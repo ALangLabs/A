@@ -101,6 +101,7 @@ struct PythonRuntimeInfo {
   int status = 0;  // 0 = not attempted, 1 = loaded, 2 = failed
   std::string description;      // e.g. "CPython 3.13.14 (/path/libpython3.13.so)"
   std::string error;            // why discovery failed, when status == 2
+  std::string pythonHome;       // sys.base_prefix of the chosen interpreter
   std::vector<std::string> siteDirs;  // purelib/platlib/stdlib of chosen env
 };
 

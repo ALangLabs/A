@@ -276,7 +276,18 @@ bool ensureInitialized(const std::string& moduleHint) {
   static bool inited = false;
   if (inited) return true;
   if (!detail::ensurePythonLoaded(moduleHint)) return false;
+  // Point CPython's getpath at the real install prefix so it finds its
+  // stdlib/platstdlib (and lib-dynload) instead of warning about
+  // <exec_prefix>. Restored immediately after init.
+  const std::string& home = detail::pythonRuntimeInfo().pythonHome;
+  const char* oldHome = std::getenv("PYTHONHOME");
+  std::string savedHome = oldHome ? oldHome : "";
+  if (!home.empty()) setenv("PYTHONHOME", home.c_str(), 1);
   Py_Initialize();
+  if (!home.empty()) {
+    if (oldHome) setenv("PYTHONHOME", savedHome.c_str(), 1);
+    else unsetenv("PYTHONHOME");
+  }
   {
     GilGuard gil;
     // Site dirs of the interpreter we embedded (its venv's site-packages),

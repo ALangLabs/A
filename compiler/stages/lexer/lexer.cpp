@@ -401,9 +401,12 @@ void Lexer::scanNumber() {
 
   while (!atEnd() && (isDigit(peek()) || peek() == '_')) advance();
 
-  // A '.' starts a fractional part only when the next character is a digit,
-  // so that `1..5` lexes as `1`, `..`, `5`.
-  if (peek() == '.' && isDigit(peek(1))) {
+  // A '.' starts a fractional part when the next character is a digit, or
+  // when it cannot begin a field name or another '.', so that `1..5` lexes
+  // as `1`, `..`, `5` and `1.foo` stays a field access, while `1.` followed
+  // by `)`, `,`, an operator, etc. is a float literal like in Python.
+  if (peek() == '.' &&
+      (isDigit(peek(1)) || (peek(1) != '.' && !isIdentStart(peek(1))))) {
     isFloat = true;
     advance();
     while (!atEnd() && (isDigit(peek()) || peek() == '_')) advance();

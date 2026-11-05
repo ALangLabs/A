@@ -31,6 +31,7 @@ namespace {
 struct Probe {
   std::string exe;                 // interpreter that produced this probe
   std::string version;             // sys.version split
+  std::string home;                // sys.base_prefix (real install, not venv)
   std::vector<std::string> siteDirs;  // purelib, platlib, stdlib
   std::vector<fs::path> libs;      // libpython candidates, best first
 };
@@ -66,7 +67,8 @@ std::string runProbe(const std::string& exe) {
       "print(sysconfig.get_config_var(\"LDLIBRARY\") or \"\")\n"
       "print(sysconfig.get_paths()[\"purelib\"])\n"
       "print(sysconfig.get_paths()[\"platlib\"])\n"
-      "print(sysconfig.get_paths()[\"stdlib\"])\n";
+      "print(sysconfig.get_paths()[\"stdlib\"])\n"
+      "print(sys.base_prefix)\n";
   if (exe.find_first_of("\"'$`\\") != std::string::npos) return {};
   std::string cmd = "\"" + exe + "\" -c '" + kCode + "' 2>/dev/null";
   FILE* pipe = popen(cmd.c_str(), "r");
@@ -82,15 +84,16 @@ std::string runProbe(const std::string& exe) {
 bool parseProbe(const std::string& exe, const std::string& out, Probe& p) {
   std::vector<std::string> lines;
   std::size_t pos = 0;
-  while (lines.size() < 7 && pos <= out.size()) {
+  while (lines.size() < 8 && pos <= out.size()) {
     std::size_t nl = out.find('\n', pos);
     if (nl == std::string::npos) nl = out.size();
     lines.push_back(out.substr(pos, nl - pos));
     pos = nl + 1;
   }
-  if (lines.size() < 7 || lines[0].empty()) return false;
+  if (lines.size() < 8 || lines[0].empty()) return false;
   p.exe = exe;
   p.version = lines[0];
+  p.home = lines[6];
   std::string libDir = lines[1];
   std::string ldLibrary = lines[2];
   for (int i = 3; i <= 5; ++i) {
@@ -390,6 +393,7 @@ bool ensurePythonLoaded(const std::string& moduleHint) {
       if (fillSymbols(handle)) {
         g_pythonRuntime.status = 1;
         g_pythonRuntime.siteDirs = probe.siteDirs;
+        g_pythonRuntime.pythonHome = probe.home;
         g_pythonRuntime.description =
             "CPython " + probe.version + " (" + lib.string() + ")";
         if (!probe.exe.empty() && probe.exe != lib.string())
