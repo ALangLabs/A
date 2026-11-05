@@ -1494,11 +1494,6 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
     }
     case StmtKind::Assign: {
       const auto& s = static_cast<const AssignStmt&>(stmt);
-      // /= and %= can trap on a zero divisor; under the in-process JIT that
-      // would kill `a` itself rather than a subprocess. A provably-float
-      // value makes it an IEEE divide, which is safe.
-      if ((s.op == "/=" || s.op == "%=") && !exprProvablyFloat(*s.value))
-        return false;
       if (s.target->kind == ExprKind::Index) {
         const auto& ix = static_cast<const IndexExpr&>(*s.target);
         return checkSupportedExpr(*ix.object) && checkSupportedExpr(*ix.index) &&
@@ -1564,6 +1559,9 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
       }
       return true;
     }
+    case StmtKind::Break:
+    case StmtKind::Continue:
+      return true;  // emitted as C break/continue inside loop bodies
     case StmtKind::FnDecl: {
       const auto& fn = static_cast<const FnDecl&>(stmt);
       // If function assigns to a global (defined at top-level), fallback (globals not yet implemented in LLVM/native without global storage)
@@ -1673,12 +1671,9 @@ bool checkSupportedExpr(const Expr& expr) {
     }
     case ExprKind::Binary: {
       const auto& b = static_cast<const BinaryExpr&>(expr);
-      // Integer division/remainder can trap on zero; allow only when an
-      // operand is provably a double (IEEE division never traps).
-      if ((b.op == "/" || b.op == "%") &&
-          !(exprProvablyFloat(*b.lhs) || exprProvablyFloat(*b.rhs))) {
-        return false;
-      } else if (b.op == "<<" || b.op == ">>") {
+      // Division/remainder are safe natively: the C runtime helpers check
+      // for zero divisors and exit(2) like the interpreter.
+      if (b.op == "<<" || b.op == ">>") {
         if (b.rhs->kind == ExprKind::IntLit) {
           int64_t val = static_cast<const IntLitExpr&>(*b.rhs).value;
           if (val < 0 || val >= 64) return false;

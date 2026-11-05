@@ -83,6 +83,9 @@ int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream&
   tcc_add_symbol(s, "malloc", (void*)malloc);
   tcc_add_symbol(s, "free", (void*)free);
   tcc_add_symbol(s, "exit", (void*)exit);
+  // Runtime error reporting (e.g. missing dict keys).
+  tcc_add_symbol(s, "fprintf", (void*)fprintf);
+  tcc_add_symbol(s, "stderr", (void*)&stderr);
 
   // Symbols the generated C calls, bound to this process's own libc/libm.
   tcc_add_symbol(s, "printf", (void*)printf);

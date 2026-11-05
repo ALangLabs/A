@@ -52,6 +52,8 @@ class CEmitter {
     out_ << "static a_i64 ai(aval v) { return v.f ? (a_i64)v.d : v.i; }\n";
     out_ << "static double ad(aval v) { return v.f ? v.d : (double)v.i; }\n";
     out_ << "int printf(const char *, ...);\n";
+    out_ << "int fprintf(void *, const char *, ...);\n";
+    out_ << "extern void *stderr;\n";
     out_ << "void *malloc(unsigned long);\n";
     out_ << "void free(void *);\n";
     out_ << "void *memcpy(void *, const void *, unsigned long);\n";
@@ -109,6 +111,30 @@ class CEmitter {
             "    return v;\n"
             "  }\n"
             "  aval v; v.i = ai(l) * ai(r); v.d = 0; v.f = 0;\n"
+            "  return v;\n"
+            "}\n"
+            "static aval a_div(aval l, aval r) {\n"
+            "  if (l.f == 1 || r.f == 1) {\n"
+            "    aval v; v.f = 1; v.d = ad(l) / ad(r); v.i = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  if (ai(r) == 0) {\n"
+            "    fprintf(stderr, \"error: Division by zero.\\n\");\n"
+            "    exit(2);\n"
+            "  }\n"
+            "  aval v; v.i = ai(l) / ai(r); v.d = 0; v.f = 0;\n"
+            "  return v;\n"
+            "}\n"
+            "static aval a_mod(aval l, aval r) {\n"
+            "  if (ad(r) == 0.0) {\n"
+            "    fprintf(stderr, \"error: Remainder by zero.\\n\");\n"
+            "    exit(2);\n"
+            "  }\n"
+            "  if (l.f == 1 || r.f == 1) {\n"
+            "    aval v; v.f = 1; v.d = fmod(ad(l), ad(r)); v.i = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  aval v; v.i = ai(l) % ai(r); v.d = 0; v.f = 0;\n"
             "  return v;\n"
             "}\n"
             "static aval a_cat(aval l, aval r) {\n"
@@ -922,11 +948,12 @@ class CEmitter {
       out_ << "  " << tn << ".f = 0;\n";
       return tn;
     }
-    // "+" and "*" dispatch through helpers that also handle string
-    // concat/repeat; the rest use the numeric tag dispatch.
-    if (op == "+" || op == "*") {
+    // "+", "*", "/", "%" dispatch through helpers that handle strings,
+    // promotion, and runtime zero checks.
+    if (op == "+" || op == "*" || op == "/" || op == "%") {
       std::string tn = tmp();
-      out_ << "  " << tn << " = a_" << (op == "+" ? "cat" : "mul") << "(" << l << ", " << r << ");\n";
+      const char* h = op == "+" ? "cat" : op == "*" ? "mul" : op == "/" ? "div" : "mod";
+      out_ << "  " << tn << " = a_" << h << "(" << l << ", " << r << ");\n";
       return tn;
     }
     std::string iop, dop;
@@ -1351,6 +1378,12 @@ class CEmitter {
         out_ << "    }\n  }\n";
         break;
       }
+      case StmtKind::Break:
+        out_ << "    break;\n";
+        break;
+      case StmtKind::Continue:
+        out_ << "    continue;\n";
+        break;
       case StmtKind::Return: {
         const auto& s = static_cast<const ReturnStmt&>(stmt);
         if (inMain_) {

@@ -9,7 +9,7 @@
 const vscode = require('vscode');
 const path = require('node:path');
 const {
-    settings, argumentsFor, serverPath, isExecutable, modulePaths, absolute,
+    settings, argumentsFor, serverPath, compilerPath, isExecutable, modulePaths, absolute,
     quotedImportCandidates, bareImportCandidates
 } = require('./config');
 const { runCheck, CheckQueue } = require('./diagnostics');
@@ -30,8 +30,18 @@ const ACTION_TITLES = {
 let stopOnDeactivate = async () => {};
 
 async function activate(context) {
-    const checkDiagnostics = vscode.languages.createDiagnosticCollection('a-check');
     const output = vscode.window.createOutputChannel('A');
+    output.appendLine(`> a-language extension activating (v${require('./package.json').version})`);
+    try {
+        await activateImpl(context, output);
+    } catch (error) {
+        output.appendLine(`ERROR during activation: ${error && error.stack || error}`);
+        throw error;
+    }
+}
+
+async function activateImpl(context, output) {
+    const checkDiagnostics = vscode.languages.createDiagnosticCollection('a-check');
     let disposed = false;
     let publication = 0;
     let reportedFailure = '';
@@ -237,10 +247,44 @@ async function activate(context) {
     }
 
     // The check-on-save mode: the checks of saved files, the outline from a
-    // lexical scan and the import links, which the server provides otherwise.
+    // lexical scan, go to definition and the import links, which the server
+    // provides otherwise.
     function startFallback() {
         if (fallback || disposed) return;
+        output.appendLine('> a-lsp is not in use (missing, disabled by a.useLanguageServer, or the workspace is untrusted).');
+        output.appendLine('> Checking saved files with the A compiler instead; set a.server.path or A_LSP_PATH to enable the language server.');
         const watcher = vscode.workspace.createFileSystemWatcher('**/*.a');
+        // Declarations per file, for lexical go to definition; cleared whenever
+        // sources change.
+        const declCache = new Map();
+        async function fileInfo(uri) {
+            const key = uri.toString();
+            if (declCache.has(key)) return declCache.get(key);
+            let info = { text: '', decls: [] };
+            try {
+                const open = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === key);
+                const text = open ? open.getText()
+                    : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+                info = { text, decls: declarations(text) };
+            } catch { /* Unreadable file: no declarations. */ }
+            declCache.set(key, info);
+            return info;
+        }
+        function nameLocation(document, decl) {
+            return new vscode.Location(document.uri, new vscode.Range(
+                document.positionAt(decl.nameStart), document.positionAt(decl.nameEnd)));
+        }
+        // Offset range to an LSP-style position pair for files that are not
+        // open in the editor.
+        function offsetRange(text, start, end) {
+            const position = offset => {
+                const before = text.lastIndexOf('\n', Math.max(0, offset - 1));
+                const line = text.slice(0, offset).split('\n').length - 1;
+                return { line, character: offset - before - 1 };
+            };
+            const s = position(start), e = position(end);
+            return new vscode.Range(s.line, s.character, e.line, e.character);
+        }
         const changedOnDisk = async uri => {
             const cwd = settings(vscode, uri).cwd;
             // Filesystem notifications can arrive after a manual check of a just-
@@ -251,6 +295,7 @@ async function activate(context) {
             // A stale result is already due to be replaced, so it does not count.
             const existing = [...queue.results.values(), ...queue.jobs.values()].filter(item => item.config.cwd === cwd && !item.stale);
             if (existing.length && existing.every(item => item.startedAt === undefined || item.startedAt > modified)) return;
+            declCache.clear();
             refresh(cwd);
         };
         fallback = vscode.Disposable.from(
@@ -289,12 +334,59 @@ async function activate(context) {
                     return links;
                 }
             }),
+            vscode.languages.registerDefinitionProvider({ language: 'a', scheme: 'file' }, {
+                async provideDefinition(document, position, token) {
+                    const word = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/);
+                    if (!word) return null;
+                    const name = document.getText(word);
+                    const config = settings(vscode, document.uri);
+                    // On an import specifier: jump to the module file, as the
+                    // compiler's import links do.
+                    for (const item of imports(document.getText())) {
+                        if (position.line !== item.line ||
+                            position.character < item.startChar || position.character > item.endChar) continue;
+                        const candidates = item.quoted
+                            ? quotedImportCandidates(item.spec, document.uri.fsPath, config)
+                            : bareImportCandidates(item.spec, config);
+                        for (const candidate of candidates) {
+                            if (token.isCancellationRequested) return null;
+                            try {
+                                const uri = vscode.Uri.file(candidate);
+                                const stat = await vscode.workspace.fs.stat(uri);
+                                if (stat.type & vscode.FileType.File) {
+                                    return new vscode.Location(uri, new vscode.Range(0, 0, 0, 0));
+                                }
+                            } catch { /* Try the next location. */ }
+                        }
+                    }
+                    // Declarations in this file first.
+                    const local = declarations(document.getText()).filter(decl => decl.name === name);
+                    if (local.length) return local.map(decl => nameLocation(document, decl));
+                    // Then every other .a file in the workspace.
+                    const files = await vscode.workspace.findFiles('**/*.a', '{**/node_modules/**,**/.git/**}');
+                    const locations = [];
+                    for (const uri of files) {
+                        if (token.isCancellationRequested || locations.length >= 50) return locations.length ? locations : null;
+                        if (uri.toString() === document.uri.toString()) continue;
+                        const { text, decls } = await fileInfo(uri);
+                        for (const decl of decls) {
+                            if (decl.name === name) {
+                                locations.push(new vscode.Location(uri, offsetRange(text, decl.nameStart, decl.nameEnd)));
+                            }
+                        }
+                    }
+                    return locations.length ? locations : null;
+                }
+            }),
             vscode.workspace.onDidOpenTextDocument(check),
             vscode.workspace.onDidSaveTextDocument(doc => {
-                if (isA(doc)) refresh(cwdOf(doc));
+                if (isA(doc)) { declCache.clear(); refresh(cwdOf(doc)); }
             }),
             vscode.workspace.onDidChangeTextDocument(event => {
-                if (isA(event.document) && event.contentChanges.length) queue.stale(cwdOf(event.document));
+                if (isA(event.document) && event.contentChanges.length) {
+                    declCache.clear();
+                    queue.stale(cwdOf(event.document));
+                }
             }),
             vscode.workspace.onDidCloseTextDocument(doc => {
                 if (isA(doc)) refresh(cwdOf(doc));
@@ -365,6 +457,7 @@ async function activate(context) {
         deciding = deciding.then(async () => {
             if (disposed) return;
             const setup = serverSetup();
+            output.appendLine(`> mode check: trusted=${vscode.workspace.isTrusted} useLanguageServer=${setup.enabled} lsp=${setup.path || '(not found)'} compiler=${compilerPath(vscode.workspace.getConfiguration('a').get('compilerPath', ''), vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0] ? vscode.workspace.workspaceFolders[0].uri.fsPath : process.cwd())}`);
             // A bare command name (no path separators) is resolved on PATH by
             // the spawn; anything path-like must exist and be executable.
             const runnable = setup.path && (isExecutable(setup.path) || !/[\\/]/.test(setup.path));
@@ -390,9 +483,15 @@ async function activate(context) {
         const config = vscode.workspace.getConfiguration('a', first && first.uri ? first.uri : doc && doc.uri);
         const configured = config.get('server.path', '') || process.env.A_LSP_PATH || '';
         const stdlibRaw = config.get('stdlibPath', '');
+        // a-lsp usually sits next to the a compiler (build/a-lsp); try that
+        // before falling back to PATH-only discovery.
+        const compiler = compilerPath(config.get('compilerPath', ''), cwd);
+        const beside = compiler && /[\\/]/.test(compiler)
+            ? path.join(path.dirname(compiler), process.platform === 'win32' ? 'a-lsp.exe' : 'a-lsp')
+            : '';
         return {
             enabled: config.get('useLanguageServer', true),
-            path: serverPath(configured, cwd, context.extensionPath),
+            path: serverPath(configured, cwd, context.extensionPath) || (beside && isExecutable(beside) ? beside : ''),
             args: Array.isArray(config.get('server.args', [])) ? config.get('server.args', []) : [],
             modulePaths: modulePaths(config, cwd, ''),
             stdlib: stdlibRaw ? absolute(stdlibRaw, cwd, '') : ''
@@ -508,7 +607,7 @@ async function activate(context) {
                 },
             }),
 
-            vscode.languages.registerReferencesProvider(selector, {
+            vscode.languages.registerReferenceProvider(selector, {
                 async provideReferences(document, position, refContext) {
                     const active = getClient();
                     if (!active) return null;
