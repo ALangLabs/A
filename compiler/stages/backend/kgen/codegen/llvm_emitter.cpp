@@ -1528,8 +1528,8 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
       const auto& s = static_cast<const ForStmt&>(stmt);
       if (s.iterable->kind == ExprKind::Range) {
         const auto& r = static_cast<const RangeExpr&>(*s.iterable);
-        if (r.step) return false;
         if (!checkSupportedExpr(*r.start) || !checkSupportedExpr(*r.end)) return false;
+        if (r.step && !checkSupportedExpr(*r.step)) return false;
       } else if (!checkSupportedExpr(*s.iterable)) {
         return false;  // lists/strings iterate via a_index in the C emitter
       }

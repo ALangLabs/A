@@ -120,6 +120,7 @@ class CEmitter {
             "  }\n"
             "  if (ai(r) == 0) {\n"
             "    fprintf(stderr, \"error: Division by zero.\\n\");\n"
+            "    fprintf(stderr, \"  = help: Check the divisor before dividing.\\n\");\n"
             "    exit(2);\n"
             "  }\n"
             "  aval v; v.i = ai(l) / ai(r); v.d = 0; v.f = 0;\n"
@@ -128,6 +129,7 @@ class CEmitter {
             "static aval a_mod(aval l, aval r) {\n"
             "  if (ad(r) == 0.0) {\n"
             "    fprintf(stderr, \"error: Remainder by zero.\\n\");\n"
+            "    fprintf(stderr, \"  = help: Check the divisor before dividing.\\n\");\n"
             "    exit(2);\n"
             "  }\n"
             "  if (l.f == 1 || r.f == 1) {\n"
@@ -274,6 +276,45 @@ class CEmitter {
             "static aval a_dict_new(void) {\n"
             "  aval r; r.f = 2; r.d = 0;\n"
             "  r.i = (a_i64)a_new_obj(3, 0, 0, 0);\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_abs(aval v) {\n"
+            "  if (v.f == 1) { aval r; r.f = 1; r.d = fabs(v.d); r.i = 0; return r; }\n"
+            "  aval r; r.i = v.i < 0 ? -v.i : v.i; r.d = 0; r.f = 0; return r;\n"
+            "}\n"
+            "static int a_aval_lt(aval a, aval b) {\n"
+            "  if (a.f == 1 || b.f == 1) return ad(a) < ad(b);\n"
+            "  return ai(a) < ai(b);\n"
+            "}\n"
+            "static aval a_minmax(aval l, aval r, int wantMax) {\n"
+            "  int takeL = wantMax ? !a_aval_lt(l, r) : a_aval_lt(l, r);\n"
+            "  return takeL ? l : r;\n"
+            "}\n"
+            "static aval a_sorted(aval l) {\n"
+            "  aval r; r.f = 0; r.d = 0; r.i = 0;\n"
+            "  if (l.f != 2 || ((a_obj *)l.i)->type != 2) return r;\n"
+            "  a_obj *lo = (a_obj *)l.i;\n"
+            "  aval *out = (aval *)malloc(sizeof(aval) * (size_t)(lo->len ? lo->len : 1));\n"
+            "  if (!out) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "  for (a_i64 i = 0; i < lo->len; ++i) {\n"
+            "    aval e = ((aval *)lo->data)[i]; a_i64 j = i - 1;\n"
+            "    while (j >= 0 && a_aval_lt(e, out[j])) {\n"
+            "      out[j + 1] = out[j]; --j;\n"
+            "    }\n"
+            "    out[j + 1] = e;\n"
+            "  }\n"
+            "  r.f = 2; r.i = (a_i64)a_new_obj(2, lo->len, lo->len, out);\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_reversed(aval l) {\n"
+            "  aval r; r.f = 0; r.d = 0; r.i = 0;\n"
+            "  if (l.f != 2 || ((a_obj *)l.i)->type != 2) return r;\n"
+            "  a_obj *lo = (a_obj *)l.i;\n"
+            "  aval *out = (aval *)malloc(sizeof(aval) * (size_t)(lo->len ? lo->len : 1));\n"
+            "  if (!out) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "  for (a_i64 i = 0; i < lo->len; ++i)\n"
+            "    out[i] = ((aval *)lo->data)[lo->len - 1 - i];\n"
+            "  r.f = 2; r.i = (a_i64)a_new_obj(2, lo->len, lo->len, out);\n"
             "  return r;\n"
             "}\n"
             "typedef aval (*a_fn)(aval);\n"
@@ -888,6 +929,14 @@ class CEmitter {
   // emits a runtime tag dispatch into a temp).
   std::string avalBin(const std::string& op, const std::string& l,
                       const std::string& r, VT want) {
+    // "/" and "%" always go through the runtime helpers: they handle int/float
+    // promotion and zero-divisor checks for every operand combination.
+    if (op == "/" || op == "%") {
+      std::string tn = tmp();
+      out_ << "  " << tn << " = a_" << (op == "/" ? "div" : "mod") << "("
+           << l << ", " << r << ");\n";
+      return tn;
+    }
     if (want == VT::Int) {
       static const std::set<std::string> cmp = {"==","!=","<","<=",">",">="};
       if (cmp.count(op)) {
@@ -948,12 +997,11 @@ class CEmitter {
       out_ << "  " << tn << ".f = 0;\n";
       return tn;
     }
-    // "+", "*", "/", "%" dispatch through helpers that handle strings,
-    // promotion, and runtime zero checks.
-    if (op == "+" || op == "*" || op == "/" || op == "%") {
+    // "+" and "*" dispatch through helpers that handle strings and
+    // numeric promotion.
+    if (op == "+" || op == "*") {
       std::string tn = tmp();
-      const char* h = op == "+" ? "cat" : op == "*" ? "mul" : op == "/" ? "div" : "mod";
-      out_ << "  " << tn << " = a_" << h << "(" << l << ", " << r << ");\n";
+      out_ << "  " << tn << " = a_" << (op == "+" ? "cat" : "mul") << "(" << l << ", " << r << ");\n";
       return tn;
     }
     std::string iop, dop;
@@ -1026,8 +1074,19 @@ class CEmitter {
           const auto& r = static_cast<const RangeExpr&>(*cp.iterable);
           std::string is = evalI(*r.start);
           std::string ie = evalI(*r.end);
-          out_ << "    for (a_i64 _k" << ti << " = " << is << "; _k" << ti
-               << " < " << ie << "; ++_k" << ti << ") {\n";
+          if (r.step) {
+            int si = tmpTop_++;
+            std::string st = "_t" + std::to_string(si);
+            std::string sv = evalI(*r.step);
+            out_ << "    " << st << ".i = " << sv << "; " << st << ".f = 0;\n";
+            out_ << "    if (" << st << ".i <= 0) { fprintf(stderr, \"error: The range step must be positive.\\n\"); exit(2); }\n";
+            out_ << "    for (a_i64 _k" << ti << " = " << is << "; (" << st
+                 << ".i > 0 ? _k" << ti << " < " << ie << " : _k" << ti << " > " << ie
+                 << "); _k" << ti << " += " << st << ".i) {\n";
+          } else {
+            out_ << "    for (a_i64 _k" << ti << " = " << is << "; _k" << ti
+                 << " < " << ie << "; ++_k" << ti << ") {\n";
+          }
           out_ << "      " << vn << " = (aval){.i=_k" << ti << ",.f=0};\n";
         } else {
           std::string ov = evalA(*cp.iterable);
@@ -1148,6 +1207,29 @@ class CEmitter {
           std::string tn = tmp();
           out_ << "  " << tn << " = a_sum(" << a0 << ");\n";
           return tn;
+        }
+        if (name == "abs" && !c.args.empty()) {
+          std::string a0 = evalA(*c.args[0].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_abs(" << a0 << ");\n";
+          return tn;
+        }
+        if ((name == "sorted" || name == "reversed") && !c.args.empty()) {
+          std::string a0 = evalA(*c.args[0].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_" << name << "(" << a0 << ");\n";
+          return tn;
+        }
+        if ((name == "min" || name == "max") && c.args.size() >= 2) {
+          std::string acc = evalA(*c.args[0].value);
+          for (std::size_t i = 1; i < c.args.size(); ++i) {
+            std::string av = evalA(*c.args[i].value);
+            std::string tn = tmp();
+            out_ << "  " << tn << " = a_minmax(" << acc << ", " << av << ", "
+                 << (name == "max" ? 1 : 0) << ");\n";
+            acc = tn;
+          }
+          return acc;
         }
         if ((name == "f64" || name == "float") && !c.args.empty()) {
           return "(aval){.d=ad(" + evalA(*c.args[0].value) + "),.f=1}";
@@ -1356,8 +1438,19 @@ class CEmitter {
           std::string ie = evalI(*r.end);
           out_ << "  " << itN << ".i = " << is << "; " << itN << ".f = 0;\n";
           out_ << "  " << endN << ".i = " << ie << "; " << endN << ".f = 0;\n";
-          out_ << "  for (; " << itN << ".i < " << endN << ".i; "
-               << itN << ".i = " << itN << ".i + 1) {\n";
+          if (r.step) {
+            int si = tmpTop_++;
+            std::string st = "_t" + std::to_string(si);
+            std::string sv = evalI(*r.step);
+            out_ << "  " << st << ".i = " << sv << "; " << st << ".f = 0;\n";
+            out_ << "  if (" << st << ".i <= 0) { fprintf(stderr, \"error: The range step must be positive.\\n\"); exit(2); }\n";
+            out_ << "  for (; (" << st << ".i > 0 ? " << itN << ".i < " << endN
+                 << ".i : " << itN << ".i > " << endN << ".i); "
+                 << itN << ".i = " << itN << ".i + " << st << ".i) {\n";
+          } else {
+            out_ << "  for (; " << itN << ".i < " << endN << ".i; "
+                 << itN << ".i = " << itN << ".i + 1) {\n";
+          }
           out_ << "    " << varN << " = " << itN << ";\n";
           for (const auto& b : s.body) emitStmt(*b);
           out_ << "  }\n";

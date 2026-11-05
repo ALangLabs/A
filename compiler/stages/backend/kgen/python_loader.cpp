@@ -16,6 +16,16 @@
 #include <system_error>
 #include <vector>
 
+// Header-inline asserts (e.g. inside Py_SIZE) reference PyLong_Type/PyBool_Type
+// directly. We never link libpython, so provide weak placeholders — only their
+// addresses are used by those asserts; real type checks go through the shim.
+#ifdef A_HAVE_PYTHON
+extern "C" {
+__attribute__((weak)) PyTypeObject PyLong_Type;
+__attribute__((weak)) PyTypeObject PyBool_Type;
+}
+#endif
+
 namespace a::python::detail {
 
 PythonRuntimeInfo g_pythonRuntime{};
