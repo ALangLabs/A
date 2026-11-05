@@ -346,8 +346,12 @@ class Formatter {
       if (member.field) {
         emitLeadingComments(member.line, level + 1, lastLine);
         ensureGap(member.line, lastLine);
-        output_ += indentText(level + 1) + member.field->name + ": " +
-                   typeText(member.field->type.get()) + '\n';
+        // Untyped fields (dynamic core): emit bare name so output
+        // re-parses. A trailing ": " would be rejected by the parser
+        // ("Expected a type name, found end of line").
+        std::string fieldText = member.field->name;
+        if (member.field->type) fieldText += ": " + typeText(member.field->type.get());
+        output_ += indentText(level + 1) + fieldText + '\n';
         lastLine = member.field->span.endLine;
         attachTrailing(member.field->span, lastLine);
       } else if (member.method) {

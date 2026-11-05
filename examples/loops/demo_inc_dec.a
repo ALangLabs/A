@@ -3,21 +3,21 @@
 fn main():
     # ---- prefix ++i and --i ----
     a = 5
-    print("prefix ++a = {++a}")   # 6, a is now 6
-    print("a after ++a = {a}")    # 6
+    print("prefix ++a = {++a}")  # 6, a is now 6
+    print("a after ++a = {a}")  # 6
 
     b = 10
-    print("prefix --b = {--b}")   # 9, b is now 9
-    print("b after --b = {b}")    # 9
+    print("prefix --b = {--b}")  # 9, b is now 9
+    print("b after --b = {b}")  # 9
 
     # ---- postfix i++ and i-- ----
     c = 3
     print("postfix c++ = {c++}")  # 3 (returns old value), c is now 4
-    print("c after c++ = {c}")    # 4
+    print("c after c++ = {c}")  # 4
 
     d = 7
     print("postfix d-- = {d--}")  # 7 (returns old value), d is now 6
-    print("d after d-- = {d}")    # 6
+    print("d after d-- = {d}")  # 6
 
     # ---- in a while loop ----
     i = 0

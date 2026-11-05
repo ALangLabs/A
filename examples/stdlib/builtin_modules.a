@@ -67,9 +67,7 @@ print("strings: " + str(len("añb")) + " code points, " + str("abc".count("b")) 
 nums = [3, 1, 2]
 print("collections: map=" + str(collections.map(nums, fn(n) => n * 2)))
 print("collections: filter=" + str(collections.filter(nums, fn(n) => n > 1)))
-print(
-    "collections: reduce=" + str(collections.reduce(nums, 0, fn(acc, n) => acc + n)),
-)
+print("collections: reduce=" + str(collections.reduce(nums, 0, fn(acc, n) => acc + n)))
 print(
     "collections: sum=" + str(collections.sum(nums)) + " any=" + str(collections.any(nums, fn(n) => n == 2)) + " all=" + str(collections.all(nums, fn(n) => n > 0)),
 )
@@ -136,19 +134,10 @@ print(
     "testing: bounded ints = " + str(testing.for_all_int(25, -50, 50, fn(n) => n >= -50 and n <= 50)),
 )
 print(
-    "testing: json round trip = " + str(
-        testing.for_all_int(
-            15,
-            0,
-            1000,
-            fn(n) => json.as_int(json.parse(str(n)))! == n,
-        ),
-    ),
+    "testing: json round trip = " + str(testing.for_all_int(15, 0, 1000, fn(n) => json.as_int(json.parse(str(n)))! == n)),
 )
 print("testing: elements = " + str(testing.for_all_elem(nums, fn(n) => n != 0)))
-print(
-    "testing: strings = " + str(testing.for_all_string(10, 8, fn(s) => len(s) <= 8)),
-)
+print("testing: strings = " + str(testing.for_all_string(10, 8, fn(s) => len(s) <= 8)))
 
 # --- log, metrics, trace -----------------------------------------------------
 log.set_level("info")

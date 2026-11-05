@@ -43,31 +43,33 @@ A/
 │   ├── ISSUE_TEMPLATE/
 │   └── PULL_REQUEST_TEMPLATE.md
 │
-├── compiler/stages/
-│   ├── lexer/  parser/  ast/   diagnostics/
-│   ├── name-resolution/        # Module loader, native module table, builtin docs
-│   ├── type-checker/           # Sema, types, method signature tables
-│   ├── semantic-analysis/  ownership/
-│   ├── ir/  optimization/
-│   ├── backend/                # Interpreter, native (C++) and LLVM codegen
-│   ├── tooling/                # AST formatter, doc generator, IR printers
-│   ├── driver/  cli/           # Version, linking glue, `a` subcommands
-│   └── tests/
+├── cmake/                      # AOptions.cmake (options, warnings, LTO)
+├── compiler/
+│   ├── a.hpp                   # Umbrella header for embedding the toolchain
+│   └── stages/                 # One CMake module per pipeline stage:
+│       ├── lexer/  parser/  ast/   diagnostics/
+│       ├── name-resolution/    # Module loader, native module table, builtin docs
+│       ├── type-checker/       # Sema, types, method signature tables
+│       ├── ownership/
+│       ├── ir/  optimization/
+│       ├── backend/            # Interpreter, native (C++) and LLVM codegen
+│       ├── tooling/            # AST formatter, doc generator, IR printers
+│       └── driver/  cli/       # Version, linking glue, `a` subcommands
 │
 ├── runtime/                    # Values, memory, UTF-8 strings, collections, IO
 │
 ├── stdlib/                     # Module docs/notes and A-file modules:
 │   ├── core/  math/  collections/  fs/  time/  test/
-│   └── json/  binary/  testing/  log/  metrics/  trace/  net/  http/
+│   ├── json/  binary/  testing/  log/  metrics/  trace/  net/  http/
+│   └── std/                    # Self-hosted stdlib written in A (Mojo-analog)
+├── kernels/                    # A-written compute kernels (Mojo MAX analog)
 │
 ├── tools/
 │   ├── lsp/        # a-lsp (stdio LSP) + smoke_test.py
 │   ├── vscode-a/               # VS Code extension: grammar + dependency-free client
-│   ├── formatter/  documentation/  benchmark-runner/
+│   └── benchmark-runner/
 │
-├── tests/
-│   ├── integration/            # Golden cases, run_tests.sh
-│   ├── lexer/  parser/  type-system/  runtime/  memory-safety/  ir/  tooling/
+├── tests/                      # CMake module: integration/, ir/, tooling/
 │
 ├── benchmarks/                 # Workloads with cross-language equivalents
 ├── docs/                       # Language spec, type system, memory model,

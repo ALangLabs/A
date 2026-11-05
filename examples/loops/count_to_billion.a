@@ -6,7 +6,7 @@ CHUNK = 100_000_000
 
 fn main():
     count = 0
-    for _chunk in 0..(TARGET / CHUNK):
+    for _chunk in 0..TARGET / CHUNK:
         for _step in 0..CHUNK:
             count += 1
         print("counted", count)

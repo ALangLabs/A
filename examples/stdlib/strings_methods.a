@@ -7,14 +7,18 @@
 # --- strings -----------------------------------------------------------------
 name = "  A Language  "
 print("strip=[" + name.strip() + "] upper=" + name.strip().upper())
-print("startswith=" + str(name.strip().startswith("A")) + " endswith=" + str(name.strip().endswith("e")))
+print(
+    "startswith=" + str(name.strip().startswith("A")) + " endswith=" + str(name.strip().endswith("e")),
+)
 print("split=" + str(name.strip().split()) + " joined=" + "-".join(name.strip().split()))
 print("replace=" + str(name.strip().replace("Language", "World")))
 print("title=" + str("a language".title()) + " capitalize=" + str("a language".capitalize()))
 print("find=" + str("banana".find("na")) + " count=" + str("banana".count("a")))
 print("isalpha=" + str("abc".isalpha()) + " isdigit=" + str("123".isdigit()))
 print("centered=[" + "ab".center(6, ".") + "] zfill=" + str("42".zfill(5)))
-print("splitlines=" + str("one\ntwo".splitlines()) + " removeprefix=" + str("a_language".removeprefix("a_")))
+print(
+    "splitlines=" + str("one\ntwo".splitlines()) + " removeprefix=" + str("a_language".removeprefix("a_")),
+)
 
 # --- arrays ------------------------------------------------------------------
 nums = [3, 1, 2]
@@ -23,7 +27,9 @@ nums.extend([0, 5])
 print("append/extend=" + str(nums))
 nums.insert(0, 9)
 print("insert=" + str(nums) + " first=" + str(nums.first()) + " last=" + str(nums.last()))
-print("contains=" + str(nums.contains(9)) + " index=" + str(nums.index(9)) + " count=" + str(nums.count(3)))
+print(
+    "contains=" + str(nums.contains(9)) + " index=" + str(nums.index(9)) + " count=" + str(nums.count(3)),
+)
 ordered = nums.copy()
 ordered.sort()
 ordered.reverse()

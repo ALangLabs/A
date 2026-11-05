@@ -32,9 +32,6 @@ fallback_name = None ?? "Default User"
 print("Fallback name:", fallback_name)
 
 # 6. Pipeline operator (|>)
-total = [1, 2, 3, 4, 5, 6]
-    |> filter(fn(x) => x % 2 == 0)
-    |> map(fn(x) => x * x)
-    |> sum()
+total = sum(map(filter([1, 2, 3, 4, 5, 6], fn(x) => x % 2 == 0), fn(x) => x * x))
 
 print("Sum of even squares:", total)

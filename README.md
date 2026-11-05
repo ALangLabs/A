@@ -198,30 +198,34 @@ cannot lower them. The full member tables and semantics live in
 ```
 ├── ac                          # Instant CLI runner script
 ├── compiler/
-│   ├── source/
-│   │   ├── lexer/              # Indentation-aware lexer & tokenization
-│   │   ├── parser/             # Recursive-descent parser
-│   │   ├── ast/                # Typed AST nodes
-│   │   ├── type-checker/       # Global Sema & unification type inference
-│   │   ├── ownership/          # Move/borrow analysis (`move(x)`, view borrows)
-│   │   ├── ir/                 # Typed SSA IR with basic blocks and phis
-│   │   ├── optimization/       # Constant folding, DCE, inlining, LICM
-│   │   ├── backend/
-│   │   │   ├── interpreter.cpp # High-speed tagged development interpreter
-│   │   │   └── native/         # Native AOT codegen hitting C++ parity
-│   │   ├── tooling/            # AST formatter, doc generator, shared printers
-│   │   └── cli/                # `a run|build|check|test|fmt|doc|ir`
+│   ├── a.hpp                   # Umbrella header for embedding the toolchain
+│   └── stages/                 # One CMake module per pipeline stage
+│       ├── lexer/              # Indentation-aware lexer & tokenization
+│       ├── parser/             # Recursive-descent parser
+│       ├── ast/                # Typed AST nodes
+│       ├── diagnostics/        # DiagnosticSink + SourceFile (incl. lexer/source.cpp)
+│       ├── name-resolution/    # Module loader, native module table, builtin docs
+│       ├── type-checker/       # Sema & unification type inference
+│       ├── ownership/          # Move/borrow analysis (`move(x)`, view borrows)
+│       ├── ir/                 # Typed SSA IR with basic blocks and phis
+│       ├── optimization/       # Constant folding, DCE, inlining, LICM
+│       ├── backend/            # interpreter.cpp, stdlib/builtins.cpp, native/, llvm/
+│       ├── tooling/            # AST formatter, doc generator, shared printers
+│       ├── driver/             # Version, linking glue (driver.cpp)
+│       └── cli/                # `a run|build|check|test|fmt|doc|ir` (main.cpp)
+├── cmake/                      # AOptions.cmake (options, warnings, LTO)
 ├── runtime/                    # Values, memory models, UTF-8 strings, and file I/O
 ├── stdlib/                     # Module notes + A-file modules (math, json, net, …)
+│   └── std/                    # Self-hosted stdlib in A (Mojo std/ analog)
+├── kernels/                    # A-written compute kernels (Mojo MAX analog)
 ├── benchmarks/                 # Verification suites with cross-language equivalents
 ├── examples/                   # Runnable programs, indexed by examples/README.md
 ├── docs/                       # Language spec, type system, compiler design, performance
 ├── tools/
-│   ├── formatter/              # a fmt documentation
-│   ├── documentation/          # a doc documentation
 │   ├── lsp/        # a-lsp: diagnostics, navigation, completion, hover
-│   └── vscode-a/               # VS Code extension (grammar + LSP client)
-└── tests/                      # Automated golden test suite
+│   ├── vscode-a/               # VS Code extension (grammar + LSP client)
+│   └── benchmark-runner/       # run.sh + compare.py
+└── tests/                      # Automated golden test suite (integration/, ir/, tooling/)
 ```
 
 ---
@@ -272,7 +276,8 @@ a fmt -w --indent 2 app.a   # choose indentation width
 ```
 
 Formatting is idempotent, and a file with lexer/parser errors is never
-rewritten. See [`tools/formatter/README.md`](tools/formatter/README.md).
+rewritten. (Formatter lives in `compiler/stages/tooling/`, shared by `a fmt`
+and the LSP.)
 
 ### Documentation generator: `a doc`
 
@@ -292,8 +297,8 @@ a doc --json geometry.a             # machine-readable API model
 ```
 
 Functions, classes/structs, enums, type aliases, fields, methods, variants,
-constants, and variables are included. See
-[`tools/documentation/README.md`](tools/documentation/README.md).
+constants, and variables are included. (Docgen lives in
+`compiler/stages/tooling/`.)
 
 ---
 

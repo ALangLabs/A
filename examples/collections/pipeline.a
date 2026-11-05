@@ -12,10 +12,7 @@ print("squares:", squares)
 evens = [n for n in 1..21 if n % 2 == 0]
 print("evens:", evens)
 
-total = evens
-    |> filter(fn(n) => n > 4)
-    |> map(fn(n) => n * 2)
-    |> sum()
+total = sum(map(filter(evens, fn(n) => n > 4), fn(n) => n * 2))
 print("pipeline total:", total)
 
 print("doubled big:", map([1, 15, 30], double))
@@ -23,4 +20,4 @@ print("any big:", any(squares, is_big))
 print("joined:", join([double(n) for n in 1..6], " "))
 
 names = ["Ada", "Grace", "Alan"]
-print("greeting:", names |> map(fn(name) => "Hi " + name) |> join("; "))
+print("greeting:", join(map(names, fn(name) => "Hi " + name), "; "))

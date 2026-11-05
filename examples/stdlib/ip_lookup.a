@@ -19,9 +19,9 @@ print("IPv4: " + field(fetch("https://api.ipify.org?format=json"), "ip"))
 print("IPv6: " + field(fetch("https://api64.ipify.org?format=json"), "ip"))
 
 # ip-api.com adds the network this address belongs to.
-where = fetch("http://ip-api.com/json/?fields=status,message,query,country,city,isp")
-print("Public address: " + field(where, "query"))
-print("  " + field(where, "status") + " " + field(where, "message"))
+location = fetch("http://ip-api.com/json/?fields=status,message,query,country,city,isp")
+print("Public address: " + field(location, "query"))
+print("  " + field(location, "status") + " " + field(location, "message"))
 print(
-    "  " + field(where, "city") + ", " + field(where, "country") + " (" + field(where, "isp") + ")",
+    "  " + field(location, "city") + ", " + field(location, "country") + " (" + field(location, "isp") + ")",
 )

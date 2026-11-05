@@ -1,9 +1,12 @@
 # Advanced & simple syntax demo in A
 
 # 1. Ultra-clean single line expression functions (no ':' or 'return' needed)
-fn square(x)= x * x
-fn add(a, b)= a + b
-fn is_even(n)= n % 2 == 0
+fn square(x):
+    return x * x
+fn add(a, b):
+    return a + b
+fn is_even(n):
+    return n % 2 == 0
 
 # 2. Hex and Binary numeric literals
 hex_val = 0xFF
