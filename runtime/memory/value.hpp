@@ -60,6 +60,23 @@ using ModulePtr = std::shared_ptr<ModuleObj>;
 struct NativeFunction;
 using NativeFunctionPtr = std::shared_ptr<NativeFunction>;
 
+// Opaque handle to an object owned by an embedded runtime (currently CPython,
+// created by backend/kgen/python_interop.cpp). The runtime never sees the
+// concrete type: `release` is installed by the backend that created the
+// handle and is invoked from the destructor, so Python objects stay alive
+// exactly as long as A values referencing them.
+struct PythonObject {
+  void* handle = nullptr;
+  void (*release)(void*) = nullptr;
+  PythonObject() = default;
+  ~PythonObject() {
+    if (handle && release) release(handle);
+  }
+  PythonObject(const PythonObject&) = delete;
+  PythonObject& operator=(const PythonObject&) = delete;
+};
+using PythonObjectPtr = std::shared_ptr<PythonObject>;
+
 struct EnumObj;
 using EnumPtr = std::shared_ptr<EnumObj>;
 
@@ -100,7 +117,7 @@ struct Value {
   std::variant<std::monostate, bool, std::int64_t, double, char32_t, std::string,
                 ArrayPtr, MapPtr, SetPtr, ArrayViewPtr, StructPtr, RangeValue, OptionalPtr,
                ResultPtr, TuplePtr, ClosurePtr, ModulePtr, NativeFunctionPtr, EnumPtr,
-               EnumVariantPtr, AllocatorPtr, PointerPtr>
+               EnumVariantPtr, AllocatorPtr, PointerPtr, PythonObjectPtr>
       data;
 };
 

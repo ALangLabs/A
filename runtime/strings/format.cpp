@@ -38,7 +38,11 @@ std::string formatDouble(double value) {
   return text;
 }
 
+ForeignValueRepr g_foreignRepr = nullptr;
+
 }  // namespace
+
+void setForeignValueRepr(ForeignValueRepr fn) { g_foreignRepr = fn; }
 
 std::string formatValue(const Value& value, bool quoteStrings) {
   if (std::holds_alternative<std::monostate>(value.data)) return "void";
@@ -157,6 +161,9 @@ std::string formatValue(const Value& value, bool quoteStrings) {
     const std::string& name = (*en)->name;
     std::size_t sep = name.rfind("::");
     return "<enum " + (sep == std::string::npos ? name : name.substr(sep + 2)) + ">";
+  }
+  if (g_foreignRepr) {
+    if (std::string rendered = g_foreignRepr(value); !rendered.empty()) return rendered;
   }
   return "void";
 }

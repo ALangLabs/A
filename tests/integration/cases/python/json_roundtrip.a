@@ -1,0 +1,9 @@
+import python:json
+
+s = json.dumps({"a": 1})
+print(s)
+d = json.loads(s)
+print(d["a"])
+
+from python:json import loads
+print(loads("[1, 2, 3]")[2])

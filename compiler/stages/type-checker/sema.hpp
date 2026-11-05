@@ -114,15 +114,20 @@ class Sema {
 
   struct ModuleAlias {
     bool native = false;
+    bool python = false;
     int moduleId = -1;
     std::string nativeName;
+    std::string pythonName;
   };
 
   struct FromBinding {
     enum class Kind { Value, Function, Struct, Trait };
     Kind kind = Kind::Value;
     bool native = false;
+    bool python = false;
     std::string nativeName;  // builtin implementing a native member
+    std::string pythonModule;
+    std::string pythonMember;
     const FnDecl* fn = nullptr;
     const StructDecl* decl = nullptr;
     std::string structName;  // qualified struct name

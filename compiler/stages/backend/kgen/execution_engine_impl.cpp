@@ -1,4 +1,5 @@
 #include "backend/kgen/execution_engine_impl.hpp"
+#include "backend/kgen/python_interop.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -7,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <iostream>
 #include <limits>
 #include <random>
 #include <sstream>
@@ -804,6 +806,50 @@ int KGENExecutionEngine::run() {
   }
 }
 
+int KGENExecutionEngine::evalPending() {
+  moduleEnvs_.resize(graph_.modules.size());
+  executed_.resize(graph_.modules.size(), 0);
+  try {
+    for (int id : graph_.order) {
+      const auto& statements = graph_.at(id).program->statements;
+      const std::size_t done = executed_[static_cast<std::size_t>(id)];
+      if (done >= statements.size()) continue;
+      Env& env = moduleEnv(id);
+      env.parent = nullptr;
+      currentModule_ = id;
+      try {
+        std::vector<StmtPtr> pending(statements.begin() + static_cast<std::ptrdiff_t>(done),
+                                     statements.end());
+        execStatements(pending, env);
+      } catch (PropagateSignal&) {
+        // A '?' at module top level stops the remaining statements.
+      } catch (...) {
+        // The batch counts as consumed even when it failed partway: like a
+        // Python REPL line, a failed input is not retried on the next line.
+        executed_[static_cast<std::size_t>(id)] = statements.size();
+        throw;
+      }
+      executed_[static_cast<std::size_t>(id)] = statements.size();
+    }
+    return 0;
+  } catch (RuntimeError& error) {
+    sink_.error(error.span, std::move(error.message), std::move(error.help));
+    return 2;
+  } catch (ReturnSignal&) {
+    sink_.error(Span{}, "Internal error: 'return' escaped the top level.");
+    return 2;
+  } catch (BreakSignal&) {
+    sink_.error(Span{}, "Internal error: 'break' escaped a loop.");
+    return 2;
+  } catch (ContinueSignal&) {
+    sink_.error(Span{}, "Internal error: 'continue' escaped a loop.");
+    return 2;
+  } catch (std::exception& error) {
+    sink_.error(Span{}, std::string("Internal error: ") + error.what());
+    return 2;
+  }
+}
+
 int KGENExecutionEngine::runTests(std::ostream& out) {
   moduleEnvs_.resize(graph_.modules.size());
   try {
@@ -993,7 +1039,10 @@ void KGENExecutionEngine::exec(const Stmt& stmt, Env& env) {
 
   case StmtKind::Expr: {
     auto* node = static_cast<const ExprStmt*>(&stmt);
-    eval(*node->expr, env);
+    Value result = eval(*node->expr, env);
+    if (replEcho_ && !std::holds_alternative<std::monostate>(result.data)) {
+      out_ << formatValue(result, true) << "\n";
+    }
     return;
   }
 
@@ -1244,12 +1293,25 @@ void KGENExecutionEngine::bindImport(const ImportStmt& stmt, Env& env) {
       std::size_t dot = stem.find_last_of('.');
       if (dot != std::string::npos && dot > 0) stem = stem.substr(0, dot);
       alias = std::move(stem);
+    } else if (stmt.pythonModuleImport) {
+      alias = stmt.pythonModule;
+      std::size_t dot = alias.rfind('.');
+      if (dot != std::string::npos) alias = alias.substr(dot + 1);
     } else {
       alias = stmt.bareName;
     }
   }
   if (alias.empty()) return;
 
+  if (stmt.pythonModuleImport) {
+#ifdef A_HAVE_PYTHON
+    Value pv = python::importModule(stmt.pythonModule, stmt.span);
+    Binding binding; binding.value = pv; binding.mutableBinding = true; env.vars[alias] = std::move(binding);
+#else
+    (void)alias; fail(stmt.span, "Python interop is not available in this build.", "Rebuild with Python 3 dev headers/libraries.");
+#endif
+    return;
+  }
   auto module = std::make_shared<ModuleObj>();
   if (stmt.nativeModule) {
     module->nativeName = stmt.bareName;
@@ -1267,7 +1329,13 @@ void KGENExecutionEngine::bindImport(const ImportStmt& stmt, Env& env) {
 void KGENExecutionEngine::bindFromImport(const FromImportStmt& stmt, Env& env) {
   for (const auto& item : stmt.items) {
     Value value;
-    if (stmt.nativeModule) {
+    if (stmt.pythonModuleImport) {
+#ifdef A_HAVE_PYTHON
+      value = python::getAttr(python::importModule(stmt.pythonModule, stmt.span), item.name, item.span);
+#else
+      fail(stmt.span, "Python interop is not available in this build.", "Rebuild with Python 3 dev headers/libraries.");
+#endif
+    } else if (stmt.nativeModule) {
       if (const std::string* fn = nativeFunction(stmt.bareName, item.name)) {
         auto native = std::make_shared<NativeFunction>();
         native->builtinName = *fn;
@@ -1632,6 +1700,14 @@ Value KGENExecutionEngine::evalIndex(const IndexExpr& expr, Env& env) {
     std::size_t normalized = static_cast<std::size_t>(normalizeIndex(index, length, expr.span));
     return makeChar(codepointAt(*text, normalized));
   }
+  if (std::holds_alternative<PythonObjectPtr>(object.data)) {
+#ifdef A_HAVE_PYTHON
+    Value key = eval(*expr.index, env);
+    return python::getItem(object, key, expr.span);
+#else
+    fail(expr.span, "Python interop is not available in this build.");
+#endif
+  }
   fail(expr.span, "Only arrays, maps, and strings can be indexed.");
 }
 
@@ -1735,6 +1811,14 @@ Value KGENExecutionEngine::evalField(const FieldExpr& expr, Env& env) {
     fail(expr.fieldSpan,
          "Variant '" + (*variantValue)->variant + "' of enum '" +
              shortStructName((*variantValue)->enumName) + "' has no field '" + expr.field + "'.");
+  }
+
+  if (std::holds_alternative<PythonObjectPtr>(object.data)) {
+#ifdef A_HAVE_PYTHON
+    return python::getAttr(object, expr.field, expr.fieldSpan);
+#else
+    fail(expr.fieldSpan, "Python interop is not available in this build.");
+#endif
   }
 
   if (auto* modulePtr = std::get_if<ModulePtr>(&object.data)) {
@@ -2116,6 +2200,14 @@ bool KGENExecutionEngine::valuesEqual(const Value& lhs, const Value& rhs) {
   if (auto* left = std::get_if<ClosurePtr>(&lhs.data)) {
     return *left == std::get<ClosurePtr>(rhs.data);
   }
+  if (std::holds_alternative<PythonObjectPtr>(lhs.data)) {
+    if (!std::holds_alternative<PythonObjectPtr>(rhs.data)) return false;
+#ifdef A_HAVE_PYTHON
+    return python::equals(lhs, rhs);
+#else
+    return false;
+#endif
+  }
   return false;
 }
 
@@ -2496,6 +2588,15 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
     args.reserve(expr.args.size());
     for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
 
+    if (std::holds_alternative<PythonObjectPtr>(object.data)) {
+#ifdef A_HAVE_PYTHON
+      Value attr = python::getAttr(object, field->field, field->fieldSpan);
+      return callValue(attr, std::move(args), expr.span);
+#else
+      fail(expr.span, "Python interop is not available in this build.");
+#endif
+    }
+
     if (auto* structValue = std::get_if<StructPtr>(&object.data)) {
       return callMethod(*structValue, field->field, std::move(args), expr.span);
     }
@@ -2554,6 +2655,16 @@ Value KGENExecutionEngine::callValue(const Value& callee, ArgList args, Span spa
   }
   if (auto* native = std::get_if<NativeFunctionPtr>(&callee.data)) {
     return callBuiltin((*native)->builtinName, args, span);
+  }
+  if (auto* py = std::get_if<PythonObjectPtr>(&callee.data)) {
+#ifdef A_HAVE_PYTHON
+    std::vector<Value> argv;
+    argv.reserve(args.size());
+    for (Value& arg : args) argv.push_back(std::move(arg));
+    return python::callObject(*py, argv, span);
+#else
+    fail(span, "Python interop is not available in this build.");
+#endif
   }
   fail(span, "This value is not callable.",
        "Only functions and lambdas can be called.");

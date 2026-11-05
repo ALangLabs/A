@@ -197,6 +197,7 @@ void ModuleLoader::loadImports(Module& module) {
 
   for (auto& statement : module.program->statements) {
     if (auto* import = dynamic_cast<ImportStmt*>(statement.get())) {
+      if (import->pythonModuleImport) { import->nativeModule = false; import->moduleId = -1; continue; }
       bool native = false;
       int id = resolve(import->path, import->bareName, import->quoted, import->targetSpan, native);
       import->nativeModule = native;
@@ -204,6 +205,7 @@ void ModuleLoader::loadImports(Module& module) {
       continue;
     }
     if (auto* from = dynamic_cast<FromImportStmt*>(statement.get())) {
+      if (from->pythonModuleImport) { from->nativeModule = false; from->moduleId = -1; continue; }
       bool native = false;
       int id = resolve(from->path, from->bareName, from->quoted, from->targetSpan, native);
       from->nativeModule = native;

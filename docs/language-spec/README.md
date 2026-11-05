@@ -394,10 +394,13 @@ import math
 import "lib/util.a"
 import "lib/util.a" as util
 from "lib/util.a" import add, Point
+import python:json
+from python:math import sqrt, pi
 ```
 
 - Bare imports like `import math` resolve to native modules or stdlib modules as configured by the module loader.
 - Quoted imports load `.a` modules from filesystem/module paths.
+- `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev files; runs in the interpreter (`a run`/`a test`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, structs, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, and `==`.
 - Imports are only allowed at module top level.
 
 ## 6. Functions

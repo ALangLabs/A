@@ -28,6 +28,13 @@ class KGENExecutionEngine {
   // Returns the process exit code: 0 on success, 2 on a runtime error.
   int run();
 
+  // REPL support: executes only the statements appended since the previous
+  // call, keeping module environments (and therefore bindings) alive. The
+  // graph/sema objects the engine references must be mutated in place
+  // between calls (same addresses, new contents).
+  int evalPending();
+  void setReplEcho(bool enabled) { replEcho_ = enabled; }
+
   // Runs every zero-argument function whose name starts with "test_" in the
   // entry module, reporting results to `out`. Returns 0 when all pass, 1 when
   // any fail, and 2 when the program fails before the tests start.
@@ -311,6 +318,11 @@ class KGENExecutionEngine {
   // propagating a thrown signal, which made every call pay for unwinding.
   bool returning_ = false;
   Value returnValue_;
+
+  // REPL session state: how many top-level statements of each module have
+  // already run, and whether bare expression statements print their value.
+  std::vector<std::size_t> executed_;
+  bool replEcho_ = false;
 };
 
 }  // namespace a

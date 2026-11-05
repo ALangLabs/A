@@ -469,19 +469,22 @@ struct DeferStmt : Stmt {
   StmtPtr body;
 };
 
-// `import "lib/util.a"`, `import "lib/util.a" as u`, or `import math`.
+// `import "lib/util.a"`, `import "lib/util.a" as u`, `import math`, or
+// `import python:<package>` (Mojo-style CPython interop).
 struct ImportStmt : Stmt {
   ImportStmt() : Stmt(StmtKind::Import) {}
-  std::string path;        // quoted path, empty for native/bare imports
+  std::string path;        // quoted path, empty for native/bare/python imports
   std::string alias;       // explicit alias, or empty
   std::string bareName;    // identifier for bare imports
+  std::string pythonModule;  // CPython module path for `python:<package>`
   bool quoted = false;
   bool nativeModule = false;  // resolved to a built-in native module
+  bool pythonModuleImport = false;
   int moduleId = -1;          // resolved module id
   Span targetSpan;
 };
 
-// `from "lib/util.a" import add, Vec as Point`.
+// `from "lib/util.a" import add, Vec as Point` or `from python:<pkg> import x`.
 struct FromImportStmt : Stmt {
   FromImportStmt() : Stmt(StmtKind::FromImport) {}
   struct Item {
@@ -491,8 +494,10 @@ struct FromImportStmt : Stmt {
   };
   std::string path;
   std::string bareName;
+  std::string pythonModule;
   bool quoted = false;
   bool nativeModule = false;
+  bool pythonModuleImport = false;
   int moduleId = -1;
   std::vector<Item> items;
   Span targetSpan;

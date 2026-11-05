@@ -104,6 +104,10 @@ Sema::ModuleAlias* Sema::findAlias(const std::string& name) {
 
 TypePtr Sema::moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
                                bool report) {
+  if (alias.python) {
+    (void)report; (void)span;
+    auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+  }
   if (alias.native) {
     if (const std::string* fn = nativeFunction(alias.nativeName, member)) {
       (void)fn;
@@ -154,6 +158,11 @@ TypePtr Sema::moduleMemberType(const ModuleAlias& alias, const std::string& memb
 
 TypePtr Sema::moduleMemberCall(const ModuleAlias& alias, const std::string& member,
                                CallExpr& call) {
+  (void)member;
+  if (alias.python) {
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+  }
   if (alias.native) {
     if (const std::string* fn = nativeFunction(alias.nativeName, member)) {
       return checkBuiltinCall(*fn, call);
@@ -1095,14 +1104,23 @@ void Sema::registerImports(Module& module) {
   for (auto& statement : module.program->statements) {
     if (auto* import = dynamic_cast<ImportStmt*>(statement.get())) {
       std::string alias = import->alias;
-      if (alias.empty()) alias = import->quoted ? aliasStem(import->path) : import->bareName;
+      if (alias.empty()) {
+        if (import->quoted) alias = aliasStem(import->path);
+        else if (import->pythonModuleImport) {
+          alias = import->pythonModule;
+          std::size_t dot = alias.rfind('.');
+          if (dot != std::string::npos) alias = alias.substr(dot + 1);
+        } else alias = import->bareName;
+      }
       if (alias.empty()) continue;
 
       ModuleAlias entry;
       entry.native = import->nativeModule;
+      entry.python = import->pythonModuleImport;
       entry.moduleId = import->moduleId;
       entry.nativeName = import->bareName;
-      if (!entry.native && entry.moduleId < 0) continue;
+      entry.pythonName = import->pythonModule;
+      if (!entry.native && !entry.python && entry.moduleId < 0) continue;
 
       if (moduleAliases_.count(alias)) {
         sink_.error(import->span, "Duplicate import alias '" + alias + "'.");
@@ -1118,7 +1136,13 @@ void Sema::registerImports(Module& module) {
         binding.span = item.span;
         binding.moduleId = from->moduleId;
 
-        if (from->nativeModule) {
+        if (from->pythonModuleImport) {
+          binding.python = true;
+          binding.kind = FromBinding::Kind::Function; // dynamic Python member/callable at runtime
+          binding.pythonModule = from->pythonModule;
+          binding.pythonMember = item.name;
+          { auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; binding.type=t; }
+        } else if (from->nativeModule) {
           binding.native = true;
           if (const std::string* fn = nativeFunction(from->bareName, item.name)) {
             binding.kind = FromBinding::Kind::Function;
@@ -1651,8 +1675,7 @@ void Sema::checkDoWhile(DoWhileStmt& stmt) {
 TypePtr Sema::iterableElementType(TypePtr iterableType, Span span, const std::string& hint) {
   TypePtr resolved = resolveType(iterableType);
   if (resolved->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */ (void)0;
-    return typeError();
+    /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (resolved->kind == TypeKind::Array || resolved->kind == TypeKind::Range ||
       resolved->kind == TypeKind::Set) {
@@ -1858,6 +1881,10 @@ TypePtr Sema::inferIdent(IdentExpr& expr) {
     }
   }
   if (auto alias = moduleAliases_.find(expr.name); alias != moduleAliases_.end()) {
+    if (alias->second.python) {
+      // CPython modules are fully dynamic: members are resolved at runtime.
+      auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+    }
     return alias->second.native ? typeNativeModule(alias->second.nativeName)
                                 : typeModule(alias->second.moduleId);
   }
@@ -2159,6 +2186,10 @@ TypePtr Sema::inferCall(CallExpr& expr) {
         if (sym == structs_.end()) return typeError();
         return checkStructConstruction(sym->second, expr);
       }
+      if (binding.python) {
+        for (auto& arg : expr.args) inferExpr(*arg.value);
+        auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+      }
       if (binding.kind == FromBinding::Kind::Function && !binding.native) {
         auto sigIt = signatures_.find(binding.fn);
         if (sigIt == signatures_.end()) return typeError();
@@ -2235,6 +2266,11 @@ TypePtr Sema::inferCall(CallExpr& expr) {
   if (resolved->kind == TypeKind::Function) {
     return checkFunctionValueCall("this expression", calleeType, expr);
   }
+  if (resolved->kind == TypeKind::Var) {
+    // Dynamic value: callability is decided at runtime.
+    for (auto& arg : expr.args) inferExpr(*arg.value);
+    auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+  }
   if (resolved->kind != TypeKind::Error) {
     sink_.error(expr.callee->span,
                 "Values of type '" + typeName(resolved) + "' are not callable.",
@@ -2249,6 +2285,11 @@ TypePtr Sema::checkFunctionValueCall(const std::string& name, TypePtr fnType, Ca
   if (resolved->kind == TypeKind::Error) {
     for (auto& arg : call.args) inferExpr(*arg.value);
     return typeError();
+  }
+  if (resolved->kind == TypeKind::Var) {
+    // Dynamic value: callability and signature are decided at runtime.
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (resolved->kind != TypeKind::Function) {
     sink_.error(call.callee->span,
@@ -2549,9 +2590,9 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
   };
 
   if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */ (void)0;
+    /* dynamic: inferred at runtime */
     for (auto& arg : call.args) inferExpr(*arg.value);
-    return typeError();
+    auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
 
   if (object->kind == TypeKind::Struct) {
@@ -4337,8 +4378,7 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
   if (object->kind == TypeKind::Array) return object->elem;
   if (object->kind == TypeKind::String) return typeChar();
   if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */ (void)0;
-    return typeError();
+    /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (object->kind == TypeKind::Set) {
     sink_.error(expr.object->span, "A set cannot be indexed.",
@@ -4371,8 +4411,7 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
   if (object->kind == TypeKind::Array) return typeArray(object->elem);
   if (object->kind == TypeKind::String) return typeString();
   if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */ (void)0;
-    return typeError();
+    /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   sink_.error(expr.object->span,
               "Values of type '" + typeName(object) + "' cannot be sliced.");
@@ -4488,8 +4527,7 @@ TypePtr Sema::inferField(FieldExpr& expr) {
   }
 
   if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */ (void)0;
-    return typeError();
+    /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
 
   if (object->kind == TypeKind::Array || object->kind == TypeKind::String) {
