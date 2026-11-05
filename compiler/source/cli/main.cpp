@@ -22,6 +22,7 @@ void printUsage(std::ostream& os) {
      << "  a <command> [options] <file.a>\n"
      << "\n"
       << "Commands:\n"
+      << "  repl             start the interactive REPL (like python)\n"
       << "  run <file.a>     compile and execute a program\n"
       << "  build <file.a>   compile program to native binary (-o <bin>)\n"
       << "  check <file.a>   type-check a program without running it\n"
@@ -172,7 +173,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     return false;
   }
 
-  static const std::vector<std::string> kCommands = {"run",  "build", "check", "test",
+  static const std::vector<std::string> kCommands = {"repl", "run",  "build", "check", "test",
                                                      "fmt",  "doc",   "ir",    "version",
                                                      "help"};
   bool known = false;
@@ -197,6 +198,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
 
   options.command = positional[0];
   if (options.command == "version" || options.command == "help") return true;
+  if (options.command == "repl") return true;
 
   if (positional.size() < 2) {
     err << "error: '" << options.command << "' requires a file\n";
@@ -300,6 +302,10 @@ int main(int argc, char** argv) {
 
   if (options.command == "test") {
     return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
+  }
+
+  if (options.command == "repl") {
+    return a::repl(config, std::cin, std::cout, std::cerr);
   }
 
   return a::runFile(options.path, config, std::cin, std::cout, std::cerr);

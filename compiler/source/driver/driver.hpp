@@ -30,6 +30,13 @@ int runSource(const std::string& displayPath, std::string source, const DriverCo
 int testFile(const std::string& path, const DriverConfig& config, std::istream& in,
              std::ostream& out, std::ostream& err);
 
+// Runs an interactive REPL (`a repl`): reads lines from `in`, prints a banner
+// and `>>>`/`...` prompts to `out`, evaluates each complete chunk in a
+// persistent session (variables/functions survive across lines), and echoes
+// the value of bare expressions. `help`/`exit`/`quit` are meta-commands.
+// Exit code is always 0 (errors are reported inline, like Python).
+int repl(const DriverConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
+
 // Compiles a program to a native binary executable (`a build`).
 int buildFile(const std::string& path, const std::string& outputPath,
               const DriverConfig& config, const std::string& backend, std::ostream& err);
