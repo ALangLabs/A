@@ -12,5 +12,9 @@ namespace a::kgen {
 bool emitLLVMIR(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out);
 bool buildExecutable(const ModuleGraph& graph, const SemaResult& sema, const std::string& outputPath, std::ostream& err);
 int runModule(const ModuleGraph& graph, const SemaResult& sema, std::istream& in, std::ostream& out, std::ostream& err);
+bool compileNativeExecutable(const ModuleGraph& graph, const SemaResult& sema,
+                             const std::string& outputBase, std::ostream& err);
+int runNativeExecutable(const std::string& outputBase, std::istream& in, std::ostream& out,
+                        std::ostream& err);
 bool isSupported(const ModuleGraph& graph);
 }

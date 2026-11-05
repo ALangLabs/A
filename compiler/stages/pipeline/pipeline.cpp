@@ -5,6 +5,7 @@
 #include "backend/kgen/execution_engine.hpp"
 #include "backend/kgen/execution_engine_impl.hpp"
 #include "backend/kgen/kgen_backend.hpp"
+#include "backend/kgen/repl_eval.hpp"
 #include "diagnostics/diagnostics.hpp"
 #include "ir/ir.hpp"
 #include "name-resolution/module_loader.hpp"
@@ -39,8 +40,15 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(source),config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
-  // KGEN/LLVM path when supported; internal engine fallback for full dynamic semantics.
-  if(kgen::isSupported(*m.graph)) return kgen::runModule(*m.graph,*m.sema,in,out,err);
+  // Fast path: native-subset programs compile and run directly
+  // (Goose/Mojo-style). If native compilation is unavailable, fall back to
+  // the internal engine so `run` keeps full dynamic semantics.
+  if(std::getenv("A_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
+    std::string base="/tmp/a_native_run_"+std::to_string(::getpid())+"_"+std::to_string(::rand());
+    if(kgen::compileNativeExecutable(*m.graph,*m.sema,base,err)){
+      return kgen::runNativeExecutable(base,in,out,err);
+    }
+  }
   return kgen::runWithEngine(*m.graph,*m.sema,sink,in,out,err);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
@@ -78,5 +86,36 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   int rc=session.engine->evalPending();
   session.sink->flush(err,false);
   return rc;
+}
+
+namespace {
+ReplSession g_replSession;
+PipelineConfig g_replConfig;
+bool g_replBusy = false;
+
+// `repl.eval` bridge used by the self-hosted REPL UI. Reentrancy (user code
+// calling repl.eval while an eval is in flight) is rejected with code 3.
+int replEvalBridge(const std::string& source, std::istream& in, std::ostream& out,
+                   std::ostream& err) {
+  if (g_replBusy) return 3;
+  g_replBusy = true;
+  const int rc = replEval(g_replSession, source, g_replConfig, in, out, err);
+  g_replBusy = false;
+  return rc;
+}
+}  // namespace
+
+int runReplUi(const std::string& entryPath, const PipelineConfig& config,
+              std::istream& in, std::ostream& out, std::ostream& err) {
+  g_replConfig = config;
+  g_replConfig.checkOnly = false;
+  kgen::setReplEvalHandler(&replEvalBridge);
+
+  std::string source;
+  if (!readAll(entryPath, source, err)) return kNoIn;
+  DiagnosticSink sink;
+  auto m = runFrontendPipeline(entryPath, std::move(source), g_replConfig, sink, out, err);
+  if (!m.ok) return kCErr;
+  return kgen::runWithEngine(*m.graph, *m.sema, sink, in, out, err);
 }
 }

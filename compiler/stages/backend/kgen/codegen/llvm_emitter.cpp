@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <unordered_set>
 #include <set>
 #include <filesystem>
 #include <cstdlib>
@@ -16,6 +17,8 @@
 
 namespace a {
 namespace {
+
+bool isStdlibModule(const Module& mod);
 
 std::string extractString(const StringLitExpr& s) {
   std::string result;
@@ -43,10 +46,11 @@ class LLVMEmitter {
     collectStringLiterals();
     emitStringConstants();
 
-    // Emit user function definitions
+    // Emit user function definitions (stdlib/prelude modules are skipped:
+    // they are not part of the native subset and are never called natively)
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
       const auto& mod = graph_.modules[i];
-      if (!mod.program) continue;
+      if (!mod.program || isStdlibModule(mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         if (stmt->kind == StmtKind::FnDecl) {
           emitFunction(*static_cast<const FnDecl*>(stmt.get()));
@@ -79,7 +83,7 @@ class LLVMEmitter {
 
   void collectStringLiterals() {
     for (const auto& mod : graph_.modules) {
-      if (!mod.program) continue;
+      if (!mod.program || isStdlibModule(mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         collectFromStmt(*stmt);
       }
@@ -586,10 +590,10 @@ class X86Emitter {
 
     out_ << "\n.text\n";
 
-    // Emit functions
+    // Emit functions (stdlib/prelude modules skipped, same as LLVMEmitter)
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
       const auto& mod = graph_.modules[i];
-      if (!mod.program) continue;
+      if (!mod.program || isStdlibModule(mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         if (stmt->kind == StmtKind::FnDecl) {
           emitFunction(*static_cast<const FnDecl*>(stmt.get()));
@@ -618,7 +622,7 @@ class X86Emitter {
 
   void collectStringLiterals() {
     for (const auto& mod : graph_.modules) {
-      if (!mod.program) continue;
+      if (!mod.program || isStdlibModule(mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         collectFromStmt(*stmt);
       }
@@ -1064,14 +1068,14 @@ bool buildLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
   return true;
 }
 
-int runLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
-                  std::istream& in, std::ostream& out, std::ostream& err) {
-  (void)in;
-  std::string tmpBase = "/tmp/a_llvm_run_" + std::to_string(getpid()) + "_" + std::to_string(rand());
-  if (!buildLLVMModule(graph, sema, tmpBase, err)) {
-    return 1;
-  }
+bool compileLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
+                       const std::string& outputBase, std::ostream& err) {
+  return buildLLVMModule(graph, sema, outputBase, err);
+}
 
+int runBuiltLLVMModule(const std::string& tmpBase, std::istream& in, std::ostream& out,
+                       std::ostream& err) {
+  (void)in;
   // Execute directly and stream stdout/stderr
   std::string runCmd = tmpBase + " 2>/tmp/a_llvm_err.txt";
   FILE* pipe = popen(runCmd.c_str(), "r");
@@ -1104,9 +1108,35 @@ int runLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
   return WIFEXITED(status) ? WEXITSTATUS(status) : 2;
 }
 
+int runLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
+                  std::istream& in, std::ostream& out, std::ostream& err) {
+  std::string tmpBase = "/tmp/a_llvm_run_" + std::to_string(getpid()) + "_" + std::to_string(rand());
+  if (!compileLLVMModule(graph, sema, tmpBase, err)) {
+    return 1;
+  }
+  return runBuiltLLVMModule(tmpBase, in, out, err);
+}
+
 namespace {
+// stdlib/prelude modules (stdlib/**, incl. the auto-loaded prelude) use
+// language features the native subset cannot lower; they are never emitted,
+// so they must not gate user programs either.
+bool isStdlibModule(const Module& mod) {
+  return mod.path.find("stdlib") != std::string::npos;
+}
+// Names bound at module top level. Native functions cannot see module globals
+// (the emitter only allocates function-local slots), so a function that reads
+// one is rejected and stays on the interpreter.
+std::unordered_set<std::string> g_nativeGlobals;
+bool g_nativeInFunction = false;
 bool checkSupportedExpr(const Expr& expr);
 bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
+  auto fail = [&](const char* what) {
+    if (std::getenv("A_DEBUG_NATIVE"))
+      std::fprintf(stderr, "[native-gate] unsupported %s (stmt kind %d, global %d)\n",
+                   what, static_cast<int>(stmt.kind), static_cast<int>(isGlobal));
+    return false;
+  };
   switch (stmt.kind) {
     case StmtKind::Let: {
       if (isGlobal) return false;
@@ -1184,6 +1214,9 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
         std::vector<const Stmt*> q; for (auto& s: fn.body) q.push_back(s.get());
         while(!q.empty()){auto* cur=q.back(); q.pop_back();
           if(cur->kind==StmtKind::Let){ localNames.insert(static_cast<const LetStmt&>(*cur).name); }
+          // In A's Python-style semantics the first `name = value` inside a
+          // function declares a local, so assign targets count as locals too.
+          else if(cur->kind==StmtKind::Assign){ auto& a=static_cast<const AssignStmt&>(*cur); if(a.target->kind==ExprKind::Ident) localNames.insert(static_cast<const IdentExpr&>(*a.target).name); }
           else if(cur->kind==StmtKind::If){ auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) q.push_back(s.get()); for(auto& s: ifs.elseBody) q.push_back(s.get()); }
           else if(cur->kind==StmtKind::While){ auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) q.push_back(s.get()); }
           else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); localNames.insert(fo.var); for(auto& s: fo.body) q.push_back(s.get()); }
@@ -1197,11 +1230,16 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
           else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); for(auto& s: fo.body) q2.push_back(s.get()); }
         }
       }
-      for (const auto& st : fn.body) if (!checkSupportedStmt(*st, false)) return false;
-      return true;
+      g_nativeInFunction = true;
+      bool bodyOk = true;
+      for (const auto& st : fn.body) {
+        if (!checkSupportedStmt(*st, false)) { bodyOk = false; break; }
+      }
+      g_nativeInFunction = false;
+      return bodyOk;
     }
     default:
-      return false;
+      return fail("stmt");
   }
 }
 
@@ -1209,8 +1247,14 @@ bool checkSupportedExpr(const Expr& expr) {
   switch (expr.kind) {
     case ExprKind::IntLit:
     case ExprKind::BoolLit:
-    case ExprKind::Ident:
       return true;
+    case ExprKind::Ident: {
+      if (g_nativeInFunction &&
+          g_nativeGlobals.count(static_cast<const IdentExpr&>(expr).name)) {
+        return false;
+      }
+      return true;
+    }
     case ExprKind::StringLit: {
       const auto& s = static_cast<const StringLitExpr&>(expr);
       for (const auto& p : s.parts) if (p.isExpr) return false;
@@ -1267,9 +1311,18 @@ bool checkSupportedExpr(const Expr& expr) {
 
 bool isLLVMSupported(const ModuleGraph& graph) {
   if (graph.modules.empty()) return false;
+  g_nativeGlobals.clear();
+  g_nativeInFunction = false;
   for (const auto& mod : graph.modules) {
-    if (!mod.program) continue;
+    if (!mod.program || isStdlibModule(mod)) continue;
     for (const auto& st : mod.program->statements) {
+      if (st->kind == StmtKind::Let) {
+        g_nativeGlobals.insert(static_cast<const LetStmt&>(*st).name);
+      } else if (st->kind == StmtKind::Assign &&
+                 static_cast<const AssignStmt&>(*st).target->kind == ExprKind::Ident) {
+        g_nativeGlobals.insert(
+            static_cast<const IdentExpr&>(*static_cast<const AssignStmt&>(*st).target).name);
+      }
       if (!checkSupportedStmt(*st, true)) return false;
     }
   }

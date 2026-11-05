@@ -19,6 +19,12 @@ bool emitX86Assembly(const ModuleGraph& graph, const SemaResult& sema, std::ostr
 bool buildLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
                      const std::string& outputPath, std::ostream& err);
 
+// Compiles via LLVM/native pipeline; returns false when compilation fails.
+bool compileLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
+                       const std::string& outputBase, std::ostream& err);
+// Executes a binary produced by compileLLVMModule/buildLLVMModule.
+int runBuiltLLVMModule(const std::string& outputBase, std::istream& in, std::ostream& out,
+                       std::ostream& err);
 // Compiles via LLVM/native pipeline and executes the resulting program directly.
 int runLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
                   std::istream& in, std::ostream& out, std::ostream& err);
