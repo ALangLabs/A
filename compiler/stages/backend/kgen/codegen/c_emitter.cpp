@@ -50,6 +50,23 @@ class CEmitter {
     out_ << "static a_i64 ai(aval v) { return v.f ? (a_i64)v.d : v.i; }\n";
     out_ << "static double ad(aval v) { return v.f ? v.d : (double)v.i; }\n";
     out_ << "int printf(const char *, ...);\n";
+    out_ << "int snprintf(char *, unsigned long, const char *, ...);\n";
+    out_ << "double strtod(const char *, char **);\n";
+    out_ << "char *strchr(const char *, int);\n";
+    out_ << "char *strcat(char *, const char *);\n";
+    // Python-style float repr: shortest %g precision that round-trips, with a
+    // trailing ".0" when the result would otherwise look like an int.
+    out_ << "static void a_print_double(double v) {\n"
+            "  char buf[64]; int p;\n"
+            "  for (p = 1; p <= 17; ++p) {\n"
+            "    snprintf(buf, sizeof buf, \"%.*g\", p, v);\n"
+            "    if (strtod(buf, 0) == v) break;\n"
+            "  }\n"
+            "  if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E') &&\n"
+            "      !strchr(buf, 'n') && !strchr(buf, 'i') && !strchr(buf, 'N') &&\n"
+            "      !strchr(buf, 'I')) strcat(buf, \".0\");\n"
+            "  printf(\"%s\\n\", buf);\n"
+            "}\n";
     out_ << "double sqrt(double);\n";
     out_ << "double pow(double, double);\n";
     out_ << "double fmod(double, double);\n";
@@ -462,7 +479,7 @@ class CEmitter {
     std::string av = evalA(arg);
     std::string tn = tmp();
     out_ << "  " << tn << " = " << av << ";\n";
-    out_ << "  if (" << tn << ".f) printf(\"%.17g\\n\", " << tn << ".d);"
+    out_ << "  if (" << tn << ".f) a_print_double(" << tn << ".d);"
          << " else printf(\"%lld\\n\", " << tn << ".i);\n";
   }
 

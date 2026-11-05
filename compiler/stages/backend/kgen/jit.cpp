@@ -41,6 +41,11 @@ void jitDiag(void* opaque, const char* msg) {
   *s += '\n';
 }
 
+// libc functions whose C++ headers expose overloads get wrappers so their
+// addresses can be taken unambiguously.
+char* jit_strchr(const char* s, int c) { return const_cast<char*>(strchr(s, c)); }
+char* jit_strcat(char* d, const char* s) { return strcat(d, s); }
+
 }  // namespace
 
 int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream& err) {
@@ -68,6 +73,11 @@ int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream&
   tcc_add_symbol(s, "memset", (void*)memset);
   tcc_add_symbol(s, "memcpy", (void*)memcpy);
   tcc_add_symbol(s, "memmove", (void*)memmove);
+  // a_print_double's formatting helpers.
+  tcc_add_symbol(s, "snprintf", (void*)snprintf);
+  tcc_add_symbol(s, "strtod", (void*)strtod);
+  tcc_add_symbol(s, "strchr", (void*)jit_strchr);
+  tcc_add_symbol(s, "strcat", (void*)jit_strcat);
 
   // Symbols the generated C calls, bound to this process's own libc/libm.
   tcc_add_symbol(s, "printf", (void*)printf);

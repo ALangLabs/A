@@ -22,6 +22,7 @@ namespace {
 
 bool isStdlibModule(const ModuleGraph& graph, const Module& mod);
 bool nativeFloatScanOk(const ModuleGraph& graph);
+bool exprProvablyFloat(const Expr& expr);
 
 std::string extractString(const StringLitExpr& s) {
   std::string result;
@@ -1494,8 +1495,10 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
     case StmtKind::Assign: {
       const auto& s = static_cast<const AssignStmt&>(stmt);
       // /= and %= can trap on a zero divisor; under the in-process JIT that
-      // would kill `a` itself rather than a subprocess.
-      if (s.op == "/=" || s.op == "%=") return false;
+      // would kill `a` itself rather than a subprocess. A provably-float
+      // value makes it an IEEE divide, which is safe.
+      if ((s.op == "/=" || s.op == "%=") && !exprProvablyFloat(*s.value))
+        return false;
       return s.target->kind == ExprKind::Ident && checkSupportedExpr(*s.value);
     }
     case StmtKind::Expr: {
@@ -1589,6 +1592,34 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
   }
 }
 
+// True when the expression is provably a double at runtime (contains a float
+// literal or a float builtin), making / and % safe from integer div-by-zero.
+bool exprProvablyFloat(const Expr& expr) {
+  switch (expr.kind) {
+    case ExprKind::FloatLit:
+      return true;
+    case ExprKind::Binary: {
+      const auto& b = static_cast<const BinaryExpr&>(expr);
+      static const std::set<std::string> arith = {"+","-","*","/","%"};
+      return arith.count(b.op) &&
+             (exprProvablyFloat(*b.lhs) || exprProvablyFloat(*b.rhs));
+    }
+    case ExprKind::Unary:
+      return static_cast<const UnaryExpr&>(expr).op == "-" &&
+             exprProvablyFloat(*static_cast<const UnaryExpr&>(expr).operand);
+    case ExprKind::Call: {
+      const auto& c = static_cast<const CallExpr&>(expr);
+      if (c.callee->kind != ExprKind::Ident) return false;
+      static const std::set<std::string> fns = {
+          "sqrt","pow","fmod","floor","ceil","round","exp","log","sin","cos",
+          "tan","fabs","f64","float"};
+      return fns.count(static_cast<const IdentExpr&>(*c.callee).name) != 0;
+    }
+    default:
+      return false;
+  }
+}
+
 bool checkSupportedExpr(const Expr& expr) {
   switch (expr.kind) {
     case ExprKind::IntLit:
@@ -1605,8 +1636,10 @@ bool checkSupportedExpr(const Expr& expr) {
       return false;
     case ExprKind::Binary: {
       const auto& b = static_cast<const BinaryExpr&>(expr);
-      // Division or remainder requires runtime checks for zero, fallback to interpreter
-      if (b.op == "/" || b.op == "%") {
+      // Integer division/remainder can trap on zero; allow only when an
+      // operand is provably a double (IEEE division never traps).
+      if ((b.op == "/" || b.op == "%") &&
+          !(exprProvablyFloat(*b.lhs) || exprProvablyFloat(*b.rhs))) {
         return false;
       } else if (b.op == "<<" || b.op == ">>") {
         if (b.rhs->kind == ExprKind::IntLit) {
