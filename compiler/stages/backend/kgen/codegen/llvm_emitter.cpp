@@ -565,8 +565,29 @@ class X86Emitter {
   X86Emitter(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out)
       : graph_(graph), sema_(sema), out_(out) {}
 
+  void collectGlobals() {
+    if (graph_.entry < 0 ||
+        static_cast<std::size_t>(graph_.entry) >= graph_.modules.size()) return;
+    const auto& root = graph_.modules[static_cast<std::size_t>(graph_.entry)];
+    if (!root.program) return;
+    for (const auto& stmt : root.program->statements) {
+      std::string name;
+      if (stmt->kind == StmtKind::Let) {
+        name = static_cast<const LetStmt&>(*stmt).name;
+      } else if (stmt->kind == StmtKind::Assign &&
+                 static_cast<const AssignStmt&>(*stmt).target->kind == ExprKind::Ident) {
+        name = static_cast<const IdentExpr&>(*static_cast<const AssignStmt&>(*stmt).target).name;
+      }
+      if (!name.empty() && !globalSlots_.count(name)) {
+        globalSlots_[name] = globalBytes_;
+        globalBytes_ += 8;
+      }
+    }
+  }
+
   bool emit() {
     collectStringLiterals();
+    collectGlobals();
 
     out_ << ".intel_syntax noprefix\n";
     out_ << ".text\n\n";
@@ -589,6 +610,9 @@ class X86Emitter {
     }
 
     out_ << "\n.text\n";
+    if (globalBytes_ > 0) {
+      out_ << ".comm _a_globals, " << globalBytes_ << ", 32\n\n";
+    }
 
     // Emit functions (stdlib/prelude modules skipped, same as LLVMEmitter)
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
@@ -613,8 +637,13 @@ class X86Emitter {
   int labelCounter_ = 1;
   int strCounter_ = 1;
   int currentStackOffset_ = 0;
+  bool inMain_ = false;
   std::unordered_map<std::string, int> stackSlots_;
   std::unordered_map<std::string, std::string> strTable_;
+  // Module-level bindings live in a dedicated .bss area so functions can read
+  // them (Goose-style flat global storage, one 8-byte slot per name).
+  std::unordered_map<std::string, int> globalSlots_;
+  int globalBytes_ = 0;
 
   std::string nextLabel(const std::string& prefix = "L") {
     return "." + prefix + "_" + std::to_string(labelCounter_++);
@@ -709,10 +738,17 @@ class X86Emitter {
     switch (stmt.kind) {
       case StmtKind::Let: {
         const auto& let = static_cast<const LetStmt&>(stmt);
-        int slot = allocateSlot(let.name);
+        auto git = globalSlots_.find(let.name);
+        bool toGlobal = inMain_ && git != globalSlots_.end();
+        int slot = toGlobal ? -1 : allocateSlot(let.name);
         if (let.init) {
           emitExpr(*let.init);
-          out_ << "  mov [rbp - " << slot << "], rax\n";
+          if (toGlobal) {
+            out_ << "  lea r10, [rip+_a_globals]\n";
+            out_ << "  mov [r10+" << git->second << "], rax\n";
+          } else {
+            out_ << "  mov [rbp - " << slot << "], rax\n";
+          }
         }
         break;
       }
@@ -720,8 +756,39 @@ class X86Emitter {
         const auto& assign = static_cast<const AssignStmt&>(stmt);
         if (assign.target->kind == ExprKind::Ident) {
           const auto& id = static_cast<const IdentExpr&>(*assign.target);
-          int slot = allocateSlot(id.name);
+          auto git = globalSlots_.find(id.name);
+          // Assign resolves through the env chain: a name bound at module
+          // level is mutated, not shadowed (matches the interpreter).
+          bool toGlobal = git != globalSlots_.end() &&
+                          stackSlots_.find(id.name) == stackSlots_.end();
+          int slot = toGlobal ? -1 : allocateSlot(id.name);
           emitExpr(*assign.value);
+          if (toGlobal) {
+            int off = git->second;
+            if (assign.op == "=") {
+              out_ << "  lea r10, [rip+_a_globals]\n";
+              out_ << "  mov [r10+" << off << "], rax\n";
+            } else {
+              // rax = value; compute cur <op> value into rax, store back
+              out_ << "  mov rbx, rax\n";
+              out_ << "  lea r10, [rip+_a_globals]\n";
+              out_ << "  mov rax, [r10+" << off << "]\n";
+              const std::string& o = assign.op;
+              std::string base = o.size() > 1 ? o.substr(0, o.size() - 1) : o;
+              if (base == "+") out_ << "  add rax, rbx\n";
+              else if (base == "-") out_ << "  sub rax, rbx\n";
+              else if (base == "*") out_ << "  imul rax, rbx\n";
+              else if (base == "/") { out_ << "  cqo\n  idiv rbx\n"; }
+              else if (base == "%") { out_ << "  cqo\n  idiv rbx\n  mov rax, rdx\n"; }
+              else if (base == "&") out_ << "  and rax, rbx\n";
+              else if (base == "|") out_ << "  or rax, rbx\n";
+              else if (base == "^") out_ << "  xor rax, rbx\n";
+              else if (base == "<<") { out_ << "  mov rcx, rbx\n  shl rax, cl\n"; }
+              else if (base == ">>") { out_ << "  mov rcx, rbx\n  sar rax, cl\n"; }
+              out_ << "  mov [r10+" << off << "], rax\n";
+            }
+            break;
+          }
           if (assign.op == "=") {
             out_ << "  mov [rbp - " << slot << "], rax\n";
           } else if (assign.op == "+=") {
@@ -869,7 +936,13 @@ class X86Emitter {
         if (it != stackSlots_.end()) {
           out_ << "  mov rax, [rbp - " << it->second << "]\n";
         } else {
-          out_ << "  mov rax, 0\n";
+          auto git = globalSlots_.find(id.name);
+          if (git != globalSlots_.end()) {
+            out_ << "  lea r10, [rip+_a_globals]\n";
+            out_ << "  mov rax, [r10+" << git->second << "]\n";
+          } else {
+            out_ << "  mov rax, 0\n";
+          }
         }
         break;
       }
@@ -998,6 +1071,10 @@ class X86Emitter {
     out_ << "  mov rbp, rsp\n";
     out_ << "  sub rsp, 256\n";
 
+    stackSlots_.clear();
+    currentStackOffset_ = 0;
+    inMain_ = true;
+
     if (graph_.entry >= 0 && static_cast<std::size_t>(graph_.entry) < graph_.modules.size()) {
       const auto& root = graph_.modules[static_cast<std::size_t>(graph_.entry)];
       if (root.program) {
@@ -1124,11 +1201,6 @@ namespace {
 bool isStdlibModule(const Module& mod) {
   return mod.path.find("stdlib") != std::string::npos;
 }
-// Names bound at module top level. Native functions cannot see module globals
-// (the emitter only allocates function-local slots), so a function that reads
-// one is rejected and stays on the interpreter.
-std::unordered_set<std::string> g_nativeGlobals;
-bool g_nativeInFunction = false;
 bool checkSupportedExpr(const Expr& expr);
 bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
   auto fail = [&](const char* what) {
@@ -1230,13 +1302,8 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
           else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); for(auto& s: fo.body) q2.push_back(s.get()); }
         }
       }
-      g_nativeInFunction = true;
-      bool bodyOk = true;
-      for (const auto& st : fn.body) {
-        if (!checkSupportedStmt(*st, false)) { bodyOk = false; break; }
-      }
-      g_nativeInFunction = false;
-      return bodyOk;
+      for (const auto& st : fn.body) if (!checkSupportedStmt(*st, false)) return false;
+      return true;
     }
     default:
       return fail("stmt");
@@ -1248,13 +1315,8 @@ bool checkSupportedExpr(const Expr& expr) {
     case ExprKind::IntLit:
     case ExprKind::BoolLit:
       return true;
-    case ExprKind::Ident: {
-      if (g_nativeInFunction &&
-          g_nativeGlobals.count(static_cast<const IdentExpr&>(expr).name)) {
-        return false;
-      }
+    case ExprKind::Ident:
       return true;
-    }
     case ExprKind::StringLit: {
       const auto& s = static_cast<const StringLitExpr&>(expr);
       for (const auto& p : s.parts) if (p.isExpr) return false;
@@ -1311,18 +1373,9 @@ bool checkSupportedExpr(const Expr& expr) {
 
 bool isLLVMSupported(const ModuleGraph& graph) {
   if (graph.modules.empty()) return false;
-  g_nativeGlobals.clear();
-  g_nativeInFunction = false;
   for (const auto& mod : graph.modules) {
     if (!mod.program || isStdlibModule(mod)) continue;
     for (const auto& st : mod.program->statements) {
-      if (st->kind == StmtKind::Let) {
-        g_nativeGlobals.insert(static_cast<const LetStmt&>(*st).name);
-      } else if (st->kind == StmtKind::Assign &&
-                 static_cast<const AssignStmt&>(*st).target->kind == ExprKind::Ident) {
-        g_nativeGlobals.insert(
-            static_cast<const IdentExpr&>(*static_cast<const AssignStmt&>(*st).target).name);
-      }
       if (!checkSupportedStmt(*st, true)) return false;
     }
   }
