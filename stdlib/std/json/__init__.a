@@ -1,0 +1,5 @@
+# std.json (Mojo `std/json` analog).
+# This package is backed by the native module `json` implemented in the
+# toolchain (see compiler/stages/name-resolution/native_modules.hpp and
+# compiler/stages/backend/stdlib/builtins.cpp). `import json` resolves to
+# the native implementation.

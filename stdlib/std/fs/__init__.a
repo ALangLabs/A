@@ -1,0 +1,5 @@
+# std.fs (Mojo `std/fs` analog).
+# This package is backed by the native module `fs` implemented in the
+# toolchain (see compiler/stages/name-resolution/native_modules.hpp and
+# compiler/stages/backend/stdlib/builtins.cpp). `import fs` resolves to
+# the native implementation.

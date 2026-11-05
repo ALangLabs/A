@@ -1,0 +1,5 @@
+# std.metrics (Mojo `std/metrics` analog).
+# This package is backed by the native module `metrics` implemented in the
+# toolchain (see compiler/stages/name-resolution/native_modules.hpp and
+# compiler/stages/backend/stdlib/builtins.cpp). `import metrics` resolves to
+# the native implementation.

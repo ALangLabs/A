@@ -1,0 +1,5 @@
+# std.binary (Mojo `std/binary` analog).
+# This package is backed by the native module `binary` implemented in the
+# toolchain (see compiler/stages/name-resolution/native_modules.hpp and
+# compiler/stages/backend/stdlib/builtins.cpp). `import binary` resolves to
+# the native implementation.

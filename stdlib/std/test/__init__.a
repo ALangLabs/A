@@ -1,0 +1,3 @@
+# std.test package (Mojo `std/testing`/`std/test` analog).
+# Re-exports the assertion harness.
+from "test.a" import passed, failed, check, equal, require, summary, report

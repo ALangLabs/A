@@ -1,0 +1,2 @@
+# std.iter package (Mojo `std/iter` analog).
+from "iter.a" import range_step, repeat, take

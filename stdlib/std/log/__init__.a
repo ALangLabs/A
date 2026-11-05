@@ -1,0 +1,5 @@
+# std.log (Mojo `std/log` analog).
+# This package is backed by the native module `log` implemented in the
+# toolchain (see compiler/stages/name-resolution/native_modules.hpp and
+# compiler/stages/backend/stdlib/builtins.cpp). `import log` resolves to
+# the native implementation.

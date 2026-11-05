@@ -1,0 +1,4 @@
+# std.prelude (Mojo `std/prelude` analog).
+# Auto-loaded by the compiler before every program (see module_loader).
+# This file provides the Mojo-shaped package entry; the actual auto-loaded
+# vocabulary lives in stdlib/prelude.a at the stdlib root for loader compat.

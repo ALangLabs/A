@@ -1,5 +1,44 @@
-# Trait surface (Mojo `builtin/value.mojo` analog).
+# std.traits (Mojo `std/traits` analog).
 #
-# The canonical trait declarations and helpers live in `stdlib/std/traits`.
-# This entry keeps `import traits` working for existing code.
-from "../std/traits/traits.a" import Copyable, Equatable, Hashable, Comparable, eq, ne, lt, gt, is_copyable, is_equatable, copy_value
+# These are real trait declarations: a struct opts in with
+# `impl Equatable for Foo:` and Sema verifies the required methods. The
+# lowercase helpers below are generic conveniences that call the same methods.
+
+trait Copyable:
+    ## A value that can be copied without invalidating the original.
+    fn copy_of(self) -> Self
+
+trait Equatable:
+    ## Equality against another value of the same type.
+    fn eq(self, other) -> bool
+
+trait Hashable(Equatable):
+    ## A stable integer hash consistent with `eq`.
+    fn hash(self) -> i64
+
+trait Comparable(Equatable):
+    ## Negative, zero, or positive when `self` is below, equal to, or above
+    ## `other`.
+    fn compare(self, other) -> i64
+
+fn eq<T>(a: T, b: T) -> bool:
+    return a == b
+
+fn ne<T>(a: T, b: T) -> bool:
+    return a != b
+
+fn lt<T>(a: T, b: T) -> bool:
+    return a < b
+
+fn gt<T>(a: T, b: T) -> bool:
+    return a > b
+
+fn is_copyable(x: bool) -> bool:
+    # Every A value is copyable today; move-only types are future work.
+    return true
+
+fn is_equatable(x: bool) -> bool:
+    return true
+
+fn copy_value<T>(x: T) -> T:
+    return x

@@ -1,0 +1,2 @@
+# std.gpu package (Mojo `std/gpu` / MAX analog stubs).
+from "gpu.a" import Kernel, Buffer, Device, cpu_device, create_device, device_name, make_buffer, make_kernel, add_kernel, host_launch, buffer_len, buffer_sum, transfer_in, transfer_out, launch

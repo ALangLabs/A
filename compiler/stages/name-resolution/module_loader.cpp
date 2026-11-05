@@ -110,9 +110,18 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
 
   // The prelude loads before the entry so its declarations are in scope
   // everywhere. Programs compiled without a stdlib on disk are unaffected.
+  // Mojo-analog: stdlib/prelude.a or stdlib/std/prelude/prelude.a (or __init__.a).
   std::error_code exists;
-  const fs::path prelude = fs::path(options_.stdlibRoot) / "prelude.a";
-  if (fs::exists(prelude, exists)) loadModule(prelude.string(), prelude.string(), nullptr);
+  const fs::path stdRoot = fs::path(options_.stdlibRoot);
+  for (const auto& candidate : {stdRoot / "prelude.a",
+                                stdRoot / "std" / "prelude" / "prelude.a",
+                                stdRoot / "std" / "prelude" / "__init__.a",
+                                stdRoot / "std" / "prelude.a"}) {
+    if (fs::exists(candidate, exists)) {
+      loadModule(candidate.string(), candidate.string(), nullptr);
+      break;
+    }
+  }
 
   int entry = loadModule(entryPath, entryPath, &entrySource);
   graph_.entry = entry;
@@ -237,13 +246,19 @@ int ModuleLoader::resolveBare(const std::string& name, Span span, bool& nativeOu
   }
 
   std::vector<fs::path> candidates;
-  if (!options_.stdlibRoot.empty()) {
-    candidates.push_back(fs::path(options_.stdlibRoot) / (name + ".a"));
-    candidates.push_back(fs::path(options_.stdlibRoot) / name / (name + ".a"));
-  }
+  const auto addPkg = [&](const fs::path& root) {
+    candidates.push_back(root / (name + ".a"));
+    candidates.push_back(root / name / (name + ".a"));
+    candidates.push_back(root / name / "__init__.a");
+    candidates.push_back(root / "std" / (name + ".a"));
+    candidates.push_back(root / "std" / name / (name + ".a"));
+    candidates.push_back(root / "std" / name / "__init__.a");
+  };
+  if (!options_.stdlibRoot.empty()) addPkg(fs::path(options_.stdlibRoot));
   for (const auto& dir : options_.modulePaths) {
     candidates.push_back(fs::path(dir) / (name + ".a"));
     candidates.push_back(fs::path(dir) / name / (name + ".a"));
+    candidates.push_back(fs::path(dir) / name / "__init__.a");
   }
 
   for (const auto& candidate : candidates) {
