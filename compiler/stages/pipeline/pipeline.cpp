@@ -51,6 +51,13 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   if(!std::getenv("A_NO_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
     std::uint64_t h=srcHash;
     auto mix=[&](const std::string& d){for(unsigned char c:d){h^=c;h*=1099511628211ULL;}};
+    // Include this binary's mtime so emitter/compiler changes invalidate
+    // cached natives automatically.
+    {
+      std::error_code ec2;
+      auto exeMt=std::filesystem::last_write_time("/proc/self/exe",ec2);
+      if(!ec2) mix("exe:"+std::to_string(exeMt.time_since_epoch().count()));
+    }
     for(const auto& mod:m.graph->modules){
       if(mod.path.find("stdlib")!=std::string::npos) continue;
       mix(mod.path);

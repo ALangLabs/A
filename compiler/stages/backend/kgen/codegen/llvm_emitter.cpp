@@ -888,10 +888,6 @@ class X86Emitter {
               out_ << "  mov rbx, rax\n";
               out_ << "  lea r10, [rip+_a_globals]\n";
               out_ << "  mov rax, [r10+" << off << "]\n";
-              // rax = value; compute cur <op> value into rax, store back
-              out_ << "  mov rbx, rax\n";
-              out_ << "  lea r10, [rip+_a_globals]\n";
-              out_ << "  mov rax, [r10+" << off << "]\n";
               const std::string& o = assign.op;
               std::string base = o.size() > 1 ? o.substr(0, o.size() - 1) : o;
               if (base == "+") out_ << "  add rax, rbx\n";
@@ -995,25 +991,33 @@ class X86Emitter {
         const auto& forStmt = static_cast<const ForStmt&>(stmt);
         if (forStmt.iterable->kind == ExprKind::Range) {
           const auto& range = static_cast<const RangeExpr&>(*forStmt.iterable);
+          // The iterator lives in a hidden slot; the visible loop variable is
+          // re-bound from it each iteration so body assignments to the loop
+          // var cannot corrupt iteration (matches the interpreter).
+          int iterSlot = allocateSlot("__iter_" + forStmt.var);
           int varSlot = allocateSlot(forStmt.var);
-          emitExpr(*range.start);
-          out_ << "  mov [rbp - " << varSlot << "], rax\n";
+          emitIOperand(*range.start);
+          out_ << "  mov [rbp - " << iterSlot << "], rax\n";
 
           int endSlot = allocateSlot("__end_" + forStmt.var);
-          emitExpr(*range.end);
+          emitIOperand(*range.end);
           out_ << "  mov [rbp - " << endSlot << "], rax\n";
 
           std::string condLbl = nextLabel("for_cond");
+          std::string bodyLbl = nextLabel("for_body");
           std::string endLbl = nextLabel("for_end");
 
           out_ << condLbl << ":\n";
-          out_ << "  mov rax, [rbp - " << varSlot << "]\n";
+          out_ << "  mov rax, [rbp - " << iterSlot << "]\n";
           out_ << "  cmp rax, [rbp - " << endSlot << "]\n";
           out_ << "  jge " << endLbl << "\n";
+          out_ << "  mov [rbp - " << varSlot << "], rax\n";
+          out_ << "  jmp " << bodyLbl << "\n";
 
+          out_ << bodyLbl << ":\n";
           for (const auto& s : forStmt.body) emitStmt(*s);
 
-          out_ << "  add qword ptr [rbp - " << varSlot << "], 1\n";
+          out_ << "  add qword ptr [rbp - " << iterSlot << "], 1\n";
           out_ << "  jmp " << condLbl << "\n";
           out_ << endLbl << ":\n";
         }

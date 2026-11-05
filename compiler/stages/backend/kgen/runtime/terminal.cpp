@@ -60,6 +60,13 @@ bool rawMode(bool enable) {
     // Pure cbreak: no ISIG so Ctrl-C arrives as byte 0x03 and the REPL line
     // editor can treat it as "interrupt this input" like IPython does.
     cfmakeraw(&raw);
+    // cfmakeraw also disables OPOST, which would break '\n' -> '\r\n' on
+    // stdout and make every printed line stair-step right. Keep output
+    // post-processing on; only input needs raw mode.
+    raw.c_oflag |= OPOST;
+#ifdef ONLCR
+    raw.c_oflag |= ONLCR;
+#endif
     if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) != 0) return false;
     g_state.valid = true;
     return true;
