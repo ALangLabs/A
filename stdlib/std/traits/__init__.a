@@ -1,4 +1,5 @@
-# std.traits package re-export (Mojo `std/traits/__init__.mojo` analog).
-# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
-# from the stdlib root, so this file imports the sibling explicitly.
-from "traits.a" import Copyable, Equatable, Hashable, Comparable, eq, ne, lt, gt, is_copyable, is_equatable, copy_value
+# std.traits package (Mojo traits analog).
+from "equatable.a" import Equatable, eq, ne
+from "hashable.a" import Hashable
+from "comparable.a" import Comparable, lt, gt
+from "copyable.a" import Copyable, is_copyable, is_equatable, copy_value

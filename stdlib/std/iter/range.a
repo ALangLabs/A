@@ -1,0 +1,12 @@
+# std.iter.range (Mojo range analog).
+import core
+
+fn range_step(lo: i64, hi: i64, step: i64) -> [i64]:
+    if step == 0:
+        core.panic("range_step: step is 0")
+    out = []
+    n = lo
+    while (step > 0) == (n < hi):
+        out.append(n)
+        n = n + step
+    return out

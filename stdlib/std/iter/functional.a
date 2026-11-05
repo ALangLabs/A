@@ -1,0 +1,36 @@
+# std.iter.functional (Mojo itertools/iter helpers analog).
+import core
+
+fn repeat<T>(n: i64, x: T) -> [T]:
+    out = []
+    i = 0
+    while i < n:
+        out.append(x)
+        i = i + 1
+    return out
+
+fn zip_apply<T>(f: fn(T, T) -> T, a: [T], b: [T]) -> [T]:
+    if len(a) != len(b):
+        core.panic("zip_apply: lengths differ")
+    out = []
+    i = 0
+    while i < len(a):
+        out.append(f(a[i], b[i]))
+        i = i + 1
+    return out
+
+fn take<T>(n: i64, xs: [T]) -> [T]:
+    out = []
+    i = 0
+    while i < n and i < len(xs):
+        out.append(xs[i])
+        i = i + 1
+    return out
+
+fn enumerate_pairs(xs: [i64]) -> [[i64]]:
+    out = []
+    i = 0
+    while i < len(xs):
+        out.append([i, xs[i]])
+        i = i + 1
+    return out

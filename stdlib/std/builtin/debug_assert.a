@@ -1,0 +1,10 @@
+# std.builtin.debug_assert / assertions (Mojo `std/builtin/debug_assert.mojo` analog).
+
+fn assert_true(condition, message):
+    assert(condition, message)
+
+fn assert_eq_val(actual, expected, message):
+    assert_eq(actual, expected, message)
+
+fn panic_msg(message):
+    panic(message)

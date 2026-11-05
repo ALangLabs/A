@@ -1,4 +1,2 @@
-# std.memory package re-export (Mojo `std/memory/__init__.mojo` analog).
-# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
-# from the stdlib root, so this file imports the sibling explicitly.
-from "memory.a" import arena_new, arena_pool, arena_region, alloc, release, reset, used, total, alloc_bytes
+# std.memory package (Mojo `std/memory/__init__.mojo` analog).
+from "alloc.a" import arena_new, arena_pool, arena_region, alloc, release, reset, used, total

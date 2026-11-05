@@ -1,0 +1,39 @@
+# std.math.functions (Mojo math module analog).
+import math
+
+fn sqrt(x):
+    return math.sqrt(x)
+
+fn abs_val(x):
+    return math.abs(x)
+
+fn min_val(a, b):
+    return math.min(a, b)
+
+fn max_val(a, b):
+    return math.max(a, b)
+
+fn pow_val(base, e):
+    return math.pow(base, e)
+
+fn sin(x):
+    return math.sin(x)
+
+fn cos(x):
+    return math.cos(x)
+
+fn floor(x):
+    return math.floor(x)
+
+fn ceil(x):
+    return math.ceil(x)
+
+fn round_val(x):
+    return math.round(x)
+
+fn clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x

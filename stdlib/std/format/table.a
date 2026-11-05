@@ -1,0 +1,46 @@
+# std.format.table (format helper).
+
+fn table(headers: [str], rows: [[str]]) -> str:
+    width = len(headers)
+    lines = []
+    header_text = ""
+    i = 0
+    while i < width:
+        if i > 0:
+            header_text = header_text + " | "
+        header_text = header_text + headers[i]
+        i = i + 1
+    lines.append(header_text)
+    sep = ""
+    i = 0
+    while i < width:
+        if i > 0:
+            sep = sep + "-|-"
+        sep = sep + "---"
+        i = i + 1
+    lines.append(sep)
+    r = 0
+    while r < len(rows):
+        line = ""
+        c = 0
+        while c < width:
+            if c > 0:
+                line = line + " | "
+            line = line + str(rows[r][c])
+            c = c + 1
+        lines.append(line)
+        r = r + 1
+    out = ""
+    i = 0
+    while i < len(lines):
+        if i > 0:
+            out = out + "\n"
+        out = out + lines[i]
+        i = i + 1
+    return out
+
+fn join_rows(rows: [i64]) -> str:
+    out = []
+    for r in rows:
+        out.append(str(r))
+    return table(["row"], [out])

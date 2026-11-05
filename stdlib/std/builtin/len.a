@@ -1,0 +1,4 @@
+# std.builtin.len (Mojo `std/builtin/len.mojo` analog).
+
+fn len_of(x):
+    return len(x)

@@ -1,0 +1,14 @@
+# std.format.csv (format helper).
+
+fn csv_row(values: [str]) -> str:
+    parts = []
+    for v in values:
+        parts.append(str(v))
+    text = ""
+    i = 0
+    while i < len(parts):
+        if i > 0:
+            text = text + ","
+        text = text + parts[i]
+        i = i + 1
+    return text

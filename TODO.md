@@ -250,3 +250,5 @@ against the compiler (2026-10-29).
 - [ ] MLIR dialect backend (LIT/KGEN/POP/HLCF-style): requires MLIR/toolchain integration + new backend architecture; no in-tree implementation.
 - [ ] Real SIMD vector codegen/specialization (current: scalar/list emulation).
 - [ ] Real GPU codegen/specialization/runtime integration (current: host/interpreter-oriented abstractions).
+- [x] Modularized `stdlib/std/builtin` into Mojo/Python-style submodules (`int.a`, `float.a`, `bool.a`, `string.a`, `len.a`, `range.a`, `debug_assert.a`) with package `__init__` re-exports and compat `builtin.a`.
+- [x] Extended modular package layout to `std/collections` (`list.a`,`dict.a`), `std/math` (`functions.a`,`constants.a`), `std/traits` (`equatable.a`,`hashable.a`,`comparable.a`,`copyable.a`), `std/memory` (`alloc.a`), `std/iter` (`range.a`,`functional.a`), `std/format` (`csv.a`,`table.a`) with compat re-export files.

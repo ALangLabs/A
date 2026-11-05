@@ -1,0 +1,5 @@
+# std.traits.hashable (Mojo `std/hash`/value trait analog).
+from "equatable.a" import Equatable
+
+trait Hashable(Equatable):
+    fn hash(self) -> i64

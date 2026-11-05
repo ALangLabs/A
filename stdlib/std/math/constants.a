@@ -1,0 +1,8 @@
+# std.math.constants (Mojo `std/math/constants.mojo` analog).
+import math
+
+fn PI():
+    return math.PI
+
+fn E():
+    return math.E

@@ -1,2 +1,3 @@
-# std.iter package (Mojo `std/iter` analog).
-from "iter.a" import range_step, repeat, take
+# std.iter package (Mojo `std/iter`/`itertools` analog).
+from "range.a" import range_step
+from "functional.a" import repeat, zip_apply, take, enumerate_pairs

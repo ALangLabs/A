@@ -1,0 +1,4 @@
+# std.builtin.bool (Mojo `std/builtin/bool.mojo` analog).
+
+fn Bool(x):
+    return x != 0

@@ -1,0 +1,13 @@
+# std.traits.copyable (Mojo `std/builtin/value.mojo` analog).
+
+trait Copyable:
+    fn copy(self) -> Self
+
+fn is_copyable(x: bool) -> bool:
+    return x
+
+fn is_equatable(x: bool) -> bool:
+    return x
+
+fn copy_value<T>(x: T) -> T:
+    return x

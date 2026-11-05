@@ -1,0 +1,36 @@
+# std.collections.list (Mojo `std/collections/list.mojo` analog).
+
+fn map_list<T>(values: [T], f: fn(T) -> T) -> [T]:
+    return map(values, f)
+
+fn filter_list<T>(values: [T], pred: fn(T) -> bool) -> [T]:
+    return filter(values, pred)
+
+fn reduce_list<T>(values: [T], init: T, f: fn(T, T) -> T) -> T:
+    return reduce(values, init, f)
+
+fn sum_list(values: [i64]) -> i64:
+    return sum(values)
+
+fn any_list(values: [bool]) -> bool:
+    for v in values:
+        if v:
+            return true
+    return false
+
+fn all_list(values: [bool]) -> bool:
+    for v in values:
+        if not v:
+            return false
+    return true
+
+fn len_of<T>(values: [T]) -> i64:
+    return len(values)
+
+fn list_reverse<T>(values: [T]) -> [T]:
+    i = len(values) - 1
+    out = []
+    while i >= 0:
+        out.append(values[i])
+        i = i - 1
+    return out

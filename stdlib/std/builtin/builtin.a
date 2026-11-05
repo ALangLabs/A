@@ -1,38 +1,8 @@
-# std.builtin (Mojo `std/builtin` analog): conversions and predicates.
-# Thin wrappers over interpreter builtins; no new compiler features.
-
-fn Int(x):
-    return int(x)
-
-fn Float(x):
-    return float(x)
-
-fn Bool(x):
-    return x != 0
-
-fn String(x):
-    return str(x)
-
-fn len_of(x):
-    return len(x)
-
-fn range_list(stop):
-    out = []
-    i = 0
-    while i < stop:
-        out.append(i)
-        i = i + 1
-    return out
-
-fn assert_true(condition, message):
-    assert(condition, message)
-
-fn assert_eq_val(actual, expected, message):
-    assert_eq(actual, expected, message)
-
-fn panic_msg(message):
-    panic(message)
-
-fn str_of(x):
-    return str(x)
-
+# Compatibility: builtin.a split into modular files (Mojo-style).
+from "int.a" import Int
+from "float.a" import Float
+from "bool.a" import Bool
+from "string.a" import String, str_of
+from "len.a" import len_of
+from "range.a" import range_list
+from "debug_assert.a" import assert_true, assert_eq_val, panic_msg
