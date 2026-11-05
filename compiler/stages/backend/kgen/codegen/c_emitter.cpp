@@ -45,6 +45,7 @@ class CEmitter {
     collectGlobals();
     pretypeGlobals();
     collectStrings();
+    collectLambdas();
 
     out_ << "typedef long long a_i64;\n";
     out_ << "typedef struct { a_i64 i; double d; int f; } aval;\n";
@@ -196,6 +197,37 @@ class CEmitter {
             "  }\n"
             "  return r;\n"
             "}\n"
+            "typedef aval (*a_fn)(aval);\n"
+            "static aval a_map(aval l, aval f) {\n"
+            "  aval r; r.f = 2; r.i = (a_i64)a_new_obj(2, 0, 0, 0); r.d = 0;\n"
+            "  if (l.f == 2 && ((a_obj *)l.i)->type == 2 && f.f == 3) {\n"
+            "    a_obj *lo = (a_obj *)l.i;\n"
+            "    for (a_i64 k = 0; k < lo->len; ++k)\n"
+            "      (void)a_append(r, ((a_fn)f.i)(((aval *)lo->data)[k]));\n"
+            "  }\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_filter(aval l, aval f) {\n"
+            "  aval r; r.f = 2; r.i = (a_i64)a_new_obj(2, 0, 0, 0); r.d = 0;\n"
+            "  if (l.f == 2 && ((a_obj *)l.i)->type == 2 && f.f == 3) {\n"
+            "    a_obj *lo = (a_obj *)l.i;\n"
+            "    for (a_i64 k = 0; k < lo->len; ++k) {\n"
+            "      aval e = ((aval *)lo->data)[k];\n"
+            "      aval keep = ((a_fn)f.i)(e);\n"
+            "      if (keep.f ? keep.d != 0.0 : keep.i != 0) (void)a_append(r, e);\n"
+            "    }\n"
+            "  }\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_sum(aval l) {\n"
+            "  aval acc; acc.i = 0; acc.d = 0; acc.f = 0;\n"
+            "  if (l.f == 2 && ((a_obj *)l.i)->type == 2) {\n"
+            "    a_obj *lo = (a_obj *)l.i;\n"
+            "    for (a_i64 k = 0; k < lo->len; ++k)\n"
+            "      acc = a_cat(acc, ((aval *)lo->data)[k]);\n"
+            "  }\n"
+            "  return acc;\n"
+            "}\n"
             "static void a_print_obj(a_obj *o) {\n"
             "  if (o->type == 1) { printf(\"\\\"%s\\\"\", (char *)o->data); return; }\n"
             "  if (o->type != 2) { printf(\"<obj>\"); return; }\n"
@@ -265,6 +297,7 @@ class CEmitter {
     }
     if (!fns.empty()) out_ << "\n";
     for (const FnDecl* fn : fns) emitFunction(*fn);
+    emitLambdaFunctions();
     emitMain();
     return true;
   }
@@ -281,6 +314,8 @@ class CEmitter {
   std::unordered_map<std::string, VT> slotType_;
   std::vector<std::string> stringLits_;
   std::unordered_map<std::string, int> stringLitIdx_;
+  std::vector<const LambdaExpr*> lambdas_;
+  std::unordered_map<const LambdaExpr*, int> lambdaIdx_;
 
   static std::string cIdent(const std::string& name) {
     std::string r;
@@ -547,6 +582,151 @@ class CEmitter {
     }
   }
 
+  // ---- lambda collection (each becomes a real C function) ----
+  void collectExprLambdas(const Expr& e) {
+    switch (e.kind) {
+      case ExprKind::Lambda: {
+        const auto& l = static_cast<const LambdaExpr&>(e);
+        if (!lambdaIdx_.count(&l)) {
+          lambdaIdx_[&l] = static_cast<int>(lambdas_.size());
+          lambdas_.push_back(&l);
+        }
+        collectExprLambdas(*l.body);
+        break;
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(e);
+        collectExprLambdas(*b.lhs);
+        collectExprLambdas(*b.rhs);
+        break;
+      }
+      case ExprKind::Unary:
+        collectExprLambdas(*static_cast<const UnaryExpr&>(e).operand);
+        break;
+      case ExprKind::Range: {
+        const auto& r = static_cast<const RangeExpr&>(e);
+        collectExprLambdas(*r.start);
+        collectExprLambdas(*r.end);
+        if (r.step) collectExprLambdas(*r.step);
+        break;
+      }
+      case ExprKind::Index: {
+        const auto& x = static_cast<const IndexExpr&>(e);
+        collectExprLambdas(*x.object);
+        collectExprLambdas(*x.index);
+        break;
+      }
+      case ExprKind::ArrayLit: {
+        for (const auto& el : static_cast<const ArrayLitExpr&>(e).elements)
+          collectExprLambdas(*el);
+        break;
+      }
+      case ExprKind::Comprehension: {
+        const auto& cp = static_cast<const ComprehensionExpr&>(e);
+        collectExprLambdas(*cp.element);
+        collectExprLambdas(*cp.iterable);
+        if (cp.condition) collectExprLambdas(*cp.condition);
+        break;
+      }
+      case ExprKind::Call: {
+        for (const auto& a : static_cast<const CallExpr&>(e).args)
+          collectExprLambdas(*a.value);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void collectStmtLambdas(const Stmt& s) {
+    switch (s.kind) {
+      case StmtKind::Let: {
+        const auto& l = static_cast<const LetStmt&>(s);
+        if (l.init) collectExprLambdas(*l.init);
+        break;
+      }
+      case StmtKind::Assign:
+        collectExprLambdas(*static_cast<const AssignStmt&>(s).value);
+        break;
+      case StmtKind::Expr:
+        collectExprLambdas(*static_cast<const ExprStmt&>(s).expr);
+        break;
+      case StmtKind::Return: {
+        const auto& r = static_cast<const ReturnStmt&>(s);
+        if (r.value) collectExprLambdas(*r.value);
+        break;
+      }
+      case StmtKind::If: {
+        const auto& i = static_cast<const IfStmt&>(s);
+        for (const auto& br : i.branches) {
+          collectExprLambdas(*br.cond);
+          for (const auto& b : br.body) collectStmtLambdas(*b);
+        }
+        for (const auto& b : i.elseBody) collectStmtLambdas(*b);
+        break;
+      }
+      case StmtKind::While: {
+        const auto& w = static_cast<const WhileStmt&>(s);
+        collectExprLambdas(*w.cond);
+        for (const auto& b : w.body) collectStmtLambdas(*b);
+        break;
+      }
+      case StmtKind::For: {
+        const auto& f = static_cast<const ForStmt&>(s);
+        collectExprLambdas(*f.iterable);
+        for (const auto& b : f.body) collectStmtLambdas(*b);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void collectLambdas() {
+    for (const auto& mod : graph_.modules) {
+      if (!mod.program || isStdlibModuleC(graph_, mod)) continue;
+      for (const auto& stmt : mod.program->statements) {
+        if (stmt->kind == StmtKind::FnDecl) {
+          for (const auto& b : static_cast<const FnDecl&>(*stmt).body)
+            collectStmtLambdas(*b);
+        } else {
+          collectStmtLambdas(*stmt);
+        }
+      }
+    }
+  }
+
+  // Emits each collected lambda as a standalone C function afn_l<N>.
+  void emitLambdaFunctions() {
+    for (std::size_t i = 0; i < lambdas_.size(); ++i) {
+      const LambdaExpr& l = *lambdas_[i];
+      locals_.clear();
+      slotType_.clear();
+      inMain_ = false;
+      tmpTop_ = 0;
+      for (const auto& p : l.params) {
+        std::string n = cIdent(p.name);
+        locals_.insert(n);
+        slotType_[n] = VT::Unknown;
+      }
+      out_ << "aval afn_l" << i << "(";
+      for (std::size_t j = 0; j < l.params.size(); ++j) {
+        if (j) out_ << ", ";
+        out_ << "aval v_" << cIdent(l.params[j].name);
+      }
+      out_ << ") {\n";
+      for (const auto& n : locals_) {
+        bool isParam = false;
+        for (const auto& p : l.params) if (cIdent(p.name) == n) { isParam = true; break; }
+        if (!isParam) out_ << "  aval v_" << n << " = {0};\n";
+      }
+      for (int t = 0; t < 2048; ++t) out_ << "  aval _t" << t << " = {0};\n";
+      std::string rv = evalA(*l.body);
+      out_ << "  return " << rv << ";\n";
+      out_ << "}\n\n";
+    }
+  }
+
   std::string lvalue(const std::string& rawName) {
     std::string n = cIdent(rawName);
     if (locals_.count(n)) return "v_" + n;
@@ -713,6 +893,11 @@ class CEmitter {
         out_ << "  }\n";
         return tn;
       }
+      case ExprKind::Lambda: {
+        auto it = lambdaIdx_.find(static_cast<const LambdaExpr*>(&e));
+        if (it == lambdaIdx_.end()) return "(aval){.i=0,.f=0}";
+        return "(aval){.i=(a_i64)afn_l" + std::to_string(it->second) + ",.f=3}";
+      }
       case ExprKind::Comprehension: {
         const auto& cp = static_cast<const ComprehensionExpr&>(e);
         int ti = tmpTop_++;
@@ -824,6 +1009,19 @@ class CEmitter {
           std::string a1 = evalA(*c.args[1].value);
           std::string tn = tmp();
           out_ << "  " << tn << " = a_join(" << a0 << ", " << a1 << ");\n";
+          return tn;
+        }
+        if ((name == "map" || name == "filter") && c.args.size() >= 2) {
+          std::string a0 = evalA(*c.args[0].value);
+          std::string a1 = evalA(*c.args[1].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_" << name << "(" << a0 << ", " << a1 << ");\n";
+          return tn;
+        }
+        if (name == "sum" && !c.args.empty()) {
+          std::string a0 = evalA(*c.args[0].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_sum(" << a0 << ");\n";
           return tn;
         }
         if ((name == "f64" || name == "float") && !c.args.empty()) {

@@ -1653,6 +1653,10 @@ bool checkSupportedExpr(const Expr& expr) {
       return checkSupportedExpr(*cp.element) && checkSupportedExpr(*cp.iterable) &&
              (!cp.condition || checkSupportedExpr(*cp.condition));
     }
+    case ExprKind::Lambda: {
+      const auto& l = static_cast<const LambdaExpr&>(expr);
+      return checkSupportedExpr(*l.body);
+    }
     case ExprKind::StringLit: {
       // Static string literals are heap objects in the C emitter; f-strings
       // (interpolated parts) still need the interpreter.
