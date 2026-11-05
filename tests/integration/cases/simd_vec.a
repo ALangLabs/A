@@ -1,4 +1,4 @@
-import "../../../stdlib/simd/simd.a" as simd
+import "../../../stdlib/std/simd/simd.a" as simd
 
 fn double(x):
     return x * 2

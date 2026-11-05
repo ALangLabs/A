@@ -1,10 +1,9 @@
 # Standard library
 
-Standard library modules come in two forms:
+The standard library is organized in a Mojo-inspired layout under `stdlib/std/` (see [`stdlib/std/README.md`](../../stdlib/std/README.md) and `/tmp/mojo-ref/Mojo/stdlib/std` for the reference).
 
-- **Native modules** implemented by the toolchain.
-- **A-file modules** under `stdlib/`, resolvable with `import "..."` or bare
-  names such as `import test`.
+- **Native modules** implemented by the toolchain (`compiler/stages/backend/stdlib/builtins.cpp`, registered in `name-resolution/native_modules.hpp`).
+- **A-file packages/modules** under `stdlib/std/` (and legacy compat paths under `stdlib/`), resolvable with `import "..."` or bare names such as `import test`.
 
 Usage:
 
@@ -17,8 +16,9 @@ print(sqrt(PI))
 ```
 
 Module resolution searches the importing file's directory, `-I` paths,
-`A_PATH`, and the stdlib root (or `--stdlib`). Details:
-[docs/language-spec](../language-spec/README.md#modules).
+`A_PATH`, and the stdlib root (or `--stdlib`). Bare imports also resolve under
+`stdlib/std/<name>.a`, `stdlib/std/<name>/__init__.a`, and package forms.
+Details: [docs/language-spec](../language-spec/README.md#modules).
 
 ## Native modules
 
@@ -78,23 +78,21 @@ Module resolution searches the importing file's directory, `-I` paths,
   are runtime errors. See
   [Memory allocators](../language-spec/README.md#memory-allocators).
 
-## Self-hosted stdlib (`stdlib/std/`)
+## `std/` package layout (Mojo-inspired)
 
-Mojo-shaped, written in A itself (Mojo `std/` analog):
-`stdlib/std/__init__.a` re-exports `builtin/` (Int/Float/Bool/String/len/
-range), `collections/` (map/filter/reduce/sum), `math/` (sqrt/abs/min/max/
-pow/clamp), `simd/` (list lane ops), `traits/` (Equatable/Hashable/
-Comparable + `eq()`), `memory/` (arena). `stdlib/prelude.a` holds the
-auto-vocabulary: `Vec4`, `prelude_version()`, and list helpers.
+`stdlib/std/` is the canonical package tree. Native modules have package stubs (`__init__.a`) under `std/<pkg>/`; A-written packages provide implementations/re-exports (e.g. `builtin`, `collections`, `math`, `memory`, `simd`, `traits`, `iter`, `format`, `test`, `comptime`, `gpu`, `prelude`). `stdlib/prelude.a` is auto-loaded by the compiler before every program.
 
 ```a
-import "../../stdlib/std/__init__.a" as std
-print(std.sqrt(144.0))
+from "std/__init__.a" import sqrt, len_of, range_list
+print(sqrt(144.0))
+print(len_of(range_list(3)))
 ```
 
-## A-file modules
+Legacy compatibility files remain at some `stdlib/<pkg>/` paths for existing quoted imports; prefer `stdlib/std/` for new work.
 
-`stdlib/test/test.a` is a small assertion harness built on `core`:
+## A-file modules (compat)
+
+`stdlib/std/test/test.a` (also compat `stdlib/test/test.a`) is a small assertion harness built on `core`:
 
 ```a
 import test

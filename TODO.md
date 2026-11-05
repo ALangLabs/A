@@ -232,3 +232,12 @@ against the compiler (2026-10-29).
 - [x] Docs updated: `docs/language-spec/README.md` (keywords, control flow, `++`/`--`)
 - [x] Docs updated: `docs/tutorials/README.md` (loops reference)
 - [x] Example: `examples/loops/demo_inc_dec.a`
+
+## 8. Stdlib layout (Mojo-inspired, 2026-11-05)
+- [x] Canonical `stdlib/std/<pkg>/` package tree with `__init__.a` stubs/exports (Mojo `std/` analog).
+- [x] `stdlib/std/prelude/` package entry + auto-load support from `std/prelude` locations.
+- [x] Module loader resolves bare imports under `stdlib/std/`.
+- [x] Legacy compat copies kept at `stdlib/<pkg>/` for existing quoted imports (migrated key tests/examples to `std/`).
+- [ ] Remove legacy `stdlib/<pkg>` compat copies after all quoted imports migrate.
+- [ ] Make native-module package stubs ergonomic (re-export/wrapper strategy without breaking module namespace semantics).
+- [ ] Self-host more of the stdlib in `.a` where semantics allow (compiler/runtime-limited today).
