@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(Alang VERSION 0.0.1 LANGUAGES CXX)
+project(Alang VERSION 0.0.1 LANGUAGES CXX C)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -31,6 +31,9 @@ add_subdirectory(compiler/stages/object)
 add_subdirectory(compiler/stages/driver)
 add_subdirectory(compiler/stages/cli)
 add_subdirectory(tools/lsp)
+# In-process JIT backend (Goose-style): vendored TinyCC compiles the C
+# emitter's output into memory for `a run`.
+include(cmake/libtcc.cmake)
 # Packaging
 include(GNUInstallDirs)
 install(TARGETS a RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
