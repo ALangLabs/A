@@ -1,4 +1,5 @@
 #include "backend/kgen/python_interop.hpp"
+#include "backend/kgen/python_shim.hpp"
 #include "strings/format.hpp"
 
 #include <cstdlib>
@@ -179,6 +180,22 @@ Value fromPy(PyObject* obj) {
     v.data = set;
     return v;
   }
+  // Integer-like objects (numpy scalars etc.) via __index__.
+  PyObject* idx = PyNumber_Index(obj);
+  if (idx) {
+    Value v = fromPy(idx);
+    Py_DECREF(idx);
+    return v;
+  }
+  PyErr_Clear();
+  // Float-like objects (numpy float32 etc.) via __float__.
+  PyObject* flt = PyNumber_Float(obj);
+  if (flt) {
+    Value v = fromPy(flt);
+    Py_DECREF(flt);
+    return v;
+  }
+  PyErr_Clear();
   return wrapBorrowed(obj);
 }
 
@@ -254,17 +271,43 @@ bool isAvailable() {
 #endif
 }
 
-void ensureInitialized() {
+bool ensureInitialized(const std::string& moduleHint) {
 #ifdef A_HAVE_PYTHON
   static bool inited = false;
-  if (!inited) {
-    Py_Initialize();
+  if (inited) return true;
+  if (!detail::ensurePythonLoaded(moduleHint)) return false;
+  Py_Initialize();
+  {
+    GilGuard gil;
+    // Site dirs of the interpreter we embedded (its venv's site-packages),
+    // then project .venv/venv scans and A_PYTHONPATH.
+    for (const std::string& dir : detail::pythonRuntimeInfo().siteDirs)
+      appendSysPath(dir);
     addVenvSitePackages();
     addEnvPythonPath();
-    // Let formatValue render PythonObject values through repr().
-    setForeignValueRepr(&repr);
-    inited = true;
   }
+  // Let formatValue render PythonObject values through repr().
+  setForeignValueRepr(&repr);
+  inited = true;
+  return true;
+#else
+  (void)moduleHint;
+  return false;
+#endif
+}
+
+[[maybe_unused]] void requirePython(Span span, const std::string& hint = "") {
+  if (ensureInitialized(hint)) return;
+#ifdef A_HAVE_PYTHON
+  const auto& info = detail::pythonRuntimeInfo();
+  throw RuntimeError{span,
+                     "Python interop is unavailable: " +
+                         (info.error.empty() ? std::string("no CPython runtime found")
+                                             : info.error),
+                     "Install Python 3, or set A_PYTHON/A_PYTHON_LIB to a Python "
+                     "environment (e.g. a uv or venv interpreter)."};
+#else
+  unavailable(span, "Cannot initialize Python interop");
 #endif
 }
 
@@ -272,7 +315,7 @@ Value importModule(const std::string& name, Span span) {
 #ifndef A_HAVE_PYTHON
   unavailable(span, "Cannot import '" + name + "'");
 #else
-  ensureInitialized();
+  requirePython(span, name);
   GilGuard gil;
   PyObject* mod = PyImport_ImportModule(name.c_str());
   if (!mod) failPy(span, "Failed to import Python module '" + name + "'");
@@ -284,7 +327,7 @@ Value getAttr(const Value& object, const std::string& attr, Span span) {
 #ifndef A_HAVE_PYTHON
   unavailable(span, "Cannot access '" + attr + "'");
 #else
-  ensureInitialized();
+  requirePython(span);
   GilGuard gil;
   PyObject* target = unwrap(object);
   if (!target) {
@@ -304,7 +347,7 @@ Value getItem(const Value& object, const Value& key, Span span) {
 #ifndef A_HAVE_PYTHON
   unavailable(span, "Cannot subscript a Python object");
 #else
-  ensureInitialized();
+  requirePython(span);
   GilGuard gil;
   PyObject* target = unwrap(object);
   if (!target) throw RuntimeError{span, "Subscript requires a Python object.", ""};
@@ -323,7 +366,7 @@ Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args
 #ifndef A_HAVE_PYTHON
   unavailable(span, "Cannot call a Python object");
 #else
-  ensureInitialized();
+  requirePython(span);
   GilGuard gil;
   PyObject* fn = callable ? static_cast<PyObject*>(callable->handle) : nullptr;
   if (!fn || !PyCallable_Check(fn)) {
@@ -355,7 +398,7 @@ bool equals(const Value& lhs, const Value& rhs) {
   (void)rhs;
   return false;
 #else
-  ensureInitialized();
+  if (!ensureInitialized()) return false;
   GilGuard gil;
   PyObject* a = unwrap(lhs);
   PyObject* b = unwrap(rhs);
@@ -366,6 +409,117 @@ bool equals(const Value& lhs, const Value& rhs) {
     return false;
   }
   return result == 1;
+#endif
+}
+
+Value binaryOp(PyBinOp op, const Value& lhs, const Value& rhs, Span span) {
+#ifndef A_HAVE_PYTHON
+  (void)op;
+  (void)lhs;
+  (void)rhs;
+  unavailable(span, "Cannot apply a Python operator");
+#else
+  requirePython(span);
+  GilGuard gil;
+  int cmp = -1;
+  switch (op) {
+    case PyBinOp::Eq: cmp = Py_EQ; break;
+    case PyBinOp::Ne: cmp = Py_NE; break;
+    case PyBinOp::Lt: cmp = Py_LT; break;
+    case PyBinOp::Gt: cmp = Py_GT; break;
+    case PyBinOp::Le: cmp = Py_LE; break;
+    case PyBinOp::Ge: cmp = Py_GE; break;
+    default: break;
+  }
+  if (cmp >= 0) {
+    PyObject* a = toPy(lhs, span);
+    PyObject* b = toPy(rhs, span);
+    if (!a || !b) {
+      Py_XDECREF(a);
+      Py_XDECREF(b);
+      failPy(span, "Failed to convert operands for Python comparison");
+    }
+    int result = PyObject_RichCompareBool(a, b, cmp);
+    Py_DECREF(a);
+    Py_DECREF(b);
+    if (result < 0) failPy(span, "Python comparison failed");
+    Value v;
+    v.data = result == 1;
+    return v;
+  }
+  PyObject* pa = toPy(lhs, span);
+  PyObject* pb = toPy(rhs, span);
+  if (!pa || !pb) {
+    Py_XDECREF(pa);
+    Py_XDECREF(pb);
+    failPy(span, "Failed to convert operands for the Python operator");
+  }
+  PyObject* result = nullptr;
+  if (op == PyBinOp::Pow) {
+    result = PyNumber_Power(pa, pb, Py_None);  // ternary slot: no modulo
+  } else if (op == PyBinOp::In || op == PyBinOp::NotIn) {
+    // `lhs in rhs`: rhs is the container.
+    int contains = PySequence_Contains(pb, pa);
+    if (contains >= 0) {
+      Value v;
+      v.data = (op == PyBinOp::In) == (contains == 1);
+      Py_DECREF(pa);
+      Py_DECREF(pb);
+      return v;
+    }
+    PyErr_Clear();
+    // Fall back to iteration for objects without sq_contains.
+    PyObject* it = PyObject_GetIter(pb);
+    if (it) {
+      PyObject* item = nullptr;
+      bool found = false;
+      while ((item = PyIter_Next(it)) != nullptr) {
+        int eq = PyObject_RichCompareBool(item, pa, Py_EQ);
+        Py_DECREF(item);
+        if (eq < 0) {
+          Py_DECREF(it);
+          Py_DECREF(pa);
+          Py_DECREF(pb);
+          failPy(span, "Python 'in' comparison failed");
+        }
+        if (eq == 1) {
+          found = true;
+          break;
+        }
+      }
+      Py_DECREF(it);
+      Value v;
+      v.data = (op == PyBinOp::In) == found;
+      Py_DECREF(pa);
+      Py_DECREF(pb);
+      return v;
+    }
+    Py_DECREF(pa);
+    Py_DECREF(pb);
+    failPy(span, "Python object is not a container");
+  }
+  using BinaryFn = PyObject* (*)(PyObject*, PyObject*);
+  BinaryFn fn = nullptr;
+  switch (op) {
+    case PyBinOp::Add: fn = PyNumber_Add; break;
+    case PyBinOp::Sub: fn = PyNumber_Subtract; break;
+    case PyBinOp::Mul: fn = PyNumber_Multiply; break;
+    case PyBinOp::Div: fn = PyNumber_TrueDivide; break;
+    case PyBinOp::Mod: fn = PyNumber_Remainder; break;
+    case PyBinOp::BitAnd: fn = PyNumber_And; break;
+    case PyBinOp::BitOr: fn = PyNumber_Or; break;
+    case PyBinOp::BitXor: fn = PyNumber_Xor; break;
+    case PyBinOp::Shl: fn = PyNumber_Lshift; break;
+    case PyBinOp::Shr: fn = PyNumber_Rshift; break;
+    default: break;
+  }
+  if (fn) result = fn(pa, pb);
+  Py_DECREF(pa);
+  Py_DECREF(pb);
+  if (!result) failPy(span, "Python operator failed");
+  Value out = fromPy(result);
+  Py_DECREF(result);
+  return out;
 #endif
 }
 
@@ -575,7 +729,7 @@ std::string repr(const Value& v) {
 #ifdef A_HAVE_PYTHON
   if (!isPythonValue(v)) return {};
   try {
-    ensureInitialized();
+    if (!ensureInitialized()) return {};
     GilGuard gil;
     PyObject* obj = unwrap(v);
     if (!obj) return {};

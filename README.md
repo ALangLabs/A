@@ -123,11 +123,22 @@ print(sqrt(2))                # 1.4142135623730951
 ```
 
 Works in `a run`, `a test`, `a repl`, and `a -c` (interpreter path only).
-The embedded interpreter is chosen at build time — point CMake at your own
-(`-DPython3_EXECUTABLE=$(which python3)` works with uv-managed Pythons). At
-runtime a local `.venv`/`venv`'s `site-packages` is picked up automatically,
-and `A_PYTHONPATH` adds extra dirs, so `uv pip install numpy` in a project
-env just works.
+
+`a` does **not** link one Python at build time — like Mojo, it discovers a
+CPython at runtime and `dlopen`s its `libpython`. On the first `python:`
+import it probes, in order: `A_PYTHON`/`A_PYTHON_LIB` overrides, a local
+`.venv`/`venv`, `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`/`CONDA_PREFIX`,
+`python3`/`python` on `PATH`, uv-managed installs
+(`~/.local/share/uv/python/*`), then system libraries — preferring the
+environment that actually contains the module you're importing, so
+`uv pip install numpy` / `uv add torch` just works. The chosen
+interpreter's `site-packages` is added to `sys.path`, and `A_PYTHONPATH`
+(colon-separated) adds extra dirs. Build-time CMake only needs Python
+headers (`-DPython3_EXECUTABLE` still works as a hint).
+
+Python objects support `.attr`, `obj[key]`, calls, `==`, and A's operators
+(`+ - * / % **`, comparisons, `in`) are forwarded to CPython — so
+`np_array * 2` and `5 in torch_tensor` behave exactly like Python.
 See `examples/python-interop/` for runnable examples, including NumPy and
 PyTorch under `optional/`.
 

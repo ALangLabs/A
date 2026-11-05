@@ -2215,7 +2215,41 @@ bool KGENExecutionEngine::valuesEqual(const Value& lhs, const Value& rhs) {
   return false;
 }
 
+python::PyBinOp toPythonBinOp(BinOp op) {
+  switch (op) {
+    case BinOp::Add: return python::PyBinOp::Add;
+    case BinOp::Sub: return python::PyBinOp::Sub;
+    case BinOp::Mul: return python::PyBinOp::Mul;
+    case BinOp::Div: return python::PyBinOp::Div;
+    case BinOp::Mod: return python::PyBinOp::Mod;
+    case BinOp::Pow: return python::PyBinOp::Pow;
+    case BinOp::BitAnd: return python::PyBinOp::BitAnd;
+    case BinOp::BitOr: return python::PyBinOp::BitOr;
+    case BinOp::BitXor: return python::PyBinOp::BitXor;
+    case BinOp::Shl: return python::PyBinOp::Shl;
+    case BinOp::Shr: return python::PyBinOp::Shr;
+    case BinOp::Eq: return python::PyBinOp::Eq;
+    case BinOp::Ne: return python::PyBinOp::Ne;
+    case BinOp::Lt: return python::PyBinOp::Lt;
+    case BinOp::Gt: return python::PyBinOp::Gt;
+    case BinOp::Le: return python::PyBinOp::Le;
+    case BinOp::Ge: return python::PyBinOp::Ge;
+    case BinOp::In: return python::PyBinOp::In;
+    case BinOp::NotIn: return python::PyBinOp::NotIn;
+    default: return python::PyBinOp::Invalid;
+  }
+}
+
 Value KGENExecutionEngine::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Span span) {
+  // Any operator touching a Python object is evaluated by CPython itself.
+  if (python::isPythonValue(lhs) || python::isPythonValue(rhs)) {
+#ifdef A_HAVE_PYTHON
+    return python::binaryOp(toPythonBinOp(op), lhs, rhs, span);
+#else
+    fail(span, "Operator '" + std::string(binOpName(op)) +
+                  "' needs Python interop, which is not available in this build.");
+#endif
+  }
   if (op == BinOp::In || op == BinOp::NotIn) {
     bool found = false;
     ArrayWindow window;
