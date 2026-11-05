@@ -7,6 +7,7 @@
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
+#include <cstdio>
 #include <set>
 #include <filesystem>
 #include <cstdlib>
@@ -595,8 +596,14 @@ class X86Emitter {
     // Format strings
     out_ << ".section .rodata\n";
     out_ << ".Lfmt_int:\n  .asciz \"%lld\\n\"\n";
+    out_ << ".Lfmt_float:\n  .asciz \"%.17g\\n\"\n";
     out_ << ".Lfmt_str:\n  .asciz \"%s\\n\"\n";
 
+    for (const auto& pair : floatTable_) {
+      char buf[64];
+      std::snprintf(buf, sizeof(buf), "%.17g", pair.first);
+      out_ << pair.second << ":\n  .double " << buf << "\n";
+    }
     for (const auto& pair : strTable_) {
       out_ << pair.second << ":\n  .asciz \"";
       for (char c : pair.first) {
@@ -644,6 +651,12 @@ class X86Emitter {
   // them (Goose-style flat global storage, one 8-byte slot per name).
   std::unordered_map<std::string, int> globalSlots_;
   int globalBytes_ = 0;
+  // Value typing for the native subset: slots are 8 bytes and may hold an
+  // i64 or an IEEE-754 double bit pattern. "f64" entries are doubles.
+  std::unordered_map<std::string, bool> slotIsFloat_;   // function/top-level locals
+  std::unordered_map<std::string, bool> globalIsFloat_; // module globals
+  std::unordered_map<double, std::string> floatTable_;
+  int floatCounter_ = 1;
 
   std::string nextLabel(const std::string& prefix = "L") {
     return "." + prefix + "_" + std::to_string(labelCounter_++);
@@ -694,10 +707,57 @@ class X86Emitter {
       if (strTable_.find(s) == strTable_.end()) {
         strTable_[s] = ".Lstr_" + std::to_string(strCounter_++);
       }
+    } else if (expr.kind == ExprKind::FloatLit) {
+      double v = static_cast<const FloatLitExpr&>(expr).value;
+      if (floatTable_.find(v) == floatTable_.end()) {
+        floatTable_[v] = ".LCf_" + std::to_string(floatCounter_++);
+      }
     } else if (expr.kind == ExprKind::Call) {
       const auto& c = static_cast<const CallExpr&>(expr);
       for (const auto& a : c.args) collectFromExpr(*a.value);
+    } else if (expr.kind == ExprKind::Binary) {
+      const auto& b = static_cast<const BinaryExpr&>(expr);
+      collectFromExpr(*b.lhs); collectFromExpr(*b.rhs);
+    } else if (expr.kind == ExprKind::Unary) {
+      collectFromExpr(*static_cast<const UnaryExpr&>(expr).operand);
+    } else if (expr.kind == ExprKind::Range) {
+      const auto& r = static_cast<const RangeExpr&>(expr);
+      collectFromExpr(*r.start); collectFromExpr(*r.end);
+      if (r.step) collectFromExpr(*r.step);
     }
+  }
+
+  // Does this expression evaluate to a double in the native subset?
+  bool exprIsFloat(const Expr& expr) {
+    switch (expr.kind) {
+      case ExprKind::FloatLit: return true;
+      case ExprKind::Ident: {
+        const std::string& n = static_cast<const IdentExpr&>(expr).name;
+        auto li = slotIsFloat_.find(n);
+        if (li != slotIsFloat_.end()) return li->second;
+        auto gi = globalIsFloat_.find(n);
+        return gi != globalIsFloat_.end() && gi->second;
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(expr);
+        static const std::set<std::string> arith = {"+","-","*","/","%"};
+        return arith.count(b.op) && (exprIsFloat(*b.lhs) || exprIsFloat(*b.rhs));
+      }
+      case ExprKind::Unary: {
+        const auto& u = static_cast<const UnaryExpr&>(expr);
+        return u.op == "-" && exprIsFloat(*u.operand);
+      }
+      case ExprKind::Call:
+        return exprIsFloatCall(static_cast<const CallExpr&>(expr).callee.get());
+      default: return false;
+    }
+  }
+  bool exprIsFloatCall(const Expr* callee) {
+    if (!callee || callee->kind != ExprKind::Ident) return false;
+    static const std::set<std::string> fns = {
+        "sqrt","pow","fmod","floor","ceil","round","exp","log","sin","cos","tan",
+        "fabs","f64","float"};
+    return fns.count(static_cast<const IdentExpr&>(*callee).name) != 0;
   }
 
   int allocateSlot(const std::string& name) {
@@ -710,6 +770,7 @@ class X86Emitter {
 
   void emitFunction(const FnDecl& fn) {
     stackSlots_.clear();
+    slotIsFloat_.clear();
     currentStackOffset_ = 0;
 
     std::string fnLabel = fn.name == "main" ? "_a_main" : "_a_" + fn.name;
@@ -742,12 +803,16 @@ class X86Emitter {
         bool toGlobal = inMain_ && git != globalSlots_.end();
         int slot = toGlobal ? -1 : allocateSlot(let.name);
         if (let.init) {
-          emitExpr(*let.init);
+          bool fv = exprIsFloat(*let.init);
+          if (fv) emitExpr(*let.init); else emitIOperand(*let.init);
+          slotIsFloat_[let.name] = fv;   // Let is always a local binding
           if (toGlobal) {
             out_ << "  lea r10, [rip+_a_globals]\n";
-            out_ << "  mov [r10+" << git->second << "], rax\n";
+            if (fv) out_ << "  movsd [r10+" << git->second << "], xmm0\n";
+            else out_ << "  mov [r10+" << git->second << "], rax\n";
           } else {
-            out_ << "  mov [rbp - " << slot << "], rax\n";
+            if (fv) out_ << "  movsd [rbp - " << slot << "], xmm0\n";
+            else out_ << "  mov [rbp - " << slot << "], rax\n";
           }
         }
         break;
@@ -762,13 +827,67 @@ class X86Emitter {
           bool toGlobal = git != globalSlots_.end() &&
                           stackSlots_.find(id.name) == stackSlots_.end();
           int slot = toGlobal ? -1 : allocateSlot(id.name);
-          emitExpr(*assign.value);
+          bool valFloat = exprIsFloat(*assign.value);
+          bool curFloat = (toGlobal ? globalIsFloat_ : slotIsFloat_)[id.name];
+          if (assign.op == "=") {
+            if (valFloat) emitExpr(*assign.value); else emitIOperand(*assign.value);
+            (toGlobal ? globalIsFloat_ : slotIsFloat_)[id.name] = valFloat;
+            if (toGlobal) {
+              out_ << "  lea r10, [rip+_a_globals]\n";
+              if (valFloat) out_ << "  movsd [r10+" << git->second << "], xmm0\n";
+              else out_ << "  mov [r10+" << git->second << "], rax\n";
+            } else {
+              if (valFloat) out_ << "  movsd [rbp - " << slot << "], xmm0\n";
+              else out_ << "  mov [rbp - " << slot << "], rax\n";
+            }
+            break;
+          }
+          // compound assignment
+          bool doFloat = valFloat || curFloat;
+          if (doFloat) {
+            (toGlobal ? globalIsFloat_ : slotIsFloat_)[id.name] = true;
+            emitFOperand(*assign.value);       // xmm0 = value
+            out_ << "  movsd xmm1, xmm0\n";    // xmm1 = value
+            if (toGlobal) {
+              out_ << "  lea r10, [rip+_a_globals]\n";
+              out_ << "  movsd xmm0, [r10+" << git->second << "]\n";
+            } else {
+              out_ << "  movsd xmm0, [rbp - " << slot << "]\n";
+            }
+            std::string base = assign.op.size() > 1 ? assign.op.substr(0, assign.op.size()-1) : assign.op;
+            if (base == "+") out_ << "  addsd xmm0, xmm1\n";
+            else if (base == "-") out_ << "  subsd xmm0, xmm1\n";
+            else if (base == "*") out_ << "  mulsd xmm0, xmm1\n";
+            else if (base == "/") out_ << "  divsd xmm0, xmm1\n";
+            else {
+              // %, &, |, ^, <<, >> on floats: truncate both to int, int op
+              out_ << "  cvttsd2si rax, xmm0\n  mov rbx, rax\n";
+              out_ << "  cvttsd2si rax, xmm1\n  mov rcx, rax\n  mov rax, rbx\n";
+              if (base == "%") { out_ << "  cqo\n  idiv rcx\n  mov rax, rdx\n"; }
+              else if (base == "&") out_ << "  and rax, rcx\n";
+              else if (base == "|") out_ << "  or rax, rcx\n";
+              else if (base == "^") out_ << "  xor rax, rcx\n";
+              else if (base == "<<") { out_ << "  mov rcx, rbx\n  shl rax, cl\n"; }
+              else if (base == ">>") { out_ << "  mov rcx, rbx\n  sar rax, cl\n"; }
+              // int result -> store as double
+              out_ << "  cvtsi2sd xmm0, rax\n";
+            }
+            if (toGlobal) {
+              out_ << "  lea r10, [rip+_a_globals]\n";
+              out_ << "  movsd [r10+" << git->second << "], xmm0\n";
+            } else {
+              out_ << "  movsd [rbp - " << slot << "], xmm0\n";
+            }
+            break;
+          }
+          emitIOperand(*assign.value);
           if (toGlobal) {
             int off = git->second;
-            if (assign.op == "=") {
+            {
+              // rax = value; compute cur <op> value into rax, store back
+              out_ << "  mov rbx, rax\n";
               out_ << "  lea r10, [rip+_a_globals]\n";
-              out_ << "  mov [r10+" << off << "], rax\n";
-            } else {
+              out_ << "  mov rax, [r10+" << off << "]\n";
               // rax = value; compute cur <op> value into rax, store back
               out_ << "  mov rbx, rax\n";
               out_ << "  lea r10, [rip+_a_globals]\n";
@@ -922,6 +1041,20 @@ class X86Emitter {
     }
   }
 
+  void emitFOperand(const Expr& e) {
+    emitExpr(e);
+    if (!exprIsFloat(e)) {
+      out_ << "  cvtsi2sd xmm0, rax\n";
+    }
+  }
+
+  void emitIOperand(const Expr& e) {
+    emitExpr(e);
+    if (exprIsFloat(e)) {
+      out_ << "  cvttsd2si rax, xmm0\n";
+    }
+  }
+
   void emitExpr(const Expr& expr) {
     switch (expr.kind) {
       case ExprKind::IntLit:
@@ -930,16 +1063,26 @@ class X86Emitter {
       case ExprKind::BoolLit:
         out_ << "  mov rax, " << (static_cast<const BoolLitExpr&>(expr).value ? 1 : 0) << "\n";
         break;
+      case ExprKind::FloatLit: {
+        double v = static_cast<const FloatLitExpr&>(expr).value;
+        out_ << "  movsd xmm0, [rip+" << floatTable_[v] << "]\n";
+        break;
+      }
       case ExprKind::Ident: {
         const auto& id = static_cast<const IdentExpr&>(expr);
+        bool isF = exprIsFloat(expr);
         auto it = stackSlots_.find(id.name);
         if (it != stackSlots_.end()) {
-          out_ << "  mov rax, [rbp - " << it->second << "]\n";
+          if (isF) out_ << "  movsd xmm0, [rbp - " << it->second << "]\n";
+          else out_ << "  mov rax, [rbp - " << it->second << "]\n";
         } else {
           auto git = globalSlots_.find(id.name);
           if (git != globalSlots_.end()) {
             out_ << "  lea r10, [rip+_a_globals]\n";
-            out_ << "  mov rax, [r10+" << git->second << "]\n";
+            if (isF) out_ << "  movsd xmm0, [r10+" << git->second << "]\n";
+            else out_ << "  mov rax, [r10+" << git->second << "]\n";
+          } else if (isF) {
+            out_ << "  xorpd xmm0, xmm0\n";
           } else {
             out_ << "  mov rax, 0\n";
           }
@@ -948,9 +1091,52 @@ class X86Emitter {
       }
       case ExprKind::Binary: {
         const auto& bin = static_cast<const BinaryExpr&>(expr);
-        emitExpr(*bin.lhs);
+        static const std::set<std::string> cmpOps = {"==","!=","<","<=",">",">="};
+        bool fbin = exprIsFloat(expr) ||
+                    (cmpOps.count(bin.op) &&
+                     (exprIsFloat(*bin.lhs) || exprIsFloat(*bin.rhs)));
+        if (fbin) {
+          emitFOperand(*bin.lhs);
+          out_ << "  movsd xmm1, xmm0\n";
+          emitFOperand(*bin.rhs);
+          if (bin.op == "+") out_ << "  addsd xmm1, xmm0\n";
+          else if (bin.op == "-") out_ << "  subsd xmm1, xmm0\n";
+          else if (bin.op == "*") out_ << "  mulsd xmm1, xmm0\n";
+          else if (bin.op == "/") out_ << "  divsd xmm1, xmm0\n";
+          else if (bin.op == "%") {
+            // fmod(lhs, rhs): xmm0=lhs, xmm1=rhs
+            out_ << "  movsd xmm2, xmm0\n  movsd xmm0, xmm1\n  movsd xmm1, xmm2\n";
+            out_ << "  call fmod@PLT\n";
+          } else {
+            // comparisons and bitwise ops on doubles: compare as double,
+            // produce an i64 0/1 in rax
+            out_ << "  ucomisd xmm1, xmm0\n";
+            std::string setc = "setnp al";
+            if (bin.op == "==") setc = "sete al";
+            else if (bin.op == "!=") setc = "setne al";
+            else if (bin.op == "<") setc = "setb al";
+            else if (bin.op == "<=") setc = "setbe al";
+            else if (bin.op == ">") setc = "seta al";
+            else if (bin.op == ">=") setc = "setae al";
+            else {
+              // bitwise on floats: convert to int and redo as int op
+              out_ << "  cvttsd2si rax, xmm1\n  mov rbx, rax\n";
+              out_ << "  cvttsd2si rax, xmm0\n  mov rcx, rax\n  mov rax, rbx\n";
+              std::string bop = bin.op;
+              if (bop == "and" || bop == "&") out_ << "  and rax, rcx\n";
+              else if (bop == "|") out_ << "  or rax, rcx\n";
+              else if (bop == "^") out_ << "  xor rax, rcx\n";
+              else if (bop == "<<") { out_ << "  mov rcx, rbx\n"; }
+              goto fbin_done;
+            }
+            out_ << "  " << setc << "\n  movzx rax, al\n";
+          }
+          if (bin.op != "%") out_ << "  movsd xmm0, xmm1\n";
+          goto fbin_done;
+        }
+        emitIOperand(*bin.lhs);
         out_ << "  push rax\n";
-        emitExpr(*bin.rhs);
+        emitIOperand(*bin.rhs);
         out_ << "  mov rbx, rax\n";
         out_ << "  pop rax\n";
 
@@ -1005,10 +1191,20 @@ class X86Emitter {
           out_ << "  sar rax, cl\n";
         }
         break;
+      fbin_done:
+        break;
       }
       case ExprKind::Unary: {
         const auto& un = static_cast<const UnaryExpr&>(expr);
-        emitExpr(*un.operand);
+        if (un.op == "-" && exprIsFloat(*un.operand)) {
+          emitExpr(*un.operand);
+          if (!exprIsFloat(*un.operand)) out_ << "  cvtsi2sd xmm0, rax\n";
+          out_ << "  mov rax, 0x8000000000000000\n";
+          out_ << "  movq xmm1, rax\n";
+          out_ << "  xorpd xmm0, xmm1\n";
+          break;
+        }
+        emitIOperand(*un.operand);
         if (un.op == "-") {
           out_ << "  neg rax\n";
         } else if (un.op == "~") {
@@ -1027,6 +1223,13 @@ class X86Emitter {
           if (name == "print") {
             if (!call.args.empty()) {
               const auto& argExpr = *call.args[0].value;
+              if (exprIsFloat(argExpr)) {
+                emitFOperand(argExpr);
+                out_ << "  lea rdi, .Lfmt_float[rip]\n";
+                out_ << "  mov eax, 1\n";
+                out_ << "  call printf@PLT\n";
+                return;
+              }
               if (argExpr.kind == ExprKind::StringLit) {
                 std::string s = extractString(static_cast<const StringLitExpr&>(argExpr));
                 out_ << "  lea rdi, .Lfmt_str[rip]\n";
@@ -1035,7 +1238,7 @@ class X86Emitter {
                 out_ << "  call printf@PLT\n";
                 return;
               }
-              emitExpr(argExpr);
+              emitIOperand(argExpr);
               out_ << "  mov rsi, rax\n";
               out_ << "  lea rdi, .Lfmt_int[rip]\n";
               out_ << "  mov rax, 0\n";
@@ -1044,6 +1247,48 @@ class X86Emitter {
             }
           }
 
+          // Float/math builtins (libm, xmm0/xmm1 convention)
+          static const std::set<std::string> libm1 = {
+              "floor","ceil","round","exp","log","sin","cos","tan","fabs"};
+          if (name == "sqrt" && !call.args.empty()) {
+            emitFOperand(*call.args[0].value);
+            out_ << "  sqrtsd xmm0, xmm0\n";
+            return;
+          }
+          if (libm1.count(name) && !call.args.empty()) {
+            emitFOperand(*call.args[0].value);
+            out_ << "  call " << name << "@PLT\n";
+            return;
+          }
+          if ((name == "pow" || name == "fmod") && call.args.size() >= 2) {
+            emitFOperand(*call.args[0].value);
+            out_ << "  movsd xmm2, xmm0\n";
+            emitFOperand(*call.args[1].value);
+            out_ << "  movsd xmm1, xmm0\n  movsd xmm0, xmm2\n";
+            out_ << "  call " << name << "@PLT\n";
+            return;
+          }
+          if ((name == "f64" || name == "float") && !call.args.empty()) {
+            emitIOperand(*call.args[0].value);   // rax = int bits or converted
+            if (exprIsFloat(*call.args[0].value)) {
+              // arg was double: cvttsd2si already truncated; redo properly
+              emitFOperand(*call.args[0].value);
+            } else {
+              out_ << "  cvtsi2sd xmm0, rax\n";
+            }
+            return;
+          }
+          if (name == "int" && !call.args.empty()) {
+            emitFOperand(*call.args[0].value);
+            if (!exprIsFloat(*call.args[0].value)) {
+              // int(int) — value already in rax via emitIOperand path; but
+              // emitFOperand left xmm0; convert back
+              out_ << "  cvttsd2si rax, xmm0\n";
+            } else {
+              out_ << "  cvttsd2si rax, xmm0\n";
+            }
+            return;
+          }
           // User function call
           static const char* kArgRegs[] = {"rdi", "rsi", "rdx", "rcx", "r8", "r9"};
           for (std::size_t i = 0; i < call.args.size() && i < 6; ++i) {
@@ -1072,6 +1317,7 @@ class X86Emitter {
     out_ << "  sub rsp, 256\n";
 
     stackSlots_.clear();
+    slotIsFloat_.clear();
     currentStackOffset_ = 0;
     inMain_ = true;
 
@@ -1314,6 +1560,7 @@ bool checkSupportedExpr(const Expr& expr) {
   switch (expr.kind) {
     case ExprKind::IntLit:
     case ExprKind::BoolLit:
+    case ExprKind::FloatLit:
       return true;
     case ExprKind::Ident:
       return true;

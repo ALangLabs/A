@@ -554,6 +554,15 @@ fn ed_search():
         return false
     return false
 
+# Moves the cursor to the first row below the drawn input area so program
+# output never overwrites the buffer being submitted.
+fn ed_leave_area():
+    terminal.write("\r")
+    down = S.drawn - S.cur_vrow
+    if down > 0:
+        terminal.write("\x1b[" + str(down) + "B")
+    terminal.flush()
+
 # Main entry: shows `prompt`, edits until submit/exit/interrupt.
 # Returns (kind, text): 0 = submit, 1 = exit (Ctrl-D/EOF), 2 = interrupt.
 fn read_input(prompt):
@@ -562,6 +571,7 @@ fn read_input(prompt):
     while true:
         k = read_key()
         if k == "":
+            ed_leave_area()
             return (1, "")
 
         # Completion menu has focus for navigation keys.
@@ -594,6 +604,7 @@ fn read_input(prompt):
         if k == "\r" or k == "\n":
             text = ed_text()
             if input_complete(text):
+                ed_leave_area()
                 return (0, text)
             ed_newline()
             ed_render()
@@ -617,12 +628,14 @@ fn read_input(prompt):
 
         if k == "\x04":  # Ctrl-D
             if ed_text().strip() == "":
+                ed_leave_area()
                 return (1, "")
             ed_delete()
             ed_render()
             continue
 
         if k == "\x03":  # Ctrl-C
+            ed_leave_area()
             return (2, "")
 
         if k == "\x12":  # Ctrl-R
@@ -685,7 +698,11 @@ fn read_input(prompt):
             ed_render()
             continue
         if k == "\x1b[C":
-            ed_move(0, 1)
+            g = ghost_text()
+            if g != "":
+                ed_insert(g)
+            else:
+                ed_move(0, 1)
             ed_render()
             continue
         if k == "\x1b[D":
@@ -697,7 +714,11 @@ fn read_input(prompt):
             ed_render()
             continue
         if k == "\x1b[F":
-            ed_home_end("end")
+            g = ghost_text()
+            if g != "":
+                ed_insert(g)
+            else:
+                ed_home_end("end")
             ed_render()
             continue
         if k == "\x1b[3~":
