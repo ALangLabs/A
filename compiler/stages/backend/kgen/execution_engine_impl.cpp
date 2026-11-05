@@ -1050,7 +1050,14 @@ void KGENExecutionEngine::exec(const Stmt& stmt, Env& env) {
     auto* node = static_cast<const ExprStmt*>(&stmt);
     Value result = eval(*node->expr, env);
     if (replEcho_ && !std::holds_alternative<std::monostate>(result.data)) {
-      out_ << "Out[" << ++replOutCount_ << "]: " << formatValue(result, true) << "\n";
+      // IPython-style Out[n] prompt; red like the In prompt family, but only
+      // when attached to a terminal so piped output stays clean.
+      if (a::kgen::terminal::isTty()) {
+        out_ << "\x1b[1;31mOut[" << ++replOutCount_ << "]:\x1b[0m "
+             << formatValue(result, true) << "\n";
+      } else {
+        out_ << "Out[" << ++replOutCount_ << "]: " << formatValue(result, true) << "\n";
+      }
     }
     return;
   }

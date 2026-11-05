@@ -62,6 +62,7 @@ fn repl_main():
             print("\x1b[1;31m(runtime error)\x1b[0m")
         elif rc == 3:
             print("\x1b[1;31m(nested repl.eval is not allowed)\x1b[0m")
+        print("")
 
     terminal.raw_mode(false)
     print("")
