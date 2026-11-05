@@ -181,6 +181,21 @@ class CEmitter {
             "  r.f = 2; r.i = (a_i64)a_new_obj(1, total, 0, b);\n"
             "  return r;\n"
             "}\n"
+            "static aval a_append(aval l, aval v) {\n"
+            "  aval r; r.i = 0; r.d = 0; r.f = 0;\n"
+            "  if (l.f == 2 && ((a_obj *)l.i)->type == 2) {\n"
+            "    a_obj *o = (a_obj *)l.i;\n"
+            "    if (o->len >= o->cap) {\n"
+            "      a_i64 nc = o->cap ? o->cap * 2 : 8;\n"
+            "      aval *nd = (aval *)malloc(sizeof(aval) * (size_t)nc);\n"
+            "      if (!nd) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "      memcpy(nd, o->data, sizeof(aval) * (size_t)o->len);\n"
+            "      o->data = nd; o->cap = nc;\n"
+            "    }\n"
+            "    ((aval *)o->data)[o->len++] = v;\n"
+            "  }\n"
+            "  return r;\n"
+            "}\n"
             "static void a_print_obj(a_obj *o) {\n"
             "  if (o->type == 1) { printf(\"\\\"%s\\\"\", (char *)o->data); return; }\n"
             "  if (o->type != 2) { printf(\"<obj>\"); return; }\n"
@@ -467,9 +482,16 @@ class CEmitter {
         if (l.init) collectExprStrings(*l.init);
         break;
       }
-      case StmtKind::Assign:
-        collectExprStrings(*static_cast<const AssignStmt&>(s).value);
+      case StmtKind::Assign: {
+        const auto& a = static_cast<const AssignStmt&>(s);
+        if (a.target->kind == ExprKind::Index) {
+          const auto& ix = static_cast<const IndexExpr&>(*a.target);
+          collectExprStrings(*ix.object);
+          collectExprStrings(*ix.index);
+        }
+        collectExprStrings(*a.value);
         break;
+      }
       case StmtKind::Expr:
         collectExprStrings(*static_cast<const ExprStmt&>(s).expr);
         break;
@@ -715,6 +737,17 @@ class CEmitter {
       }
       case ExprKind::Call: {
         const auto& c = static_cast<const CallExpr&>(e);
+        if (c.callee->kind == ExprKind::Field) {
+          const auto& f = static_cast<const FieldExpr&>(*c.callee);
+          if (f.field == "append" && c.args.size() == 1) {
+            std::string ov = evalA(*f.object);
+            std::string av = evalA(*c.args[0].value);
+            std::string tn = tmp();
+            out_ << "  " << tn << " = a_append(" << ov << ", " << av << ");\n";
+            return tn;
+          }
+          return "(aval){.i=0,.f=0}";
+        }
         if (c.callee->kind != ExprKind::Ident) return "(aval){.i=0,.f=0}";
         std::string name = cIdent(static_cast<const IdentExpr&>(*c.callee).name);
         if (name == "print" && c.args.size() == 1) {
@@ -828,7 +861,7 @@ class CEmitter {
       for (const auto& p : fn.params) if (cIdent(p.name) == n) { isParam = true; break; }
       if (!isParam) out_ << "  aval v_" << n << " = {0};\n";
     }
-    for (int i = 0; i < 256; ++i) out_ << "  aval _t" << i << " = {0};\n";
+    for (int i = 0; i < 2048; ++i) out_ << "  aval _t" << i << " = {0};\n";
     for (const auto& s : fn.body) emitStmt(*s);
     out_ << "  return (aval){.i=0,.f=0};\n";
     out_ << "}\n\n";
@@ -840,7 +873,9 @@ class CEmitter {
   }
 
   void emitStmt(const Stmt& stmt) {
-    tmpTop_ = 0;
+    // tmpTop_ is monotonic per function: temps must stay live across nested
+    // statements (e.g. a for-loop's iterable), so they are only reset when a
+    // function/main body starts.
     switch (stmt.kind) {
       case StmtKind::Let: {
         const auto& s = static_cast<const LetStmt&>(stmt);
@@ -853,6 +888,23 @@ class CEmitter {
       }
       case StmtKind::Assign: {
         const auto& s = static_cast<const AssignStmt&>(stmt);
+        if (s.target->kind == ExprKind::Index && s.op == "=") {
+          const auto& ix = static_cast<const IndexExpr&>(*s.target);
+          std::string ov = evalA(*ix.object);
+          std::string iv = evalA(*ix.index);
+          std::string vv = evalA(*s.value);
+          int ti = tmpTop_++;
+          std::string tn = "_t" + std::to_string(ti);
+          out_ << "  {\n    " << tn << " = " << ov << ";\n";
+          out_ << "    if (" << tn << ".f == 2 && ((a_obj *)" << tn
+               << ".i)->type == 2) {\n";
+          out_ << "      a_i64 _k" << ti << " = ai(" << iv << ");\n";
+          out_ << "      a_obj *_o" << ti << " = (a_obj *)" << tn << ".i;\n";
+          out_ << "      if (_k" << ti << " >= 0 && _k" << ti << " < _o" << ti
+               << "->len) ((aval *)_o" << ti << "->data)[_k" << ti << "] = " << vv << ";\n";
+          out_ << "    }\n  }\n";
+          break;
+        }
         if (s.target->kind != ExprKind::Ident) break;
         std::string raw = static_cast<const IdentExpr&>(*s.target).name;
         std::string n = cIdent(raw);
@@ -915,24 +967,40 @@ class CEmitter {
       }
       case StmtKind::For: {
         const auto& s = static_cast<const ForStmt&>(stmt);
-        if (s.iterable->kind != ExprKind::Range) break;
-        const auto& r = static_cast<const RangeExpr&>(*s.iterable);
         std::string v = cIdent(s.var);
-        std::string itN = "v___iter_" + v;
-        std::string endN = "v___end_" + v;
         std::string varN = "v_" + v;
-        slotType_[v] = VT::Int;
-        slotType_["__iter_" + v] = VT::Int;
-        slotType_["__end_" + v] = VT::Int;
-        std::string is = evalI(*r.start);
-        std::string ie = evalI(*r.end);
-        out_ << "  " << itN << ".i = " << is << "; " << itN << ".f = 0;\n";
-        out_ << "  " << endN << ".i = " << ie << "; " << endN << ".f = 0;\n";
-        out_ << "  for (; " << itN << ".i < " << endN << ".i; "
-             << itN << ".i = " << itN << ".i + 1) {\n";
-        out_ << "    " << varN << " = " << itN << ";\n";
+        slotType_[v] = VT::Unknown;
+        if (s.iterable->kind == ExprKind::Range) {
+          const auto& r = static_cast<const RangeExpr&>(*s.iterable);
+          std::string itN = "v___iter_" + v;
+          std::string endN = "v___end_" + v;
+          slotType_[v] = VT::Int;
+          slotType_["__iter_" + v] = VT::Int;
+          slotType_["__end_" + v] = VT::Int;
+          std::string is = evalI(*r.start);
+          std::string ie = evalI(*r.end);
+          out_ << "  " << itN << ".i = " << is << "; " << itN << ".f = 0;\n";
+          out_ << "  " << endN << ".i = " << ie << "; " << endN << ".f = 0;\n";
+          out_ << "  for (; " << itN << ".i < " << endN << ".i; "
+               << itN << ".i = " << itN << ".i + 1) {\n";
+          out_ << "    " << varN << " = " << itN << ";\n";
+          for (const auto& b : s.body) emitStmt(*b);
+          out_ << "  }\n";
+          break;
+        }
+        // Generic iterable (list/string): index-loop via a_index.
+        int ti = tmpTop_++;
+        std::string it = "_t" + std::to_string(ti);
+        std::string ov = evalA(*s.iterable);
+        out_ << "  " << it << " = " << ov << ";\n";
+        out_ << "  if (" << it << ".f == 2) {\n";
+        out_ << "    a_obj *_o" << ti << " = (a_obj *)" << it << ".i;\n";
+        out_ << "    for (a_i64 _k" << ti << " = 0; _k" << ti << " < _o" << ti
+             << "->len; ++_k" << ti << ") {\n";
+        out_ << "      " << varN << " = a_index(" << it << ", (aval){.i=_k" << ti
+             << ",.f=0});\n";
         for (const auto& b : s.body) emitStmt(*b);
-        out_ << "  }\n";
+        out_ << "    }\n  }\n";
         break;
       }
       case StmtKind::Return: {
@@ -983,7 +1051,7 @@ class CEmitter {
       if (root.program) {
         collectLocalNames(root.program->statements);
         for (const auto& n : locals_) out_ << "  aval v_" << n << " = {0};\n";
-        for (int i = 0; i < 256; ++i) out_ << "  aval _t" << i << " = {0};\n";
+        for (int i = 0; i < 2048; ++i) out_ << "  aval _t" << i << " = {0};\n";
         for (const auto& stmt : root.program->statements) {
           if (stmt->kind != StmtKind::FnDecl) emitStmt(*stmt);
         }

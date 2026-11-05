@@ -1499,6 +1499,11 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
       // value makes it an IEEE divide, which is safe.
       if ((s.op == "/=" || s.op == "%=") && !exprProvablyFloat(*s.value))
         return false;
+      if (s.target->kind == ExprKind::Index) {
+        const auto& ix = static_cast<const IndexExpr&>(*s.target);
+        return checkSupportedExpr(*ix.object) && checkSupportedExpr(*ix.index) &&
+               checkSupportedExpr(*s.value);
+      }
       return s.target->kind == ExprKind::Ident && checkSupportedExpr(*s.value);
     }
     case StmtKind::Expr: {
@@ -1526,10 +1531,13 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
     }
     case StmtKind::For: {
       const auto& s = static_cast<const ForStmt&>(stmt);
-      if (s.iterable->kind != ExprKind::Range) return false;
-      const auto& r = static_cast<const RangeExpr&>(*s.iterable);
-      if (r.step) return false;
-      if (!checkSupportedExpr(*r.start) || !checkSupportedExpr(*r.end)) return false;
+      if (s.iterable->kind == ExprKind::Range) {
+        const auto& r = static_cast<const RangeExpr&>(*s.iterable);
+        if (r.step) return false;
+        if (!checkSupportedExpr(*r.start) || !checkSupportedExpr(*r.end)) return false;
+      } else if (!checkSupportedExpr(*s.iterable)) {
+        return false;  // lists/strings iterate via a_index in the C emitter
+      }
       // Scoped shadowing check: if any nested statement declares a variable with loop var's name,
       // fallback to interpreter
       std::vector<const Stmt*> queue;
@@ -1670,6 +1678,12 @@ bool checkSupportedExpr(const Expr& expr) {
     }
     case ExprKind::Call: {
       const auto& c = static_cast<const CallExpr&>(expr);
+      if (c.callee->kind == ExprKind::Field) {
+        // Method calls: only list.append is supported natively.
+        const auto& f = static_cast<const FieldExpr&>(*c.callee);
+        if (f.field != "append" || c.args.size() != 1) return false;
+        return checkSupportedExpr(*f.object) && checkSupportedExpr(*c.args[0].value);
+      }
       if (c.callee->kind != ExprKind::Ident) return false;
       const std::string& name = static_cast<const IdentExpr&>(*c.callee).name;
       // Standard-library builtins (json, binary, testing, log, metrics,
