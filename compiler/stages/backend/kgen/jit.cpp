@@ -78,6 +78,10 @@ int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream&
   tcc_add_symbol(s, "strtod", (void*)strtod);
   tcc_add_symbol(s, "strchr", (void*)jit_strchr);
   tcc_add_symbol(s, "strcat", (void*)jit_strcat);
+  // Heap objects (strings) allocated by the generated C.
+  tcc_add_symbol(s, "malloc", (void*)malloc);
+  tcc_add_symbol(s, "free", (void*)free);
+  tcc_add_symbol(s, "exit", (void*)exit);
 
   // Symbols the generated C calls, bound to this process's own libc/libm.
   tcc_add_symbol(s, "printf", (void*)printf);

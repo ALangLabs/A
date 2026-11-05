@@ -44,12 +44,18 @@ class CEmitter {
   bool emit() {
     collectGlobals();
     pretypeGlobals();
+    collectStrings();
 
     out_ << "typedef long long a_i64;\n";
     out_ << "typedef struct { a_i64 i; double d; int f; } aval;\n";
     out_ << "static a_i64 ai(aval v) { return v.f ? (a_i64)v.d : v.i; }\n";
     out_ << "static double ad(aval v) { return v.f ? v.d : (double)v.i; }\n";
     out_ << "int printf(const char *, ...);\n";
+    out_ << "void *malloc(unsigned long);\n";
+    out_ << "void free(void *);\n";
+    out_ << "void *memcpy(void *, const void *, unsigned long);\n";
+    out_ << "void exit(int);\n";
+    out_ << "typedef unsigned long size_t;\n";
     out_ << "int snprintf(char *, unsigned long, const char *, ...);\n";
     out_ << "double strtod(const char *, char **);\n";
     out_ << "char *strchr(const char *, int);\n";
@@ -67,6 +73,85 @@ class CEmitter {
             "      !strchr(buf, 'I')) strcat(buf, \".0\");\n"
             "  printf(\"%s\\n\", buf);\n"
             "}\n";
+    // Heap objects: aval.f == 2 means .i holds an a_obj*. type 1 = string
+    // (data is char*, len bytes), type 2 = list (data is aval*, len elems).
+    out_ << "typedef struct a_obj { int type; a_i64 len; a_i64 cap; void *data; } a_obj;\n";
+    out_ << "static a_obj *a_new_obj(int t, a_i64 len, a_i64 cap, void *d) {\n"
+            "  a_obj *o = (a_obj *)malloc(sizeof(a_obj));\n"
+            "  if (!o) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "  o->type = t; o->len = len; o->cap = cap; o->data = d;\n"
+            "  return o;\n"
+            "}\n"
+            "static aval a_strof(aval v);\n"
+            "static aval a_mul(aval l, aval r) {\n"
+            "  int ls = (l.f == 2 && ((a_obj *)l.i)->type == 1);\n"
+            "  int rs = (r.f == 2 && ((a_obj *)r.i)->type == 1);\n"
+            "  if (ls || rs) {\n"
+            "    aval S = ls ? l : r;\n"
+            "    aval N = ls ? r : l;\n"
+            "    a_obj *so = (a_obj *)S.i;\n"
+            "    a_i64 cnt = ai(N);\n"
+            "    if (cnt < 0) cnt = 0;\n"
+            "    a_i64 n = so->len * cnt;\n"
+            "    char *b = (char *)malloc((size_t)n + 1);\n"
+            "    if (!b) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "    for (a_i64 k = 0; k < cnt; ++k)\n"
+            "      memcpy(b + k * so->len, so->data, (size_t)so->len);\n"
+            "    b[n] = 0;\n"
+            "    aval v; v.f = 2; v.i = (a_i64)a_new_obj(1, n, 0, b); v.d = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  if (l.f == 1 || r.f == 1) {\n"
+            "    aval v; v.f = 1; v.d = ad(l) * ad(r); v.i = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  aval v; v.i = ai(l) * ai(r); v.d = 0; v.f = 0;\n"
+            "  return v;\n"
+            "}\n"
+            "static aval a_cat(aval l, aval r) {\n"
+            "  int ls = (l.f == 2 && ((a_obj *)l.i)->type == 1);\n"
+            "  int rs = (r.f == 2 && ((a_obj *)r.i)->type == 1);\n"
+            "  if (ls || rs) {\n"
+            "    aval L = ls ? l : a_strof(l);\n"
+            "    aval R = rs ? r : a_strof(r);\n"
+            "    a_obj *lo = (a_obj *)L.i, *ro = (a_obj *)R.i;\n"
+            "    char *b = (char *)malloc((size_t)(lo->len + ro->len + 1));\n"
+            "    if (!b) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "    memcpy(b, lo->data, (size_t)lo->len);\n"
+            "    memcpy(b + lo->len, ro->data, (size_t)ro->len);\n"
+            "    b[lo->len + ro->len] = 0;\n"
+            "    aval v; v.f = 2; v.i = (a_i64)a_new_obj(1, lo->len + ro->len, 0, b); v.d = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  if (l.f == 1 || r.f == 1) {\n"
+            "    aval v; v.f = 1; v.d = ad(l) + ad(r); v.i = 0;\n"
+            "    return v;\n"
+            "  }\n"
+            "  aval v; v.i = ai(l) + ai(r); v.d = 0; v.f = 0;\n"
+            "  return v;\n"
+            "}\n"
+            "static aval a_lenof(aval v) {\n"
+            "  aval r; r.f = 0; r.d = 0;\n"
+            "  if (v.f == 2) r.i = ((a_obj *)v.i)->len; else r.i = 0;\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_strof(aval v) {\n"
+            "  char buf[64];\n"
+            "  if (v.f == 2) {\n"
+            "    a_obj *o = (a_obj *)v.i;\n"
+            "    char *b = (char *)malloc((size_t)o->len + 1);\n"
+            "    memcpy(b, o->data, (size_t)o->len); b[o->len] = 0;\n"
+            "    aval r; r.f = 2; r.i = (a_i64)a_new_obj(1, o->len, 0, b); r.d = 0;\n"
+            "    return r;\n"
+            "  }\n"
+            "  if (v.f) snprintf(buf, sizeof buf, \"%.*g\", 17, v.d);\n"
+            "  else snprintf(buf, sizeof buf, \"%lld\", v.i);\n"
+            "  a_i64 n = 0; while (buf[n]) ++n;\n"
+            "  char *b = (char *)malloc((size_t)n + 1);\n"
+            "  memcpy(b, buf, (size_t)n + 1);\n"
+            "  aval r; r.f = 2; r.i = (a_i64)a_new_obj(1, n, 0, b); r.d = 0;\n"
+            "  return r;\n"
+            "}\n";
     out_ << "double sqrt(double);\n";
     out_ << "double pow(double, double);\n";
     out_ << "double fmod(double, double);\n";
@@ -77,6 +162,15 @@ class CEmitter {
 
     for (const auto& n : globalNames_) out_ << "static aval g_" << n << " = {0};\n";
     if (!globalNames_.empty()) out_ << "\n";
+
+    // Static string objects for literals (aval.f == 2 -> a_obj*).
+    for (std::size_t si = 0; si < stringLits_.size(); ++si) {
+      const std::string& lit = stringLits_[si];
+      out_ << "static char a_sd_" << si << "[] = \"" << escapeC(lit) << "\";\n";
+      out_ << "static a_obj a_so_" << si << " = {1, " << lit.size() << ", "
+           << lit.size() << ", a_sd_" << si << "};\n";
+    }
+    if (!stringLits_.empty()) out_ << "\n";
 
     std::vector<const FnDecl*> fns;
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
@@ -111,6 +205,8 @@ class CEmitter {
   std::unordered_map<std::string, VT> globalType_;
   std::set<std::string> locals_;
   std::unordered_map<std::string, VT> slotType_;
+  std::vector<std::string> stringLits_;
+  std::unordered_map<std::string, int> stringLitIdx_;
 
   static std::string cIdent(const std::string& name) {
     std::string r;
@@ -256,6 +352,102 @@ class CEmitter {
     }
   }
 
+  void collectExprStrings(const Expr& e) {
+    switch (e.kind) {
+      case ExprKind::StringLit: {
+        const auto& s = static_cast<const StringLitExpr&>(e);
+        std::string lit;
+        for (const auto& p : s.parts) if (!p.isExpr) lit += p.text;
+        if (!stringLitIdx_.count(lit)) {
+          stringLitIdx_[lit] = static_cast<int>(stringLits_.size());
+          stringLits_.push_back(lit);
+        }
+        break;
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(e);
+        collectExprStrings(*b.lhs);
+        collectExprStrings(*b.rhs);
+        break;
+      }
+      case ExprKind::Unary:
+        collectExprStrings(*static_cast<const UnaryExpr&>(e).operand);
+        break;
+      case ExprKind::Range: {
+        const auto& r = static_cast<const RangeExpr&>(e);
+        collectExprStrings(*r.start);
+        collectExprStrings(*r.end);
+        if (r.step) collectExprStrings(*r.step);
+        break;
+      }
+      case ExprKind::Call: {
+        const auto& c = static_cast<const CallExpr&>(e);
+        for (const auto& a : c.args) collectExprStrings(*a.value);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void collectStmtStrings(const Stmt& s) {
+    switch (s.kind) {
+      case StmtKind::Let: {
+        const auto& l = static_cast<const LetStmt&>(s);
+        if (l.init) collectExprStrings(*l.init);
+        break;
+      }
+      case StmtKind::Assign:
+        collectExprStrings(*static_cast<const AssignStmt&>(s).value);
+        break;
+      case StmtKind::Expr:
+        collectExprStrings(*static_cast<const ExprStmt&>(s).expr);
+        break;
+      case StmtKind::Return: {
+        const auto& r = static_cast<const ReturnStmt&>(s);
+        if (r.value) collectExprStrings(*r.value);
+        break;
+      }
+      case StmtKind::If: {
+        const auto& i = static_cast<const IfStmt&>(s);
+        for (const auto& br : i.branches) {
+          collectExprStrings(*br.cond);
+          for (const auto& b : br.body) collectStmtStrings(*b);
+        }
+        for (const auto& b : i.elseBody) collectStmtStrings(*b);
+        break;
+      }
+      case StmtKind::While: {
+        const auto& w = static_cast<const WhileStmt&>(s);
+        collectExprStrings(*w.cond);
+        for (const auto& b : w.body) collectStmtStrings(*b);
+        break;
+      }
+      case StmtKind::For: {
+        const auto& f = static_cast<const ForStmt&>(s);
+        collectExprStrings(*f.iterable);
+        for (const auto& b : f.body) collectStmtStrings(*b);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  void collectStrings() {
+    for (const auto& mod : graph_.modules) {
+      if (!mod.program || isStdlibModuleC(graph_, mod)) continue;
+      for (const auto& stmt : mod.program->statements) {
+        if (stmt->kind == StmtKind::FnDecl) {
+          for (const auto& b : static_cast<const FnDecl&>(*stmt).body)
+            collectStmtStrings(*b);
+        } else {
+          collectStmtStrings(*stmt);
+        }
+      }
+    }
+  }
+
   std::string lvalue(const std::string& rawName) {
     std::string n = cIdent(rawName);
     if (locals_.count(n)) return "v_" + n;
@@ -362,7 +554,13 @@ class CEmitter {
       out_ << "  " << tn << ".f = 0;\n";
       return tn;
     }
-    // Arithmetic: float if either side is, int otherwise.
+    // "+" and "*" dispatch through helpers that also handle string
+    // concat/repeat; the rest use the numeric tag dispatch.
+    if (op == "+" || op == "*") {
+      std::string tn = tmp();
+      out_ << "  " << tn << " = a_" << (op == "+" ? "cat" : "mul") << "(" << l << ", " << r << ");\n";
+      return tn;
+    }
     std::string iop, dop;
     if (op == "+") { iop = "+"; dop = "+"; }
     else if (op == "-") { iop = "-"; dop = "-"; }
@@ -391,6 +589,14 @@ class CEmitter {
         return "(aval){.d=" + floatLit(static_cast<const FloatLitExpr&>(e).value) + ",.f=1}";
       case ExprKind::Ident:
         return identA(static_cast<const IdentExpr&>(e).name);
+      case ExprKind::StringLit: {
+        const auto& s = static_cast<const StringLitExpr&>(e);
+        std::string lit;
+        for (const auto& p : s.parts) if (!p.isExpr) lit += p.text;
+        auto it = stringLitIdx_.find(lit);
+        if (it == stringLitIdx_.end()) return "(aval){.i=0,.f=2}";
+        return "(aval){.i=(a_i64)&a_so_" + std::to_string(it->second) + ",.f=2}";
+      }
       case ExprKind::Binary: {
         const auto& b = static_cast<const BinaryExpr&>(e);
         std::string l = evalA(*b.lhs);
@@ -425,6 +631,16 @@ class CEmitter {
         }
         if (name == "int" && !c.args.empty()) {
           return "(aval){.i=ai(" + evalA(*c.args[0].value) + "),.f=0}";
+        }
+        if (name == "len" && !c.args.empty()) {
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_lenof(" << evalA(*c.args[0].value) << ");\n";
+          return tn;
+        }
+        if (name == "str" && !c.args.empty()) {
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_strof(" << evalA(*c.args[0].value) << ");\n";
+          return tn;
         }
         if ((name == "f64" || name == "float") && !c.args.empty()) {
           return "(aval){.d=ad(" + evalA(*c.args[0].value) + "),.f=1}";
@@ -479,7 +695,11 @@ class CEmitter {
     std::string av = evalA(arg);
     std::string tn = tmp();
     out_ << "  " << tn << " = " << av << ";\n";
-    out_ << "  if (" << tn << ".f) a_print_double(" << tn << ".d);"
+    out_ << "  if (" << tn << ".f == 2) {\n"
+         << "    a_obj *o_ = (a_obj *)" << tn << ".i;\n"
+         << "    if (o_->type == 1) printf(\"%s\\n\", (char *)o_->data);\n"
+         << "    else printf(\"<obj>\\n\");\n"
+         << "  } else if (" << tn << ".f) a_print_double(" << tn << ".d);"
          << " else printf(\"%lld\\n\", " << tn << ".i);\n";
   }
 

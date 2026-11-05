@@ -1629,11 +1629,13 @@ bool checkSupportedExpr(const Expr& expr) {
       return false;  // bool literals print/behave differently natively
     case ExprKind::Ident:
       return true;
-    case ExprKind::StringLit:
-      // String values need a heap runtime the native subset lacks; the only
-      // supported use is a literal directly inside print(...) (handled in
-      // the Call case below).
-      return false;
+    case ExprKind::StringLit: {
+      // Static string literals are heap objects in the C emitter; f-strings
+      // (interpolated parts) still need the interpreter.
+      const auto& sl = static_cast<const StringLitExpr&>(expr);
+      for (const auto& part : sl.parts) if (part.isExpr) return false;
+      return true;
+    }
     case ExprKind::Binary: {
       const auto& b = static_cast<const BinaryExpr&>(expr);
       // Integer division/remainder can trap on zero; allow only when an
@@ -1666,7 +1668,7 @@ bool checkSupportedExpr(const Expr& expr) {
       // Native runtime functions are handled by interpreter or native backend
       if (name == "write_file" || name == "read_file" || name == "append_file" ||
           name == "file_exists" || name == "remove_file" || name == "flush" ||
-          name == "input" || name == "read_line" || name == "len" ||
+          name == "input" || name == "read_line" ||
           name == "int" || name == "float" || name == "set" ||
           name == "unsafe_get" || name == "unsafe_set" || name == "move" ||
           name == "arena_new" || name == "arena_pool" || name == "arena_region" ||
