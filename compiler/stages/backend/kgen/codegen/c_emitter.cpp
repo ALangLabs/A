@@ -62,16 +62,18 @@ class CEmitter {
     out_ << "char *strcat(char *, const char *);\n";
     // Python-style float repr: shortest %g precision that round-trips, with a
     // trailing ".0" when the result would otherwise look like an int.
-    out_ << "static void a_print_double(double v) {\n"
-            "  char buf[64]; int p;\n"
+    out_ << "static void a_fmt_double(char *buf, double v) {\n"
+            "  int p;\n"
             "  for (p = 1; p <= 17; ++p) {\n"
-            "    snprintf(buf, sizeof buf, \"%.*g\", p, v);\n"
+            "    snprintf(buf, 64, \"%.*g\", p, v);\n"
             "    if (strtod(buf, 0) == v) break;\n"
             "  }\n"
             "  if (!strchr(buf, '.') && !strchr(buf, 'e') && !strchr(buf, 'E') &&\n"
             "      !strchr(buf, 'n') && !strchr(buf, 'i') && !strchr(buf, 'N') &&\n"
             "      !strchr(buf, 'I')) strcat(buf, \".0\");\n"
-            "  printf(\"%s\\n\", buf);\n"
+            "}\n"
+            "static void a_print_double(double v) {\n"
+            "  char buf[64]; a_fmt_double(buf, v); printf(\"%s\\n\", buf);\n"
             "}\n";
     // Heap objects: aval.f == 2 means .i holds an a_obj*. type 1 = string
     // (data is char*, len bytes), type 2 = list (data is aval*, len elems).
@@ -134,6 +136,63 @@ class CEmitter {
             "  aval r; r.f = 0; r.d = 0;\n"
             "  if (v.f == 2) r.i = ((a_obj *)v.i)->len; else r.i = 0;\n"
             "  return r;\n"
+            "}\n"
+            "static aval a_index(aval o, aval ix) {\n"
+            "  aval r; r.i = 0; r.d = 0; r.f = 0;\n"
+            "  if (o.f != 2) return r;\n"
+            "  a_obj *ob = (a_obj *)o.i;\n"
+            "  a_i64 k = ai(ix);\n"
+            "  if (k < 0 || k >= ob->len) return r;\n"
+            "  if (ob->type == 2) return ((aval *)ob->data)[k];\n"
+            "  if (ob->type == 1) {\n"
+            "    char *b = (char *)malloc(2);\n"
+            "    b[0] = ((char *)ob->data)[k]; b[1] = 0;\n"
+            "    r.f = 2; r.i = (a_i64)a_new_obj(1, 1, 0, b);\n"
+            "    return r;\n"
+            "  }\n"
+            "  return r;\n"
+            "}\n"
+            "static aval a_join(aval l, aval sep) {\n"
+            "  aval r; r.i = 0; r.d = 0; r.f = 0;\n"
+            "  if (l.f != 2 || ((a_obj *)l.i)->type != 2) return r;\n"
+            "  a_obj *lo = (a_obj *)l.i;\n"
+            "  aval sv = (sep.f == 2 && ((a_obj *)sep.i)->type == 1) ? sep : a_strof(sep);\n"
+            "  a_obj *so = (a_obj *)sv.i;\n"
+            "  a_i64 total = 0;\n"
+            "  for (a_i64 k = 0; k < lo->len; ++k) {\n"
+            "    aval e = ((aval *)lo->data)[k];\n"
+            "    aval es = (e.f == 2 && ((a_obj *)e.i)->type == 1) ? e : a_strof(e);\n"
+            "    total += ((a_obj *)es.i)->len;\n"
+            "    if (k + 1 < lo->len) total += so->len;\n"
+            "  }\n"
+            "  char *b = (char *)malloc((size_t)total + 1);\n"
+            "  if (!b) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "  a_i64 pos = 0;\n"
+            "  for (a_i64 k = 0; k < lo->len; ++k) {\n"
+            "    aval e = ((aval *)lo->data)[k];\n"
+            "    aval es = (e.f == 2 && ((a_obj *)e.i)->type == 1) ? e : a_strof(e);\n"
+            "    a_obj *eo = (a_obj *)es.i;\n"
+            "    memcpy(b + pos, eo->data, (size_t)eo->len); pos += eo->len;\n"
+            "    if (k + 1 < lo->len) {\n"
+            "      memcpy(b + pos, so->data, (size_t)so->len); pos += so->len;\n"
+            "    }\n"
+            "  }\n"
+            "  b[total] = 0;\n"
+            "  r.f = 2; r.i = (a_i64)a_new_obj(1, total, 0, b);\n"
+            "  return r;\n"
+            "}\n"
+            "static void a_print_obj(a_obj *o) {\n"
+            "  if (o->type == 1) { printf(\"\\\"%s\\\"\", (char *)o->data); return; }\n"
+            "  if (o->type != 2) { printf(\"<obj>\"); return; }\n"
+            "  printf(\"[\");\n"
+            "  for (a_i64 k = 0; k < o->len; ++k) {\n"
+            "    if (k) printf(\", \");\n"
+            "    aval e = ((aval *)o->data)[k];\n"
+            "    if (e.f == 2) a_print_obj((a_obj *)e.i);\n"
+            "    else if (e.f == 1) { char b[64]; a_fmt_double(b, e.d); printf(\"%s\", b); }\n"
+            "    else printf(\"%lld\", e.i);\n"
+            "  }\n"
+            "  printf(\"]\");\n"
             "}\n"
             "static aval a_strof(aval v) {\n"
             "  char buf[64];\n"
@@ -380,6 +439,17 @@ class CEmitter {
         if (r.step) collectExprStrings(*r.step);
         break;
       }
+      case ExprKind::ArrayLit: {
+        const auto& a = static_cast<const ArrayLitExpr&>(e);
+        for (const auto& el : a.elements) collectExprStrings(*el);
+        break;
+      }
+      case ExprKind::Index: {
+        const auto& x = static_cast<const IndexExpr&>(e);
+        collectExprStrings(*x.object);
+        collectExprStrings(*x.index);
+        break;
+      }
       case ExprKind::Call: {
         const auto& c = static_cast<const CallExpr&>(e);
         for (const auto& a : c.args) collectExprStrings(*a.value);
@@ -597,6 +667,28 @@ class CEmitter {
         if (it == stringLitIdx_.end()) return "(aval){.i=0,.f=2}";
         return "(aval){.i=(a_i64)&a_so_" + std::to_string(it->second) + ",.f=2}";
       }
+      case ExprKind::ArrayLit: {
+        const auto& a = static_cast<const ArrayLitExpr&>(e);
+        std::string tn = tmp();
+        out_ << "  {\n";
+        out_ << "    a_obj *la_ = a_new_obj(2, " << a.elements.size() << ", "
+             << a.elements.size() << ", malloc(sizeof(aval) * " << (a.elements.size() ? a.elements.size() : 1) << "));\n";
+        out_ << "    " << tn << ".f = 2; " << tn << ".i = (a_i64)la_; " << tn << ".d = 0;\n";
+        for (std::size_t i = 0; i < a.elements.size(); ++i) {
+          std::string av = evalA(*a.elements[i]);
+          out_ << "    ((aval *)la_->data)[" << i << "] = " << av << ";\n";
+        }
+        out_ << "  }\n";
+        return tn;
+      }
+      case ExprKind::Index: {
+        const auto& x = static_cast<const IndexExpr&>(e);
+        std::string ov = evalA(*x.object);
+        std::string iv = evalA(*x.index);
+        std::string tn = tmp();
+        out_ << "  " << tn << " = a_index(" << ov << ", " << iv << ");\n";
+        return tn;
+      }
       case ExprKind::Binary: {
         const auto& b = static_cast<const BinaryExpr&>(e);
         std::string l = evalA(*b.lhs);
@@ -633,13 +725,22 @@ class CEmitter {
           return "(aval){.i=ai(" + evalA(*c.args[0].value) + "),.f=0}";
         }
         if (name == "len" && !c.args.empty()) {
+          std::string av = evalA(*c.args[0].value);
           std::string tn = tmp();
-          out_ << "  " << tn << " = a_lenof(" << evalA(*c.args[0].value) << ");\n";
+          out_ << "  " << tn << " = a_lenof(" << av << ");\n";
           return tn;
         }
         if (name == "str" && !c.args.empty()) {
+          std::string av = evalA(*c.args[0].value);
           std::string tn = tmp();
-          out_ << "  " << tn << " = a_strof(" << evalA(*c.args[0].value) << ");\n";
+          out_ << "  " << tn << " = a_strof(" << av << ");\n";
+          return tn;
+        }
+        if (name == "join" && c.args.size() >= 2) {
+          std::string a0 = evalA(*c.args[0].value);
+          std::string a1 = evalA(*c.args[1].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = a_join(" << a0 << ", " << a1 << ");\n";
           return tn;
         }
         if ((name == "f64" || name == "float") && !c.args.empty()) {
@@ -698,6 +799,7 @@ class CEmitter {
     out_ << "  if (" << tn << ".f == 2) {\n"
          << "    a_obj *o_ = (a_obj *)" << tn << ".i;\n"
          << "    if (o_->type == 1) printf(\"%s\\n\", (char *)o_->data);\n"
+         << "    else if (o_->type == 2) { a_print_obj(o_); printf(\"\\n\"); }\n"
          << "    else printf(\"<obj>\\n\");\n"
          << "  } else if (" << tn << ".f) a_print_double(" << tn << ".d);"
          << " else printf(\"%lld\\n\", " << tn << ".i);\n";

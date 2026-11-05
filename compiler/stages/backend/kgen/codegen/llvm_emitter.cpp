@@ -1629,6 +1629,16 @@ bool checkSupportedExpr(const Expr& expr) {
       return false;  // bool literals print/behave differently natively
     case ExprKind::Ident:
       return true;
+    case ExprKind::ArrayLit: {
+      const auto& a = static_cast<const ArrayLitExpr&>(expr);
+      for (const auto& el : a.elements)
+        if (!checkSupportedExpr(*el)) return false;
+      return true;
+    }
+    case ExprKind::Index: {
+      const auto& x = static_cast<const IndexExpr&>(expr);
+      return checkSupportedExpr(*x.object) && checkSupportedExpr(*x.index);
+    }
     case ExprKind::StringLit: {
       // Static string literals are heap objects in the C emitter; f-strings
       // (interpolated parts) still need the interpreter.
