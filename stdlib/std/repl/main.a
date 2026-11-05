@@ -21,6 +21,8 @@ fn repl_main():
         print("error: the interactive REPL requires a terminal")
         return 1
     terminal.raw_mode(true)
+    terminal.write("\x1b[?2004h")
+    terminal.flush()
     history.history_load()
 
     print("A REPL 0.0.1 — interactive shell for the A language")
@@ -64,6 +66,8 @@ fn repl_main():
             print("\x1b[1;31m(nested repl.eval is not allowed)\x1b[0m")
         print("")
 
+    terminal.write("\x1b[?2004l")
+    terminal.flush()
     terminal.raw_mode(false)
     print("")
     return 0

@@ -409,20 +409,21 @@ fn read_key():
         if b2 == "A" or b2 == "B" or b2 == "C" or b2 == "D" or b2 == "H" or b2 == "F" or b2 == "Z" or b2 == "E":
             return "\x1b[" + b2
         if b2 >= "0" and b2 <= "9":
-            b3 = terminal.read_char_ms(50)
-            if b3 == None:
-                b3 = ""
-            if b3 == "~":
-                return "\x1b[" + b2 + "~"
-            if b3 == ";" or b3 == ":":
-                # Modifier sequences like ESC [ 1 ; 5 A — consume final byte.
-                b4 = terminal.read_char_ms(50)
-                if b4 == None:
-                    b4 = ""
-                if b4 == "":
-                    return "\x1b[" + b2 + b3
-                return "\x1b[" + b2 + b3 + b4
-            return "\x1b[" + b2 + b3
+            # Collect CSI parameters until the final byte ('~' or a letter),
+            # covering ESC[3~, ESC[1;5A and bracketed-paste markers.
+            seq = b2
+            while len(seq) < 16:
+                c = terminal.read_char_ms(50)
+                if c == None:
+                    c = ""
+                if c == "":
+                    break
+                seq = seq + c
+                if c == "~":
+                    break
+                if (c >= "A" and c <= "Z") or (c >= "a" and c <= "z"):
+                    break
+            return "\x1b[" + seq
         return "\x1b[" + b1 + b2
     return "\x1b" + b1
 
@@ -558,6 +559,35 @@ fn ed_search():
         # Any other key cancels the search.
         return false
     return false
+
+# Reads a bracketed-paste payload (terminated by ESC[201~) and inserts it
+# into the buffer as lines — IPython-style multiline paste.
+fn paste_read():
+    buf = ""
+    marker = "\x1b[201~"
+    while true:
+        c = terminal.read_char()
+        if c == None:
+            break
+        if c == None:
+            c = ""
+        buf = buf + c
+        n = len(buf)
+        if n >= 6 and buf[n - 6..] == marker:
+            buf = buf[0..n - 6]
+            break
+    t = buf.replace("\r\n", "\n")
+    t = t.replace("\r", "\n")
+    if len(t) > 0 and t[len(t) - 1..] == "\n":
+        t = t[0..len(t) - 1]
+    parts = t.split("\n")
+    first = true
+    for seg in parts:
+        if not first:
+            ed_newline()
+        ed_insert(seg)
+        first = false
+    S.comp_open = false
 
 # Moves the cursor to the first row below the drawn input area so program
 # output never overwrites the buffer being submitted.
@@ -739,6 +769,10 @@ fn read_input(prompt):
             continue
         if k == "\x1b":
             S.comp_open = false
+            ed_render()
+            continue
+        if k == "\x1b[200~":
+            paste_read()
             ed_render()
             continue
 
