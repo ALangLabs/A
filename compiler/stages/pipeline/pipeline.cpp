@@ -48,7 +48,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   // Fast path: native-subset programs compile and run directly
   // (Goose/Mojo-style). If native compilation is unavailable, fall back to
   // the internal engine so `run` keeps full dynamic semantics.
-  if(std::getenv("A_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
+  if(!std::getenv("A_NO_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
     std::uint64_t h=srcHash;
     auto mix=[&](const std::string& d){for(unsigned char c:d){h^=c;h*=1099511628211ULL;}};
     for(const auto& mod:m.graph->modules){

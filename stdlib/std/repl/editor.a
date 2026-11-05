@@ -210,7 +210,12 @@ fn vis_len(s):
 fn prompt_for(row):
     if row == 0:
         return S.prompt
-    return " " * len(S.prompt)
+    # IPython-style continuation: "   ...: " with the colon aligned under
+    # the "In [n]:" colon and code starting in the same column.
+    w = vis_len(S.prompt)
+    if w < 6:
+        w = 6
+    return " " * (w - 5) + "...: "
 
 # Returns the ghost autosuggest suffix for the current single-line input.
 fn ghost_text():

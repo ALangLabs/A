@@ -23,8 +23,8 @@ fn repl_main():
     terminal.raw_mode(true)
     history.history_load()
 
-    print("A REPL — type 'help' for keys, 'exit' to quit")
-    print("Python-style dynamic semantics; state persists across inputs.")
+    print("A REPL 0.0.1 — interactive shell for the A language")
+    print("State persists across inputs; type 'help' for keys, 'exit' to quit.")
     print("")
 
     counter = 0

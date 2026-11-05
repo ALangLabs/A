@@ -1559,16 +1559,17 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
 bool checkSupportedExpr(const Expr& expr) {
   switch (expr.kind) {
     case ExprKind::IntLit:
-    case ExprKind::BoolLit:
     case ExprKind::FloatLit:
       return true;
+    case ExprKind::BoolLit:
+      return false;  // bool literals print/behave differently natively
     case ExprKind::Ident:
       return true;
-    case ExprKind::StringLit: {
-      const auto& s = static_cast<const StringLitExpr&>(expr);
-      for (const auto& p : s.parts) if (p.isExpr) return false;
-      return true;
-    }
+    case ExprKind::StringLit:
+      // String values need a heap runtime the native subset lacks; the only
+      // supported use is a literal directly inside print(...) (handled in
+      // the Call case below).
+      return false;
     case ExprKind::Binary: {
       const auto& b = static_cast<const BinaryExpr&>(expr);
       // Division or remainder requires runtime checks for zero, fallback to interpreter
@@ -1608,6 +1609,16 @@ bool checkSupportedExpr(const Expr& expr) {
           name == "borrow" || name == "borrow_mut" || name == "unsafe_address_of" ||
           name == "unsafe_load" || name == "unsafe_store" || name == "unsafe_offset") {
         return false;
+      }
+      if (name == "print") {
+        if (c.args.size() != 1) return false;
+        const auto& a0 = *c.args[0].value;
+        if (a0.kind == ExprKind::StringLit) {
+          const auto& sl = static_cast<const StringLitExpr&>(a0);
+          for (const auto& part : sl.parts) if (part.isExpr) return false;
+          return true;
+        }
+        return checkSupportedExpr(a0);
       }
       for (const auto& a : c.args) if (!checkSupportedExpr(*a.value)) return false;
       return true;

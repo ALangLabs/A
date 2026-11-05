@@ -333,6 +333,7 @@ class KGENExecutionEngine {
   // already run, and whether bare expression statements print their value.
   std::vector<std::size_t> executed_;
   bool replEcho_ = false;
+  std::int64_t replOutCount_ = 0;
 };
 
 }  // namespace a

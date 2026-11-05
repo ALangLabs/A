@@ -1050,7 +1050,7 @@ void KGENExecutionEngine::exec(const Stmt& stmt, Env& env) {
     auto* node = static_cast<const ExprStmt*>(&stmt);
     Value result = eval(*node->expr, env);
     if (replEcho_ && !std::holds_alternative<std::monostate>(result.data)) {
-      out_ << formatValue(result, true) << "\n";
+      out_ << "Out[" << ++replOutCount_ << "]: " << formatValue(result, true) << "\n";
     }
     return;
   }
