@@ -1,9 +1,11 @@
 #include "backend/kgen/python_interop.hpp"
 #include "strings/format.hpp"
 
-#include <initializer_list>
+#include <cstdlib>
+#include <filesystem>
 #include <memory>
 #include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -198,6 +200,52 @@ PyObject* dictFromPairs(std::initializer_list<std::pair<const char*, PyObject*>>
 }  // namespace
 #endif
 
+#ifdef A_HAVE_PYTHON
+// Appends `dir` to sys.path inside the embedded interpreter.
+void appendSysPath(const std::string& dir) {
+  PyObject* path = PySys_GetObject("path");  // borrowed
+  if (!path) return;
+  PyObject* entry = PyUnicode_DecodeFSDefault(dir.c_str());
+  if (entry && PyList_Append(path, entry) == 0) {
+    // appended
+  }
+  Py_XDECREF(entry);
+}
+
+// uv/pip-style project environments: if ./.venv or ./venv has a
+// pyvenv.cfg, its lib/python*/site-packages joins sys.path so packages
+// installed with `uv pip`/`pip` are importable from A.
+void addVenvSitePackages() {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  for (const char* name : {".venv", "venv"}) {
+    fs::path root = fs::path(name);
+    if (!fs::exists(root / "pyvenv.cfg", ec)) continue;
+    fs::path lib = root / "lib";
+    if (!fs::is_directory(lib, ec)) continue;
+    for (const auto& entry : fs::directory_iterator(lib, ec)) {
+      if (!entry.is_directory(ec)) continue;
+      fs::path site = entry.path() / "site-packages";
+      if (fs::is_directory(site, ec)) appendSysPath(site.string());
+    }
+  }
+}
+
+// A_PYTHONPATH: colon-separated extra module search dirs, like PYTHONPATH.
+void addEnvPythonPath() {
+  const char* value = std::getenv("A_PYTHONPATH");
+  if (!value || !*value) return;
+  std::string list = value;
+  std::size_t start = 0;
+  while (start <= list.size()) {
+    std::size_t end = list.find(':', start);
+    if (end == std::string::npos) end = list.size();
+    if (end > start) appendSysPath(list.substr(start, end - start));
+    start = end + 1;
+  }
+}
+#endif
+
 bool isAvailable() {
 #ifdef A_HAVE_PYTHON
   return true;
@@ -211,6 +259,8 @@ void ensureInitialized() {
   static bool inited = false;
   if (!inited) {
     Py_Initialize();
+    addVenvSitePackages();
+    addEnvPythonPath();
     // Let formatValue render PythonObject values through repr().
     setForeignValueRepr(&repr);
     inited = true;

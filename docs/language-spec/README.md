@@ -400,7 +400,8 @@ from python:math import sqrt, pi
 
 - Bare imports like `import math` resolve to native modules or stdlib modules as configured by the module loader.
 - Quoted imports load `.a` modules from filesystem/module paths.
-- `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev files; runs in the interpreter (`a run`/`a test`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, structs, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, and `==`.
+- `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev files; runs in the interpreter (`a run`/`a test`/`a repl`/`a -c`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, structs, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, and `==`.
+- The embedded interpreter is whichever Python 3 CMake's `find_package(Python3)` selects — override with `cmake -DPython3_EXECUTABLE=$(which python3)` (uv-managed interpreters work; they ship `libpython` + headers). At runtime, a `./.venv` or `./venv` with `pyvenv.cfg` has its `site-packages` added automatically, and `A_PYTHONPATH` (colon-separated) adds extra search dirs — so `uv pip`/`pip` installs in a project venv are importable.
 - Imports are only allowed at module top level.
 
 ## 6. Functions

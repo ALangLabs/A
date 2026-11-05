@@ -123,6 +123,11 @@ print(sqrt(2))                # 1.4142135623730951
 ```
 
 Works in `a run`, `a test`, `a repl`, and `a -c` (interpreter path only).
+The embedded interpreter is chosen at build time — point CMake at your own
+(`-DPython3_EXECUTABLE=$(which python3)` works with uv-managed Pythons). At
+runtime a local `.venv`/`venv`'s `site-packages` is picked up automatically,
+and `A_PYTHONPATH` adds extra dirs, so `uv pip install numpy` in a project
+env just works.
 See `examples/python-interop/` for runnable examples, including NumPy and
 PyTorch under `optional/`.
 
