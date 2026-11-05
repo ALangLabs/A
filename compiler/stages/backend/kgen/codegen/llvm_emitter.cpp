@@ -19,7 +19,7 @@
 namespace a {
 namespace {
 
-bool isStdlibModule(const Module& mod);
+bool isStdlibModule(const ModuleGraph& graph, const Module& mod);
 
 std::string extractString(const StringLitExpr& s) {
   std::string result;
@@ -51,7 +51,7 @@ class LLVMEmitter {
     // they are not part of the native subset and are never called natively)
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
       const auto& mod = graph_.modules[i];
-      if (!mod.program || isStdlibModule(mod)) continue;
+      if (!mod.program || isStdlibModule(graph_,mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         if (stmt->kind == StmtKind::FnDecl) {
           emitFunction(*static_cast<const FnDecl*>(stmt.get()));
@@ -84,7 +84,7 @@ class LLVMEmitter {
 
   void collectStringLiterals() {
     for (const auto& mod : graph_.modules) {
-      if (!mod.program || isStdlibModule(mod)) continue;
+      if (!mod.program || isStdlibModule(graph_,mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         collectFromStmt(*stmt);
       }
@@ -624,7 +624,7 @@ class X86Emitter {
     // Emit functions (stdlib/prelude modules skipped, same as LLVMEmitter)
     for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
       const auto& mod = graph_.modules[i];
-      if (!mod.program || isStdlibModule(mod)) continue;
+      if (!mod.program || isStdlibModule(graph_,mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         if (stmt->kind == StmtKind::FnDecl) {
           emitFunction(*static_cast<const FnDecl*>(stmt.get()));
@@ -664,7 +664,7 @@ class X86Emitter {
 
   void collectStringLiterals() {
     for (const auto& mod : graph_.modules) {
-      if (!mod.program || isStdlibModule(mod)) continue;
+      if (!mod.program || isStdlibModule(graph_,mod)) continue;
       for (const auto& stmt : mod.program->statements) {
         collectFromStmt(*stmt);
       }
@@ -1448,7 +1448,10 @@ namespace {
 // stdlib/prelude modules (stdlib/**, incl. the auto-loaded prelude) use
 // language features the native subset cannot lower; they are never emitted,
 // so they must not gate user programs either.
-bool isStdlibModule(const Module& mod) {
+bool isStdlibModule(const ModuleGraph& graph, const Module& mod) {
+  // The entry module is user code even when its path happens to contain a
+  // "stdlib" directory component (e.g. tests/integration/cases/stdlib/).
+  if (mod.id == graph.entry) return false;
   return mod.path.find("stdlib") != std::string::npos;
 }
 bool checkSupportedExpr(const Expr& expr);
@@ -1636,7 +1639,7 @@ bool checkSupportedExpr(const Expr& expr) {
 bool isLLVMSupported(const ModuleGraph& graph) {
   if (graph.modules.empty()) return false;
   for (const auto& mod : graph.modules) {
-    if (!mod.program || isStdlibModule(mod)) continue;
+    if (!mod.program || isStdlibModule(graph,mod)) continue;
     for (const auto& st : mod.program->statements) {
       if (!checkSupportedStmt(*st, true)) return false;
     }
