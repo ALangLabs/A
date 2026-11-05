@@ -1,4 +1,5 @@
 #include "pipeline/pipeline.hpp"
+#include <filesystem>
 #include <fstream>
 #include <sstream>
 #include <utility>
@@ -39,14 +40,41 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
   CompiledModule m; m.graph=std::make_unique<ModuleGraph>(std::move(graph)); m.sema=std::make_unique<SemaResult>(std::move(result)); m.ok=true; return m;
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
+  // Hash the source before it is moved into the frontend; used as the native
+  // compile-cache key so repeat `a run`s skip recompilation (Goose-style).
+  std::uint64_t srcHash=1469598103934665603ULL;
+  for(unsigned char c:source){srcHash^=c;srcHash*=1099511628211ULL;}
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(source),config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
   // Fast path: native-subset programs compile and run directly
   // (Goose/Mojo-style). If native compilation is unavailable, fall back to
   // the internal engine so `run` keeps full dynamic semantics.
   if(std::getenv("A_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
-    std::string base="/tmp/a_native_run_"+std::to_string(::getpid())+"_"+std::to_string(::rand());
-    if(kgen::compileNativeExecutable(*m.graph,*m.sema,base,err)){
-      return kgen::runNativeExecutable(base,in,out,err);
+    std::uint64_t h=srcHash;
+    auto mix=[&](const std::string& d){for(unsigned char c:d){h^=c;h*=1099511628211ULL;}};
+    for(const auto& mod:m.graph->modules){
+      if(mod.path.find("stdlib")!=std::string::npos) continue;
+      mix(mod.path);
+      std::error_code ec;
+      auto mt=std::filesystem::last_write_time(mod.path,ec);
+      if(!ec) mix(std::to_string(mt.time_since_epoch().count()));
+    }
+    std::ostringstream hex; hex<<std::hex<<h;
+    const std::string cacheDir="/tmp/a_native_cache";
+    const std::string cacheBin=cacheDir+"/"+hex.str();
+    const std::string runBin="/tmp/a_native_run_"+std::to_string(::getpid())+"_"+std::to_string(::rand());
+    std::error_code ec;
+    if(std::filesystem::exists(cacheBin,ec)){
+      std::filesystem::copy_file(cacheBin,runBin,std::filesystem::copy_options::overwrite_existing,ec);
+      if(!ec) return kgen::runNativeExecutable(runBin,in,out,err);
+    }
+    std::filesystem::create_directories(cacheDir,ec);
+    if(kgen::compileNativeExecutable(*m.graph,*m.sema,cacheBin,err)){
+      std::filesystem::remove(cacheBin+".s",ec);
+      std::filesystem::remove(cacheBin+".ll",ec);
+      if(std::filesystem::copy_file(cacheBin,runBin,std::filesystem::copy_options::overwrite_existing,ec)){
+        return kgen::runNativeExecutable(runBin,in,out,err);
+      }
+      return kgen::runNativeExecutable(cacheBin,in,out,err);
     }
   }
   return kgen::runWithEngine(*m.graph,*m.sema,sink,in,out,err);
