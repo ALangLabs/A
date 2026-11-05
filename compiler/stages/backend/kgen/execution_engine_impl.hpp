@@ -17,6 +17,7 @@
 #include "collections/transparent_map.hpp"
 #include "memory/value.hpp"
 #include "type-checker/sema.hpp"
+#include "backend/kgen/python_interop.hpp"
 
 namespace a {
 
@@ -237,6 +238,11 @@ class KGENExecutionEngine {
   Value evalIdentifier(const IdentExpr& expr, Env& env);
   Value evalBinary(const BinaryExpr& expr, Env& env);
   Value evalCall(const CallExpr& expr, Env& env);
+  // Positional arguments only; named arguments (name=value) are evaluated by
+  // evalKeywordArgs and forwarded to Python callables.
+  KGENExecutionEngine::ArgList evalPositionalArgs(const std::vector<CallArg>& args, Env& env);
+  // Evaluates every named argument of a call; empty when the call has none.
+  std::vector<python::KeywordArg> evalKeywordArgs(const std::vector<CallArg>& args, Env& env);
   Value evalString(const StringLitExpr& expr, Env& env);
   Value evalIndex(const IndexExpr& expr, Env& env);
   Value evalSlice(const SliceExpr& expr, Env& env);
@@ -261,6 +267,9 @@ class KGENExecutionEngine {
   Value callFunction(const FnDecl& decl, ArgList args, Span span);
   Value callClosure(const ClosurePtr& closure, ArgList args, Span span);
   Value callValue(const Value& callee, ArgList args, Span span);
+  // `kwargs` are the already-evaluated named arguments (name=value) of the call.
+  Value callValue(const Value& callee, ArgList args, const std::vector<python::KeywordArg>& kwargs,
+                  Span span);
   Value callMethod(const StructPtr& object, const std::string& methodName, ArgList args,
                    Span span);
   Value callModuleMember(const ModuleObj& module, const std::string& member,

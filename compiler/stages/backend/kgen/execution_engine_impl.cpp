@@ -1,5 +1,6 @@
 #include "backend/kgen/execution_engine_impl.hpp"
 #include "backend/kgen/python_interop.hpp"
+#include "backend/kgen/runtime/terminal.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -25,6 +26,10 @@
 
 namespace a {
 namespace {
+bool hasNamedArgs(const std::vector<CallArg>& args) {
+  return std::any_of(args.begin(), args.end(), [](const CallArg& arg) { return !arg.name.empty(); });
+}
+
 
 constexpr int kMaxCallDepth = 2000;
 
@@ -2538,10 +2543,9 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
     // Sema proved the callee is a builtin, not a variable: evaluate arguments
     // and dispatch on the resolved id instead of walking scopes and name maps.
     if (expr.builtinId != BuiltinId::None) {
-      ArgList args;
-      args.reserve(expr.args.size());
-      for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
-      return callBuiltinFast(expr.builtinId, ident->name, args, expr.span);
+      if (hasNamedArgs(expr.args)) fail(expr.span, "Named arguments are not supported for this function.");
+      ArgList builtinArgs = evalPositionalArgs(expr.args, env);
+      return callBuiltinFast(expr.builtinId, ident->name, builtinArgs, expr.span);
     }
     // Sema already resolved a plain identifier to a declared function or struct;
     // call it without walking the scope chain again.
@@ -2549,17 +2553,12 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
       if (expr.calleeStruct) {
         return constructStruct(*expr.calleeStruct, expr.args, env, expr.span);
       }
-      ArgList args;
-      args.reserve(expr.args.size());
-      for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
-      return callFunction(*expr.calleeFunction, std::move(args), expr.span);
+      return callFunction(*expr.calleeFunction, evalPositionalArgs(expr.args, env), expr.span);
     }
 
     if (Binding* binding = env.find(ident->name)) {
-      ArgList args;
-      args.reserve(expr.args.size());
-      for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
-      return callValue(binding->value, std::move(args), expr.span);
+      return callValue(binding->value, evalPositionalArgs(expr.args, env),
+                       evalKeywordArgs(expr.args, env), expr.span);
     }
 
     auto structIt = sema_.structs.end();
@@ -2579,14 +2578,9 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
       return constructStruct(*expr.calleeStruct, expr.args, env, expr.span);
     }
 
-    ArgList args;
-    args.reserve(expr.args.size());
-    for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
-
-    if (expr.calleeFunction) {
-      return callFunction(*expr.calleeFunction, std::move(args), expr.span);
-    }
-    return callBuiltin(ident->name, args, expr.span);
+    if (hasNamedArgs(expr.args)) fail(expr.span, "Named arguments are not supported for this function.");
+    ArgList builtinArgs = evalPositionalArgs(expr.args, env);
+    return callBuiltin(ident->name, builtinArgs, expr.span);
   }
 
   if (auto* field = asExpr<FieldExpr>(*expr.callee, ExprKind::Field)) {
@@ -2622,14 +2616,15 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
       }
     }
 
-    ArgList args;
-    args.reserve(expr.args.size());
-    for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
+    if (hasNamedArgs(expr.args) && !std::holds_alternative<PythonObjectPtr>(object.data)) {
+      fail(expr.span, "Named arguments are only supported when calling Python objects.");
+    }
+    ArgList args = evalPositionalArgs(expr.args, env);
 
     if (std::holds_alternative<PythonObjectPtr>(object.data)) {
 #ifdef A_HAVE_PYTHON
       Value attr = python::getAttr(object, field->field, field->fieldSpan);
-      return callValue(attr, std::move(args), expr.span);
+      return callValue(attr, std::move(args), evalKeywordArgs(expr.args, env), expr.span);
 #else
       fail(expr.span, "Python interop is not available in this build.");
 #endif
@@ -2642,18 +2637,18 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
   }
 
   Value callee = eval(*expr.callee, env);
-  ArgList args;
-  args.reserve(expr.args.size());
-  for (const auto& arg : expr.args) args.push_back(eval(*arg.value, env));
-  return callValue(callee, std::move(args), expr.span);
+  return callValue(callee, evalPositionalArgs(expr.args, env), evalKeywordArgs(expr.args, env),
+                   expr.span);
 }
 
 Value KGENExecutionEngine::callModuleMember(const ModuleObj& module, const std::string& member,
                                     const std::vector<CallArg>& args, Env& env, Span span) {
   if (module.id < 0) {
-    ArgList values;
-    values.reserve(args.size());
-    for (const auto& arg : args) values.push_back(eval(*arg.value, env));
+    if (hasNamedArgs(args)) {
+      fail(span, "Named arguments are not supported for this function.",
+           "Only calls to Python objects (import python:<module>) accept named arguments.");
+    }
+    ArgList values = evalPositionalArgs(args, env);
     if (const std::string* fn = nativeFunction(module.nativeName, member)) {
       return callBuiltin(*fn, values, span);
     }
@@ -2665,10 +2660,10 @@ Value KGENExecutionEngine::callModuleMember(const ModuleObj& module, const std::
 
   const ModuleExports& exports = sema_.modules[static_cast<std::size_t>(module.id)];
   if (auto fn = exports.functions.find(member); fn != exports.functions.end()) {
-    ArgList values;
-    values.reserve(args.size());
-    for (const auto& arg : args) values.push_back(eval(*arg.value, env));
-    return callFunction(*fn->second, std::move(values), span);
+    if (hasNamedArgs(args)) {
+      fail(span, "Named arguments are not supported for this function.");
+    }
+    return callFunction(*fn->second, evalPositionalArgs(args, env), span);
   }
   if (exports.structs.count(member)) {
     const StructDecl* decl = findStruct(qualifiedName(module.id, member));
@@ -2678,16 +2673,40 @@ Value KGENExecutionEngine::callModuleMember(const ModuleObj& module, const std::
 
   Binding* binding = moduleBinding(module, member);
   if (binding) {
-    ArgList values;
-    values.reserve(args.size());
-    for (const auto& arg : args) values.push_back(eval(*arg.value, env));
-    return callValue(binding->value, std::move(values), span);
+    return callValue(binding->value, evalPositionalArgs(args, env), evalKeywordArgs(args, env), span);
   }
 
   fail(span, "Module '" + exports.name + "' has no function '" + member + "'.");
 }
 
+KGENExecutionEngine::ArgList KGENExecutionEngine::evalPositionalArgs(const std::vector<CallArg>& args, Env& env) {
+  ArgList values;
+  values.reserve(args.size());
+  for (const auto& arg : args) {
+    if (arg.name.empty()) values.push_back(eval(*arg.value, env));
+  }
+  return values;
+}
+
+std::vector<python::KeywordArg> KGENExecutionEngine::evalKeywordArgs(
+    const std::vector<CallArg>& args, Env& env) {
+  std::vector<python::KeywordArg> kwargs;
+  for (const auto& arg : args) {
+    if (!arg.name.empty()) kwargs.push_back({arg.name, eval(*arg.value, env)});
+  }
+  return kwargs;
+}
+
 Value KGENExecutionEngine::callValue(const Value& callee, ArgList args, Span span) {
+  return callValue(callee, std::move(args), {}, span);
+}
+
+Value KGENExecutionEngine::callValue(const Value& callee, ArgList args,
+                                     const std::vector<python::KeywordArg>& kwargs, Span span) {
+  if (!kwargs.empty() && !std::holds_alternative<PythonObjectPtr>(callee.data)) {
+    fail(span, "Named arguments are not supported for this function.",
+         "Only calls to Python objects (import python:<module>) accept named arguments.");
+  }
   if (auto* closure = std::get_if<ClosurePtr>(&callee.data)) {
     return callClosure(*closure, std::move(args), span);
   }
@@ -2697,9 +2716,9 @@ Value KGENExecutionEngine::callValue(const Value& callee, ArgList args, Span spa
   if (auto* py = std::get_if<PythonObjectPtr>(&callee.data)) {
 #ifdef A_HAVE_PYTHON
     std::vector<Value> argv;
-    argv.reserve(args.size());
+    argv.reserve(args.size() + kwargs.size());
     for (Value& arg : args) argv.push_back(std::move(arg));
-    return python::callObject(*py, argv, span);
+    return python::callObject(*py, argv, kwargs, span);
 #else
     fail(span, "Python interop is not available in this build.");
 #endif
@@ -3405,6 +3424,33 @@ Value KGENExecutionEngine::callBuiltin(const std::string& name, ArgList& args, S
     if (!args.empty()) {
       out_ << expectString(args[0], span, "The input prompt");
       out_.flush();
+    }
+    // In REPL raw mode the line editor owns fd 0; read through the same
+    // UTF-8-aware path so buffered std::cin reads cannot swallow keys.
+    if (kgen::terminal::rawActive()) {
+      std::string line;
+      while (true) {
+        std::string ch;
+        if (kgen::terminal::readChar(-1, ch) <= 0) break;
+        if (ch == "\n" || ch == "\r") break;
+        if (ch == "\x03" || ch == "\x04") break;  // Ctrl-C / Ctrl-D end input
+        if (ch == "\x7f" || ch == "\x08") {
+          if (!line.empty()) {
+            // Drop the last UTF-8 encoded codepoint.
+            std::size_t cut = line.size();
+            while (cut > 0 && (static_cast<unsigned char>(line[cut - 1]) & 0xC0) == 0x80) --cut;
+            if (cut > 0) --cut;
+            line.resize(cut);
+            out_ << "\x08 \x08";
+          }
+          continue;
+        }
+        line += ch;
+        out_ << ch;
+      }
+      out_ << "\n";
+      out_.flush();
+      return makeString(std::move(line));
     }
     std::string line;
     if (!std::getline(in_, line)) {

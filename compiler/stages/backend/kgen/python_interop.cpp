@@ -373,8 +373,10 @@ Value getItem(const Value& object, const Value& key, Span span) {
 #endif
 }
 
-Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args, Span span) {
+Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args,
+                 const std::vector<KeywordArg>& kwargs, Span span) {
 #ifndef A_HAVE_PYTHON
+  (void)kwargs;
   unavailable(span, "Cannot call a Python object");
 #else
   requirePython(span);
@@ -394,7 +396,29 @@ Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args
     }
     PyTuple_SET_ITEM(tuple, static_cast<Py_ssize_t>(i), arg);
   }
-  PyObject* result = PyObject_Call(fn, tuple, nullptr);
+  PyObject* kw = nullptr;
+  if (!kwargs.empty()) {
+    kw = PyDict_New();
+    if (!kw) {
+      Py_DECREF(tuple);
+      failPy(span, "Failed to build Python keyword arguments");
+    }
+    for (const KeywordArg& kwarg : kwargs) {
+      PyObject* key = PyUnicode_FromString(kwarg.name.c_str());
+      PyObject* value = key ? toPy(kwarg.value, span) : nullptr;
+      if (!value || PyDict_SetItem(kw, key, value) != 0) {
+        Py_XDECREF(key);
+        Py_XDECREF(value);
+        Py_DECREF(kw);
+        Py_DECREF(tuple);
+        failPy(span, "Failed to convert keyword argument '" + kwarg.name + "'");
+      }
+      Py_DECREF(key);
+      Py_DECREF(value);
+    }
+  }
+  PyObject* result = PyObject_Call(fn, tuple, kw);
+  Py_XDECREF(kw);
   Py_DECREF(tuple);
   if (!result) failPy(span, "Python call failed");
   Value out = fromPy(result);

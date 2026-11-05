@@ -1,0 +1,8 @@
+import python:json
+import python:string
+
+print(json.dumps({"a": 1}, indent=2))
+print(string.capwords("  hello   world  "))
+
+from python:math import gcd
+print(gcd(12, 8))

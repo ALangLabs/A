@@ -12,7 +12,12 @@ bool ensureInitialized(const std::string& moduleHint = "");
 Value importModule(const std::string& name, Span span);
 Value getAttr(const Value& object, const std::string& attr, Span span);
 Value getItem(const Value& object, const Value& key, Span span);
-Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args, Span span);
+struct KeywordArg {
+  std::string name;
+  Value value;
+};
+Value callObject(const PythonObjectPtr& callable, const std::vector<Value>& args,
+                 const std::vector<KeywordArg>& kwargs, Span span);
 bool equals(const Value& lhs, const Value& rhs);
 bool isPythonValue(const Value& v);
 std::string repr(const Value& v);
