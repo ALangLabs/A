@@ -1,0 +1,12 @@
+# Smoke test: Mojo-inspired std/ package layout is resolvable.
+from "../../../../stdlib/std/test/__init__.a" import check, equal, summary, report
+from "../../../../stdlib/std/math/__init__.a" import sqrt, clamp
+from "../../../../stdlib/std/builtin/__init__.a" import len_of, range_list
+
+check("sqrt", sqrt(144.0) == 12.0)
+equal("clamp", clamp(5, 0, 3), 3)
+equal("len_of", len_of(range_list(4)), 4)
+report()
+failed = summary()
+if failed != 0:
+    panic("std layout smoke failed")
