@@ -465,6 +465,13 @@ class CEmitter {
         collectExprStrings(*x.index);
         break;
       }
+      case ExprKind::Comprehension: {
+        const auto& cp = static_cast<const ComprehensionExpr&>(e);
+        collectExprStrings(*cp.element);
+        collectExprStrings(*cp.iterable);
+        if (cp.condition) collectExprStrings(*cp.condition);
+        break;
+      }
       case ExprKind::Call: {
         const auto& c = static_cast<const CallExpr&>(e);
         for (const auto& a : c.args) collectExprStrings(*a.value);
@@ -551,7 +558,10 @@ class CEmitter {
     std::string n = cIdent(rawName);
     if (locals_.count(n)) return "v_" + n;
     if (globalNames_.count(n)) return "g_" + n;
-    return "(aval){.i=0,.f=0}";
+    // Undeclared names (e.g. comprehension vars bound in an inner block)
+    // still resolve to v_<n>; genuinely undefined names fail C compilation
+    // and fall back to the interpreter.
+    return "v_" + n;
   }
   bool isGlobalLV(const std::string& lv) { return lv.rfind("g_", 0) == 0; }
 
@@ -702,6 +712,46 @@ class CEmitter {
         }
         out_ << "  }\n";
         return tn;
+      }
+      case ExprKind::Comprehension: {
+        const auto& cp = static_cast<const ComprehensionExpr&>(e);
+        int ti = tmpTop_++;
+        std::string it = "_t" + std::to_string(ti);
+        std::string res = "_t" + std::to_string(tmpTop_++);
+        std::string vn = "v_" + cIdent(cp.var);
+        out_ << "  {\n";
+        out_ << "    aval " << vn << " = {0};\n";
+        out_ << "    " << res << ".f = 2; " << res << ".i = (a_i64)a_new_obj(2, 0, 0, 0); "
+             << res << ".d = 0;\n";
+        bool isRange = cp.iterable->kind == ExprKind::Range;
+        if (isRange) {
+          const auto& r = static_cast<const RangeExpr&>(*cp.iterable);
+          std::string is = evalI(*r.start);
+          std::string ie = evalI(*r.end);
+          out_ << "    for (a_i64 _k" << ti << " = " << is << "; _k" << ti
+               << " < " << ie << "; ++_k" << ti << ") {\n";
+          out_ << "      " << vn << " = (aval){.i=_k" << ti << ",.f=0};\n";
+        } else {
+          std::string ov = evalA(*cp.iterable);
+          out_ << "    " << it << " = " << ov << ";\n";
+          out_ << "    if (" << it << ".f == 2) {\n";
+          out_ << "      a_obj *_o" << ti << " = (a_obj *)" << it << ".i;\n";
+          out_ << "      for (a_i64 _k" << ti << " = 0; _k" << ti << " < _o" << ti
+               << "->len; ++_k" << ti << ") {\n";
+          out_ << "        " << vn << " = a_index(" << it << ", (aval){.i=_k" << ti
+               << ",.f=0});\n";
+        }
+        std::string indent = isRange ? "      " : "        ";
+        if (cp.condition) {
+          std::string cv = evalA(*cp.condition);
+          out_ << indent << "if (!(" << cv << ".f ? " << cv << ".d != 0.0 : " << cv
+               << ".i != 0)) continue;\n";
+        }
+        std::string ev = evalA(*cp.element);
+        out_ << indent << "(void)a_append(" << res << ", " << ev << ");\n";
+        out_ << (isRange ? "    }\n" : "      }\n    }\n");
+        out_ << "  }\n";
+        return res;
       }
       case ExprKind::Index: {
         const auto& x = static_cast<const IndexExpr&>(e);

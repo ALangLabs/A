@@ -1647,6 +1647,12 @@ bool checkSupportedExpr(const Expr& expr) {
       const auto& x = static_cast<const IndexExpr&>(expr);
       return checkSupportedExpr(*x.object) && checkSupportedExpr(*x.index);
     }
+    case ExprKind::Comprehension: {
+      const auto& cp = static_cast<const ComprehensionExpr&>(expr);
+      if (cp.isSet) return false;  // sets need a hash runtime
+      return checkSupportedExpr(*cp.element) && checkSupportedExpr(*cp.iterable) &&
+             (!cp.condition || checkSupportedExpr(*cp.condition));
+    }
     case ExprKind::StringLit: {
       // Static string literals are heap objects in the C emitter; f-strings
       // (interpolated parts) still need the interpreter.
