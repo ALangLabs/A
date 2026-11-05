@@ -1,7 +1,7 @@
 {
   "name": "a-language",
   "displayName": "A Language",
-  "description": "Syntax highlighting, diagnostics, navigation, hover documentation, completion, signature help, formatting, and rename for the A programming language.",
+  "description": "Syntax highlighting, the A language server (diagnostics as you type, hover, go to definition, symbols, formatting, signature help), check-on-save fallback, and Run/Build/Test/Check/Format tasks for the A programming language.",
   "version": "0.0.1",
   "publisher": "a-lang",
   "license": "MIT",
@@ -11,11 +11,12 @@
     "directory": "tools/vscode-a"
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.85.0"
   },
   "categories": [
     "Programming Languages",
-    "Linters"
+    "Linters",
+    "Snippets"
   ],
   "keywords": [
     "a",
@@ -25,9 +26,23 @@
   ],
   "activationEvents": [
     "onLanguage:a",
-    "onCommand:a.restartServer"
+    "onCommand:a.restartServer",
+    "onTaskType:a",
+    "onDebugInitialConfigurations",
+    "onDebugDynamicConfigurations:a"
   ],
   "main": "./extension.js",
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": "limited",
+      "description": "Syntax highlighting, snippets and the outline work in Restricted Mode. Running the compiler requires a trusted workspace.",
+      "restrictedConfigurations": ["a.compilerPath", "a.entryFile", "a.stdlibPath", "a.modulePaths", "a.server.path", "a.server.args", "a.server.modulePaths"]
+    },
+    "virtualWorkspaces": {
+      "supported": false,
+      "description": "A uses a compiler and source files on the extension host's filesystem."
+    }
+  },
   "contributes": {
     "languages": [
       {
@@ -36,6 +51,10 @@
           "A",
           "a"
         ],
+        "icon": {
+          "dark": "./fileicons/a-dark.svg",
+          "light": "./fileicons/a-light.svg"
+        },
         "extensions": [
           ".a"
         ],
@@ -47,15 +66,196 @@
         "language": "a",
         "scopeName": "source.a",
         "path": "./syntaxes/a.tmLanguage.json"
+      },
+      {
+        "scopeName": "markdown.a.codeblock",
+        "path": "./syntaxes/a.markdown.json",
+        "injectTo": [
+          "text.html.markdown"
+        ],
+        "embeddedLanguages": {
+          "meta.embedded.block.a": "a"
+        }
+      }
+    ],
+    "snippets": [
+      {
+        "language": "a",
+        "path": "./snippets/a.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "a.run",
+        "title": "Run Program",
+        "category": "A",
+        "icon": "$(play)",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
+        "command": "a.build",
+        "title": "Build Executable",
+        "category": "A",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
+        "command": "a.test",
+        "title": "Run Tests",
+        "category": "A",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
+        "command": "a.check",
+        "title": "Check Program",
+        "category": "A",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
+        "command": "a.fmt",
+        "title": "Format File",
+        "category": "A",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
+        "command": "a.showOutput",
+        "title": "Show Compiler Output",
+        "category": "A"
+      },
+      {
+        "command": "a.restartServer",
+        "title": "Restart Language Server",
+        "category": "A",
+        "enablement": "isWorkspaceTrusted"
+      }
+    ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "a.run",
+          "when": "editorLangId == a && isWorkspaceTrusted",
+          "group": "navigation"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "a.run",
+        "key": "ctrl+shift+b",
+        "mac": "cmd+shift+b",
+        "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings"
+      },
+      {
+        "command": "a.run",
+        "key": "ctrl+f5",
+        "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings && debugState == inactive"
+      },
+      {
+        "command": "a.run",
+        "key": "f5",
+        "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings && debugState == inactive"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "a",
+        "label": "A: Run Program",
+        "languages": [
+          "a"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "required": [],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Entry file. Defaults to a.entryFile or the active A file.",
+                "default": "${file}"
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "a",
+            "request": "launch",
+            "name": "A: Run Program",
+            "noDebug": true
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "A: Run Program",
+            "description": "Run the A program in a task terminal (no debugger).",
+            "body": {
+              "type": "a",
+              "request": "launch",
+              "name": "A: Run Program",
+              "noDebug": true
+            }
+          }
+        ]
       }
     ],
     "configuration": {
       "title": "A",
       "properties": {
+        "a.compilerPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Compiler executable or command on PATH. Empty searches a and build/{Release,Debug}/a in the workspace, then PATH. Relative paths use the workspace folder. Supports ${workspaceFolder}."
+        },
+        "a.entryFile": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Program entry file, relative to the workspace folder. Empty checks/runs the current file. Set this when editing imported modules. Supports ${workspaceFolder}."
+        },
+        "a.stdlibPath": {
+          "type": "string",
+          "default": "",
+          "scope": "resource",
+          "description": "Standard-library directory passed as --stdlib to the compiler and a-lsp. Empty uses the compiler's default lookup. Supports ${workspaceFolder}."
+        },
+        "a.modulePaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "scope": "resource",
+          "description": "Extra directories searched for imported A modules, passed as -I to the compiler and to a-lsp. Supports ${workspaceFolder}."
+        },
+        "a.useLanguageServer": {
+          "type": "boolean",
+          "default": true,
+          "scope": "window",
+          "description": "Start the a-lsp language server for diagnostics as you type, hover, go to definition, symbols, formatting and signature help. Without it, or with it off, saved files are checked with 'a check' (a.checkOnSave)."
+        },
+        "a.checkOnSave": {
+          "type": "boolean",
+          "default": true,
+          "scope": "resource",
+          "description": "Without the language server: check saved A files on open and save. Checks wait until open A files in the same workspace folder are saved."
+        },
+        "a.checkTimeout": {
+          "type": "number",
+          "default": 30000,
+          "minimum": 1000,
+          "maximum": 300000,
+          "scope": "resource",
+          "description": "Maximum time in milliseconds for a background compiler check."
+        },
+        "a.useRunKeybindings": {
+          "type": "boolean",
+          "default": true,
+          "description": "Run the program on Ctrl+Shift+B (Cmd+Shift+B on macOS), F5, and Ctrl+F5 while editing A. Disable to use VS Code's usual task/debug keybindings."
+        },
         "a.server.path": {
           "type": "string",
           "default": "",
-          "description": "Path to the a-lsp executable. When empty, the extension searches build/a-lsp in the workspace and a-lsp on PATH."
+          "scope": "resource",
+          "description": "Path to the a-lsp executable. When empty, the extension searches build*/a-lsp in the workspace and a-lsp on PATH. The A_LSP_PATH environment variable is also honored."
         },
         "a.server.args": {
           "type": "array",
@@ -63,6 +263,7 @@
             "type": "string"
           },
           "default": [],
+          "scope": "resource",
           "description": "Extra arguments passed to a-lsp (for example --stdio)."
         },
         "a.server.modulePaths": {
@@ -71,18 +272,72 @@
             "type": "string"
           },
           "default": [],
-          "description": "Extra directories searched for imported A modules."
+          "scope": "resource",
+          "description": "Extra directories searched for imported A modules by a-lsp. Merged with a.modulePaths."
         }
       }
     },
-    "commands": [
+    "taskDefinitions": [
       {
-        "command": "a.restartServer",
-        "title": "A: Restart Language Server"
+        "type": "a",
+        "required": [
+          "action"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "enum": [
+              "run",
+              "build",
+              "test",
+              "check",
+              "fmt"
+            ],
+            "description": "Compiler operation. Run compiles and executes the program and is the contributed build task; build makes an executable beside the source; test runs every fn test_*(); check type-checks; fmt rewrites the source formatted."
+          },
+          "file": {
+            "type": "string",
+            "description": "Source file relative to the workspace folder. Defaults to a.entryFile or the active file. Supports ${workspaceFolder} and ${file}."
+          },
+          "output": {
+            "type": "string",
+            "description": "Executable path for build; defaults to the source path without the .a extension."
+          }
+        }
       }
-    ]
+    ],
+    "problemMatchers": [
+      {
+        "name": "a",
+        "owner": "a-task",
+        "source": "A",
+        "fileLocation": [
+          "autoDetect",
+          "${workspaceFolder}"
+        ],
+        "pattern": [
+          {
+            "regexp": "^(error|warning)(?:\\[[^\\]]*\\])?:\\s*(.*)$",
+            "severity": 1,
+            "message": 2
+          },
+          {
+            "regexp": "^\\s*-->\\s+(.+):(\\d+):(\\d+)\\s*$",
+            "file": 1,
+            "line": 2,
+            "column": 3
+          }
+        ]
+      }
+    ],
+    "configurationDefaults": {
+      "[a]": {
+        "editor.tabSize": 4,
+        "editor.insertSpaces": true
+      }
+    }
   },
   "scripts": {
-    "package": "vsce package"
+    "package": "vsce package --no-dependencies"
   }
 }

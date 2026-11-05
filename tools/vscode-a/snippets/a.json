@@ -1,0 +1,107 @@
+{
+  "Main function": {
+    "prefix": "main",
+    "body": ["fn main():", "\t$0"],
+    "description": "Program entry point"
+  },
+  "Function": {
+    "prefix": "fn",
+    "body": ["fn ${1:name}(${2:args}):", "\t$0"],
+    "description": "Function declaration"
+  },
+  "Function with return type": {
+    "prefix": "fnret",
+    "body": ["fn ${1:name}(${2:args}) -> ${3:String}:", "\treturn $0"],
+    "description": "Function with an annotated return type"
+  },
+  "Lambda": {
+    "prefix": "lambda",
+    "body": "${1:name} = fn(${2:args}) => ${3:expr}$0",
+    "description": "Anonymous function"
+  },
+  "Struct": {
+    "prefix": "struct",
+    "body": ["struct ${1:Name}:", "\t${2:field}", "", "\tfn ${3:method}(self):", "\t\t$0"],
+    "description": "Struct with fields and methods"
+  },
+  "Class": {
+    "prefix": "class",
+    "body": ["class ${1:Name}:", "\t$0"],
+    "description": "Class declaration"
+  },
+  "Enum": {
+    "prefix": "enum",
+    "body": ["enum ${1:Name}:", "\t${2:Variant}", "\t$0"],
+    "description": "Enum declaration"
+  },
+  "Trait": {
+    "prefix": "trait",
+    "body": ["trait ${1:Name}:", "\t$0"],
+    "description": "Trait declaration"
+  },
+  "Type alias": {
+    "prefix": "type",
+    "body": "type ${1:Name} = ${2:i64}$0",
+    "description": "Type alias"
+  },
+  "Import module": {
+    "prefix": "import",
+    "body": "import ${1:math}$0",
+    "description": "Import an A module"
+  },
+  "Import from file": {
+    "prefix": "from",
+    "body": "from \"${1:lib/module.a}\" import ${2:name}$0",
+    "description": "Import names from a quoted module path"
+  },
+  "Print": {
+    "prefix": "print",
+    "body": "print(${1:value})$0",
+    "description": "Print values"
+  },
+  "If": {
+    "prefix": "if",
+    "body": ["if ${1:condition}:", "\t$0"],
+    "description": "Conditional block"
+  },
+  "If else": {
+    "prefix": "ife",
+    "body": ["if ${1:condition}:", "\t$2", "else:", "\t$0"],
+    "description": "Conditional with fallback"
+  },
+  "For": {
+    "prefix": "for",
+    "body": ["for ${1:item} in ${2:items}:", "\t$0"],
+    "description": "Iterate over a range or collection"
+  },
+  "While": {
+    "prefix": "while",
+    "body": ["while ${1:condition}:", "\t$0"],
+    "description": "While loop"
+  },
+  "Match": {
+    "prefix": "match",
+    "body": ["match ${1:value}:", "\t${2:pattern} => ${3:result}", "\t_ => $0"],
+    "description": "Pattern match"
+  },
+  "List comprehension": {
+    "prefix": "compre",
+    "body": "${1:name} = [${2:expr} for ${3:item} in ${4:items}]$0",
+    "description": "List comprehension"
+  },
+  "Defer": {
+    "prefix": "defer",
+    "body": "defer ${1:cleanup}$0",
+    "description": "Run a statement when the block ends"
+  },
+  "Test function": {
+    "prefix": "test",
+    "body": ["fn test_${1:name}():", "\tassert(${2:condition})$0"],
+    "description": "Test run by 'a test'"
+  },
+  "Assert": {
+    "prefix": "assert",
+    "body": "assert(${1:condition})$0",
+    "description": "Assertion"
+  }
+}
