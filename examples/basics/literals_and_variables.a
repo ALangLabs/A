@@ -1,0 +1,15 @@
+# Literals, assignment, and rebinding
+x = 42
+pi_like = 3.14159
+ok = true
+letter = 'A'
+name = "Ada"
+
+print(x, pi_like, ok, letter, name)
+
+# Hex/binary integers
+print(0xFF, 0b1010)
+
+# Rebinding (dynamic/Python-style)
+x = "now a string"
+print(x)

@@ -1,2 +1,0 @@
-name = "A"
-print("Hello from {name}!")

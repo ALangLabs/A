@@ -1,0 +1,22 @@
+# Native modules: core, math, time, fs
+import core
+import math
+import time
+import fs
+
+core.assert(1 + 1 == 2)
+core.assert_eq("A".lower(), "a")
+print(math.sqrt(81), math.PI, math.floor(3.9))
+
+start = time.now()
+time.sleep(1)
+end = time.now()
+print(end >= start)
+
+path = "/tmp/a-stdlib-example.txt"
+fs.write_file(path, "hello")
+fs.append_file(path, " A")
+print(fs.read_file(path))
+print(fs.file_exists(path))
+fs.remove_file(path)
+print(fs.file_exists(path))

@@ -1,0 +1,17 @@
+# Arithmetic, comparison, logic, bitwise, ternary, coalescing
+a = 10
+b = 3
+
+print(a + b, a - b, a * b, a / b, a % b, a ** 2)
+print(a == b, a != b, a < b, a <= b, a > b, a >= b)
+print(true and false, true or false, not false)
+
+print((1 << 4) | 3)
+print(8 >> 1)
+
+n = -5
+label = n < 0 ? "negative" : "non-negative"
+print(label)
+
+missing = None
+print(missing ?? "fallback")

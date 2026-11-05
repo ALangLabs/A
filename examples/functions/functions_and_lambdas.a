@@ -1,0 +1,24 @@
+# Functions, annotations, lambdas, closures
+fn add(a, b):
+    return a + b
+
+fn greet(name: String) -> String:
+    return "Hello, {name}"
+
+print(add(2, 3))
+print(greet("A"))
+
+double = fn(n) => n * 2
+print(double(21))
+print((fn(x, y) => x + y)(20, 22))
+
+# Capture/snapshot semantics (see integration tests for details)
+counter = 10
+bump = fn() => counter + 1
+counter = 100
+print(bump(), counter)
+
+fn apply(f, value):
+    return f(value)
+
+print(apply(double, 5))

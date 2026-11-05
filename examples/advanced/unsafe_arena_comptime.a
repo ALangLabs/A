@@ -1,0 +1,20 @@
+# Unsafe/arena examples (advanced; semantics are implementation-specific)
+import arena
+import unsafe
+
+# Pool allocator supports individual releases; bump/region have different rules.
+a = arena.pool(1024)
+h = arena.alloc(a, 16)
+print(arena.used(a), arena.total(a))
+arena.release(a, h)
+print(arena.used(a))
+arena.reset(a)
+print(arena.used(a))
+
+xs = [10, 20, 30]
+print(unsafe.get(xs, 1))
+unsafe.set(xs, 1, 99)
+print(xs)
+
+# comptime syntax exists in the language; specialization coverage varies by backend.
+print("advanced example complete")

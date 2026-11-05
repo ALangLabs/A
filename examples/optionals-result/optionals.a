@@ -1,0 +1,22 @@
+# Optionals: None, Some, ??, !, ?., equality
+struct Address:
+    city
+    country
+
+struct User:
+    name
+    address
+
+missing = None
+print(missing, missing ?? 0)
+
+present = Some(41)
+print(present, present! + 1)
+
+user = User("Ada", Address("London", "UK"))
+maybeUser = Some(user)
+print(maybeUser?.name, maybeUser?.address?.city, maybeUser?.address?.country)
+
+nested = Some(Some(5))
+print((nested ?? Some(0)) ?? 1)
+print(present == Some(41), missing == None)

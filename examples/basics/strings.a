@@ -1,0 +1,14 @@
+# Strings: interpolation, escapes, raw strings, methods
+name = "World"
+print("Hello, {name}!")
+print("sum = {2 + 3}")
+
+print("line1\nline2")
+print("""raw triple-quoted
+string with {braces} not interpolated as normal behavior may vary""")
+
+s = "  Hello World  "
+print(s.strip().upper())
+print("a,b,c".split(","))
+print("Hello".contains("ell"), "Hello".startswith("He"), "Hello".endswith("ld"))
+print("-".join(["a", "b", "c"]))

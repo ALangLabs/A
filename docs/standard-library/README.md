@@ -1,123 +1,452 @@
-# Standard library
+# A Standard Library & API Reference
 
-The standard library is organized in a Mojo-inspired layout under `stdlib/std/` (see [`stdlib/std/README.md`](../../stdlib/std/README.md) and `/tmp/mojo-ref/Mojo/stdlib/std` for the reference).
+This reference documents the current A standard library surface as implemented by:
 
-- **Native modules** implemented by the toolchain (`compiler/stages/backend/stdlib/builtins.cpp`, registered in `name-resolution/native_modules.hpp`).
-- **A-file packages/modules** under `stdlib/std/` (and legacy compat paths under `stdlib/`), resolvable with `import "..."` or bare names such as `import test`.
+- `compiler/stages/name-resolution/native_modules.hpp` (native module namespaces)
+- `compiler/stages/name-resolution/builtin_docs.hpp` (builtin docs/signatures used by tooling)
+- `compiler/stages/type-checker/sema.cpp` (builtin recognition and type behavior)
+- `compiler/stages/type-checker/method_signatures.hpp` (array/map/set/string method surfaces)
+- `stdlib/prelude.a` and `stdlib/std/*`
+- integration tests in `tests/integration/cases/`
 
-Usage:
+> **Runtime note:** A currently executes with dynamic/Python-style semantics in many paths. Some stdlib/native-backed features (especially `json`, `binary`, `testing`, `log`, `metrics`, `trace`, `net`, `http`) are implemented in the runtime/builtin layer and are primarily exercised through the interpreter/KGEN execution engine path. Availability/performance characteristics may differ on the LLVM AOT path.
+
+## 1. Prelude (auto-loaded)
+
+`stdlib/prelude.a` is auto-loaded by the module loader when a stdlib root is found. It provides namespaced vocabulary and helpers.
+
+### 1.1 `prelude_version()`
+
+```a
+print(prelude_version())  # "0.0.1"
+```
+
+### 1.2 `Vec4` (SIMD-like value type, width 4)
+
+```a
+struct Vec4:
+    x
+    y
+    z
+    w
+```
+
+Methods:
+
+| Method | Description |
+|---|---|
+| `get(i)` | Returns lane `x/y/z/w` for indices 0..3 (else `w`) |
+| `to_list()` | Returns `[x, y, z, w]` |
+| `add(other)` | Lane-wise addition, returns `Vec4` |
+| `scale(s)` | Scales all lanes by `s`, returns `Vec4` |
+| `dot(other)` | Dot product |
+| `sum()` | Sum of lanes |
+
+### 1.3 Result helpers
+
+```a
+fn Ok(value):        # -> Result(ok=true, value, error=None)
+fn Err(message):     # -> Result(ok=false, value=None, error)
+fn unwrap(r):        # returns value or panics with r.error
+fn is_ok(r) -> bool
+fn is_err(r) -> bool
+fn unwrap_or(r, fallback)
+fn err_value(r)
+fn map_result(r, f: fn(i64) -> i64)
+fn and_then(r, f: fn(i64) -> Result) -> Result
+fn vectorize(f: fn(i64) -> i64, xs: [i64]) -> [i64]
+```
+
+Example:
+
+```a
+fn divide(a, b):
+    if b == 0:
+        return Err("division by zero")
+    return Ok(a / b)
+
+print(is_ok(divide(10, 2)))
+print(unwrap_or(divide(10, 0), -1))
+```
+
+## 2. Global builtins and constants
+
+These names are recognized by the type checker/runtime as builtins or builtin constants (subject to shadowing rules). Some are also exposed via native modules.
+
+### 2.1 Core I/O and conversion
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `print` | `print(value)` | Write value to stdout + newline |
+| `eprint` | `eprint(value)` | Write value to stderr + newline |
+| `input` | `input([prompt]) -> String` | Read a line from stdin |
+| `flush` | `flush()` | Flush stdout |
+| `len` | `len(value) -> i64` | Length of string/array/map/set (and supported containers) |
+| `str` | `str(value) -> String` | Convert value to string |
+| `int` | `int(value) -> i64` | Convert number/bool/numeric string to `i64` |
+| `float` | `float(value) -> f64` | Convert number/bool/numeric string to `f64` |
+
+### 2.2 Math / numeric builtins
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `abs` | `abs(x) -> number` | Absolute value |
+| `min` | `min(a, b) -> number` | Smaller of two values |
+| `max` | `max(a, b) -> number` | Larger of two values |
+| `pow` | `pow(base, exponent) -> f64` | Power |
+| `sqrt` | `sqrt(x) -> f64` | Square root |
+| `sin/cos/tan` | `sin(x) -> f64` etc. | Trig (radians) |
+| `asin/acos/atan/atan2` | `atan2(y, x) -> f64` | Inverse trig / angle |
+| `exp/log/log2/log10` | `log(x) -> f64` etc. | Exponential/logarithms |
+| `floor/ceil/round/trunc` | `round(x) -> f64` etc. | Rounding |
+| `random` | `random() -> f64` | Pseudo-random float in `[0, 1)` |
+| `random_int` | `random_int(low, high) -> i64` | Inclusive pseudo-random integer |
+| `sum` | `sum(values) -> number` | Sum numeric array |
+
+Sized conversion builtins are recognized by the checker: `i8,i16,i32,i64,u8,u16,u32,u64,f32,f64`.
+
+### 2.3 Collection / functional builtins
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `join` | `join(values, separator) -> String` | Join array of strings |
+| `map` | `map(values, fn) -> array` | Apply function to elements |
+| `filter` | `filter(values, fn) -> array` | Keep elements matching predicate |
+| `reduce` | `reduce(values, initial, fn) -> value` | Left fold |
+| `any` | `any(values, fn) -> bool` | Any element matches |
+| `all` | `all(values, fn) -> bool` | All elements match |
+| `set` | `set(values) -> Set` | Build set from iterable-like values |
+
+### 2.4 Optionals / results / assertions / control helpers
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `Some` | `Some(value) -> T?` | Wrap in optional |
+| `Ok` | `Ok(value) -> Result` | Success result |
+| `Err` | `Err(error) -> Result` | Error result |
+| `panic` | `panic(message)` | Abort with message (exit status 2) |
+| `assert` | `assert(condition[, message])` | Runtime assertion |
+| `assert_eq` | `assert_eq(actual, expected[, message])` | Equality assertion |
+
+### 2.5 Memory / ownership / borrow / unsafe builtins
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `move` | `move(value) -> T` | Move ownership out of a binding (tracked semantics) |
+| `copy` | `copy(value) -> T` | Deep copy a value |
+| `borrow` | `borrow(variable)` | Immutable borrow (analyzer-tracked) |
+| `borrow_mut` | `borrow_mut(variable)` | Mutable borrow (analyzer-tracked) |
+| `unsafe_get` | `unsafe_get(array, index) -> T` | Unchecked element access |
+| `unsafe_set` | `unsafe_set(array, index, value)` | Unchecked element assignment |
+| `unsafe_address_of` | `unsafe_address_of(array, index) -> *T` | Raw pointer to element |
+| `unsafe_load` | `unsafe_load(pointer) -> T` | Load through raw pointer |
+| `unsafe_store` | `unsafe_store(pointer, value)` | Store through raw pointer |
+| `unsafe_offset` | `unsafe_offset(pointer, count) -> *T` | Pointer offset |
+
+### 2.6 Allocator / arena builtins
+
+| API | Signature (tooling) | Description |
+|---|---|---|
+| `arena_new` | `arena_new(capacity) -> Allocator` | Bump allocator |
+| `arena_pool` | `arena_pool(capacity) -> Allocator` | Pool allocator (reuses equal-size blocks) |
+| `arena_region` | `arena_region(capacity) -> Allocator` | Region allocator (reverse-order release) |
+| `arena_alloc` | `arena_alloc(allocator, size) -> i64` | Allocate bytes, returns handle |
+| `arena_release` | `arena_release(allocator, handle)` | Release allocation |
+| `arena_reset` | `arena_reset(allocator)` | Free all allocations |
+| `arena_used` | `arena_used(allocator) -> i64` | Bytes in use |
+| `arena_total` | `arena_total(allocator) -> i64` | Capacity |
+
+### 2.7 Builtin constants
+
+Recognized constants include (see `builtin_docs.hpp` / `sema.cpp`):
+
+```text
+PI, E
+I8_MIN, I8_MAX, I16_MIN, I16_MAX, I32_MIN, I32_MAX, I64_MIN, I64_MAX
+U8_MAX, U16_MAX, U32_MAX
+F32_MIN, F32_MAX, F64_MIN, F64_MAX
+```
+
+## 3. Collection and primitive method API
+
+Method surfaces are defined in `compiler/stages/type-checker/method_signatures.hpp` and used by the type checker/LSP.
+
+### 3.1 Array methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `append` | `append(v)` | Add element to end |
+| `extend` | `extend(xs)` | Append all elements from another array |
+| `insert` | `insert(i, v)` | Insert before index |
+| `remove_at` | `remove_at(i)` | Remove and return element at index |
+| `pop` | `pop([i])` | Remove/return last (or index) |
+| `remove` | `remove(v)` | Remove first occurrence |
+| `clear` | `clear()` | Remove all elements |
+| `copy` | `copy()` | Shallow copy |
+| `count` | `count(v)` | Count occurrences |
+| `index` | `index(v[, start[, end]])` | First index; error if absent |
+| `contains` | `contains(v)` | Membership test |
+| `sort` | `sort()` | Sort in place |
+| `reverse` | `reverse()` | Reverse in place |
+| `first` | `first()` | First element as optional |
+| `last` | `last()` | Last element as optional |
+| `join` | `join(sep)` | Join elements with separator |
+
+### 3.2 Map methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `get` | `get(k[, default])` | Value for key, default or `None` |
+| `pop` | `pop(k[, default])` | Remove key and return value/default |
+| `contains` | `contains(k)` | Key membership |
+| `keys` | `keys()` | Keys array |
+| `values` | `values()` | Values array |
+| `items` | `items()` | Array of `(key, value)` tuples |
+| `update` | `update(other)` | Copy entries from another map |
+| `copy` | `copy()` | Shallow copy |
+| `clear` | `clear()` | Remove all entries |
+
+Indexing (`m[key]`) and assignment (`m[key] = value`) are also supported by the language/runtime.
+
+### 3.3 Set methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `add` | `add(v)` | Insert value |
+| `remove` | `remove(v)` | Remove value; error if absent |
+| `discard` | `discard(v)` | Remove if present |
+| `contains` | `contains(v)` | Membership |
+| `union` | `union(s)` | Union |
+| `intersection` | `intersection(s)` | Intersection |
+| `difference` | `difference(s)` | Difference |
+| `issubset` | `issubset(s)` | Subset test |
+| `issuperset` | `issuperset(s)` | Superset test |
+| `copy` | `copy()` | Shallow copy |
+| `clear` | `clear()` | Remove all elements |
+
+### 3.4 String methods
+
+| Method | Signature | Description |
+|---|---|---|
+| `capitalize/casefold/lower/upper/swapcase/title` | `upper()` etc. | Case transforms |
+| `center/ljust/rjust/zfill` | `center(width[, fill])` | Padding/alignment |
+| `count` | `count(sub[, start[, end]])` | Count substring occurrences |
+| `find/rfind` | `find(sub[, start[, end]])` | Index or `-1` |
+| `index/rindex` | `index(sub[, start[, end]])` | Index or error |
+| `startswith/endswith` | `startswith(prefix[, start[, end]])` | Prefix/suffix tests |
+| `expandtabs` | `expandtabs([tabsize])` | Expand tabs |
+| `strip/lstrip/rstrip` | `strip([chars])` | Trim characters |
+| `partition/rpartition` | `partition(sep)` | Split once into 3-tuple |
+| `removeprefix/removesuffix` | `removeprefix(affix)` | Remove affix when present |
+| `replace` | `replace(old, new[, count])` | Replace occurrences |
+| `split/rsplit/splitlines` | `split([sep[, maxsplit]])` | Split into arrays |
+| `join` | `join(parts)` | Join array with string separator |
+| `isalnum/isalpha/isascii/isdecimal/isdigit/isidentifier/islower/isnumeric/isprintable/isspace/istitle/isupper` | `isdigit()` etc. | Character-class predicates |
+| `contains` | `contains(sub)` | Substring membership |
+| `repeat` | `repeat(n)` | Repeat string |
+| `chars` | `chars()` | Array of characters |
+
+Strings also support interpolation (`"{expr}"`), indexing/slicing operations as implemented by the runtime, and concatenation/operators where supported.
+
+## 4. Native modules (toolchain-backed)
+
+Import native modules by bare name:
 
 ```a
 import math
-from math import sqrt, PI
-
-print(math.floor(3.7))
-print(sqrt(PI))
+import fs
+import json
+from net import tcp_connect
 ```
 
-Module resolution searches the importing file's directory, `-I` paths,
-`A_PATH`, and the stdlib root (or `--stdlib`). Bare imports also resolve under
-`stdlib/std/<name>.a`, `stdlib/std/<name>/__init__.a`, and package forms.
-Details: [docs/language-spec](../language-spec/README.md#modules).
+Native module members map to runtime builtins (see `native_modules.hpp`).
 
-## Native modules
+### 4.1 `math`
 
-| Module | Members |
-| ------ | ------- |
-| `math` | `sqrt abs min max pow sin cos tan asin acos atan atan2 exp log log2 log10 floor ceil round trunc random random_int`, constants `PI E` |
-| `io` | `print eprint input flush` |
-| `fs` | `read_file write_file append_file file_exists list_dir remove_file create_dir remove_dir rename current_dir` |
-| `strings` | `len str join` |
-| `collections` | `len map filter reduce any all sum join set` |
-| `unsafe` | `get set address_of offset load store` — unchecked element access and raw pointers |
-| `arena` | `new pool region alloc release reset used total` |
-| `core` | `panic assert assert_eq` |
-| `time` | `now sleep` |
-| `json` | `parse stringify pretty is_valid get at len has keys kind as_str as_int as_float as_bool as_array as_map` |
-| `binary` | `encode decode` |
-| `testing` | `seed for_all_int for_all_float for_all_bool for_all_string for_all_elem` |
-| `log` | `set_level set_json debug info warn error` |
-| `metrics` | `counter gauge histogram render reset` |
-| `trace` | `start end current set_attribute add_event inject extract spans reset` |
-| `net` | `resolve tcp_listen tcp_connect accept send recv close local_port set_timeout set_nonblocking poll udp_socket udp_bind udp_send udp_recv tls_connect tls_available` |
-| `http` | `get post request serve serve_once` |
-
-- `fs` paths are strings. `list_dir` returns sorted entry names, `create_dir`
-  creates missing parents, and `remove_dir` only removes empty directories.
-  Failures are runtime errors that include the operating-system message.
-- `now()` returns Unix epoch milliseconds; `sleep(ms)` pauses for a
-  non-negative duration.
-- `assert` and `assert_eq` raise runtime errors; `panic(message)` aborts
-  unconditionally. All three exit with status 2.
-- The serialization, observability, testing, networking, and HTTP modules are
-  implemented in the interpreter runtime. Programs that use them run with
-  `a run` (and `a test`); `a build` reports that a compiled backend cannot
-  lower them. Each module has its own notes:
-  [json](../../stdlib/json/README.md),
-  [binary](../../stdlib/binary/README.md),
-  [testing](../../stdlib/testing/README.md),
-  [log](../../stdlib/log/README.md),
-  [metrics](../../stdlib/metrics/README.md),
-  [trace](../../stdlib/trace/README.md),
-  [net](../../stdlib/net/README.md),
-  [http](../../stdlib/http/README.md).
-- `json.parse` yields an opaque `Json` value. `Json` has no operators; read it
-  with `json.get`, `json.at`, `json.kind`, and the `as_*` accessors, which
-  return optionals. `binary.decode` yields `Json?` and reports malformed input
-  as `None` instead of failing.
-- `log` writes to stderr, `metrics.render` returns Prometheus text, and
-  `trace` records spans in the process. Their output contains timestamps and
-  random identifiers, so golden tests should match stable substrings.
-- `net` sockets are `i64` handles that must be closed with `net.close`, and TLS
-  requires the toolchain to be built with OpenSSL (`net.tls_available` reports
-  whether it is). `http` is layered on `net` and handles one request per
-  connection on a single thread.
-- `arena` allocators return integer byte-offset handles. `new` is a bump
-  allocator, `pool` reuses released blocks, and `region` releases in reverse
-  allocation order. Out-of-space allocations and out-of-order region releases
-  are runtime errors. See
-  [Memory allocators](../language-spec/README.md#memory-allocators).
-
-## `std/` package layout (Mojo-inspired)
-
-`stdlib/std/` is the canonical package tree. Native modules have package stubs (`__init__.a`) under `std/<pkg>/`; A-written packages provide implementations/re-exports (e.g. `builtin`, `collections`, `math`, `memory`, `simd`, `traits`, `iter`, `format`, `test`, `comptime`, `gpu`, `prelude`). `stdlib/prelude.a` is auto-loaded by the compiler before every program.
+Functions: `sqrt, abs, min, max, pow, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round, trunc, random, random_int`  
+Constants: `PI`, `E`
 
 ```a
-from "std/__init__.a" import sqrt, len_of, range_list
-print(sqrt(144.0))
-print(len_of(range_list(3)))
+import math
+print(math.sqrt(81))
+print(math.PI)
 ```
 
-Legacy compatibility files remain at some `stdlib/<pkg>/` paths for existing quoted imports; prefer `stdlib/std/` for new work.
+### 4.2 `io`
 
-## A-file modules (compat)
-
-`stdlib/std/test/test.a` (also compat `stdlib/test/test.a`) is a small assertion harness built on `core`:
+Functions: `print, eprint, input, flush`
 
 ```a
-import test
-
-test.check("addition", 1 + 1 == 2)
-test.equal("double", 6, 3 * 2)
-test.require(true, "always true")
-test.report()               # "2 passed, 0 failed"
+import io
+io.print("hello")
 ```
 
-The module exports the live counters `test.passed` and `test.failed`, plus
-`check`, `equal`, `require`, `summary`, and `report`.
+### 4.3 `fs`
 
-## Examples
+Functions: `read_file, write_file, append_file, file_exists, list_dir, remove_file, create_dir, remove_dir, rename, current_dir`
 
-Runnable programs live in `examples/stdlib/` and run with `a run` (the
-compiled backends do not lower these modules):
+```a
+import fs
+fs.write_file("/tmp/a-demo.txt", "hi")
+print(fs.read_file("/tmp/a-demo.txt"))
+print(fs.file_exists("/tmp/a-demo.txt"))
+```
 
-| File | Shows |
-| ---- | ----- |
-| `builtin_modules.a` | every builtin package in one script, with no `fn main()` |
-| `serialization.a` | parsing, reading, pretty-printing, and a binary round trip |
-| `property_testing.a` | seeded properties over ints, floats, bools, strings, and elements |
-| `observability.a` | structured log records, a Prometheus render, and span propagation |
-| `networking.a` | a loopback TCP exchange, an HTTP handler, and a UDP round trip |
-| `ip_lookup.a` | `http.get` against a public API to read this host's IP addresses (needs network access) |
-| `strings_methods.a` | the Python-style dot methods on strings, arrays, maps, and sets |
-| `memory_arena.a` | arena allocators alongside `unsafe` pointer arithmetic |
+### 4.4 `strings`
+
+Functions: `len, str, join` (namespace wrappers over shared builtins)
+
+### 4.5 `collections`
+
+Functions: `len, map, filter, reduce, any, all, sum, join, set`
+
+### 4.6 `unsafe`
+
+Functions: `get, set, address_of, load, store, offset` (mapped to `unsafe_*` builtins)
+
+### 4.7 `arena`
+
+Functions: `new, pool, region, alloc, release, reset, used, total`
+
+### 4.8 `core`
+
+Functions: `panic, assert, assert_eq`
+
+### 4.9 `time`
+
+Functions: `now() -> i64` (Unix epoch ms), `sleep(milliseconds)`
+
+### 4.10 `json` (native-backed)
+
+Functions: `parse, stringify, pretty, is_valid, get, at, len, has, keys, kind, as_str, as_int, as_float, as_bool, as_array, as_map`
+
+Tooling signatures:
+
+| API | Signature |
+|---|---|
+| `json.parse` | `json.parse(text) -> Json` |
+| `json.stringify` | `json.stringify(value) -> String` |
+| `json.pretty` | `json.pretty(value) -> String` |
+| `json.is_valid` | `json.is_valid(text) -> bool` |
+| `json.get` | `json.get(doc, key) -> Json?` |
+| `json.at` | `json.at(doc, index) -> Json?` |
+| `json.len` | `json.len(doc) -> i64` |
+| `json.has` | `json.has(doc, key) -> bool` |
+| `json.keys` | `json.keys(doc) -> [String]` |
+| `json.kind` | `json.kind(doc) -> String` (`null,bool,int,float,string,array,object`) |
+| `json.as_*` | `json.as_str(doc) -> String?`, `as_int -> i64?`, `as_float -> f64?`, `as_bool -> bool?`, `as_array -> [Json]?`, `as_map -> {String: Json}?` |
+
+```a
+import json
+doc = json.parse("{\"a\": 1, \"b\": [true, null]}")
+print(json.kind(doc))
+print(json.stringify(doc))
+```
+
+### 4.11 `binary` (native-backed)
+
+| API | Signature | Description |
+|---|---|---|
+| `binary.encode` | `binary.encode(value) -> [i64]` | Self-describing bytes (0-255 per entry) |
+| `binary.decode` | `binary.decode(bytes) -> Json?` | Decode bytes; malformed/truncated returns `None` |
+
+### 4.12 `testing` (native-backed)
+
+| API | Signature | Description |
+|---|---|---|
+| `testing.seed` | `testing.seed(value)` | Fix generator for reproducibility |
+| `testing.for_all_int` | `testing.for_all_int(runs, low, high, fn(i64)->bool) -> bool` | Random int property |
+| `testing.for_all_float` | `testing.for_all_float(runs, low, high, fn(f64)->bool) -> bool` | Random float property |
+| `testing.for_all_bool` | `testing.for_all_bool(runs, fn(bool)->bool) -> bool` | Random bool property |
+| `testing.for_all_string` | `testing.for_all_string(runs, maxLength, fn(String)->bool) -> bool` | Random printable ASCII string property |
+| `testing.for_all_elem` | `testing.for_all_elem(values, fn(T)->bool) -> bool` | Check property for every element |
+
+### 4.13 `log` (native-backed)
+
+`log.set_level(level)` (`debug|info|warn|error`), `log.set_json(bool)`, `log.debug/info/warn/error(message[, fields])`.
+
+### 4.14 `metrics` (native-backed)
+
+`metrics.counter(name, increment[, labels])`, `metrics.gauge(name, value[, labels])`, `metrics.histogram(name, value[, labels])`, `metrics.render() -> String` (Prometheus text exposition), `metrics.reset()`.
+
+### 4.15 `trace` (native-backed)
+
+`trace.start(name) -> i64`, `trace.end(span)`, `trace.current() -> i64`, `trace.set_attribute(span, key, value)`, `trace.add_event(span, name)`, `trace.inject() -> String`, `trace.extract(traceparent) -> i64`, `trace.spans() -> [Json]`, `trace.reset()`.
+
+### 4.16 `net` (native-backed)
+
+TCP/UDP/TLS/polling primitives:
+
+| API | Signature |
+|---|---|
+| `net.resolve` | `net.resolve(host) -> [String]` |
+| `net.tcp_listen` | `net.tcp_listen(host, port) -> i64` |
+| `net.tcp_connect` | `net.tcp_connect(host, port) -> i64` |
+| `net.accept` | `net.accept(listener) -> i64` |
+| `net.send` | `net.send(handle, data) -> i64` |
+| `net.recv` | `net.recv(handle, maxBytes) -> String` |
+| `net.close` | `net.close(handle)` |
+| `net.local_port` | `net.local_port(handle) -> i64` |
+| `net.set_timeout` | `net.set_timeout(handle, millis)` |
+| `net.set_nonblocking` | `net.set_nonblocking(handle, bool)` |
+| `net.poll` | `net.poll(handles, timeoutMillis) -> [i64]` |
+| `net.udp_socket` | `net.udp_socket() -> i64` |
+| `net.udp_bind` | `net.udp_bind(handle, host, port)` |
+| `net.udp_send` | `net.udp_send(handle, host, port, data) -> i64` |
+| `net.udp_recv` | `net.udp_recv(handle, maxBytes) -> (String, String, i64)` |
+| `net.tls_connect` | `net.tls_connect(host, port) -> i64` (requires OpenSSL build) |
+| `net.tls_available` | `net.tls_available() -> bool` |
+
+### 4.17 `http` (native-backed)
+
+| API | Signature |
+|---|---|
+| `http.get` | `http.get(url) -> (i64, {String: String}, String)` |
+| `http.post` | `http.post(url, body) -> (i64, {String: String}, String)` |
+| `http.request` | `http.request(socket, method, path, headers, body) -> (i64, {String: String}, String)` |
+| `http.serve` | `http.serve(listener, handler)` (handler returning status 0 stops serving) |
+| `http.serve_once` | `http.serve_once(listener, handler) -> bool` |
+
+> TLS/HTTPS support depends on the build having OpenSSL enabled.
+
+## 5. `std/*` package library
+
+`stdlib/std/` contains Mojo-inspired package structure. Some packages export pure A helpers; others are backed by native modules.
+
+| Package | Kind | Notes |
+|---|---|---|
+| `std/builtin` | A helpers | wrappers/types/helpers (`Int`, `Float`, `String`, `len_of`, `range_list`, assertions) |
+| `std/math` | A wrapper + native `math` | `functions.a`, `constants.a` |
+| `std/collections` | A helpers | list/dict helpers over builtin behavior |
+| `std/iter` | A helpers | iteration/functional helpers |
+| `std/format` | A helpers | CSV/table formatting helpers |
+| `std/memory` | A wrapper | arena wrappers over `arena` builtins |
+| `std/simd` | A helpers | `Vec4`/`Vec8` helpers; scalar-emulated SIMD surface |
+| `std/gpu` | A stubs/CPU fallback | Mojo/MAX-shaped API; `available=false` on CPU fallback |
+| `std/comptime` | A helpers | compile-time-oriented helpers / runtime tags/ranges |
+| `std/traits` | A traits/helpers | `Equatable`, `Hashable`, `Comparable`, `Copyable` etc. |
+| `std/test` | A harness | `check`, `equal`, `require`, `summary`, `report` |
+| `std/prelude` | package entry | auto-loaded vocabulary lives in `stdlib/prelude.a` |
+| `std/core`, `std/fs`, `std/time`, `std/json`, `std/binary`, `std/testing`, `std/log`, `std/metrics`, `std/trace`, `std/net`, `std/http` | native-backed package stubs | `import <name>` resolves to native implementation |
+
+### 5.1 `std.test` harness API
+
+```a
+from "std/test/test.a" import check, equal, require, report, summary
+
+fn test_math():
+    check("truthy", 1 + 1 == 2)
+    equal("sum", 4, 2 + 2)
+    require(true, "must hold")
+```
+
+## 6. `a test` discovery
+
+`a test <file.a>` runs top-level functions whose names start with `test_`.
+
+```a
+fn test_addition():
+    assert_eq(2 + 2, 4)
+```
+
+Use `assert`, `assert_eq`, `panic`, and/or `std/test` helpers for failures.

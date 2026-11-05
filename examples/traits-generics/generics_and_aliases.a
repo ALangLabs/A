@@ -1,0 +1,19 @@
+# Type aliases and generic-style runtime values
+type UserId = i64
+
+fn identity(x):
+    return x
+
+struct Box:
+    value
+
+    fn get(self):
+        return self.value
+
+id: UserId = 7
+print(id)
+print(identity(42))
+print(identity("hi"))
+
+b = Box(99)
+print(b.get())

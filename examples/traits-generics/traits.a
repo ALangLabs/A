@@ -1,0 +1,30 @@
+# Traits, impl, and a where-constrained generic function
+trait Equatable:
+    fn eq(self, other) -> bool
+
+trait Hashable(Equatable):
+    fn hash(self) -> i64
+
+struct Point:
+    x: i64
+    y: i64
+
+    fn eq(self, other) -> bool:
+        return self.x == other.x and self.y == other.y
+
+    fn hash(self) -> i64:
+        return self.x * 31 + self.y
+
+impl Equatable for Point:
+    pass
+
+impl Hashable for Point:
+    pass
+
+fn same(a: Point, b: Point) -> bool where Equatable:
+    return a.eq(b)
+
+p = Point(1, 2)
+q = Point(1, 2)
+r = Point(3, 4)
+print(p.eq(q), p.eq(r), same(p, q), p.hash())

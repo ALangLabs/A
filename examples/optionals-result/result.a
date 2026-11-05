@@ -1,0 +1,17 @@
+# Result values: Ok/Err helpers
+import prelude
+
+fn divide(a, b):
+    if b == 0:
+        return prelude.Err("division by zero")
+    return prelude.Ok(a / b)
+
+fn show(r):
+    if prelude.is_ok(r):
+        print("ok", prelude.unwrap(r))
+    else:
+        print("err", prelude.err_value(r))
+
+show(divide(10, 2))
+show(divide(10, 0))
+print(prelude.unwrap_or(divide(10, 0), -1))

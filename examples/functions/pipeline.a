@@ -1,0 +1,18 @@
+# Pipeline operator: value |> func(args) => func(value, args)
+fn square(x):
+    return x * x
+
+fn add(a, b):
+    return a + b
+
+print(5 |> square())
+print(2 |> add(3))
+
+value = 3
+    |> square()
+    |> add(1)
+    |> square()
+print(value)
+
+items = ["a", "b", "c"]
+print(items |> join("-"))

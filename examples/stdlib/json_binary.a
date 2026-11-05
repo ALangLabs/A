@@ -1,0 +1,17 @@
+# Native-backed json/binary modules (interpreter/execution-engine path)
+import json
+import binary
+
+doc = json.parse("""{"a": 1, "b": [true, null], "s": "hi"}""")
+print(json.kind(doc))
+print(json.stringify(doc))
+print(json.get(doc, "a"))
+print(json.has(doc, "b"), json.keys(doc))
+print(json.is_valid("""{bad}"""))
+
+payload = json.parse("""[1, true, "x"]""")
+bytes = binary.encode(payload)
+print(bytes)
+decoded = binary.decode(bytes)
+print(decoded)
+print(binary.decode([255, 255, 255]))  # malformed -> None

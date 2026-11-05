@@ -13,40 +13,38 @@
 namespace {
 
 constexpr int kExitUsage = 64;
-constexpr int kExitNoInput = 66;
 
 void printUsage(std::ostream& os) {
-  os << "A language toolchain " << a::kVersion << "\n"
+  os << "A language toolchain " << a::kVersion << " (v2)\n"
      << "\n"
      << "Usage:\n"
      << "  a <command> [options] <file.a>\n"
      << "\n"
-      << "Commands:\n"
-      << "  repl             start the interactive REPL (like python)\n"
-      << "  run <file.a>     compile and execute a program\n"
-      << "  build <file.a>   compile program to native binary (-o <bin>)\n"
-      << "  check <file.a>   type-check a program without running it\n"
-      << "  test <file.a>    run every fn test_*() in a program\n"
-      << "  fmt <file.a>     format a source file (prints to stdout)\n"
-      << "  doc <file.a>     generate documentation (markdown, prints to stdout)\n"
-      << "  ir <file.a>      print the typed SSA intermediate representation\n"
-      << "  version          print the toolchain version\n"
-      << "  help             show this message\n"
+     << "Commands:\n"
+     << "  repl             start the interactive REPL\n"
+     << "  run <file.a>     compile and execute a program\n"
+     << "  build <file.a>   compile to a native binary (-o <bin>)\n"
+     << "  check <file.a>   type-check without running\n"
+     << "  test <file.a>    run every fn test_*()\n"
+     << "  fmt <file.a>     format source (stdout; -w to write)\n"
+     << "  doc <file.a>     generate documentation (markdown; --json)\n"
+     << "  ir <file.a>      print the typed SSA IR\n"
+     << "  version          print version\n"
+     << "  help             show this message\n"
      << "\n"
      << "Options:\n"
-     << "  -o <file>        output path (for 'build' and 'doc')\n"
-     << "  -w, --write      rewrite the source file in place (for 'fmt')\n"
-     << "  --check          exit nonzero if the file needs formatting (for 'fmt')\n"
-     << "  --indent <n>     indentation width in spaces (for 'fmt', default 4)\n"
-     << "  --json           emit structured JSON (for 'doc' and 'check')\n"
-     << "  --opt            run optimization passes when printing IR (for 'ir')\n"
-     << "  --backend <name> compilation backend: 'native' (default) or 'llvm'\n"
-     << "  --emit-llvm      emit textual LLVM IR (.ll) file instead of executable\n"
-     << "  -I <dir>         add a module search directory (repeatable)\n"
-     << "  --stdlib <dir>   override the standard library directory\n"
+     << "  -o <file>        output path (build/doc)\n"
+     << "  -w, --write      rewrite source in place (fmt)\n"
+     << "  --check          exit nonzero if file needs formatting (fmt)\n"
+     << "  --indent <n>     indentation width (fmt, default 4)\n"
+     << "  --json           structured JSON (doc, check)\n"
+     << "  --opt            run optimization passes (ir)\n"
+     << "  --emit-llvm      emit LLVM IR (.ll) instead of executable (build)\n"
+     << "  -I <dir>         add module search directory (repeatable)\n"
+     << "  --stdlib <dir>   override standard library directory\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  -h, --help       show this message\n"
-     << "  -V, --version    print the toolchain version\n";
+     << "  -V, --version    print version\n";
 }
 
 bool isTerminal() {
@@ -61,8 +59,6 @@ struct Options {
   std::string command;
   std::string path;
   std::string outputPath;
-  std::string backend = "llvm";
-  bool hasExplicitBackend = false;
   bool emitLLVM = false;
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;
@@ -77,236 +73,104 @@ struct Options {
 bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   std::vector<std::string> positional;
   bool colorDisabled = false;
-
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--no-color") {
-      colorDisabled = true;
-    } else if (arg == "--emit-llvm") {
-      options.emitLLVM = true;
-    } else if (arg == "--check") {
-      options.checkOnly = true;
-    } else if (arg == "-w" || arg == "--write") {
-      options.writeInPlace = true;
-    } else if (arg == "--json") {
-      options.jsonOutput = true;
-    } else if (arg == "--opt") {
-      options.optimize = true;
-    } else if (arg == "--indent") {
-      if (i + 1 >= argc) {
-        err << "error: '--indent' requires a positive number\n";
-        return false;
-      }
-      std::string value = argv[++i];
-      try {
-        options.indentWidth = std::stoi(value);
-      } catch (...) {
-        err << "error: invalid indentation width '" << value << "'\n";
-        return false;
-      }
-      if (options.indentWidth < 1 || options.indentWidth > 16) {
-        err << "error: indentation width must be between 1 and 16\n";
-        return false;
-      }
-    } else if (arg.rfind("--indent=", 0) == 0) {
-      std::string value = arg.substr(9);
-      try {
-        options.indentWidth = std::stoi(value);
-      } catch (...) {
-        err << "error: invalid indentation width '" << value << "'\n";
-        return false;
-      }
-      if (options.indentWidth < 1 || options.indentWidth > 16) {
-        err << "error: indentation width must be between 1 and 16\n";
-        return false;
-      }
-    } else if (arg == "--backend") {
-      if (i + 1 >= argc) {
-        err << "error: '--backend' requires a name ('native' or 'llvm')\n";
-        return false;
-      }
-      options.backend = argv[++i];
-      options.hasExplicitBackend = true;
+    if (arg == "--no-color") colorDisabled = true;
+    else if (arg == "--emit-llvm") options.emitLLVM = true;
+    else if (arg == "--check") options.checkOnly = true;
+    else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
+    else if (arg == "--json") options.jsonOutput = true;
+    else if (arg == "--opt") options.optimize = true;
+    else if (arg == "--backend") {
+      // Accepted for compatibility; A v2 uses a single LLVM-oriented backend.
+      if (i + 1 >= argc) { err << "error: '--backend' requires a name\n"; return false; }
+      ++i;
     } else if (arg.rfind("--backend=", 0) == 0) {
-      options.backend = arg.substr(10);
-      options.hasExplicitBackend = true;
-    } else if (arg == "-o" || arg == "--output") {
-      if (i + 1 >= argc) {
-        err << "error: '" << arg << "' requires a file path\n";
-        return false;
-      }
+      // compatibility no-op
+    } else if (arg == "--indent") {
+      if (i + 1 >= argc) { err << "error: '--indent' requires a number\n"; return false; }
+      try { options.indentWidth = std::stoi(argv[++i]); } catch (...) { err << "error: invalid indentation width\n"; return false; }
+      if (options.indentWidth < 1 || options.indentWidth > 16) { err << "error: indentation width must be 1-16\n"; return false; }
+    } else if (arg.rfind("--indent=", 0) == 0) {
+      try { options.indentWidth = std::stoi(arg.substr(9)); } catch (...) { err << "error: invalid indentation width\n"; return false; }
+      if (options.indentWidth < 1 || options.indentWidth > 16) { err << "error: indentation width must be 1-16\n"; return false; }
+    } else if (arg == "-o") {
+      if (i + 1 >= argc) { err << "error: '-o' requires a path\n"; return false; }
       options.outputPath = argv[++i];
-    } else if (arg == "-I" || arg == "--include") {
-      if (i + 1 >= argc) {
-        err << "error: '" << arg << "' requires a directory\n";
-        return false;
-      }
+    } else if (arg == "-I") {
+      if (i + 1 >= argc) { err << "error: '-I' requires a directory\n"; return false; }
       options.modulePaths.push_back(argv[++i]);
     } else if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
       options.modulePaths.push_back(arg.substr(2));
     } else if (arg == "--stdlib") {
-      if (i + 1 >= argc) {
-        err << "error: '--stdlib' requires a directory\n";
-        return false;
-      }
+      if (i + 1 >= argc) { err << "error: '--stdlib' requires a directory\n"; return false; }
       options.stdlibRoot = argv[++i];
-    } else if (arg == "-h" || arg == "--help") {
-      options.command = "help";
-    } else if (arg == "-V" || arg == "--version") {
-      options.command = "version";
-    } else if (!arg.empty() && arg[0] == '-' && arg != "-") {
-      err << "error: unknown option '" << arg << "'\n";
-      err << "help: run 'a help' to see available commands\n";
-      return false;
-    } else {
-      positional.push_back(std::move(arg));
-    }
+    } else if (arg == "-h" || arg == "--help") { printUsage(std::cout); std::exit(0); }
+    else if (arg == "-V" || arg == "--version") { std::cout << a::kVersionLine << "\n"; std::exit(0); }
+    else if (!arg.empty() && arg[0] == '-') { err << "error: unknown option '" << arg << "'\n"; return false; }
+    else positional.push_back(arg);
   }
-
-  options.useColor = !colorDisabled && isTerminal();
-
-  if (options.command == "help" || options.command == "version") return true;
-
-  if (positional.empty()) {
-    err << "error: missing command\n";
-    err << "help: run 'a help' to see available commands\n";
-    return false;
-  }
-
-  static const std::vector<std::string> kCommands = {"repl", "run",  "build", "check", "test",
-                                                     "fmt",  "doc",   "ir",    "version",
-                                                     "help"};
-  bool known = false;
-  for (const auto& command : kCommands) {
-    if (positional[0] == command) {
-      known = true;
-      break;
-    }
-  }
-
-  if (!known) {
-    // Allow `a program.a` as shorthand for `a run program.a`.
-    if (positional.size() == 1) {
-      options.command = "run";
-      options.path = positional[0];
-      return true;
-    }
-    err << "error: unknown command '" << positional[0] << "'\n";
-    err << "help: run 'a help' to see available commands\n";
-    return false;
-  }
-
+  if (positional.empty()) { printUsage(std::cerr); return false; }
   options.command = positional[0];
-  if (options.command == "version" || options.command == "help") return true;
-  if (options.command == "repl") return true;
-
-  if (positional.size() < 2) {
-    err << "error: '" << options.command << "' requires a file\n";
-    err << "help: usage is 'a " << options.command << " <file.a>'\n";
-    return false;
+  if (options.command == "version") { std::cout << a::kVersionLine << "\n"; std::exit(0); }
+  if (options.command == "help") { printUsage(std::cout); std::exit(0); }
+  if (options.command == "repl") {
+    if (positional.size() > 1) { err << "error: 'repl' takes no file argument\n"; return false; }
+  } else {
+    if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
+    if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
+    options.path = positional[1];
   }
-
-  if (positional.size() > 2) {
-    err << "error: unexpected argument '" << positional[2] << "'\n";
-    return false;
+  if (options.command != "build" && options.command != "doc" && !options.outputPath.empty()) { err << "error: '-o' is only valid with 'build' or 'doc'\n"; return false; }
+  if (options.command != "build" && options.emitLLVM) { err << "error: '--emit-llvm' is only valid with 'build'\n"; return false; }
+  if (options.command != "fmt" && (options.writeInPlace || options.checkOnly || options.indentWidth != 4)) {
+    err << "error: fmt options are only valid with 'fmt'\n"; return false;
   }
-
-  options.path = positional[1];
+  if (options.command != "doc" && options.command != "check" && options.jsonOutput) {
+    err << "error: '--json' is only valid with 'doc' or 'check'\n"; return false;
+  }
+  if (options.command != "ir" && options.optimize) { err << "error: '--opt' is only valid with 'ir'\n"; return false; }
+  if (options.writeInPlace && options.checkOnly) { err << "error: '--write' and '--check' cannot be combined\n"; return false; }
+  options.useColor = isTerminal() && !colorDisabled;
   return true;
 }
 
 }  // namespace
 
 int main(int argc, char** argv) {
+  if (argc <= 1) { printUsage(std::cerr); return kExitUsage; }
   Options options;
-  if (!parseOptions(argc, argv, options, std::cerr)) {
-    std::cerr << "\n";
-    printUsage(std::cerr);
-    return kExitUsage;
-  }
-
-  if (options.command == "help") {
-    printUsage(std::cout);
-    return 0;
-  }
-  if (options.command == "version") {
-    std::cout << "A language toolchain " << a::kVersion << "\n";
-    return 0;
-  }
-
-  if (options.path == "-") {
-    std::cerr << "error: reading from stdin is not supported yet\n";
-    return kExitNoInput;
-  }
-
+  if (!parseOptions(argc, argv, options, std::cerr)) return kExitUsage;
   a::DriverConfig config;
   config.checkOnly = options.command == "check";
-  config.jsonDiagnostics = options.jsonOutput && options.command == "check";
   config.useColor = options.useColor;
-  config.backend = options.backend;
+  config.jsonDiagnostics = options.jsonOutput && options.command == "check";
+  config.backend = "llvm"; // single backend (Mojo-style LLVM pipeline)
   config.modulePaths = options.modulePaths;
   config.stdlibRoot = options.stdlibRoot;
-
+  if (options.command == "run") return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
+  if (options.command == "repl") return a::repl(config, std::cin, std::cout, std::cerr);
+  if (options.command == "test") return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "build") {
-    std::string backend = options.backend;
-    // Default build backend is native C++ codegen for full language coverage unless --backend=llvm is explicitly specified
-    if (backend == "llvm" && !options.hasExplicitBackend) {
-      backend = "native";
-    }
     std::string out = options.outputPath;
-    if (out.empty()) {
-      out = options.path;
-      if (out.size() >= 2 && out.substr(out.size() - 2) == ".a") {
-        out = out.substr(0, out.size() - 2);
-      } else {
-        out += ".out";
-      }
-      if (options.emitLLVM) {
-        out += ".ll";
-      }
-    }
     if (options.emitLLVM) {
+      if (out.empty()) out = options.path + ".ll";
       return a::emitLLVMFile(options.path, out, config, std::cerr);
     }
-    return a::buildFile(options.path, out, config, backend, std::cerr);
+    if (out.empty()) out = "a.out";
+    return a::buildFile(options.path, out, config, "llvm", std::cerr);
   }
-
+  if (options.command == "check") return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "fmt") {
-    a::FormatFileOptions formatOptions;
-    formatOptions.checkOnly = options.checkOnly;
-    formatOptions.writeInPlace = options.writeInPlace;
-    formatOptions.indentWidth = options.indentWidth;
-    formatOptions.useColor = options.useColor;
-    return a::formatFile(options.path, formatOptions, std::cout, std::cerr);
+    a::FormatFileOptions fmt; fmt.checkOnly = options.checkOnly; fmt.writeInPlace = options.writeInPlace; fmt.indentWidth = options.indentWidth; fmt.useColor = options.useColor;
+    return a::formatFile(options.path, fmt, std::cout, std::cerr);
   }
-
   if (options.command == "doc") {
-    a::DocFileOptions docOptions;
-    docOptions.json = options.jsonOutput;
-    docOptions.useColor = options.useColor;
-    docOptions.outputPath = options.outputPath;
-    return a::documentFile(options.path, docOptions, std::cout, std::cerr);
+    a::DocFileOptions doc; doc.json = options.jsonOutput; doc.useColor = options.useColor; doc.outputPath = options.outputPath;
+    return a::documentFile(options.path, doc, std::cout, std::cerr);
   }
-
-  if (options.command == "ir") {
-    return a::emitIRFile(options.path, config, options.optimize, std::cout, std::cerr);
-  }
-
-  if (options.command == "check") {
-    int code = a::runFile(options.path, config, std::cin, std::cout, std::cerr);
-    if (code == 0 && !options.jsonOutput) {
-      std::cout << options.path << ": File is valid\n";
-    }
-    return code;
-  }
-
-  if (options.command == "test") {
-    return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
-  }
-
-  if (options.command == "repl") {
-    return a::repl(config, std::cin, std::cout, std::cerr);
-  }
-
-  return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
+  if (options.command == "ir") return a::emitIRFile(options.path, config, options.optimize, std::cout, std::cerr);
+  std::cerr << "error: unknown command '" << options.command << "'\n";
+  printUsage(std::cerr);
+  return kExitUsage;
 }

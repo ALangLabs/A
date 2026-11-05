@@ -1,115 +1,123 @@
 #!/usr/bin/env bash
-# Golden-file test runner for the A toolchain.
+# Golden tests for the A language compiler.
+#
+# Layout:
+#   tests/integration/cases/**/*.a      one case per feature; may live in
+#                                       subdirectories (e.g. errors/, stdlib/)
+#   tests/integration/cases/**/lib/     imported fixtures; never run directly
+#   <path>/<name>.out                   expected stdout for a `run` case
+#   <path>/<name>.err                   expected stderr substrings (one per line)
+#   <path>/<name>.exit                  expected numeric exit code
+#   <path>/<name>.in                    stdin fed to the program
+#   <path>/<name>.flags                 command/flags, e.g. "check" or "test"
 #
 # Usage: tests/integration/run_tests.sh [path-to-a-binary]
-#
-# Each tests/integration/cases/<name>.a (or cases/<group>/<name>.a) is executed.
-# Files under a `lib/` directory are import fixtures, not test cases. Optional
-# companion files share the source's base path:
-#   <name>.out    expected stdout (default: empty)
-#   <name>.in     stdin fed to the program
-#   <name>.err    substrings that must appear in stderr (one per line)
-#   <name>.exit   expected exit code (default: 0)
-#   <name>.flags  invocation flags; "check" runs 'a check' instead of 'a run'
-set -u
+set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
+CASES_DIR="$SCRIPT_DIR/cases"
 A_BIN="${1:-$ROOT_DIR/build/a}"
 if [[ "$A_BIN" != /* ]]; then
   A_BIN="$(cd "$(dirname "$A_BIN")" 2>/dev/null && pwd)/$(basename "$A_BIN")"
 fi
-
 if [[ ! -x "$A_BIN" ]]; then
   echo "error: A binary not found at '$A_BIN'" >&2
-  echo "build it first: cmake -S . -B build && cmake --build build" >&2
+  echo "build the compiler first (tooling/build/build.sh or cmake --build build)" >&2
   exit 1
 fi
 
-CASES_DIR="$SCRIPT_DIR/cases"
-WORK_DIR="$(mktemp -d)"
-trap 'rm -rf "$WORK_DIR"' EXIT
+# Ensure the repo stdlib is found regardless of cwd (v2 module loader can pick
+# a nearer test fixture `stdlib/` directory when run from case subdirs).
+if [[ -z "${A_STDLIB:-}" && -d "$ROOT_DIR/stdlib" ]]; then
+  export A_STDLIB="$ROOT_DIR/stdlib"
+fi
 
-pass=0
-fail=0
-failed_names=()
+TMP_DIR="$(mktemp -d)"
+trap 'rm -rf "$TMP_DIR"' EXIT
 
-case_sources=()
-while IFS= read -r -d '' source_file; do
-  case_sources+=("$source_file")
-done < <(find "$CASES_DIR" -type f -name '*.a' -not -path '*/lib/*' -print0 | sort -z)
+passed=0
+failed=0
 
-for source in "${case_sources[@]}"; do
-  relative="${source#"$CASES_DIR"/}"
-  name="${relative%.a}"
-  name="${name//\//_}"
-  base="${source%.a}"
+run_case() {
+  local source="$1"
+  local case_dir base name command stdout_file stderr_file stdin_file
+  local expected expected_err exit_file expected_exit actual_exit rc
+
+  case_dir="$(dirname "$source")"
+  base="$(basename "$source" .a)"
+  name="${case_dir#$CASES_DIR/}/$base"
+  name="${name#./}"
+  stdout_file="$TMP_DIR/${name//\//__}.stdout"
+  stderr_file="$TMP_DIR/${name//\//__}.stderr"
+  expected="$case_dir/$base.out"
+  expected_err="$case_dir/$base.err"
+  exit_file="$case_dir/$base.exit"
+  stdin_file="$case_dir/$base.in"
 
   command="run"
-  if [[ -f "$base.flags" ]]; then
-    if grep -q "test" "$base.flags"; then
-      command="test"
-    elif grep -q "check" "$base.flags"; then
-      command="check"
-    fi
+  local flags_file="$case_dir/$base.flags"
+  if [[ -f "$flags_file" ]]; then
+    command="$(tr -d '\r\n' < "$flags_file")"
   fi
+  if [[ ! -f "$stdin_file" ]]; then
+    stdin_file="/dev/null"
+  fi
+
+  rc=0
+  # shellcheck disable=SC2086
+  (cd "$case_dir" && "$A_BIN" $command "$source" <"$stdin_file") \
+    >"$stdout_file" 2>"$stderr_file" || rc=$?
 
   expected_exit=0
-  if [[ -f "$base.exit" ]]; then
-    expected_exit="$(tr -d '[:space:]' < "$base.exit")"
+  if [[ -f "$exit_file" ]]; then
+    expected_exit="$(tr -d '[:space:]' < "$exit_file")"
   fi
+  actual_exit="$rc"
 
-  stdin_file=/dev/null
-  [[ -f "$base.in" ]] && stdin_file="$base.in"
-
-  # Each case runs in its own scratch directory so file I/O tests are isolated.
-  case_dir="$WORK_DIR/cwd/$name"
-  mkdir -p "$case_dir"
-
-  (cd "$case_dir" && "$A_BIN" "$command" "$source" <"$stdin_file") \
-    >"$WORK_DIR/$name.stdout" 2>"$WORK_DIR/$name.stderr"
-  actual_exit=$?
-
-  problems=()
-
-  if [[ "$actual_exit" != "$expected_exit" ]]; then
-    problems+=("exit code: expected $expected_exit, got $actual_exit")
-  fi
-
-  expected_out="$WORK_DIR/$name.expected"
-  : >"$expected_out"
-  [[ -f "$base.out" ]] && cp "$base.out" "$expected_out"
-  if ! diff -u "$expected_out" "$WORK_DIR/$name.stdout" >"$WORK_DIR/$name.diff"; then
-    problems+=("stdout mismatch")
-  fi
-
-  if [[ -f "$base.err" ]]; then
-    while IFS= read -r needle; do
-      [[ -z "$needle" ]] && continue
-      if ! grep -Fq -- "$needle" "$WORK_DIR/$name.stderr"; then
-        problems+=("stderr missing: $needle")
-      fi
-    done < "$base.err"
-  fi
-
-  if [[ ${#problems[@]} -eq 0 ]]; then
-    pass=$((pass + 1))
-  else
-    fail=$((fail + 1))
-    failed_names+=("$name")
+  local ok=1
+  if [[ "$actual_exit" -ne "$expected_exit" ]]; then
     echo "FAIL $name"
-    for problem in "${problems[@]}"; do
-      echo "  - $problem"
-    done
-    if [[ -s "$WORK_DIR/$name.diff" ]]; then
-      sed 's/^/  /' "$WORK_DIR/$name.diff"
-    fi
-    if [[ -s "$WORK_DIR/$name.stderr" ]]; then
-      sed 's/^/  stderr| /' "$WORK_DIR/$name.stderr"
+    echo "  - exit code: expected $expected_exit, got $actual_exit"
+    ok=0
+  fi
+  if [[ -f "$expected" ]]; then
+    if ! diff -u "$expected" "$stdout_file" >/dev/null; then
+      [[ "$ok" -eq 1 ]] && echo "FAIL $name"
+      echo "  - stdout mismatch"
+      diff -u "$expected" "$stdout_file" | sed 's/^/  /' || true
+      ok=0
     fi
   fi
-done
+  if [[ -f "$expected_err" ]]; then
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      [[ -z "$line" ]] && continue
+      if ! grep -Fq -- "$line" "$stderr_file"; then
+        [[ "$ok" -eq 1 ]] && echo "FAIL $name"
+        echo "  - missing expected stderr: $line"
+        ok=0
+      fi
+    done < "$expected_err"
+  fi
+
+  if [[ "$ok" -eq 1 ]]; then
+    passed=$((passed + 1))
+  else
+    if [[ -s "$stderr_file" ]]; then
+      echo "  stderr|"
+      sed 's/^/  /' "$stderr_file"
+    fi
+    failed=$((failed + 1))
+  fi
+}
+
+# Discover every case, excluding library fixtures in `lib/` directories.
+while IFS= read -r source; do
+  run_case "$source"
+done < <(find "$CASES_DIR" -name '*.a' -not -path '*/lib/*' | sort)
 
 echo
-echo "passed: $pass, failed: $fail"
-[[ $fail -eq 0 ]]
+echo "passed: $passed, failed: $failed"
+if [[ "$failed" -ne 0 ]]; then
+  exit 1
+fi

@@ -1,0 +1,13 @@
+# Example module for import demos
+fn add(a, b):
+    return a + b
+
+fn mul(a, b):
+    return a * b
+
+struct Point:
+    x
+    y
+
+    fn sum(self):
+        return self.x + self.y

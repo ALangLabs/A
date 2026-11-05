@@ -1,0 +1,20 @@
+# Native-backed observability/network APIs (examples; some require runtime support/network access)
+import log
+import metrics
+import trace
+import net
+
+log.set_level("info")
+log.info("hello", {"component": "example"})
+
+metrics.counter("requests_total", 1, {"route": "/"})
+metrics.gauge("workers", 2)
+print(metrics.render())
+
+span = trace.start("demo")
+trace.set_attribute(span, "feature", "docs")
+trace.end(span)
+print(trace.spans())
+
+print("net.tls_available:", net.tls_available())
+print("resolve localhost:", net.resolve("localhost"))

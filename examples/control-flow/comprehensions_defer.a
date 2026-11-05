@@ -1,0 +1,16 @@
+# Comprehensions and defer
+nums = [0, 1, 2, 3, 4, 5]
+squares = [n * n for n in nums]
+evens = [n for n in nums if n % 2 == 0]
+print(squares)
+print(evens)
+
+chosen = {n % 3 for n in 0..8}
+print(chosen)
+
+fn demo():
+    defer print("cleanup 1")
+    defer print("cleanup 2")
+    print("work")
+
+demo()

@@ -1,0 +1,14 @@
+# Class/inheritance syntax
+class Animal:
+    name
+
+    fn kind(self):
+        return "animal"
+
+class Dog(Animal):
+    fn sound(self):
+        return "woof"
+
+d = Dog("Rex")
+print(d.name)
+print(d.sound())

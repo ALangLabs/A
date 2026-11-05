@@ -1,0 +1,12 @@
+# Run with: ./build/a test examples/advanced/testing.a
+
+fn test_assertions():
+    assert(true)
+    assert_eq(2 + 2, 4)
+    assert_eq("A".lower(), "a")
+
+fn test_collections():
+    xs = [1, 2, 3]
+    xs.append(4)
+    assert_eq(len(xs), 4)
+    assert(xs.contains(4))

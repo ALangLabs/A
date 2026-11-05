@@ -1,0 +1,13 @@
+# Simple enums (explicit integer values allowed)
+enum Color:
+    Red
+    Green = 5
+    Blue
+    Yellow = -2
+    Purple
+
+print(Color.Red)
+print(Color.Green)
+print(Color.Blue)
+print(Color.Yellow)
+print(Color.Purple)

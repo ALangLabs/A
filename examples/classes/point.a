@@ -1,0 +1,19 @@
+# Struct/class with fields and methods
+struct Point:
+    x
+    y
+
+    fn sum(self):
+        return self.x + self.y
+
+    fn move(self, dx, dy):
+        self.x = self.x + dx
+        self.y = self.y + dy
+
+p = Point(3, 4)
+print(p.sum())
+p.move(1, 2)
+print(p.x, p.y)
+
+named = Point(y=10, x=20)
+print(named.x, named.y)

@@ -1,0 +1,25 @@
+# if / elif / else, while, for, loop, break/continue
+n = 7
+if n < 0:
+    print("negative")
+elif n % 2 == 0:
+    print("even")
+else:
+    print("odd")
+
+i = 0
+while i < 3:
+    print("while", i)
+    i += 1
+
+for x in [10, 20, 30]:
+    print("for", x)
+
+j = 0
+loop:
+    j += 1
+    if j == 2:
+        continue
+    print("loop", j)
+    if j >= 4:
+        break

@@ -1,940 +1,757 @@
-# The A Language Reference (v0.0.1)
+# A Language Specification (Current Implementation)
 
-A is indentation-based and statically typed. Blocks are introduced by a colon
-and indented consistently; braces are not used for blocks.
+This document describes the syntax and semantics implemented by the A compiler in this repository. It is based on the lexer, parser, AST, type checker, name resolution/module loader, and integration tests.
 
-## Lexical structure
+## 1. Source files and execution model
 
-- Comments start with `#` and run to the end of the line.
-- Indentation must use spaces; tabs in indentation are reported as errors.
-- Identifiers match `[A-Za-z_][A-Za-z0-9_]*`. A bare `_` is a discard name.
-- Keywords: `var const pvt type fn if elif else while do for in loop break
-  continue return defer struct class metaclass enum import from as match
-  self true false and or not None`.
-- Numeric literals support `_` separators, decimal integers, fractional parts,
-  exponent notation, and hex/binary integer literals (`0xFF`, `0b1010_1011`).
-- String literals use double quotes with escapes `\n \t \r \0 \a \b \f \v \\
-  \" \{ \xNN \u{...}`. `\xNN` is a two-digit byte escape; `\u{...}` takes one
-  to six hex digits and encodes a Unicode code point as UTF-8. A literal
-  `{expression}` is interpolated.
-- Raw string literals use triple double quotes (`"""..."""`). They span lines,
-  perform no escape processing and no interpolation, and strip exactly one
-  newline immediately after the opening quotes. Dedenting is not performed.
-  A triple-quoted string used as a statement is the idiomatic multi-line
-  comment
-- Character literals use single quotes, cover one Unicode code point, and
-  accept the same escapes as strings.
-- Operators (27+): `+ - * / % ** & | ^ ~ << >> .. in not in == != < <= > >= = += -= *= /= %=
-  &= |= ^= <<= >>= ++ -- and or not ?. ?? ? : ! => -> |>`.
+- Source files use the `.a` extension.
+- A program is a sequence of top-level statements.
+- Indentation defines blocks (Python-style suites introduced by `:`).
+- **Spaces only** for indentation; tabs are rejected by the lexer.
+- Newlines terminate statements in most contexts.
+- The runtime semantics are currently **dynamic / Python-style** in important areas:
+  - plain assignment can create or rebind variables
+  - many operations are checked at runtime
+  - annotations are optional and used for documentation, tooling, and typed checking where applied
+- The toolchain supports `run`, `check`, `test`, `build`, `fmt`, `doc`, and `ir` commands (see [CLI Reference](../cli/README.md)).
 
+## 2. Lexical structure
 
-## Bindings and types
-
-Untyped, Python-easy style (before -> after):
+### 2.1 Comments
 
 ```a
-# before: fn fib(n: i32) -> i32: / x: i32 = 0 / const PI = 3.14
-fn fib(n):
-    return n
-x = 0
-PI = 3.14
+# line comment
+## doc comment (captured by lexer as a doc comment token/comment record)
 ```
 
-Struct fields are bare names (parser agent is adding optional struct field types):
-`struct Point:` with fields `x` / `y`. All declarations (`var`/`const`/`let`/`mut`/`pub`) are plain assignments, and reassignment is allowed.
+`##` comments are recognized as doc comments by the lexer/tooling.
+
+### 2.2 Identifiers
+
+Identifiers start with a letter or `_`, followed by letters, digits, or `_`.
+
+Examples:
 
 ```a
-answer = 42              # mutable by default (Python style), inferred as i32
-answer = 43              # rebind in place
-total += 5               # compound assignment
-name = "Ada"     # plain assignment, type inferred
-PI = 3.14159       # plain assignment, reassignable
+name
+_value
+Point2D
+json_parse
 ```
 
-The first assignment to an unknown name declares a mutable binding (Python-style variable declaration).
-`var` can also be used explicitly. Rebinding and updating in place are fully supported.
-To define an immutable value that cannot be reassigned, use `const`:
+### 2.3 Keywords
 
-```a
-LIMIT = 10
-NAME = "A"
+Reserved keywords (lexer):
+
+```text
+fn if elif else while for in loop break continue return defer
+struct class metaclass pass self true false and or not
+import from as match None enum do type trait where comptime impl
 ```
 
-Built-in types:
+Notes:
+- `Class` and `Metaclass` are also accepted as keyword forms for `class`/`metaclass`.
+- `true`/`false` are boolean literals; `None` is the null/empty optional literal identifier.
 
-| Type | Description |
-| ---- | ----------- |
-| `bool` | `true` / `false` |
-| `char` | one Unicode code point |
-| `i8`, `i16`, `i32`, `i64` | signed integers |
-| `u8`, `u16`, `u32`, `u64` | unsigned integers |
-| `f32`, `f64` | IEEE floating point |
-| `String` | immutable UTF-8 text |
-| `[T]` | homogeneous array |
-| `T[N]`, `T[N][M]` | fixed-size and multidimensional array |
-| `{K: V}` | map from keys of type `K` to values of type `V` |
-| `{T}` | set of elements of type `T` |
-| `(T, U, ...)` | tuple |
-| `fn(T, U) -> R` | function value |
-| `T?` | optional value (either `Some(T)` or `None`) |
-| `void` | absence of a value |
+### 2.4 Literals
 
-Integer literals default to `i32` and float literals to `f64`. Context pushes
-types inward, so `var x: u64 = 1` checks the literal as `u64`. There are no
-implicit numeric conversions: `f64(3)`, `i64(2.9)` (truncating), and the other
-conversion functions perform explicit, range-checked conversions.
-
-### Inference
-
-Function parameters and return types may be omitted and are inferred from use:
+#### Integer literals
 
 ```a
-fn twice(n):
-    return n * 2
-
-print(twice(21))
+0
+42
+1_000_000
+0xFF        # hexadecimal
+0b1010      # binary
 ```
 
-If a type variable is still unresolved after analysis, the compiler reports an
-inference error and asks for an annotation. Types that are used inconsistently
-(for example, passing a `String` where an integer is required) are compile
-errors. A bare `None` is allowed wherever the element type can be inferred
-later; otherwise annotate the binding (`var x: i32? = None`).
-
-## Control flow
-
-### Conditionals
+#### Float literals
 
 ```a
-if score > 90:
-    print("A")
-elif score > 80:
-    print("B")
+3.14
+0.5
+1e9
+2.5e-3
+1_2.3_4
+```
+
+A `.` starts a fractional part only when followed by a digit, so `1..5` lexes as `1`, `..`, `5`.
+
+#### Boolean literals
+
+```a
+true
+false
+```
+
+#### Character literals
+
+```a
+'a'
+'\n'
+'\x41'
+'\u{1F600}'
+```
+
+#### String literals
+
+```a
+"hello"
+"line\nbreak"
+"sum = {2 + 3}"      # interpolation
+"""multi-line
+raw text"""
+```
+
+- Normal strings support escapes and interpolation.
+- Triple-quoted strings (`"""..."""`) are treated as raw strings (content captured as-is; interpolation/escape decoding behavior follows parser implementation for raw strings).
+- Interpolation uses `{expr}` inside normal strings.
+
+Supported escapes (lexer/parser support includes):
+
+```text
+\n \t \r \a \b \f \v \0 \xNN \u{...} \\ \" \' \{ \}
+```
+
+#### Array literals
+
+```a
+[]
+[1, 2, 3]
+["a", "b"]
+```
+
+#### Map literals
+
+```a
+{}
+{"a": 1, "b": 2}
+```
+
+`{}` is an empty map. An empty set is created with `set()`.
+
+#### Set literals
+
+```a
+{1, 2, 3}
+{"x", "y"}
+```
+
+A brace literal becomes a set when elements are not `key: value` pairs.
+
+#### Tuple literals
+
+```a
+(1, 2)
+("ok", 42)
+```
+
+Parentheses without a comma are grouping, not a 1-element tuple.
+
+### 2.5 Operators and punctuation
+
+Tokens/operators implemented by the lexer/parser include:
+
+```text
+( ) [ ] { } , : . .. -> => |>
++ - * / % **        ! ? ?. ?? ~ & | ^ << >>
+== != < > <= >=
+= += -= *= /= %= &= |= ^= <<= >>=
+++ --
+```
+
+Keywords used as operators in expressions/statements: `and`, `or`, `not`, `in`, `not in`.
+
+## 3. Program structure
+
+### 3.1 Top-level declarations/statements
+
+Common top-level forms:
+
+```a
+import "lib/util.a"
+from "lib/util.a" import helper
+import math
+
+fn main():
+    print("hi")
+
+struct Point:
+    x
+    y
+
+enum Color:
+    Red
+    Green
+
+trait Equatable:
+    fn eq(self, other) -> bool
+
+impl Equatable for Point:
+    pass
+
+type UserId = i64
+```
+
+Imports are top-level only.
+
+### 3.2 Blocks and indentation
+
+A `:` introduces a block (suite). A suite may be:
+
+- an indented block on the next lines, or
+- an inline/simple form in some constructs supported by the parser (e.g. expression-bodied functions / simple statements where accepted)
+
+```a
+if ok:
+    print("yes")
 else:
-    print("C")
+    print("no")
 ```
 
-### `while` loop — pre-test
+### 3.3 `pass`
 
-The condition is checked **before** each iteration. The body may run zero times.
+`pass` is accepted as a no-op placeholder in supported contexts (e.g. empty class/impl bodies).
+
+## 4. Types and annotations
+
+A is dynamically executed, but supports optional type syntax/annotations.
+
+### 4.1 Built-in / named types
+
+Common built-in type names recognized by the type system include:
+
+```text
+bool char String str void
+int float
+i8 i16 i32 i64
+u8 u16 u32 u64
+f32 f64
+Allocator Json Pointer
+```
+
+`int`/`float` map to 64-bit numeric types in the type system. `String` and `str` map to the string type.
+
+### 4.2 Composite type syntax
 
 ```a
-count = 0
-while count < 3:
-    print("while: count = {count}")
-    count = count + 1
+[T]              # array
+T?               # optional
+(T, U)           # tuple
+{K: V}           # map type
+{T}              # set type
+fn(T, U) -> R    # function type
+T[N]             # fixed-size array type syntax (parsed)
+module.Type      # qualified type name
+Foo<T>           # generic type arguments (parsed/resolved where supported)
 ```
 
-### `do ... while` loop — post-test
-
-The body runs **at least once**; the condition is checked after each iteration.
+Examples:
 
 ```a
-n = 0
-do:
-    print("do-while: n = {n}")
-    n = n + 1
-while n < 2
+fn sum(xs: [i64]) -> i64:
+    total = 0
+    for x in xs:
+        total += x
+    return total
+
+fn lookup(m: {String: i64}, key: String) -> i64?:
+    return m.get(key)
 ```
 
-### `for` loop — iteration
-
-Iterates over a range, array, map (over its keys), set, or string. Ranges are
-written `lo..hi` (exclusive of `hi`) and may include an optional step:
-`lo..hi..step`.
+### 4.3 Type aliases
 
 ```a
-# range 0..4 → 0, 1, 2, 3
-total = 0
-for i in 0..4:
-    total = total + i
-    print("for: i = {i}, total = {total}")
-
-# stepped range 0..10..2 → 0, 2, 4, 6, 8
-for i in 0..10..2:
-    print("stepped: i = {i}")
+type UserId = i64
+type Name = String
 ```
 
-### `loop` — infinite loop
+## 5. Statements
 
-An unconditional loop with no condition. Exit it with `break` (or `return`).
+### 5.1 Assignment and rebinding
+
+Plain assignment creates or rebinds a variable in the current dynamic/runtime model:
 
 ```a
-turns = 0
-loop:
-    turns = turns + 1
-    print("loop: turn = {turns}")
-    if turns == 3:
-        break
+x = 1
+x = x + 1
+name = "A"
 ```
 
-### `break` and `continue`
-
-`break` exits the enclosing loop immediately. `continue` skips to the next
-iteration. Both work inside `while`, `do ... while`, `for`, and `loop`.
+Typed declaration form is also parsed/supported:
 
 ```a
-for j in 0..4:
-    if j == 2:
-        continue
-    print("j = {j}")
+count: i64 = 0
+title: String = "hello"
 ```
 
-### `++` and `--` — increment / decrement
+Compound assignments:
 
-`++` adds 1 to a numeric variable; `--` subtracts 1. Both come in **prefix**
-(`++i`, `--i`) and **postfix** (`i++`, `i--`) forms.
+```a
+x += 1
+x -= 1
+x *= 2
+x /= 2
+x %= 3
+x &= mask
+x |= bits
+x ^= bits
+x <<= 1
+x >>= 1
+```
 
-- **Prefix** (`++i`): increments first, then returns the new value.
-- **Postfix** (`i++`): returns the old value, then increments.
+### 5.2 Destructuring assignment
 
-The operand must be a mutable numeric variable (`var x = ...` or a plain
-assignment, which is mutable by default).
+Tuple destructuring is supported (parser/type checker/runtime support; integration-tested patterns):
+
+```a
+pair = (1, 2)
+a, b = pair
+print(a, b)
+```
+
+Use `_` to ignore a value where supported by patterns/destructuring contexts.
+
+### 5.3 Expression statements
+
+Any expression can be used as a statement:
+
+```a
+print("hi")
+p.sum()
+```
+
+### 5.4 `if` / `elif` / `else`
+
+```a
+if n < 0:
+    print("negative")
+elif n == 0:
+    print("zero")
+else:
+    print("positive")
+```
+
+### 5.5 `while`
 
 ```a
 i = 0
-print(++i)   # 1  (prefix: returns new value)
-print(i++)   # 1  (postfix: returns old value)
-print(i)     # 2
-
-j = 5
-print(--j)   # 4  (prefix: returns new value)
-print(j--)   # 4  (postfix: returns old value)
-print(j)     # 3
+while i < 3:
+    print(i)
+    i += 1
 ```
 
-They are especially handy in loops:
+### 5.6 `do ... while` (parsed)
+
+The parser supports `do`/`while` syntax; use integration tests/code behavior as the source of truth for exact runtime semantics in the current backend.
+
+### 5.7 `for ... in`
 
 ```a
-k = 0
-while k < 3:
-    print("k = {k}")
-    k++
+for n in [1, 2, 3]:
+    print(n)
+
+for i in 0..5:
+    print(i)
 ```
 
-## Expressions
+`for` iterates over iterable/runtime-supported values (arrays, ranges, maps/sets/strings and other runtime iterables where supported).
 
-Operators, from lowest to highest precedence:
-
-| Operators | Associativity | Notes |
-| --------- | ------------- | ----- |
-| `\|>` | left | pipeline: `value \|> f(args)` calls `f(value, args)` |
-| `?:` | right | conditional expression, branches are lazy |
-| `??` | left | optional fallback, right side is lazy |
-| `or` | left | short-circuit |
-| `and` | left | short-circuit |
-| `not` | prefix | logical negation |
-| `== != < <= > >=` | left | comparisons |
-| `..` | left | range constructor (end exclusive, optional step) |
-| `\|` | left | bitwise or |
-| `^` | left | bitwise xor |
-| `&` | left | bitwise and |
-| `<< >>` | left | shifts |
-| `+ -` | left | numeric addition/subtraction, string concatenation |
-| `* / %` | left | numeric |
-| `- ~` (prefix) | prefix | negation, bitwise not |
-| `**` | right | exponentiation |
-
-Both operands of an arithmetic operator must have the same type. `String +
-String` concatenates. Ranges are written `start..end` and produce the integers
-`start` through `end - 1`; `start..end..step` steps by a positive amount.
-
-Bitwise operators work on integers only. Shifts require an amount from 0 to 63;
-`<<` wraps on 64 bits and `>>` is arithmetic. `~x` equals `-x - 1`.
-
-The conditional expression `cond ? a : b` requires a `bool` condition, both
-branches must unify to one type, and only the selected branch is evaluated:
+### 5.8 `loop`
 
 ```a
-grade = score >= 90 ? "A" : "B"
-label = n % 2 == 0 ? "even" : "odd"
-```
-
-
-Postfix operators: calls, indexing (`a[i]`), slicing (`a[start..end]`,
-`a[start..end..step]`), field access (`.field`), safe navigation (`a?.field`),
-and unwrap (`a!`).
-
-Arrays are written `[1, 2, 3]` and inferred as `[i32]`. Arrays are reference
-values; slicing copies. Indexing is zero-based and bounds-checked. Negative
-indices count from the end; negative slice bounds are handled the same way.
-
-### Pipelines
-
-`lhs |> f(args)` parses as `f(lhs, args)`. The right side must be a call with a
-plain function name; any other form is a compile error. Continuation lines of a
-multi-line pipeline may start with `|>`:
-
-```a
-total = values
-    |> filter(fn(n) => n > 0)
-    |> map(fn(n) => n * 2)
-    |> sum()
-```
-
-### Lambdas
-
-`fn(params) => expression` creates a function value. Parameters may be typed and
-an optional `-> T` return annotation is allowed. The body is a single
-expression.
-
-```a
-double = fn(n) => n * 2
-add = fn(a, b) => a + b
-print((fn() => 99)())
-```
-
-Closures capture visible locals **by value at creation time**. Bindings
-reassigned afterwards are not observed; arrays and structs remain shared
-references. Global names are resolved at call time. Named functions are
-first-class values as well (`map(values, double)`).
-
-### Comprehensions
-
-`[expression for name in iterable]`, optionally with a condition:
-
-```a
-squares = [n * n for n in 0..10]
-evens = [n for n in values if n % 2 == 0]
-letters = [c for c in "hello"]
-```
-
-The iterable may be a range, an array or view (iterated over a snapshot), a
-map (its keys), a set, or a string (code points). A `{...}` comprehension
-produces a set instead of an array. The loop variable is scoped to the
-comprehension and immutable.
-
-### Match expressions
-
-`match` is an expression; each arm maps a pattern to a result expression:
-
-```a
-desc = match status:
-    200 => "OK"
-    400..499 => "Client error"
-    _ if status < 0 => "Invalid"
-    _ => "Other"
-```
-
-- Patterns: integer, float, string, char, and bool literals; enum variants
-  (`Color.Red`); **inclusive** integer ranges (`400..499` covers 499); and the
-  wildcard `_`.
-- An optional `if guard` follows the pattern.
-- Every arm must produce the same type.
-- A match must end with an unguarded `_` arm so every value is handled.
-- Note that match ranges are inclusive, unlike expression ranges.
-
-## Optionals
-
-`None` is the empty optional; `Some(x)` wraps a value:
-
-```a
-maybe = None
-print(maybe ?? 0)      # 0; the fallback is evaluated lazily
-maybe = Some(41)
-print(maybe! + 1)      # unwraps; runtime error on None
-```
-
-- `a ?? b`: `a` must be optional; `b` unifies with the element type and is only
-  evaluated when needed.
-- `a!`: unwraps an optional; a `None` produces the runtime error
-  "Cannot unwrap None with '!'."
-- `x?.field`: safe navigation on an optional struct. The result is optional,
-  and an optional field is flattened, so
-  `user?.address?.city` yields `String?`.
-- `==`/`!=` between optionals is allowed when the element is a primitive,
-  `String`, `char`, `bool`, or another optional (`None == x` works).
-
-## Statements
-
-```a
-if condition:
-    ...
-elif other:
-    ...
-else:
-    ...
-
-while condition:
-    ...
-
-do:
-    ...                 # runs at least once, then re-checks condition
-while condition
-
-for i in 0..10:
-    ...
-
-for i in 0..10..2:      # stepped range: 0, 2, 4, 6, 8
-    ...
-
-for item in array:      # iterates over a snapshot of the array
-
-for key in mapping:     # iterates over a map's keys
-
-for value in {1, 2, 3}: # iterates over a set's elements
-    ...
-    ...
-
-for ch in "text":       # iterates over code points
-    ...
-
+i = 0
 loop:
-    break               # exit the innermost loop
-    continue            # next iteration
-
-defer print("cleanup")  # runs when the enclosing block exits
+    if i >= 3:
+        break
+    print(i)
+    i += 1
 ```
 
-`do` loops take a colon after `do` and no colon after `while`. A stepped range
-requires a positive step; slice syntax (`a[0..n..2]`) is unchanged.
+`break` and `continue` are valid inside loops.
 
-`defer` callbacks in the same block run in reverse (LIFO) order. They still run
-when the block exits early through `return`, `break`, `continue`, or a runtime
-error.
+### 5.9 `return`
 
-## Functions
+```a
+fn add(a, b):
+    return a + b
+```
+
+### 5.10 `defer`
+
+`defer` schedules a statement/body to run when leaving the current scope/function flow (LIFO behavior is implemented; see tests).
+
+```a
+fn demo():
+    defer print("cleanup")
+    print("work")
+```
+
+### 5.11 `import` and `from ... import`
+
+```a
+import math
+import "lib/util.a"
+import "lib/util.a" as util
+from "lib/util.a" import add, Point
+```
+
+- Bare imports like `import math` resolve to native modules or stdlib modules as configured by the module loader.
+- Quoted imports load `.a` modules from filesystem/module paths.
+- Imports are only allowed at module top level.
+
+## 6. Functions
+
+### 6.1 Declarations
 
 ```a
 fn add(a, b):
     return a + b
 
-fn greet(name): print("Hello, {name}")
+fn greet(name: String) -> String:
+    return "Hello, {name}"
 ```
 
-- Functions may call functions declared later in the file.
-- `void` functions may omit `return`; returning a value from them is an error.
-- Non-void functions must return on every path.
-- Single-line bodies are allowed after `:`.
-- Top-level `fn` and `struct` declarations do not need to precede their use.
+Features supported by the parser/AST/type checker (with varying levels of specialization/enforcement):
 
-There are no default arguments, variadic user functions, or overloading.
+- parameters with optional type annotations
+- return type annotations (`-> T`)
+- generic type parameters: `fn id[T](x: T) -> T`
+- `comptime` parameters: `fn f(comptime N: int, ...)`
+- `where` clauses / trait constraints: `fn same(a: T, b: T) -> bool where Equatable`
 
-## Modules
-
-A program may span multiple files. Imports are only legal at the top level of
-a module:
+### 6.2 Lambdas
 
 ```a
-import "lib/mathx.a"                 # namespace = stem: mathx.add(...)
-import "lib/mathx.a" as mx           # namespace = mx
-from "lib/mathx.a" import add, Vec   # bind names directly
-
-import math                          # native module
-from math import sqrt, PI
+double = fn(n) => n * 2
+add = fn(a, b) => a + b
+print((fn() => 42)())
 ```
 
-- Quoted paths resolve against the importing file's directory, then each `-I`
-  directory, then `A_PATH`, then the standard library directory.
-- Bare names resolve to native modules first (`math`, `io`, `fs`, `strings`,
-  `collections`, `core`, `time`), then `stdlib/<name>.a` or
-  `stdlib/<name>/<name>.a`.
-- Every module runs its top-level statements **exactly once**, in dependency
-  order (imports before importers). Circular imports are a compile error.
-- Exports are functions, structs, enums, constants, and module-level `var`
-  bindings. `m.name` reads a live binding and `m.name = value` writes it;
-  functions are called as `m.fn(...)`, structs as `m.Point(...)`, and enum
-  variants as `m.Color.Red`.
-- `from ... import` binds names in the importer's scope. Imports are not
-  transitive
-- Functions and lambdas see the globals of the module where they are defined.
+Lambdas are first-class values. Capture behavior is implemented by the runtime/backend (integration tests demonstrate snapshot/value capture semantics and shared reference behavior for captured objects).
 
-## Tuples
-
-Tuples group fixed-length heterogeneous values:
+### 6.3 Calls
 
 ```a
-fn divmod(a, b):
-    return (a / b, a % b)
-
-(q, r) = divmod(17, 5)       # immutable destructuring
-(lo, hi) = (1, 2)        # mutable destructuring
-(_, rem) = divmod(9, 4)      # '_' discards a slot
-print((1, "two", true))      # (1, "two", true)
+add(1, 2)
+math.sqrt(9)
+point.sum()
 ```
 
-Destructuring requires a tuple of the same arity. Tuple slots cannot be
-indexed and tuples cannot be compared with `==` in v0.3; compare their fields
-instead.
+The language supports positional arguments and named-argument syntax in call parsing/AST (exact runtime/type behavior depends on callee).
 
-## Classes, structs, and methods
+## 7. Expressions and precedence
 
-Both `class` (or `Class`) and `struct` are supported:
+Expressions are parsed with precedence/associativity rules (see `Parser::binaryPrecedence`).
+
+### 7.1 Primary expressions
+
+- literals (`int`, `float`, `bool`, `char`, `string`)
+- identifiers and `self`
+- `None`
+- lambdas (`fn(...) => expr`)
+- `match` expressions
+- parenthesized expressions / tuples
+- array literals and comprehensions
+- map/set literals and set comprehensions
+
+### 7.2 Postfix / access / call expressions
+
+```a
+obj.field
+obj?.field        # optional chaining / safe navigation
+arr[i]            # indexing
+arr[start..end]   # slicing (and stepped forms where parsed/supported)
+f(x, y)           # call
+value!            # unwrap/propagation-related postfix operator in AST/runtime
+value?            # try/propagation operator parsed in postfix contexts
+x++               # postfix increment (parsed as unary postfix)
+x--               # postfix decrement
+```
+
+> Note: Some operators/tokens exist in the AST/lexer/parser for compatibility or evolving semantics. Use current tests and compiler behavior for edge-case semantics.
+
+### 7.3 Prefix/unary operators
+
+```a
+-x
+not cond
+~bits
+++x
+--x
+```
+
+### 7.4 Arithmetic and bitwise
+
+```a
+a + b  a - b  a * b  a / b  a % b  a ** b
+a & b  a | b  a ^ b  a << n  a >> n
+```
+
+### 7.5 Comparisons and logic
+
+```a
+a == b  a != b  a < b  a <= b  a > b  a >= b
+x in xs
+x not in xs
+a and b
+a or b
+not a
+```
+
+### 7.6 Ranges
+
+```a
+0..10
+1..10..2      # stepped range forms are parsed/supported in tested cases
+```
+
+Ranges are commonly used with `for` and some slicing/comprehension forms.
+
+### 7.7 Ternary / conditional expression
+
+```a
+value = cond ? thenValue : elseValue
+```
+
+### 7.8 Null-coalescing
+
+```a
+value = maybeValue ?? fallback
+```
+
+### 7.9 Pipeline operator
+
+The right side of `|>` must be a call to a plain function. The left value becomes the first argument.
+
+```a
+print(5 |> square())
+value = 3 |> square() |> add(1)
+print(items |> join("-"))
+```
+
+### 7.10 Comprehensions
+
+Array comprehension:
+
+```a
+doubled = [n * 2 for n in 0..5]
+evens = [n for n in 0..10 if n % 2 == 0]
+```
+
+Set comprehension:
+
+```a
+nums = {n * 2 for n in 0..4}
+```
+
+## 8. Pattern matching (`match`)
+
+`match` is an expression with pattern arms:
+
+```a
+label = match code:
+    200 => "OK"
+    400..499 => "Client error"
+    _ if code < 0 => "negative"
+    _ => "other"
+```
+
+Supported pattern forms (parser/AST):
+
+- wildcard: `_`
+- literal patterns (int/float/string/char/bool, incl. unary numeric literals where supported)
+- range patterns: `start..end` (inclusive, per tests)
+- binding patterns: `name`
+- tuple patterns: `(a, b)`
+- variant/qualified patterns: `Enum.Variant(...)` / dotted constructor paths
+- enum tag/qualified literal patterns
+- or-patterns: `a | b`
+
+Arms use `=>` and may include guards with `if`.
+
+## 9. Structs, classes, methods, and inheritance syntax
+
+### 9.1 Structs / classes
+
+`struct`, `class`, and `metaclass` declarations are parsed into class-like struct declarations.
+
+```a
+struct Point:
+    x
+    y
+
+    fn sum(self):
+        return self.x + self.y
+
+p = Point(3, 4)
+print(p.sum())
+```
+
+Fields may be declared with or without annotations; methods are declared with `fn` inside the body.
+
+### 9.2 Construction and field access
+
+```a
+p = Point(3, 4)
+named = Point(y=10, x=20)
+print(p.x, named.y)
+```
+
+### 9.3 Inheritance / metaclass syntax
+
+The parser accepts base-class and metaclass forms in declarations, e.g.:
 
 ```a
 class Animal:
-    sound
-
     fn speak(self):
-        return self.sound
+        return "..."
 
 class Dog(Animal):
-    name
-
-d = Dog("Woof", "Rex")
-print(d.name, "says", d.speak())
+    fn speak(self):
+        return "woof"
 ```
 
-### Metaclasses and `pass`
+(Use current tests/implementation behavior for full inheritance dispatch semantics.)
 
-```a
-metaclass ModelMeta:
-    pass
+## 10. Enums
 
-class BaseModel(metaclass=ModelMeta):
-    id
-
-m = BaseModel(1)
-```
-
-Constructors accept either positional arguments or named arguments (mixing is
-an error). Methods declare `self` explicitly as the first parameter. Class/struct
-values are reference values: passing or assigning one shares the same object.
-Derived classes inherit fields and methods from their base class.
-
-## Enums
-
-Enums are C-style named integer constants backed by `i32`:
+### 10.1 Simple (integer-valued) enums
 
 ```a
 enum Color:
-    Red              # 0
-    Green = 5        # explicit value
-    Blue             # 6, the previous value plus one
+    Red
+    Green = 5
+    Blue
 
-c = Color.Blue
-print(Color.Green)   # 5
+print(Color.Red)
+print(Color.Green)
 ```
 
-- Variants start at `0` and auto-increment; an explicit value resets the
-  counter.
-- Variant values must be integer literals (optionally negated).
-- An enum-typed binding behaves like `i32`, so arithmetic and comparisons work.
-- Enum values work in `match` patterns (`Color.Red => ...`).
-- Enums declared in a module are exported: `m.Color.Red`.
+Variants may have explicit integer values.
 
-## Strings
+### 10.2 Algebraic enums / payload variants
 
-Strings are immutable UTF-8 sequences. Literal text and interpolated
-expressions can be combined:
+The parser/AST/type system support algebraic variants with payload fields, and variant patterns in `match`.
+
+Conceptual form:
 
 ```a
-total = 3
-print("total = {total}, doubled = {total * 2}")
+enum Shape:
+    Circle(r: f64)
+    Rect(w: f64, h: f64)
 ```
 
-Strings are indexed and sliced by **code point**:
+Pattern matching uses qualified variant patterns:
 
 ```a
-print("héllo"[1])        # é
-print("héllo"[0..5])     # héllo
-print("abcdef"[0..6..2]) # ace
+match s:
+    Shape.Circle(r) => r
+    _ => 0
 ```
 
-Methods (Python-compatible names; case conversion and classification are
-ASCII-only, and non-ASCII code points pass through unchanged):
+## 11. Traits, impls, generics, and comptime
 
-| Method | Result |
-| ------ | ------ |
-| `capitalize()`, `title()`, `swapcase()` | ASCII case conversion |
-| `casefold()`, `lower()`, `upper()` | ASCII case conversion |
-| `center(width[, fill])`, `ljust(width[, fill])`, `rjust(width[, fill])` | pad to `width` code points |
-| `zfill(width)` | zero-pad, keeping a leading `+`/`-` |
-| `count(sub[, start[, end]])` | number of non-overlapping matches |
-| `find(sub[, start[, end]])`, `rfind(...)` | code-point index of the match, or `-1` |
-| `index(sub[, start[, end]])`, `rindex(...)` | code-point index, runtime error when absent |
-| `startswith(prefix[, start[, end]])`, `endswith(suffix[, start[, end]])` | prefix/suffix tests |
-| `expandtabs([tabsize])` | expand tabs (default 8) |
-| `strip([chars])`, `lstrip([chars])`, `rstrip([chars])` | trim characters (default ASCII whitespace) |
-| `partition(sep)`, `rpartition(sep)` | `(before, sep, after)` tuple |
-| `removeprefix(affix)`, `removesuffix(affix)` | exact prefix/suffix removal |
-| `replace(old, new[, count])` | replace occurrences |
-| `split([sep[, maxsplit]])`, `rsplit([sep[, maxsplit]])` | `[String]`; without a separator splits on whitespace |
-| `splitlines([keepends])` | `[String]` split on line boundaries |
-| `join(parts)` | join a `[String]` with the receiver |
-| `isalnum()`, `isalpha()`, `isascii()`, `isdecimal()`, `isdigit()`, `isidentifier()`, `islower()`, `isnumeric()`, `isprintable()`, `isspace()`, `istitle()`, `isupper()` | classification tests |
-| `contains(sub)` | A extension: substring test |
-| `repeat(n)` | A extension: repeat the string `n` times |
-| `chars()` | A extension: `[char]` of code points |
-
-Numeric conversion uses the free functions `int(x)` and `float(x)`, which
-accept numbers, bools, and numeric strings (surrounding ASCII whitespace and a
-leading `+` are allowed) and raise a runtime error on invalid input. There are
-no `to_int`/`to_float` methods.
-
-## Arrays and collections
-
-### Arrays
-
-Arrays are reference values, support negative indexing, and carry methods:
-
-| Method | Result |
-| ------ | ------ |
-| `append(value)` | append, returns `void` |
-| `extend(other)` | append every element of another array |
-| `insert(index, value)` | insert before `index`; clamps to the valid range |
-| `pop([index])` | remove and return the last element (or the given index) |
-| `remove(value)` | remove the first equal element, runtime error when absent |
-| `clear()` | remove every element |
-| `copy()` | shallow copy |
-| `count(value)` | number of occurrences |
-| `index(value[, start[, end]])` | first index, runtime error when absent |
-| `reverse()` | reverse in place |
-| `sort()` | sort ints, floats, or strings in place (no `key=`/`reverse=`) |
-| `remove_at(index)` | A extension: remove and return the element |
-| `contains(value)` | A extension: membership test |
-| `first()`, `last()` | A extension: `T?`, `None` when empty |
-| `join(sep)` | A extension: concatenate string forms with `sep` |
-
-Slices use exclusive end bounds and an optional positive step:
-`items[0..10..2]`. A non-positive step is a runtime error.
-
-A unit-step slice (`items[1..4]`) is a **view**: a fixed-size window over the
-original storage. Element reads and writes, `reverse()` and `sort()` act on the
-window and are visible in the source array; methods that change the length
-(`append`, `extend`, `insert`, `pop`, `remove`, `remove_at`, `clear`) reject
-views at run time. Copy a view first (`view.copy()`) to get an independent
-array. Stepped slices (`items[0..10..2]`) always copy.
-
-### Ownership, moves, and borrows
-
-Bindings move explicitly with `move(value)`: the original binding is marked as
-moved and any later read is a compile error.
+### 11.1 Traits
 
 ```a
-xs = [1, 2, 3]
-ys = move(xs)
-ys.append(4)   # ok
-print(xs)      # error: Use of moved value 'xs'.
+trait Equatable:
+    fn eq(self, other) -> bool
 ```
 
-`copy(value)` produces an independent value while leaving the original usable.
-Arrays, views, maps, sets, structs, and tuples are copied one level deep; scalars
-and strings are value types, so `copy` returns them unchanged. Pointers are
-handles and are not cloned.
+### 11.2 Implementations
 
 ```a
-a = [1, 2]
-b = copy(a)
-b.append(3)
-print(a)   # [1, 2]
+impl Equatable for Point:
+    pass
 ```
 
-A unit-step slice creates a **borrow** of its source. While the view is live,
-methods that change the lender's length (`append`, `extend`, `insert`, `pop`,
-`remove`, `remove_at`, `clear`) are rejected at compile time; element writes and
-`reverse`/`sort` remain allowed. Reassigning or releasing the view ends the
-borrow. Branches merge moved and borrowed state conservatively.
+The checker validates trait/impl conformance where implemented.
 
-Explicit borrows make the intent visible and are checked as lifetimes that end
-when the borrowing binding is reassigned or leaves scope:
+### 11.3 `where` clauses
 
 ```a
-xs = [1, 2, 3]
-m = borrow_mut(xs)
-m.append(4)      # exclusive access, so mutation is allowed through m
-print(m)         # okay: reading through the borrower
-m = []           # reassigning m releases the borrow
-xs.append(5)     # now the lender is usable again
-
-s = borrow(xs)   # shared borrow
-print(len(s))
-
-xs.append(6)     # error: xs is borrowed by s
+fn same(a: T, b: T) -> bool where Equatable:
+    return a.eq(b)
 ```
 
-Rules:
+### 11.4 Generics
 
-- `borrow(x)` takes a shared borrow. Any number of shared borrows may be live.
-- `borrow_mut(x)` takes an exclusive mutable borrow. No other borrow (shared or
-  mutable) may be live, and the lender cannot be read or mutated until the
-  mutable borrower is reassigned or goes out of scope.
-- Mutating a lender (`append`, `extend`, `insert`, `pop`, `remove`,
-  `remove_at`, `clear`, `move`, reassignment) while a shared borrow is live is
-  an error.
-- Mutating through a shared borrow (methods, element or field assignment) is
-  rejected; use `borrow_mut`.
-- A borrow of a borrow tracks the original lender.
-
-### Deterministic cleanup
-
-Structs and classes may define a `drop(self)` method. It runs when an owning
-binding leaves scope (including early `return`, `break`, `continue`, or a
-runtime error) and when an owning variable is reassigned. `defer` bodies run
-before destructors for the same block, and destructors run in reverse
-declaration order.
+Functions, structs, and type positions support generic parameter syntax in the parser/type checker:
 
 ```a
-class Resource:
-    name
-
-    fn drop(self):
-        print("drop " + self.name)
-
-fn use():
-    r = Resource("local")
-    defer print("defer")     # runs first
-                             # then r.drop()
+fn identity[T](x: T) -> T:
+    return x
 ```
 
-Aliases share their storage, so `drop` runs exactly once, when the last owning
-binding is released. Values still referenced by arrays, closures, or other
-bindings are not dropped early.
+### 11.5 `comptime` parameters
 
-### Unsafe pointers
-
-The `unsafe` module can also take raw pointers into array storage for
-hand-written low-level code:
+`comptime` parameters are parsed and represented in the AST/type checker; specialization behavior may be partial depending on backend/path.
 
 ```a
-import unsafe
-
-values = [10, 20, 30]
-p = unsafe.address_of(values, 1)   # no bounds test: may point anywhere
-print(unsafe.load(p))              # 20; load/store still bounds-check
-unsafe.store(p, 99)
-q = unsafe.offset(p, -1)
-print(unsafe.load(q))              # 10
+fn repeat(comptime N: int, x):
+    return x
 ```
 
-| Builtin | Result | Notes |
-| ------- | ------ | ----- |
-| `unsafe.address_of(array, index)` | `Pointer<T>` | unchecked: keeps the raw offset |
-| `unsafe.offset(pointer, delta)` | `Pointer<T>` | unchecked arithmetic |
-| `unsafe.load(pointer)` | `T` | runtime error when the address is outside the storage |
-| `unsafe.store(pointer, value)` | `void` | runtime error when the address is outside the storage |
+## 12. Optionals and results
 
-Pointers keep their backing storage alive, print as `<pointer N>`, and are
-handles (copying a pointer does not copy the storage).
+### 12.1 Optionals
 
-### Fixed-size and multidimensional arrays
-
-Annotate an array with a length to require that exact size:
+- `T?` is optional type syntax.
+- `None` represents the empty optional.
+- `Some(value)` wraps a value.
+- `??` provides a fallback.
+- `?.` safely navigates fields through optionals.
+- `!` is used for unwrap-style operations (and `?` appears as propagation/try-related syntax in the AST/parser; see tests for exact behavior).
 
 ```a
-numbers = [1, 2, 3, 4, 5]
-grid = [[1, 2, 3], [4, 5, 6]]
+missing = None
+present = Some(41)
+print(missing ?? 0)
+print(present!)
+print(maybeUser?.address?.city)
 ```
 
-The length suffix binds from the outside in, so `i32[2][3]` is two rows of
-three. Fixed-size arrays are checked at compile time: the literal must hold
-exactly the declared number of elements, and length-changing methods are
-rejected. Indexing, views, and element assignment work as for dynamic arrays.
+### 12.2 Results
 
-### Maps
-
-Map literals use `{key: value, ...}`; `{}` is an empty map, so annotate it
-(e.g. `m: {str: i32} = {}`). Keys are unique and keep insertion order; a
-literal key that repeats replaces the earlier value.
-
-| Method | Result |
-| ------ | ------ |
-| `get(key[, default])` | value, or the default, or `None` |
-| `pop(key[, default])` | remove and return the value; runtime error when absent without a default |
-| `contains(key)` | membership test (`key in map` also works) |
-| `keys()`, `values()` | `[K]` / `[V]` in insertion order |
-| `items()` | `[(K, V)]` pairs in insertion order |
-| `update(other)` | copy every entry of `other`, replacing equal keys |
-| `copy()` | shallow copy |
-| `clear()` | remove every entry |
-
-`map[key]` reads an entry and raises a runtime error when the key is absent;
-`map[key] = value` inserts or replaces. `len(map)` is the number of entries,
-and `for key in map:` iterates over the keys.
-
-### Sets
-
-Set literals use `{a, b, c}` and set comprehensions use `{expr for x in ...}`;
-`set()` creates an empty set and `set(iterable)` builds one from an array,
-range, or string. Sets keep insertion order and ignore duplicate values.
-
-| Method | Result |
-| ------ | ------ |
-| `add(value)` | insert when absent |
-| `remove(value)` | remove; runtime error when absent |
-| `discard(value)` | remove when present |
-| `contains(value)` | membership test (`value in set` also works) |
-| `union(other)`, `intersection(other)`, `difference(other)` | new set |
-| `issubset(other)`, `issuperset(other)` | `bool` |
-| `copy()`, `clear()` | shallow copy / empty the set |
-
-`len(set)` is the number of elements, sets are iterable, and they cannot be
-indexed.
-
-### Unchecked indexing
-
-The `unsafe` native module exposes unchecked access for code that has already
-validated its indices:
+`Ok(value)` and `Err(error)` create result values; result helpers and pattern/API behavior are available through runtime/builtins and prelude support.
 
 ```a
-import unsafe
-
-unsafe.get(values, index)
-unsafe.set(values, index, value)
+fn divide(a, b):
+    if b == 0:
+        return Err("division by zero")
+    return Ok(a / b)
 ```
 
-Both accept arrays and views, perform no normalization or bounds test, and are
-undefined behavior when the index is outside the collection. Prefer ordinary
-indexing; use `unsafe` only in tight loops that prove the index safe.
+## 13. Modules and packages
 
-### Memory allocators
+### 13.1 Module resolution
 
-The `arena` native module provides explicit allocators. Handles are byte
-offsets into the allocator's backing storage, so they are cheap integers:
+- `import math` / `import core` resolve to native modules (backed by C++ runtime bindings).
+- quoted imports resolve to `.a` files (relative/module paths and stdlib resolution rules apply).
+- the module loader auto-loads the prelude before the entry program when a stdlib root is found (`stdlib/prelude.a` / `std/prelude` variants).
+
+### 13.2 Native modules
+
+Native modules are implemented by the toolchain and exposed as module namespaces (see [Standard Library API Reference](../standard-library/README.md)).
+
+### 13.3 `std/*` packages
+
+The repository includes `stdlib/std/...` packages. Some are pure A wrappers; others are package stubs backed by native modules (`core`, `fs`, `json`, `http`, `net`, `time`, `testing`, `log`, `metrics`, `trace`, `binary`).
+
+## 14. Runtime, memory, and unsafe features
+
+- A uses runtime-managed values/objects in the interpreter/KGEN execution engine path.
+- Unsafe and arena APIs exist for low-level/experimental memory operations.
+- Ownership/move/borrow-related syntax and builtins appear in the language/tooling; use current implementation/tests for exact guarantees, especially on the LLVM/KGEN native path.
+
+## 15. Testing
+
+Functions named `test_*` at top level are discovered/executed by `a test`.
 
 ```a
-import arena
-
-buf = arena.new(1024)        # bump/arena allocator
-handle = arena.alloc(buf, 16)
-arena.used(buf)              # bytes outstanding
-arena.total(buf)             # capacity
-arena.reset(buf)             # release everything
-
-pool = arena.pool(4096)      # free-list allocator
-arena.release(pool, handle)  # returns the block to the free list
-
-region = arena.region(4096)  # LIFO region allocator
+fn test_addition():
+    assert_eq(1 + 1, 2)
 ```
 
-| Builtin | Result | Notes |
-| ------- | ------ | ----- |
-| `arena.new(capacity)`, `arena.pool(capacity)`, `arena.region(capacity)` | `Allocator` | capacity in bytes |
-| `arena.alloc(a, size)` | int handle | runtime error when out of space |
-| `arena.release(a, handle)` | `void` | pools release individual blocks; regions must release in reverse order; arenas use `reset` |
-| `arena.reset(a)` | `void` | release every block |
-| `arena.used(a)`, `arena.total(a)` | int | outstanding bytes / capacity |
-
-Allocators are also values: `print(buf)` shows `<arena 0/1024>`. The allocator
-builtins execute in the interpreter, so `a run` falls back from the
-LLVM/native backends for programs that use the `arena` module (`a build` does
-not fall back).
-
-## Built-in functions
-
-| Name | Description |
-| ---- | ----------- |
-| `print(values...)` | space-separated values plus newline to stdout |
-| `eprint(values...)` | same, to stderr |
-| `flush()` | flush stdout and stderr |
-| `input(prompt?)` | print prompt, read one line as `String` |
-| `len(container)` | length of a string (code points), array, view, map, or set |
-| `str(value)` | convert any value to its display form |
-| `move(value)` | transfer ownership; the original binding becomes unusable |
-| `copy(value)` | independent shallow copy; identity for scalars, strings, and pointers |
-| `borrow(value)`, `borrow_mut(value)` | shared / exclusive borrow with a tracked lifetime |
-| `int(value)` | `i64` from an int, bool, float (truncated toward zero), or numeric string |
-| `float(value)` | `f64` from an int, bool, float, or numeric string |
-| `abs(x)` | absolute value |
-| `min(a, b)`, `max(a, b)` | matching numeric arguments |
-| `pow(base, exp)` | `f64` power |
-| `sqrt`, `sin`, `cos`, `tan`, `exp`, `log`, `log2`, `log10` | `f64` math |
-| `floor`, `ceil`, `round`, `trunc` | `f64` rounding |
-| `atan2(y, x)` | `f64` angle |
-| `random()` | `f64` in `[0, 1)` |
-| `random_int(lo, hi)` | `i32` in `[lo, hi]`, inclusive |
-| `map(array, fn)` | `[U]` from applying the function |
-| `filter(array, fn)` | elements where the predicate is true |
-| `reduce(array, init, fn)` | left fold |
-| `any(array, fn)`, `all(array, fn)` | `bool` aggregates |
-| `sum(array)` | numeric or string concatenation, `0` when empty |
-| `join(array, sep)` | concatenate string forms with `sep` |
-| `set([iterable])` | empty set, or a set of the iterable's elements |
-| `unsafe.get(array, index)`, `unsafe.set(array, index, value)` | unchecked element access (native module `unsafe`) |
-| `unsafe.address_of(array, index)`, `unsafe.offset(pointer, delta)` | raw `Pointer<T>` arithmetic (native module `unsafe`) |
-| `unsafe.load(pointer)`, `unsafe.store(pointer, value)` | bounds-checked access through a raw pointer |
-| `Some(value)` | wrap a value in an optional |
-| `read_file(path)` | entire file as `String` |
-| `write_file(path, text)` | overwrite a file |
-| `append_file(path, text)` | append to a file |
-| `file_exists(path)` | `bool` |
-| `list_dir(path)` | sorted `[String]` of directory entry names |
-| `remove_file(path)` | delete a file |
-| `create_dir(path)` | create a directory and missing parents |
-| `remove_dir(path)` | delete an empty directory |
-| `rename(from, to)` | move or rename a path |
-| `current_dir()` | absolute current working directory |
-| `now()` | wall-clock time as Unix epoch milliseconds |
-| `sleep(ms)` | pause for a non-negative number of milliseconds |
-| `panic(message)` | abort with a runtime error |
-| `assert(condition, message?)` | runtime error unless the condition is true |
-| `assert_eq(expected, actual, message?)` | runtime error unless the values match |
-| `i8`...`i64`, `u8`...`u64`, `f32`, `f64` | checked conversions |
-
-Built-in constants: `PI`, `E`, `I8_MIN`/`I8_MAX` through `I64_MIN`/`I64_MAX`,
-`U8_MAX`, `U16_MAX`, `U32_MAX`, `F32_MIN`/`F32_MAX`, `F64_MIN`/`F64_MAX`.
-`F32_MIN` and `F64_MIN` are the most negative values. There is no `U64_MAX`
-because integers are stored in a signed 64-bit representation.
-
-## Runtime behavior
-
-- Integer arithmetic is checked. Overflow, division by zero, out-of-range
-  conversions, invalid indices, unsafe unwraps, non-positive slice steps,
-  missing struct fields at runtime, and invalid string-to-number conversions
-  produce runtime errors with source locations.
-- File I/O uses binary mode; failures report the operating-system error text.
-  `input` strips a trailing carriage return (CRLF input) and treats end of
-  input as a runtime error.
-- Runtime errors exit with code `2`; compile errors exit with code `1`.
-- Evaluation is depth-first and left-to-right. `print` writes to stdout and
-  flushes on process exit or when `flush()` is called.
-- Programs in `a run` execute imported modules once (in dependency order), then
-  the entry module's top-level statements. Functions and structs are registered
-  before any statements run.
-- There is no entry-point function: a program is its module body, so a script
-  needs no `fn main()` and no `main()` call. `main` is an ordinary name — define
-  and call it only when you want a single labeled block. See
-  `examples/stdlib/builtin_modules.a` for a statement-level tour.
-
-## Standard library modules
-
-`import math` and friends expose builtins as namespaces. The available native
-modules are `math`, `io`, `fs`, `strings`, `collections`, `unsafe`, `arena`,
-`core`, and `time`, plus the runtime-backed `json`, `binary`, `testing`, `log`,
-`metrics`, `trace`, `net`, and `http`;
-the full member list is in
-[docs/standard-library](../standard-library/README.md). Modules may also be
-written in A under `stdlib/`, such as `stdlib/test/test.a`.
-
-## Tooling and diagnostics
-
-The `a` binary provides `run`, `build`, `check`, `test`, `fmt`, `doc`, and
-`ir`. Diagnostics carry stable codes; warnings never change the exit code.
-
-| Command | Purpose |
-| ------- | ------- |
-| `a run <file.a>` | compile and execute a program |
-| `a build <file.a> [-o out]` | compile to a native binary |
-| `a check <file.a>` | type-check without running |
-| `a check --json <file.a>` | emit `{"diagnostics":[...]}` as JSON |
-| `a test <file.a>` | run every zero-argument `fn test_*()` |
-| `a fmt <file.a>` | format source |
-| `a doc <file.a>` | generate documentation |
-| `a ir <file.a>` | print the typed SSA intermediate representation |
-| `a ir --opt <file.a>` | run optimization passes, then print the IR |
-
-`a ir` lowers every function plus the entry module's top-level statements into
-typed SSA with basic blocks, branches, and phi nodes. The pipeline in
-`a ir --opt` performs constant folding/propagation, dead-code elimination
-(unreachable blocks and unused pure instructions), single-block function
-inlining, and loop-invariant code motion into natural-loop preheaders.
-Short-circuiting `and`/`or` are lowered as strict binaries in this IR, and
-constructs that cannot be represented (closures, comprehensions, pattern
-matching) appear as `opaque`.
-
-| Code | Warning |
-| ---- | ------- |
-| `W0001` | unused local variable |
-| `W0002` | unreachable statement |
-
-Prefix a local binding with `_` to silence `W0001`. `a test` runs the entry
-module's `test_*` functions in name order, prints `ok name` or
-`FAILED name: reason`, ends with a `<passed> passed, <failed> failed` summary,
-and exits with code 1 when any test fails.
-
-## Not yet supported
-
-Interfaces/traits, `?` error propagation over `Result` types,
-`i128`/`u128`/`f16`/`bf16`, package management, and concurrency primitives are
-future work. Generics, type aliases, class inheritance, open-ended ranges, and
-raw triple-quoted strings are supported.
+See [CLI Reference](../cli/README.md) and [Standard Library API Reference](../standard-library/README.md) for `assert`/`assert_eq`/`testing` APIs.

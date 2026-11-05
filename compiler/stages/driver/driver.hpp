@@ -1,78 +1,18 @@
 #pragma once
-
 #include <iosfwd>
 #include <string>
 #include <vector>
-
 namespace a {
-
-struct DriverConfig {
-  bool checkOnly = false;
-  bool jsonDiagnostics = false;  // `a check --json`: render diagnostics as JSON
-  bool useColor = false;
-  std::string backend = "llvm";          // "llvm" (default), "native", or "interpreter"
-  std::vector<std::string> modulePaths;  // -I search directories
-  std::string stdlibRoot;                // --stdlib; auto-detected when empty
-};
-
-// Compiles and, unless `checkOnly` is set, executes the named file.
-// Returns a process exit code: 0 success, 1 compile error, 2 runtime error,
-// 66 when the file cannot be read.
-int runFile(const std::string& path, const DriverConfig& config, std::istream& in,
-            std::ostream& out, std::ostream& err);
-
-// Compiles and optionally executes in-memory source. `displayPath` is used in
-// diagnostics only.
-int runSource(const std::string& displayPath, std::string source, const DriverConfig& config,
-              std::istream& in, std::ostream& out, std::ostream& err);
-
-// Compiles a program and runs its zero-argument `test_*` functions (`a test`).
-int testFile(const std::string& path, const DriverConfig& config, std::istream& in,
-             std::ostream& out, std::ostream& err);
-
-// Runs an interactive REPL (`a repl`): reads lines from `in`, prints a banner
-// and `>>>`/`...` prompts to `out`, evaluates each complete chunk in a
-// persistent session (variables/functions survive across lines), and echoes
-// the value of bare expressions. `help`/`exit`/`quit` are meta-commands.
-// Exit code is always 0 (errors are reported inline, like Python).
-int repl(const DriverConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
-
-// Compiles a program to a native binary executable (`a build`).
-int buildFile(const std::string& path, const std::string& outputPath,
-              const DriverConfig& config, const std::string& backend, std::ostream& err);
-
-// Emits textual LLVM IR (.ll) to a file.
-int emitLLVMFile(const std::string& path, const std::string& outputPath,
-                 const DriverConfig& config, std::ostream& err);
-
-// Lowers a checked program to the typed SSA IR and writes its textual form to
-// `out`. When `optimize` is set the standard optimization pipeline runs first.
-int emitIRFile(const std::string& path, const DriverConfig& config, bool optimize,
-               std::ostream& out, std::ostream& err);
-
-// Formats a source file. By default the formatted text is written to `out`;
-// `checkOnly` reports whether the file is already formatted, and
-// `writeInPlace` rewrites the input file.
-struct FormatFileOptions {
-  bool checkOnly = false;
-  bool writeInPlace = false;
-  int indentWidth = 4;
-  bool useColor = false;
-};
-
-int formatFile(const std::string& path, const FormatFileOptions& options, std::ostream& out,
-               std::ostream& err);
-
-// Generates documentation for a module. Markdown is produced by default;
-// `json` selects the structured JSON form, and `outputPath` writes to a file
-// instead of `out`.
-struct DocFileOptions {
-  bool json = false;
-  bool useColor = false;
-  std::string outputPath;
-};
-
-int documentFile(const std::string& path, const DocFileOptions& options, std::ostream& out,
-                 std::ostream& err);
-
-}  // namespace a
+struct DriverConfig { bool checkOnly=false,jsonDiagnostics=false,useColor=false; std::string backend="llvm"; std::vector<std::string> modulePaths; std::string stdlibRoot; };
+int runFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
+int runSource(const std::string& displayPath,std::string source,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
+int testFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
+int repl(const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
+int buildFile(const std::string& path,const std::string& outputPath,const DriverConfig& config,const std::string& backend,std::ostream& err);
+int emitLLVMFile(const std::string& path,const std::string& outputPath,const DriverConfig& config,std::ostream& err);
+int emitIRFile(const std::string& path,const DriverConfig& config,bool optimize,std::ostream& out,std::ostream& err);
+struct FormatFileOptions { bool checkOnly=false,writeInPlace=false; int indentWidth=4; bool useColor=false; };
+int formatFile(const std::string& path,const FormatFileOptions& options,std::ostream& out,std::ostream& err);
+struct DocFileOptions { bool json=false,useColor=false; std::string outputPath; };
+int documentFile(const std::string& path,const DocFileOptions& options,std::ostream& out,std::ostream& err);
+}

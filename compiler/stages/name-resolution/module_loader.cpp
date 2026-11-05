@@ -61,8 +61,19 @@ std::string defaultStdlibRoot() {
     candidates.push_back(dir / ".." / ".." / "stdlib");
     candidates.push_back(dir / ".." / "share" / "a" / "stdlib");
   }
-  candidates.push_back(fs::current_path(error) / "stdlib");
-
+  // Walk up from cwd to find a repo/source stdlib (test harnesses may run
+  // from subdirectories). Prefer roots that contain prelude/std layout.
+  {
+    std::error_code ec;
+    fs::path cwd = fs::current_path(ec);
+    if (!ec) {
+      std::vector<fs::path> found;
+      for (fs::path up = cwd; !up.empty(); up = up.parent_path()) { found.push_back(up / "stdlib"); if (up == up.parent_path()) break; }
+      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "prelude.a", e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
+      for (const auto& f : found) candidates.push_back(f);
+    }
+  }
+  candidates.push_back(fs::path("stdlib"));
   for (const auto& candidate : candidates) {
     std::error_code existsError;
     if (fs::exists(candidate, existsError) && !existsError) return candidate.string();

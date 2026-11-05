@@ -1,0 +1,4 @@
+# Hello world
+print("Hello, A!")
+import prelude
+print("prelude:", prelude.prelude_version())

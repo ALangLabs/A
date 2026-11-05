@@ -1,0 +1,27 @@
+# match expression, ranges, guards
+fn describe(code):
+    return match code:
+        200 => "OK"
+        201 => "Created"
+        400..499 => "Client error"
+        500..599 => "Server error"
+        _ => "Unknown"
+
+for c in [200, 201, 404, 503, 302]:
+    print(c, describe(c))
+
+fn classify(n):
+    return match n:
+        0 => "zero"
+        _ if n < 0 => "negative"
+        _ if n > 100 => "large"
+        _ => "small"
+
+print(classify(0), classify(-7), classify(999), classify(5))
+
+# Ranges in for loops
+for i in 0..5:
+    print(i)
+
+for i in 0..10..2:
+    print("step", i)
