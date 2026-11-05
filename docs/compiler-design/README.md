@@ -7,7 +7,7 @@ library. All code lives in `namespace a`.
 ## Layout
 
 ```
-compiler/source/
+compiler/stages/
   lexer/            token.hpp source.hpp span.hpp lexer.{hpp,cpp}
   ast/              ast.hpp
   parser/           parser.{hpp,cpp}
@@ -41,7 +41,7 @@ a_backend           Value, Interpreter
    ^
 a_driver            DriverConfig, runFile, runSource
    ^
-executable `a` (compiler/source/cli/main.cpp)
+executable `a` (compiler/stages/cli/main.cpp)
 ```
 
 `a_runtime` (UTF-8 and value formatting) sits alongside the front end and is
@@ -56,7 +56,7 @@ the driver and runtime use transparent string-keyed tables
 
 ## Pipeline
 
-`runSource` in `compiler/source/driver/driver.cpp` owns the exit codes:
+`runSource` in `compiler/stages/driver/driver.cpp` owns the exit codes:
 
 1. **Load** — `ModuleLoader` parses the entry file and every import, resolving
    paths, detecting cycles, and producing a post-order `ModuleGraph`.
@@ -99,7 +99,7 @@ recomputed, so the parser sees one continuous expression.
 
 `Parser` is a recursive-descent parser for statements and a Pratt parser for
 expressions. The precedence table lives in `binaryPrecedence` in
-`compiler/source/parser/parser.cpp`:
+`compiler/stages/parser/parser.cpp`:
 
 `|>` 1, `?:` 2 (right), `??` 3, `or` 4, `and` 5, prefix `not` 6,
 comparisons 7, `..` 8, `|` 9, `^` 10, `&` 11, shifts 12, `+ -` 13,
@@ -228,8 +228,8 @@ CPython's specialized call opcodes.
 
 A typical language addition touches each layer in order:
 
-1. token(s) in `compiler/source/lexer/token.hpp` and `lexer.cpp`;
-2. AST node in `compiler/source/ast/ast.hpp`, parsing in `parser.cpp`;
+1. token(s) in `compiler/stages/lexer/token.hpp` and `lexer.cpp`;
+2. AST node in `compiler/stages/ast/ast.hpp`, parsing in `parser.cpp`;
 3. typing rules in `type-checker/sema.cpp` (and helpers in `types.hpp`);
 4. evaluation in `backend/interpreter.cpp`;
 5. golden tests under `tests/integration/cases/` and a reference entry in

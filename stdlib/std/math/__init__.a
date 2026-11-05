@@ -1,0 +1,4 @@
+# std.math package re-export (Mojo `std/math/__init__.mojo` analog).
+# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
+# from the stdlib root, so this file imports the sibling explicitly.
+from "math.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, floor, ceil, round_val, PI, E, clamp

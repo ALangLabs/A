@@ -327,7 +327,7 @@ cumulative, startup ≤ 5 ms for cached units, full integration suite green.
 
 ### P5 — Typed IR and LLVM backend (10–14 weeks, native parity)
 
-- Define a typed SSA IR (`compiler/source/ir`) with explicit control flow,
+- Define a typed SSA IR (`compiler/stages/ir`) with explicit control flow,
   aggregate layout, and calling convention.
 - Lower from the typed AST after monomorphization; retain source spans for
   diagnostics and debug info.
@@ -373,14 +373,14 @@ the published matrix, allocation counts within 1.3× of C++ on `memory`.
 
 | Area | Files | Change |
 | --- | --- | --- |
-| AST dispatch | `compiler/source/ast/ast.hpp`, `backend/interpreter.cpp` | Node kinds / visitor; remove `dynamic_cast` chains |
+| AST dispatch | `compiler/stages/ast/ast.hpp`, `backend/interpreter.cpp` | Node kinds / visitor; remove `dynamic_cast` chains |
 | Operators | `lexer/token.hpp`, `parser/parser.cpp`, `ast/ast.hpp` | `Op` enum in parser and AST |
 | Names | `name-resolution/module_loader.*`, `type-checker/sema.*` | `SymbolId` interning, export tables keyed by id |
 | Scopes | `type-checker/sema.*`, `backend/interpreter.*` | Slot assignment, `ActivationRecord` |
 | Values | `runtime/memory/value.hpp`, `backend/interpreter.cpp` | Tagged 16-byte value, SSO, arena |
-| IR | `compiler/source/ir/` (new) | Typed SSA, verifier, printer |
-| Backend | `compiler/source/backend/` (new `bytecode.*`, `llvm_backend.*`) | VM and LLVM emission |
-| CLI | `compiler/source/cli/main.cpp`, `driver/driver.cpp` | `a build`, `--emit-ir`, `--emit-bytecode`, `--profile` |
+| IR | `compiler/stages/ir/` (new) | Typed SSA, verifier, printer |
+| Backend | `compiler/stages/backend/` (new `bytecode.*`, `llvm_backend.*`) | VM and LLVM emission |
+| CLI | `compiler/stages/cli/main.cpp`, `driver/driver.cpp` | `a build`, `--emit-ir`, `--emit-bytecode`, `--profile` |
 | Benchmarks | `benchmarks/`, `tools/benchmark-runner/compare.py` | Equivalents, JSON output, gates |
 
 ---

@@ -219,7 +219,7 @@ cannot lower them. The full member tables and semantics live in
 ├── tools/
 │   ├── formatter/              # a fmt documentation
 │   ├── documentation/          # a doc documentation
-│   ├── language-server/        # a-lsp: diagnostics, navigation, completion, hover
+│   ├── lsp/        # a-lsp: diagnostics, navigation, completion, hover
 │   └── vscode-a/               # VS Code extension (grammar + LSP client)
 └── tests/                      # Automated golden test suite
 ```
@@ -304,7 +304,7 @@ end, so diagnostics and navigation match `a check`.
 
 ### Language server: `a-lsp`
 
-`tools/language-server/` implements the Language Server Protocol over stdio
+`tools/lsp/` implements the Language Server Protocol over stdio
 with no third-party dependencies.
 
 | Capability | What it does |
@@ -385,7 +385,7 @@ Useful settings:
 | `a.server.modulePaths` | `[]` | Extra directories for `import` resolution |
 
 Run **A: Restart Language Server** from the command palette after rebuilding
-the server. See [`tools/language-server/README.md`](tools/language-server/README.md)
+the server. See [`tools/lsp/README.md`](tools/lsp/README.md)
 and [`tools/vscode-a/README.md`](tools/vscode-a/README.md) for details.
 
 ### Other editors
@@ -410,7 +410,7 @@ Or run the pieces directly:
 tests/integration/run_tests.sh build/a
 ./build/a-tooling-tests
 tests/tooling/run_cli_tests.sh build/a
-python3 tools/language-server/smoke_test.py build/a-lsp
+python3 tools/lsp/smoke_test.py build/a-lsp
 ```
 
 ---

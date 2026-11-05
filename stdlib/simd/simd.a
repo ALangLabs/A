@@ -1,0 +1,153 @@
+# SIMD helpers (Mojo `std/simd` + MAX kernel-adjacent analog).
+#
+# Fixed-width vectors are represented as structs with typed lanes. All lane math
+# here is scalar emulation: real fixed-width SIMD codegen needs a vector backend
+# and is tracked in TODO.md.
+import prelude
+import math
+
+# --- Vec8: eight typed i64 lanes ---
+
+struct Vec8:
+    a: i64
+    b: i64
+    c: i64
+    d: i64
+    e: i64
+    f: i64
+    g: i64
+    h: i64
+
+    fn get(self, i: i64) -> i64:
+        if i == 0:
+            return self.a
+        elif i == 1:
+            return self.b
+        elif i == 2:
+            return self.c
+        elif i == 3:
+            return self.d
+        elif i == 4:
+            return self.e
+        elif i == 5:
+            return self.f
+        elif i == 6:
+            return self.g
+        else:
+            return self.h
+
+    fn to_list(self) -> [i64]:
+        return [self.a, self.b, self.c, self.d, self.e, self.f, self.g, self.h]
+
+    fn add(self, other: Vec8) -> Vec8:
+        return Vec8(self.a + other.a, self.b + other.b, self.c + other.c, self.d + other.d, self.e + other.e, self.f + other.f, self.g + other.g, self.h + other.h)
+
+    fn scale(self, s: i64) -> Vec8:
+        return Vec8(self.a * s, self.b * s, self.c * s, self.d * s, self.e * s, self.f * s, self.g * s, self.h * s)
+
+    fn dot(self, other: Vec8) -> i64:
+        return self.a * other.a + self.b * other.b + self.c * other.c + self.d * other.d + self.e * other.e + self.f * other.f + self.g * other.g + self.h * other.h
+
+    fn hadamard(self, other: Vec8) -> Vec8:
+        return Vec8(self.a * other.a, self.b * other.b, self.c * other.c, self.d * other.d, self.e * other.e, self.f * other.f, self.g * other.g, self.h * other.h)
+
+fn vec8_from_list(xs: [i64]) -> Vec8:
+    return Vec8(xs[0], xs[1], xs[2], xs[3], xs[4], xs[5], xs[6], xs[7])
+
+fn vec8_broadcast(x: i64) -> Vec8:
+    return Vec8(x, x, x, x, x, x, x, x)
+
+# --- List lane helpers ---
+
+fn add_lists(a: [i64], b: [i64]) -> [i64]:
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] + b[i])
+    return out
+
+fn scale_list(xs: [i64], s: i64) -> [i64]:
+    out = []
+    for x in xs:
+        out.append(x * s)
+    return out
+
+fn dot_list(a: [i64], b: [i64]) -> i64:
+    total = 0
+    for i in 0..len(a):
+        total = total + a[i] * b[i]
+    return total
+
+fn hadamard_list(a: [i64], b: [i64]) -> [i64]:
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] * b[i])
+    return out
+
+fn broadcast_list(x: i64, n: i64) -> [i64]:
+    out = []
+    for i in 0..n:
+        out.append(x)
+    return out
+
+fn vectorize_list(xs: [i64], s: i64) -> [i64]:
+    # Scalar emulation of `vectorize`: scale every lane by `s`. Real SIMD is
+    # codegen work (TODO.md).
+    return scale_list(xs, s)
+
+fn unroll_list(xs: [i64], s: i64, width: i64) -> [i64]:
+    # Scalar emulation of an unrolled loop: scale in `width`-lane chunks.
+    out = []
+    i = 0
+    while i < len(xs):
+        j = 0
+        while j < width and i < len(xs):
+            out.append(xs[i] * s)
+            i = i + 1
+            j = j + 1
+    return out
+
+# --- Vec4 (prelude vector) helpers ---
+
+fn vec4_new(x: i64, y: i64, z: i64, w: i64) -> prelude.Vec4:
+    return prelude.Vec4(x, y, z, w)
+
+fn splat(x: i64) -> prelude.Vec4:
+    return prelude.Vec4(x, x, x, x)
+
+fn dot(a: prelude.Vec4, b: prelude.Vec4) -> i64:
+    return a.dot(b)
+
+fn add(a: prelude.Vec4, b: prelude.Vec4) -> prelude.Vec4:
+    return a.add(b)
+
+fn length(v: prelude.Vec4) -> f64:
+    return math.sqrt(v.dot(v))
+
+fn normalize(v: prelude.Vec4) -> prelude.Vec4:
+    n = length(v)
+    if n == 0.0:
+        return v
+    return v.scale(1.0 / n)
+
+fn lerp(a: prelude.Vec4, b: prelude.Vec4, t: f64) -> prelude.Vec4:
+    return prelude.Vec4(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t, a.w + (b.w - a.w) * t)
+
+fn sum_vecs(vectors: [prelude.Vec4]) -> prelude.Vec4:
+    total = prelude.Vec4(0, 0, 0, 0)
+    for v in vectors:
+        total = total.add(v)
+    return total
+
+fn sum_axis(vectors: [prelude.Vec4], axis: i64) -> i64:
+    total = 0
+    for v in vectors:
+        total = total + v.get(axis)
+    return total
+
+# --- Higher-order helpers ---
+
+fn unroll(xs: [i64], f: fn(i64) -> i64) -> [i64]:
+    return map(xs, f)
+
+fn parallel_reduce(xs: [i64], f: fn(i64, i64) -> i64, init: i64) -> i64:
+    return reduce(xs, init, f)

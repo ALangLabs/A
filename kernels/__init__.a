@@ -1,0 +1,3 @@
+# kernels package (Mojo MAX `max/kernels` analog).
+# GPU/CPU kernel library written in A itself — see kernels/src/*.a.
+from "src/__init__.a" import fused_add, fused_mul_add, matvec, softmax_row, bias_relu

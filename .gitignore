@@ -6,6 +6,7 @@ cmake-build-*/
 # A language sources use the .a extension; keep sample and library programs.
 !examples/*.a
 !examples/**/*.a
+!kernels/**/*.a
 !tests/**/*.a
 !stdlib/**/*.a
 !benchmarks/*.a

@@ -1,0 +1,47 @@
+# std.math (Mojo `std/math` analog): wrappers over native `math`.
+import math
+
+fn sqrt(x):
+    return math.sqrt(x)
+
+fn abs_val(x):
+    return math.abs(x)
+
+fn min_val(a, b):
+    return math.min(a, b)
+
+fn max_val(a, b):
+    return math.max(a, b)
+
+fn pow_val(base, e):
+    return math.pow(base, e)
+
+fn sin(x):
+    return math.sin(x)
+
+fn cos(x):
+    return math.cos(x)
+
+fn floor(x):
+    return math.floor(x)
+
+fn ceil(x):
+    return math.ceil(x)
+
+fn round_val(x):
+    return math.round(x)
+
+fn PI():
+    return math.PI
+
+fn E():
+    return math.E
+
+fn clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    elif x > hi:
+        return hi
+    else:
+        return x
+

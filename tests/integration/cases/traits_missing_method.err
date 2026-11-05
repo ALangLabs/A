@@ -1,0 +1,2 @@
+Struct 'Point' does not satisfy trait 'Equatable': missing 'fn eq(self, other)' (2 parameter(s)).
+Unknown trait 'Missing' in 'impl'.

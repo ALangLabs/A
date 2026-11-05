@@ -1,0 +1,5 @@
+# Trait surface (Mojo `builtin/value.mojo` analog).
+#
+# The canonical trait declarations and helpers live in `stdlib/std/traits`.
+# This entry keeps `import traits` working for existing code.
+from "../std/traits/traits.a" import Copyable, Equatable, Hashable, Comparable, eq, ne, lt, gt, is_copyable, is_equatable, copy_value

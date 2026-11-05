@@ -1,0 +1,8 @@
+# Matrix-vector multiply kernel (MAX matmul analog, written in A).
+import "../../stdlib/simd/simd.a" as simd
+
+fn matvec(mat: [[i64]], vec: [i64]) -> [i64]:
+    out = []
+    for row in mat:
+        out.append(simd.dot_list(row, vec))
+    return out

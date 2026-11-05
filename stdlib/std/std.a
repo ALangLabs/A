@@ -1,0 +1,4 @@
+# std package entry (Mojo `std/` analog). Bare `import std` resolves to
+# `stdlib/std.a` first, then `stdlib/std/std.a`; both re-export the same
+# subpackages. This file re-exports the sibling package `__init__`.
+from "__init__.a" import Int, Float, Bool, String, len_of, range_list, map_list, filter_list, reduce_list, sum_list, list_reverse, dict_get, sqrt, abs_val, min_val, max_val, pow_val, clamp, vec_new, dot_lists, add_lists, scale_list, hadamard, Equatable, Hashable, Comparable, eq, is_copyable, arena_new, arena_pool, alloc, used, total

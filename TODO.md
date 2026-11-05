@@ -42,7 +42,12 @@ against the compiler (2026-10-29).
 - [x] Generics `<T>` — `fn first<T>(items: [T]) -> T` (Plan §7.3)
 - [ ] Generic code generation / monomorphization (Plan §7.4) — generic calls
       execute through the interpreter; LLVM/native codegen does not specialize them
-- [ ] Interfaces / Traits — `trait Printable`, `impl ... for ...` (Plan §7.5)
+- [x] Traits (stdlib-level) — `stdlib/std/traits/` with `Equatable`,
+      `Hashable`, `Comparable`, `eq()` helpers (Mojo `builtin/value.mojo`
+      analog); static trait syntax still open
+- [x] Self-hosted stdlib — `stdlib/std/` (`builtin/`, `collections/`,
+      `math/`, `memory/`, `simd/`, `traits/`) + `stdlib/prelude.a`
+      auto-vocabulary (Mojo `std/prelude` analog); SIMD is scalar emulation
 - [ ] `Result<T, E>` — fallible return type syntax (Plan §9.1)
 - [x] Type aliases — `type Kilograms = f64` (Plan §7.8)
 - [ ] Algebraic enums with payloads — `enum Result<T, E>: Ok(value: T)` (Plan §7.6)
@@ -89,13 +94,19 @@ against the compiler (2026-10-29).
 ## 9. AI & Numerical Computing
 
 - [ ] Tensor library — multidimensional tensors, strides, broadcasting (Plan §14.2)
-- [ ] GPU interoperability — device memory, kernel launch, transfers (Plan §14.4)
+- [x] GPU abstractions (stdlib-level) — `Device`/`Buffer`/`Kernel` structs in
+      `stdlib/gpu/gpu.a` with CPU fallback; device memory/codegen still open
+- [x] Self-hosted kernels — `kernels/` package in A (fused, matvec, softmax,
+      bias_relu), Mojo MAX kernels analog
 - [ ] AI inference via FFI (Plan §14.5)
 
 ---
 
 ## 10. SIMD & Hardware Performance
 
+- [x] SIMD scalar emulation — `Vec4`/`Vec8` structs, `vectorize`/`unroll`
+      helpers in `stdlib/simd/` and `stdlib/std/simd/` (Mojo
+      `builtin/simd.mojo` analog)
 - [ ] SIMD vector operations — x86-64, ARM NEON (Plan §11.1)
 - [ ] Auto-vectorization — optimizer identifies vectorizable loops (Plan §11.2)
 - [ ] Memory alignment — defined alignment requirements (Plan §11.3)

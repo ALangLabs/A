@@ -1,0 +1,4 @@
+# std.simd package re-export (Mojo `std/simd/__init__.mojo` analog).
+# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
+# from the stdlib root, so this file imports the sibling explicitly.
+from "simd.a" import vec_new, splat, dot, add, scale, add_lists, dot_lists, scale_list, hadamard, dot_unrolled

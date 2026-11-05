@@ -15,7 +15,7 @@ cmake --build build -j
 ```sh
 ctest --test-dir build --output-on-failure
 tests/integration/run_tests.sh build/a
-python3 tools/language-server/smoke_test.py build/a-lsp
+python3 tools/lsp/smoke_test.py build/a-lsp
 for f in examples/*/*.a; do build/a run "$f" >/dev/null || echo "FAIL $f"; done
 ```
 
@@ -43,7 +43,7 @@ A/
 │   ├── ISSUE_TEMPLATE/
 │   └── PULL_REQUEST_TEMPLATE.md
 │
-├── compiler/source/
+├── compiler/stages/
 │   ├── lexer/  parser/  ast/   diagnostics/
 │   ├── name-resolution/        # Module loader, native module table, builtin docs
 │   ├── type-checker/           # Sema, types, method signature tables
@@ -61,7 +61,7 @@ A/
 │   └── json/  binary/  testing/  log/  metrics/  trace/  net/  http/
 │
 ├── tools/
-│   ├── language-server/        # a-lsp (stdio LSP) + smoke_test.py
+│   ├── lsp/        # a-lsp (stdio LSP) + smoke_test.py
 │   ├── vscode-a/               # VS Code extension: grammar + dependency-free client
 │   ├── formatter/  documentation/  benchmark-runner/
 │
@@ -84,8 +84,8 @@ A/
 - **Pull requests**: one behavior per PR, description covers *why*; link
   issues. The PR template lists the checks — formatter/doc-generator or LSP
   behaviour changes should extend the golden cases or `smoke_test.py`.
-- **Versioning**: `CMakeLists.txt`, `compiler/source/driver/version.hpp`,
-  `tools/language-server/server.cpp` (`kServerVersion`) and
+- **Versioning**: `CMakeLists.txt`, `compiler/stages/driver/version.hpp`,
+  `tools/lsp/server.cpp` (`kServerVersion`) and
   `tools/vscode-a/package.json` must agree; CI fails if they drift.
 - **Documentation**: new stdlib members need a row in
   `docs/standard-library/README.md`, an entry in `builtin_docs.hpp` (so the

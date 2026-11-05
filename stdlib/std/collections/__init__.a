@@ -1,0 +1,4 @@
+# std.collections package re-export (Mojo `std/collections/__init__.mojo` analog).
+# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
+# from the stdlib root, so this file imports the sibling explicitly.
+from "collections.a" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse, dict_get, dict_has

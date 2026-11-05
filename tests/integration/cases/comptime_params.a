@@ -1,0 +1,26 @@
+trait Sized:
+    fn size(self) -> i64
+
+struct Buffer:
+    n: i64
+
+    fn size(self) -> i64:
+        return self.n
+
+impl Sized for Buffer:
+    pass
+
+## `comptime` parameters are parsed and usable in the body; call-site
+## specialization is still tracked in TODO.md.
+fn repeat_n(comptime N: i64, value: i64) -> i64:
+    total = 0
+    i = 0
+    while i < N:
+        total = total + value
+        i = i + 1
+    return total
+
+fn describe<T>(value: T) -> i64 where Sized:
+    return value.size()
+
+print(describe(Buffer(3)))

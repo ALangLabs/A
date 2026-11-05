@@ -19,5 +19,5 @@ Struct names in modules are qualified internally (`module::Name`), which is
 what lets two modules define a struct with the same short name; diagnostics and
 printing use the short name.
 
-The type checker lives in `compiler/source/type-checker`. Full reference:
+The type checker lives in `compiler/stages/type-checker`. Full reference:
 [docs/language-spec](../language-spec/README.md).

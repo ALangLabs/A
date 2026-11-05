@@ -1,0 +1,8 @@
+# std package re-export (Mojo `std/__init__.mojo` analog).
+# Quoted relative imports of each subpackage __init__.
+from "builtin/__init__.a" import Int, Float, Bool, String, len_of, range_list
+from "collections/__init__.a" import map_list, filter_list, reduce_list, sum_list, list_reverse, dict_get
+from "math/__init__.a" import sqrt, abs_val, min_val, max_val, pow_val, clamp
+from "simd/__init__.a" import vec_new, dot_lists, add_lists, scale_list, hadamard
+from "traits/__init__.a" import Equatable, Hashable, Comparable, eq, is_copyable
+from "memory/__init__.a" import arena_new, arena_pool, alloc, used, total

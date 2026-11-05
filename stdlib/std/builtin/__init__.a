@@ -1,0 +1,4 @@
+# std.builtin package re-export (Mojo `std/builtin/__init__.mojo` analog).
+# Quoted relative import; bare import cannot see stdlib/std/<pkg>/<pkg>.a
+# from the stdlib root, so this file imports the sibling explicitly.
+from "builtin.a" import Int, Float, Bool, String, len_of, range_list, assert_true, assert_eq_val, panic_msg, str_of

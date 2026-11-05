@@ -1,0 +1,6 @@
+import "../../../kernels/__init__.a" as kernels
+
+print(kernels.fused_add([1, 2, 3], [10, 20, 30]))
+print(kernels.fused_mul_add([1, 2, 3], [10, 20, 30], [1, 1, 1]))
+print(kernels.matvec([[1, 2, 3], [4, 5, 6]], [7, 8, 9]))
+print(kernels.bias_relu([1.0, -2.0, 0.5], -0.5))

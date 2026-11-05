@@ -1,0 +1,12 @@
+# Fused elementwise kernels (MAX `max/kernels` analog, written in A).
+# Host implementations; each takes the same shape a device buffer would.
+import "../../stdlib/simd/simd.a" as simd
+
+fn fused_add(a: [i64], b: [i64]) -> [i64]:
+    return simd.add_lists(a, b)
+
+fn fused_mul_add(a: [i64], b: [i64], c: [i64]) -> [i64]:
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] * b[i] + c[i])
+    return out

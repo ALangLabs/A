@@ -1,0 +1,6 @@
+# Kernel library entry point; kernels are host-launched CPU implementations
+# with the MAX-shaped surface (Mojo `max/kernels` analog). Real GPU codegen
+# needs a device backend (see TODO.md).
+from "fused.a" import fused_add, fused_mul_add
+from "matmul.a" import matvec
+from "activations.a" import softmax_row, bias_relu

@@ -1,0 +1,63 @@
+# std.simd (Mojo `std/simd` analog): fixed-width vector helpers.
+#
+# `Vec4` is the prelude vector type. Lane math here is scalar emulation over
+# typed lanes; native SIMD codegen is tracked in TODO.md.
+import prelude
+
+fn vec_new(x: i64, y: i64, z: i64, w: i64) -> prelude.Vec4:
+    return prelude.Vec4(x, y, z, w)
+
+fn splat(x: i64) -> prelude.Vec4:
+    return prelude.Vec4(x, x, x, x)
+
+fn dot(a: prelude.Vec4, b: prelude.Vec4) -> i64:
+    return a.dot(b)
+
+fn add(a: prelude.Vec4, b: prelude.Vec4) -> prelude.Vec4:
+    return a.add(b)
+
+fn scale(v: prelude.Vec4, s: i64) -> prelude.Vec4:
+    return v.scale(s)
+
+fn add_lists(a: [i64], b: [i64]) -> [i64]:
+    out = []
+    i = 0
+    while i < len(a):
+        out.append(a[i] + b[i])
+        i = i + 1
+    return out
+
+fn dot_lists(a: [i64], b: [i64]) -> i64:
+    total = 0
+    i = 0
+    while i < len(a):
+        total = total + a[i] * b[i]
+        i = i + 1
+    return total
+
+fn scale_list(a: [i64], s: i64) -> [i64]:
+    out = []
+    i = 0
+    while i < len(a):
+        out.append(a[i] * s)
+        i = i + 1
+    return out
+
+fn hadamard(a: [i64], b: [i64]) -> [i64]:
+    out = []
+    i = 0
+    while i < len(a):
+        out.append(a[i] * b[i])
+        i = i + 1
+    return out
+
+fn dot_unrolled(a: [i64], b: [i64]) -> i64:
+    total = 0
+    i = 0
+    while i + 4 <= len(a):
+        total = total + a[i] * b[i] + a[i + 1] * b[i + 1] + a[i + 2] * b[i + 2] + a[i + 3] * b[i + 3]
+        i = i + 4
+    while i < len(a):
+        total = total + a[i] * b[i]
+        i = i + 1
+    return total

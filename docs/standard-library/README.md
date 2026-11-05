@@ -78,6 +78,20 @@ Module resolution searches the importing file's directory, `-I` paths,
   are runtime errors. See
   [Memory allocators](../language-spec/README.md#memory-allocators).
 
+## Self-hosted stdlib (`stdlib/std/`)
+
+Mojo-shaped, written in A itself (Mojo `std/` analog):
+`stdlib/std/__init__.a` re-exports `builtin/` (Int/Float/Bool/String/len/
+range), `collections/` (map/filter/reduce/sum), `math/` (sqrt/abs/min/max/
+pow/clamp), `simd/` (list lane ops), `traits/` (Equatable/Hashable/
+Comparable + `eq()`), `memory/` (arena). `stdlib/prelude.a` holds the
+auto-vocabulary: `Vec4`, `prelude_version()`, and list helpers.
+
+```a
+import "../../stdlib/std/__init__.a" as std
+print(std.sqrt(144.0))
+```
+
 ## A-file modules
 
 `stdlib/test/test.a` is a small assertion harness built on `core`:

@@ -1,0 +1,11 @@
+trait Equatable:
+    fn eq(self, other) -> bool
+
+struct Point:
+    x: i64
+
+impl Equatable for Point:
+    pass
+
+impl Missing for Point:
+    pass
