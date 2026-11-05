@@ -1,0 +1,10 @@
+# Python interop: JSON encode/decode via the stdlib json module.
+import python:json
+
+s = json.dumps({"a": 1})
+print(s)                  # {"a": 1}
+d = json.loads(s)
+print("d['a'] =", d["a"]) # 1
+
+from python:json import loads
+print(loads("[1, 2, 3]")[2])  # 3

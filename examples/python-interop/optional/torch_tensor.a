@@ -1,0 +1,10 @@
+# OPTIONAL: requires `pip install torch`. Demonstrates PyTorch tensors from A.
+# Not run by the examples sweep (lives one directory deeper).
+import python:torch
+
+x = torch.tensor([1.0, 2.0, 3.0])
+y = torch.tensor([4.0, 5.0, 6.0])
+print("x + y =", x + y)          # tensor([5., 7., 9.])
+print("sum:", x.sum())           # tensor(6.)
+print("matmul:", torch.matmul(x, y))  # tensor(32.)
+print("device:", x.device)

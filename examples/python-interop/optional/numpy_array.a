@@ -1,0 +1,16 @@
+# Python interop: use NumPy arrays directly from A (requires `pip install numpy`).
+import python:numpy as np
+
+a = np.array([1.0, 2.0, 3.0, 4.0])
+print("sum:", a.sum())        # 10.0
+print("mean:", a.mean())      # 2.5
+print("max:", a.max())        # 4.0
+
+b = np.arange(0, 10, 2)
+print(b)                      # array([0, 2, 4, 6, 8])
+print("b[2] =", b[2])         # 4
+print("shape:", np.zeros((2, 3)).shape)
+
+# A values flow into Python too: pass an A list, get a NumPy result back.
+c = np.array([10, 20, 30]) * 2
+print("c.sum():", c.sum())    # 120

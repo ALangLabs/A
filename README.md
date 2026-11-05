@@ -38,6 +38,7 @@ print("Length squared: {point.length_squared()}")  # 25.0
 
 * **⚡ C++ Parity Performance**: Native compilation (`a build`) with sub-4 ms startup, matching optimized C++ (`g++ -O2`) on arithmetic, pipeline traversals, and string allocation.
 * **🐍 Python-Grade Ergonomics**: Python-style natural variable declarations (`x = 10`), clean indented blocks, and the instant `ac` runner.
+* **🔗 Python Interop**: `import python:<pkg>` / `from python:<pkg> import name` embeds CPython directly — call NumPy, PyTorch, `json`, or any installed package with A syntax (interpreter path; needs Python 3 dev files at build time).
 * **🏛️ Classes, Inheritance & Metaclasses**: Clean object-oriented programming with `class Child(Parent):` and declarative `metaclass Meta: pass`.
 * **🛠️ 25+ First-Class Operators**: Rich operator support including arithmetic (`+ - * / % **`), bitwise (`& | ^ ~ << >>`), containment (`in`, `not in`), functional pipelines (`|>`), and safe null-coalescing (`??`, `?.`).
 * **🔒 Static Type Safety & Inference**: Unification-based global type inference with checked arithmetic, zero undefined behavior, and deterministic cleanup via `defer`.
@@ -93,14 +94,37 @@ cmake --build build -j
 ./build/a build program.a -o my_app
 ./my_app
 
-# 6. Format and document it:
+# 6. Interactive REPL (state persists across lines, `>>>` echo):
+./build/a repl
+
+# 7. Inline source, like `python -c`:
+./build/a -c 'print("hello from A")'
+
+# 8. Format and document it:
 ./build/a fmt -w program.a
 ./build/a doc -o docs/program.md program.a
 
-# 7. Inspect the typed SSA IR (optionally after optimization):
+# 9. Inspect the typed SSA IR (optionally after optimization):
 ./build/a ir program.a
 ./build/a ir --opt program.a
 ```
+
+### Python interop
+
+A embeds the CPython found at build time, so any installed Python package is
+callable with A syntax — no FFI boilerplate:
+
+```a
+import python:json
+from python:math import sqrt
+
+print(json.dumps({"a": 1}))   # {"a": 1}
+print(sqrt(2))                # 1.4142135623730951
+```
+
+Works in `a run`, `a test`, `a repl`, and `a -c` (interpreter path only).
+See `examples/python-interop/` for runnable examples, including NumPy and
+PyTorch under `optional/`.
 
 ---
 
@@ -240,7 +264,9 @@ parser, and AST as the compiler.
 ```
 a <command> [options] <file.a>
 
+  repl             start the interactive REPL (state persists; 'exit' to quit)
   run <file.a>     compile and execute a program
+  run -c <code>    run inline A source (also: a -c <code>)
   build <file.a>   compile to a native binary (-o <bin>)
   check <file.a>   type-check without running (--json for structured output)
   test <file.a>    run every `fn test_*()` in a program
@@ -251,6 +277,7 @@ a <command> [options] <file.a>
 
 Options:
   -o <file>        output path (for 'build' and 'doc')
+  -c <code>        run inline A source (for 'run', or alone: `a -c "..."`)
   -w, --write      rewrite the source file in place (for 'fmt')
   --check          exit nonzero if the file needs formatting (for 'fmt')
   --indent <n>     indentation width in spaces (for 'fmt', default 4)
