@@ -1,0 +1,70 @@
+# A REPL — self-hosted interactive shell (IPython analog).
+# Run via `a repl` on a terminal; the driver loads this file.
+import terminal
+import repl
+import "editor.a"
+import "complete.a"
+import "history.a"
+
+fn print_help():
+    print("A interactive shell")
+    print("  exit / quit / Ctrl-D   leave the REPL")
+    print("  Ctrl-C                 interrupt current input")
+    print("  Up/Down                history (or move between lines)")
+    print("  Tab                    complete; lists candidates")
+    print("  Ctrl-R                 reverse-i-search history")
+    print("  Ctrl-A/E/K/U/W/Y       line editing (start/end/kill/yank)")
+    print("  Ctrl-L                 clear screen")
+
+fn repl_main():
+    if not terminal.isatty():
+        print("error: the interactive REPL requires a terminal")
+        return 1
+    terminal.raw_mode(true)
+    history.history_load()
+
+    print("A REPL — type 'help' for keys, 'exit' to quit")
+    print("Python-style dynamic semantics; state persists across inputs.")
+    print("")
+
+    counter = 0
+    acc = ""
+    while true:
+        prompt = "\x1b[1;32mIn [" + str(counter + 1) + "]:\x1b[0m "
+        (kind, text) = editor.read_input(prompt)
+        if kind == 1:
+            break
+        if kind == 2:
+            print("^C")
+            continue
+        if text.strip() == "":
+            continue
+        if text == "exit" or text == "quit":
+            break
+        if text == "help" or text == "?":
+            print_help()
+            continue
+        if text == "clear":
+            terminal.write("\x1b[2J\x1b[H")
+            terminal.flush()
+            continue
+        counter = counter + 1
+        history.history_add(text)
+        complete.note_source(text)
+        src = acc + text + "\n"
+        rc = repl.eval(src)
+        if rc != 1:
+            acc = src
+        if rc == 1:
+            # Compile error: the session is untouched; the user retypes.
+            print("\x1b[90m(input discarded — fix the error above)\x1b[0m")
+        elif rc == 2:
+            print("\x1b[1;31m(runtime error)\x1b[0m")
+        elif rc == 3:
+            print("\x1b[1;31m(nested repl.eval is not allowed)\x1b[0m")
+
+    terminal.raw_mode(false)
+    print("")
+    return 0
+
+repl_main()

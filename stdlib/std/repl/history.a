@@ -1,0 +1,84 @@
+# REPL input history: in-memory ring plus ~/.a_history persistence.
+import fs
+import terminal
+
+entries = []
+struct HistState:
+    cursor
+    stash
+
+state = HistState(-1, "")   # cursor -1 = not navigating
+
+fn history_path():
+    return terminal.home() + "/.a_history"
+
+fn history_load():
+    path = history_path()
+    if fs.file_exists(path):
+        text = fs.read_file(path)
+        for line in text.splitlines():
+            entries.append(line)
+
+fn history_reset_nav():
+    state.cursor = -1
+    state.stash = ""
+
+fn history_add(line):
+    history_reset_nav()
+    if line.strip() != "" and line != "exit" and line != "quit":
+        n = len(entries)
+        if n == 0 or entries[n - 1] != line:
+            entries.append(line)
+            fs.append_file(history_path(), line + "\n")
+
+fn history_len():
+    return len(entries)
+
+fn history_all():
+    return entries
+
+# Older entry relative to the end; returns "" when exhausted.
+fn history_older(current):
+    if state.cursor == -1:
+        state.stash = current
+        if len(entries) == 0:
+            return ""
+        state.cursor = len(entries) - 1
+        return entries[state.cursor]
+    if state.cursor <= 0:
+        return entries[0]
+    state.cursor = state.cursor - 1
+    return entries[state.cursor]
+
+fn history_newer():
+    if state.cursor == -1:
+        return ""
+    if state.cursor >= len(entries) - 1:
+        state.cursor = -1
+        out = state.stash
+        state.stash = ""
+        return out
+    state.cursor = state.cursor + 1
+    return entries[state.cursor]
+
+# Most recent entry starting with `prefix` that is longer than `prefix`,
+# for ghost-text autosuggest. Returns "" when none.
+fn history_suggest(prefix):
+    i = len(entries) - 1
+    scanned = 0
+    while i >= 0 and scanned < 1000:
+        scanned = scanned + 1
+        cand = entries[i]
+        if len(cand) > len(prefix) and cand[0..len(prefix)] == prefix:
+            return cand
+        i = i - 1
+    return ""
+
+# Reverse-i-search: newest-first index whose entry contains `query`.
+fn history_find(query, start):
+    i = start
+    while i >= 0:
+        if entries[i].contains(query):
+            return i
+        i = i - 1
+    return -1

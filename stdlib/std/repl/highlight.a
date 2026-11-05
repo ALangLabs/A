@@ -1,0 +1,180 @@
+# Syntax highlighting for the REPL line editor (the prompt_toolkit
+# IPythonPTLexer analog). Produces ANSI-colored text from A source.
+
+C_KEYWORD = "\x1b[1;35m"   # bold magenta
+C_BUILTIN = "\x1b[36m"     # cyan
+C_STRING  = "\x1b[32m"     # green
+C_COMMENT = "\x1b[90m"     # bright black / gray
+C_NUMBER  = "\x1b[33m"     # yellow
+C_MODULE  = "\x1b[1;34m"   # bold blue
+C_RESET   = "\x1b[0m"
+
+keywords = ["fn", "if", "elif", "else", "while", "for", "in", "loop",
+            "break", "continue", "return", "defer", "struct", "class",
+            "Class", "metaclass", "Metaclass", "pass", "self", "true",
+            "false", "and", "or", "not", "import", "from", "as", "match",
+            "None", "Some", "Ok", "Err", "enum", "do", "type", "trait",
+            "where", "comptime", "impl", "try", "except", "finally", "raise",
+            "is", "lambda", "with", "yield", "async", "await", "global",
+            "nonlocal", "assert", "del", "exit", "quit"]
+
+builtins = ["print", "eprint", "input", "flush", "len", "str", "int",
+            "float", "bool", "char", "type", "repr", "id", "hash",
+            "abs", "min", "max", "sum", "any", "all", "sorted", "reversed",
+            "enumerate", "zip", "map", "filter", "range", "open", "eval",
+            "exec", "compile", "hasattr", "getattr", "setattr", "callable",
+            "isinstance", "issubclass", "super", "object", "dir", "help",
+            "format", "chr", "ord", "hex", "oct", "bin", "round", "pow",
+            "divmod", "iter", "next", "list", "dict", "set", "tuple",
+            "frozenset", "bytes", "bytearray", "memoryview", "slice",
+            "staticmethod", "classmethod", "property", "vars", "locals",
+            "globals", "breakpoint", "NotImplemented", "Ellipsis",
+            "ArithmeticError", "AssertionError", "AttributeError",
+            "BaseException", "BlockingIOError", "BrokenPipeError",
+            "BufferError", "BytesWarning", "ChildProcessError",
+            "ConnectionAbortedError", "ConnectionError",
+            "ConnectionRefusedError", "ConnectionResetError",
+            "DeprecationWarning", "EOFError", "EncodingWarning",
+            "EnvironmentError", "Exception", "FileExistsError",
+            "FileNotFoundError", "FloatingPointError", "FutureWarning",
+            "GeneratorExit", "IOError", "ImportError",
+            "ImportWarning", "IndentationError", "IndexError",
+            "InterruptedError", "IsADirectoryError", "KeyError",
+            "KeyboardInterrupt", "LookupError", "MemoryError",
+            "ModuleNotFoundError", "NameError", "NoneType", "NotADirectoryError",
+            "NotImplementedError", "OSError", "OverflowError",
+            "PendingDeprecationWarning", "PermissionError",
+            "ProcessLookupError", "RecursionError", "ReferenceError",
+            "ResourceWarning", "RuntimeError", "RuntimeWarning",
+            "StopAsyncIteration", "StopIteration", "SyntaxError",
+            "SyntaxWarning", "SystemError", "SystemExit", "TabError",
+            "TimeoutError", "TypeError", "UnboundLocalError",
+            "UnicodeDecodeError", "UnicodeEncodeError",
+            "UnicodeError", "UnicodeTranslateError", "UnicodeWarning",
+            "UserWarning", "ValueError", "Warning", "ZeroDivisionError"]
+
+modules = ["math", "io", "fs", "strings", "collections", "core", "time",
+           "json", "binary", "testing", "log", "metrics", "trace", "net",
+           "http", "terminal", "env", "repl", "arena", "unsafe", "prelude",
+           "simd", "iter", "format", "test", "comptime", "gpu", "memory",
+           "traits", "kernels"]
+
+struct HlState:
+    quote
+    triple
+
+state = HlState("", false)
+
+fn hl_reset():
+    state.quote = ""
+    state.triple = false
+
+fn is_ident_start(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+fn is_ident_char(c):
+    return is_ident_start(c) or (c >= "0" and c <= "9")
+
+fn is_digit(c):
+    return c >= "0" and c <= "9"
+
+fn hl_classify(word):
+    if keywords.contains(word):
+        return C_KEYWORD
+    if builtins.contains(word):
+        return C_BUILTIN
+    if modules.contains(word):
+        return C_MODULE
+    return ""
+
+fn paint(color, text):
+    if color == "":
+        return text
+    return color + text + C_RESET
+
+# Highlights one line of A source. Multiline string state carries across
+# calls through `state`; call hl_reset() before a fresh input.
+fn highlight(line):
+    out = ""
+    i = 0
+    n = len(line)
+    quote = state.quote
+    triple = state.triple
+    while i < n:
+        c = line[i..i+1]
+        if quote != "":
+            if triple:
+                if i + 2 < n and line[i..i + 3] == quote + quote + quote:
+                    out = out + paint(C_STRING, quote + quote + quote)
+                    i = i + 3
+                    quote = ""
+                    triple = false
+                    state.quote = ""
+                    state.triple = false
+                else:
+                    out = out + paint(C_STRING, c)
+                    i = i + 1
+                continue
+            if c == "\\":
+                j = i + 1
+                if j < n:
+                    out = out + paint(C_STRING, line[i..j + 1])
+                    i = j + 1
+                else:
+                    out = out + paint(C_STRING, c)
+                    i = i + 1
+                continue
+            if c == quote:
+                out = out + paint(C_STRING, c)
+                i = i + 1
+                quote = ""
+                state.quote = ""
+                continue
+            out = out + paint(C_STRING, c)
+            i = i + 1
+            continue
+
+        if c == "#":
+            out = out + paint(C_COMMENT, line[i..])
+            i = n
+            continue
+
+        if c == "\"" or c == "'":
+            d = c
+            if i + 2 < n and line[i..i + 3] == d + d + d:
+                quote = d
+                triple = true
+                out = out + paint(C_STRING, d + d + d)
+                i = i + 3
+                state.quote = quote
+                state.triple = true
+            else:
+                quote = d
+                out = out + paint(C_STRING, d)
+                i = i + 1
+                state.quote = quote
+                state.triple = false
+            continue
+
+        if is_ident_start(c):
+            j = i
+            while j < n and is_ident_char(line[j..j+1]):
+                j = j + 1
+            word = line[i..j]
+            out = out + paint(hl_classify(word), word)
+            i = j
+            continue
+
+        if is_digit(c):
+            j = i
+            while j < n and (is_ident_char(line[j..j+1]) or line[j..j+1] == "."): 
+                j = j + 1
+            out = out + paint(C_NUMBER, line[i..j])
+            i = j
+            continue
+
+        out = out + c
+        i = i + 1
+    state.quote = quote
+    state.triple = triple
+    return out

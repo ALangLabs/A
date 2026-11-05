@@ -7,6 +7,7 @@ add_library(a_backend STATIC
   kgen/object_compiler.cpp
   kgen/codegen/llvm_emitter.cpp
   kgen/runtime/builtins.cpp
+  kgen/runtime/terminal.cpp
   kgen/python_interop.cpp
   kgen/python_loader.cpp
 )

@@ -1,0 +1,727 @@
+# Interactive line editor for the A REPL — the `_pyrepl`/`prompt_toolkit`
+# analog. Handles keys, history, tab completion, reverse-i-search, ghost
+# autosuggest, and ANSI-highlighted multiline rendering.
+import terminal
+import "highlight.a"
+import "complete.a"
+import "history.a"
+
+C_PROMPT = "\x1b[1;34m"
+C_CONT = "\x1b[1;34m"
+C_DIM = "\x1b[90m"
+C_SEL = "\x1b[7m"
+C_MATCH = "\x1b[1;32m"
+C_ERR = "\x1b[1;31m"
+C_RESET = "\x1b[0m"
+
+struct EdState:
+    lines
+    row
+    col
+    prompt
+    mode
+    search_q
+    search_i
+    comp
+    comp_sel
+    comp_open
+    comp_base
+    comp_start
+    cols
+    drawn
+    cur_vrow
+    kill
+
+S = EdState([""], 0, 0, ">>> ", "edit", "", -1, [], 0, false, "", 0, 80, 0, 0, "")
+
+struct DRow:
+    w
+    p
+    b
+
+fn reset_state(prompt):
+    S.lines = [""]
+    S.row = 0
+    S.col = 0
+    S.prompt = prompt
+    S.mode = "edit"
+    S.comp = []
+    S.comp_open = false
+    S.kill = ""
+    S.drawn = 0
+    S.cur_vrow = 0
+    highlight.hl_reset()
+
+fn ed_text():
+    return S.lines.join("\n")
+
+fn ed_line():
+    return S.lines[S.row]
+
+fn ed_set_line(i, s):
+    S.lines[i] = s
+
+fn ed_insert(s):
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    S.lines[r] = ln[0..c] + s + ln[c..]
+    S.col = c + len(s)
+
+fn ed_newline():
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    S.lines[r] = ln[0..c]
+    S.lines.insert(r + 1, ln[c..])
+    S.row = r + 1
+    S.col = 0
+
+fn ed_backspace():
+    r = S.row
+    c = S.col
+    if c > 0:
+        ln = S.lines[r]
+        S.lines[r] = ln[0..c - 1] + ln[c..]
+        S.col = c - 1
+    elif r > 0:
+        prev = S.lines[r - 1]
+        cur = S.lines[r]
+        S.lines[r - 1] = prev + cur
+        S.lines.remove_at(r)
+        S.row = r - 1
+        S.col = len(prev)
+
+fn ed_delete():
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    if c < len(ln):
+        S.lines[r] = ln[0..c] + ln[c + 1..]
+    elif r + 1 < len(S.lines):
+        S.lines[r] = ln + S.lines[r + 1]
+        S.lines.remove_at(r + 1)
+
+fn ed_kill_to_eol():
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    killed = ln[c..]
+    if killed != "":
+        S.kill = killed
+        S.lines[r] = ln[0..c]
+
+fn ed_kill_whole():
+    r = S.row
+    c = S.col
+    killed = S.lines[r][c..]
+    for i in (r + 1)..len(S.lines):
+        killed = killed + "\n" + S.lines[i]
+    S.lines = [S.lines[r][0..c]]
+    S.row = 0
+    S.col = c
+    if killed.strip() != "":
+        S.kill = killed
+
+fn ed_kill_word():
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    start = c
+    while start > 0:
+        ch = ln[start - 1..start]
+        if ch == " " or ch == "\t":
+            start = start - 1
+        else:
+            break
+    while start > 0:
+        ch = ln[start - 1..start]
+        if ch == " " or ch == "\t":
+            break
+        start = start - 1
+    if start < c:
+        S.kill = ln[start..c]
+        S.lines[r] = ln[0..start] + ln[c..]
+        S.col = start
+
+fn ed_yank():
+    if S.kill != "":
+        ed_insert(S.kill)
+
+fn ed_move(dr, dc):
+    r = S.row
+    c = S.col
+    n = len(S.lines)
+    if dr != 0:
+        nr = r + dr
+        if nr >= 0 and nr < n:
+            S.row = nr
+            ln = S.lines[nr]
+            if c <= len(ln):
+                S.col = c
+            else:
+                S.col = len(ln)
+    else:
+        ln = S.lines[r]
+        nc = c + dc
+        if nc < 0:
+            if r > 0:
+                S.row = r - 1
+                S.col = len(S.lines[r - 1])
+        elif nc > len(ln):
+            if r + 1 < n:
+                S.row = r + 1
+                S.col = 0
+        else:
+            S.col = nc
+
+fn ed_home_end(which):
+    if which == "home":
+        if S.col > 0:
+            S.col = 0
+        elif S.row > 0:
+            S.row = S.row - 1
+            S.col = len(S.lines[S.row])
+    else:
+        ln = S.lines[S.row]
+        if S.col < len(ln):
+            S.col = len(ln)
+        elif S.row + 1 < len(S.lines):
+            S.row = S.row + 1
+            S.col = 0
+
+# Visible width of a string with ANSI escapes removed.
+fn vis_len(s):
+    n = 0
+    i = 0
+    ln = len(s)
+    while i < ln:
+        c = s[i]
+        if c == '\x1b':
+            j = i + 1
+            while j < ln and s[j] != 'm':
+                j = j + 1
+            i = j + 1
+        else:
+            n = n + 1
+            i = i + 1
+    return n
+
+fn prompt_for(row):
+    if row == 0:
+        return S.prompt
+    return " " * len(S.prompt)
+
+# Returns the ghost autosuggest suffix for the current single-line input.
+fn ghost_text():
+    if S.comp_open:
+        return ""
+    if len(S.lines) != 1 or S.row != 0:
+        return ""
+    ln = S.lines[0]
+    if ln == "" or S.col != len(ln):
+        return ""
+    sug = history.history_suggest(ln)
+    if sug == "" or len(sug) <= len(ln):
+        return ""
+    return sug[len(ln)..]
+
+# Builds the list of display rows: each entry is [prefix_width, prefix_text,
+# body_text]. Buffer lines come first, then the completion menu.
+fn build_display():
+    rows = []
+    ghost = ghost_text()
+    for i in 0..len(S.lines):
+        ln = S.lines[i]
+        body = highlight.highlight(ln)
+        if i == 0 and ghost != "":
+            body = body + C_DIM + ghost + C_RESET
+        pf = prompt_for(i)
+        pw = vis_len(pf)
+        ptxt = C_CONT + pf + C_RESET
+        if i == 0:
+            ptxt = C_PROMPT + pf + C_RESET
+        rows.append(DRow(pw, ptxt, body))
+    if S.comp_open and len(S.comp) > 0:
+        shown = 0
+        for i in 0..len(S.comp):
+            if shown >= 8:
+                break
+            name = S.comp[i]
+            if i == S.comp_sel:
+                rows.append(DRow(0, "", C_SEL + name + C_RESET))
+            else:
+                rows.append(DRow(0, "", C_DIM + name + C_RESET))
+            shown = shown + 1
+        if len(S.comp) > 8:
+            rows.append(DRow(0, "", C_DIM + "... " + str(len(S.comp) - 8) + " more" + C_RESET))
+    return rows
+
+# Redraws the whole input area. Returns nothing; updates S.drawn and
+# S.cur_vrow.
+fn ed_render():
+    dims = terminal.size()
+    cols = dims[0]
+    if cols < 20:
+        cols = 20
+    S.cols = cols
+    rows = build_display()
+
+    # Visual row count per display row.
+    starts = []
+    total = 0
+    for entry in rows:
+        w = entry.w + vis_len(entry.b)
+        v = 1
+        while w > cols * v:
+            v = v + 1
+        starts.append(total)
+        total = total + v
+
+    # Cursor position in visual coordinates.
+    r = S.row
+    pf_w = vis_len(prompt_for(r))
+    voff = 0
+    while (pf_w + S.col) >= cols * (voff + 1):
+        voff = voff + 1
+    cvrow = starts[r] + voff
+    ccol = (pf_w + S.col) % cols
+    if ccol < 0:
+        ccol = 0
+
+    # Move to the top of the input area and clear what was drawn before.
+    if S.cur_vrow > 0:
+        terminal.write("\x1b[" + str(S.cur_vrow) + "A")
+    terminal.write("\r")
+    for i in 0..S.drawn:
+        terminal.write("\x1b[2K")
+        if i < S.drawn - 1:
+            terminal.write("\x1b[1B")
+    if S.drawn > 1:
+        terminal.write("\x1b[" + str(S.drawn - 1) + "A")
+    terminal.write("\r")
+
+    # Draw every display row.
+    for entry in rows:
+        terminal.write(entry.p + entry.b + "\r\n")
+
+    # Cursor now sits one row below the last visual row.
+    up = total - cvrow
+    if up > 0:
+        terminal.write("\x1b[" + str(up) + "A")
+    if ccol > 0:
+        terminal.write("\x1b[" + str(ccol) + "C")
+    terminal.flush()
+
+    S.drawn = total
+    S.cur_vrow = cvrow
+
+# Completion prefix: identifier chars before the cursor on the current line,
+# including a dotted base (module.member).
+fn comp_prefix():
+    ln = ed_line()
+    c = S.col
+    start = c
+    while start > 0:
+        ch = ln[start - 1..start]
+        if (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == ".":
+            start = start - 1
+        else:
+            break
+    return (start, ln[start..c])
+
+fn comp_refresh():
+    (ps, pt) = comp_prefix()
+    S.comp_start = ps
+    items = complete.candidates(pt)
+    S.comp = items
+    S.comp_sel = 0
+    S.comp_base = pt
+    S.comp_open = len(items) > 0
+
+fn comp_accept(sel):
+    name = S.comp[sel]
+    ln = ed_line()
+    c = S.col
+    # Replace from comp_start to cursor with the full candidate.
+    newln = ln[0..S.comp_start] + name + ln[c..]
+    S.lines[S.row] = newln
+    S.col = S.comp_start + len(name)
+    S.comp_open = false
+    S.comp = []
+
+fn comp_common_insert():
+    if len(S.comp) > 0:
+        cp = complete.common_prefix(S.comp)
+        base = S.comp_base
+        dot = base.rfind(".")
+        insert = ""
+        if dot >= 0:
+            tail = cp[dot + 1..]
+            insert = tail[len(base[dot + 1..])..]
+        else:
+            insert = cp[len(base)..]
+        if insert != "":
+            ed_insert(insert)
+        if len(S.comp) == 1:
+            comp_accept(0)
+
+# Reads one key, decoding escape sequences into canonical names.
+fn read_key():
+    k = terminal.read_char()
+    if k == None:
+        k = ""
+    if k != "\x1b":
+        return k
+    b1 = terminal.read_char_ms(50)
+    if b1 == None:
+        b1 = ""
+    if b1 == "":
+        return "\x1b"
+    if b1 == "O":
+        b2 = terminal.read_char_ms(50)
+        if b2 == None:
+            b2 = ""
+        if b2 == "A":
+            return "\x1b[A"
+        if b2 == "B":
+            return "\x1b[B"
+        if b2 == "C":
+            return "\x1b[C"
+        if b2 == "D":
+            return "\x1b[D"
+        if b2 == "H":
+            return "\x1b[H"
+        if b2 == "F":
+            return "\x1b[F"
+        return "\x1b" + b1 + b2
+    if b1 == "[":
+        b2 = terminal.read_char_ms(50)
+        if b2 == None:
+            b2 = ""
+        if b2 == "":
+            return "\x1b"
+        if b2 == "A" or b2 == "B" or b2 == "C" or b2 == "D" or b2 == "H" or b2 == "F" or b2 == "Z" or b2 == "E":
+            return "\x1b[" + b2
+        if b2 >= "0" and b2 <= "9":
+            b3 = terminal.read_char_ms(50)
+            if b3 == None:
+                b3 = ""
+            if b3 == "~":
+                return "\x1b[" + b2 + "~"
+            if b3 == ";" or b3 == ":":
+                # Modifier sequences like ESC [ 1 ; 5 A — consume final byte.
+                b4 = terminal.read_char_ms(50)
+                if b4 == None:
+                    b4 = ""
+                if b4 == "":
+                    return "\x1b[" + b2 + b3
+                return "\x1b[" + b2 + b3 + b4
+            return "\x1b[" + b2 + b3
+        return "\x1b[" + b1 + b2
+    return "\x1b" + b1
+
+# Heuristic multiline completeness (port of the driver's replInputComplete):
+# unclosed brackets, unterminated strings, or a pending ":" block mean more
+# input is expected.
+fn input_complete(text):
+    parens = 0
+    squares = 0
+    braces = 0
+    in_string = false
+    quote = ""
+    escaped = false
+    pending_colon = -1
+    for line in text.splitlines():
+        comment = false
+        i = 0
+        while i < len(line):
+            ch = line[i..i+1]
+            if comment:
+                break
+            if in_string:
+                if escaped:
+                    escaped = false
+                elif ch == "\\":
+                    escaped = true
+                elif ch == quote:
+                    in_string = false
+                i = i + 1
+                continue
+            if ch == "#":
+                comment = true
+                break
+            if ch == "\"" or ch == "'":
+                in_string = true
+                quote = ch
+                i = i + 1
+                continue
+            if ch == "(":
+                parens = parens + 1
+            elif ch == ")":
+                parens = parens - 1
+            elif ch == "[":
+                squares = squares + 1
+            elif ch == "]":
+                squares = squares - 1
+            elif ch == "\{":
+                braces = braces + 1
+            elif ch == "\}":
+                braces = braces - 1
+            i = i + 1
+        code = line
+        hash = code.find("#")
+        if hash >= 0:
+            code = code[0..hash]
+        while len(code) > 0 and (code[len(code) - 1..] == " " or code[len(code) - 1..] == "\t" or code[len(code) - 1..] == "\r"):
+            code = code[0..len(code) - 1]
+        if code == "":
+            continue
+        ind = 0
+        while ind < len(line) and (line[ind..ind+1] == " " or line[ind..ind+1] == "\t"):
+            ind = ind + 1
+        if pending_colon >= 0:
+            if ind > pending_colon:
+                pending_colon = -1
+            else:
+                pending_colon = -1
+        if code[len(code) - 1..] == ":":
+            pending_colon = ind
+    return parens <= 0 and squares <= 0 and braces <= 0 and pending_colon < 0 and not in_string
+
+# Reverse-i-search sub-loop (Ctrl-R). Returns true when a history entry was
+# accepted into the buffer.
+fn ed_search():
+    q = ""
+    match_i = len(history.history_all()) - 1
+    while true:
+        m = ""
+        if q != "":
+            idx = history.history_find(q, match_i)
+            if idx >= 0:
+                m = history.history_all()[idx]
+                match_i = idx
+        status = C_ERR + "failed" + C_RESET
+        if m != "":
+            status = C_MATCH + "reverse-i-search`" + q + "': " + m + C_RESET
+        # Redraw: collapse buffer area, print the search line.
+        if S.cur_vrow > 0:
+            terminal.write("\x1b[" + str(S.cur_vrow) + "A")
+        terminal.write("\r")
+        for i in 0..S.drawn:
+            terminal.write("\x1b[2K")
+            if i < S.drawn - 1:
+                terminal.write("\x1b[1B")
+        if S.drawn > 1:
+            terminal.write("\x1b[" + str(S.drawn - 1) + "A")
+        terminal.write("\r" + status + "\r\n")
+        terminal.flush()
+        S.drawn = 0
+        S.cur_vrow = 0
+
+        k = read_key()
+        # Erase the search line; the cursor sits on the row below it.
+        terminal.write("\x1b[1A\r\x1b[2K")
+        if k == "":
+            return false
+        if k == "\r" or k == "\n":
+            if m != "":
+                S.lines = m.split("\n")
+                S.row = len(S.lines) - 1
+                S.col = len(S.lines[S.row])
+                highlight.hl_reset()
+            return m != ""
+        if k == "\x12":  # Ctrl-R again: older match
+            if m != "":
+                match_i = match_i - 1
+                q2 = q
+                idx = history.history_find(q2, match_i)
+                if idx >= 0:
+                    match_i = idx
+            continue
+        if k == "\x7f" or k == "\x08":
+            if len(q) > 0:
+                q = q[0..len(q) - 1]
+                match_i = len(history.history_all()) - 1
+            continue
+        if k == "\x1b" or k == "\x07":
+            return false
+        if len(k) == 1 and k >= " ":
+            q = q + k
+            match_i = len(history.history_all()) - 1
+            continue
+        # Any other key cancels the search.
+        return false
+    return false
+
+# Main entry: shows `prompt`, edits until submit/exit/interrupt.
+# Returns (kind, text): 0 = submit, 1 = exit (Ctrl-D/EOF), 2 = interrupt.
+fn read_input(prompt):
+    reset_state(prompt)
+    ed_render()
+    while true:
+        k = read_key()
+        if k == "":
+            return (1, "")
+
+        # Completion menu has focus for navigation keys.
+        if S.comp_open:
+            if k == "\x1b[A":
+                S.comp_sel = (S.comp_sel + len(S.comp) - 1) % len(S.comp)
+                ed_render()
+                continue
+            if k == "\x1b[B":
+                S.comp_sel = (S.comp_sel + 1) % len(S.comp)
+                ed_render()
+                continue
+            if k == "\t" or k == "\x1b[C" or k == "\r" or k == "\n":
+                if k == "\t":
+                    comp_accept(S.comp_sel)
+                elif k == "\r" or k == "\n":
+                    comp_accept(S.comp_sel)
+                else:
+                    comp_accept(S.comp_sel)
+                ed_render()
+                continue
+            if k == "\x1b":
+                S.comp_open = false
+                S.comp = []
+                ed_render()
+                continue
+            S.comp_open = false
+            S.comp = []
+
+        if k == "\r" or k == "\n":
+            text = ed_text()
+            if input_complete(text):
+                return (0, text)
+            ed_newline()
+            ed_render()
+            continue
+
+        if k == "\t":
+            if not S.comp_open:
+                comp_refresh()
+                if S.comp_open and len(S.comp) == 1:
+                    comp_accept(0)
+                elif S.comp_open:
+                    comp_common_insert()
+            ed_render()
+            continue
+
+        if k == "\x7f" or k == "\x08":
+            ed_backspace()
+            S.comp_open = false
+            ed_render()
+            continue
+
+        if k == "\x04":  # Ctrl-D
+            if ed_text().strip() == "":
+                return (1, "")
+            ed_delete()
+            ed_render()
+            continue
+
+        if k == "\x03":  # Ctrl-C
+            return (2, "")
+
+        if k == "\x12":  # Ctrl-R
+            ed_search()
+            ed_render()
+            continue
+
+        if k == "\x01":  # Ctrl-A
+            ed_home_end("home")
+            ed_render()
+            continue
+        if k == "\x05":  # Ctrl-E
+            ed_home_end("end")
+            ed_render()
+            continue
+        if k == "\x0b":  # Ctrl-K
+            ed_kill_to_eol()
+            ed_render()
+            continue
+        if k == "\x15":  # Ctrl-U
+            ed_kill_whole()
+            ed_render()
+            continue
+        if k == "\x17":  # Ctrl-W
+            ed_kill_word()
+            ed_render()
+            continue
+        if k == "\x19":  # Ctrl-Y
+            ed_yank()
+            ed_render()
+            continue
+        if k == "\x0c":  # Ctrl-L
+            terminal.write("\x1b[2J\x1b[H")
+            ed_render()
+            continue
+
+        if k == "\x1b[A":  # Up: history or move line up
+            if S.row == 0:
+                cur = ed_line()
+                older = history.history_older(cur)
+                if older != "":
+                    S.lines = older.split("\n")
+                    S.row = len(S.lines) - 1
+                    S.col = len(S.lines[S.row])
+                    highlight.hl_reset()
+            else:
+                ed_move(-1, 0)
+            ed_render()
+            continue
+        if k == "\x1b[B":  # Down
+            if S.row == len(S.lines) - 1:
+                newer = history.history_newer()
+                if newer != "":
+                    S.lines = newer.split("\n")
+                    S.row = len(S.lines) - 1
+                    S.col = len(S.lines[S.row])
+                    highlight.hl_reset()
+            else:
+                ed_move(1, 0)
+            ed_render()
+            continue
+        if k == "\x1b[C":
+            ed_move(0, 1)
+            ed_render()
+            continue
+        if k == "\x1b[D":
+            ed_move(0, -1)
+            ed_render()
+            continue
+        if k == "\x1b[H":
+            ed_home_end("home")
+            ed_render()
+            continue
+        if k == "\x1b[F":
+            ed_home_end("end")
+            ed_render()
+            continue
+        if k == "\x1b[3~":
+            ed_delete()
+            ed_render()
+            continue
+        if k == "\x1b[Z":  # Shift-Tab: cycle completion backwards
+            if not S.comp_open:
+                comp_refresh()
+            if S.comp_open and len(S.comp) > 0:
+                S.comp_sel = (S.comp_sel + len(S.comp) - 1) % len(S.comp)
+            ed_render()
+            continue
+        if k == "\x1b":
+            S.comp_open = false
+            ed_render()
+            continue
+
+        # Printable character input.
+        if len(k) == 1 and k >= " ":
+            ed_insert(k)
+            S.comp_open = false
+            ed_render()
+            continue
+        # Unknown control key: ignore.
+        ed_render()
+    return (1, "")

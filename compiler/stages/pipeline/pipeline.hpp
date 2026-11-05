@@ -43,4 +43,10 @@ struct ReplSession {
 // Returns 0 on success, 1 on frontend (compile) failure, 2 on runtime error.
 int replEval(ReplSession& session, const std::string& source, const PipelineConfig& config,
              std::istream& in, std::ostream& out, std::ostream& err);
+
+// Runs the self-hosted A REPL UI (the `stdlib/std/repl` package entry file)
+// in the interpreter. Registers the `repl.eval` bridge first so the UI can
+// evaluate user input in a persistent session.
+int runReplUi(const std::string& entryPath, const PipelineConfig& config,
+              std::istream& in, std::ostream& out, std::ostream& err);
 }

@@ -4359,6 +4359,34 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
     return builtinTypeByName(name);
   }
 
+  // -------------------------------------------------- terminal/env/repl
+  // Interactive-REPL primitives; argument shapes are validated by the
+  // interpreter, so the checker only fixes the result type.
+  if (name == "terminal_isatty" || name == "terminal_raw_mode") {
+    if (!call.args.empty()) inferArgs();
+    return typeBool();
+  }
+  if (name == "terminal_read_char" || name == "terminal_read_char_ms") {
+    if (!call.args.empty()) inferArgs();
+    return typeOptional(typeString());
+  }
+  if (name == "terminal_write" || name == "terminal_flush") {
+    if (!call.args.empty()) inferArgs();
+    return typeVoid();
+  }
+  if (name == "terminal_size") {
+    if (!call.args.empty()) inferArgs();
+    return typeArray(typeInt(64, true));
+  }
+  if (name == "terminal_home" || name == "env_get") {
+    if (!call.args.empty()) inferArgs();
+    return typeString();
+  }
+  if (name == "repl_eval") {
+    if (!call.args.empty()) inferArgs();
+    return typeInt(64, true);
+  }
+
   return typeError();
 }
 

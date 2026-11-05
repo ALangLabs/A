@@ -9,8 +9,11 @@
 #include <iostream>
 #include "diagnostics/diagnostics.hpp"
 #include "pipeline/pipeline.hpp"
+#include "name-resolution/module_loader.hpp"
+#include "backend/kgen/runtime/terminal.hpp"
 #include "tooling/docgen.hpp"
 #include "tooling/formatter.hpp"
+#include <filesystem>
 namespace a {
 namespace {
 PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; return p; }
@@ -57,6 +60,14 @@ bool replInputComplete(const std::string& text){
 }
 }
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
+  // Interactive terminal: run the self-hosted A REPL (stdlib/std/repl) with
+  // line editing, history, highlighting, and completion. Piped stdin keeps
+  // the simple line-based fallback so scripts and tests still work.
+  if(kgen::terminal::isTty()){
+    const std::filesystem::path entry=std::filesystem::path(defaultStdlibRoot())/"std"/"repl"/"main.a";
+    PipelineConfig pc=toP(c); pc.checkOnly=false;
+    return runReplUi(entry.string(),pc,in,o,e);
+  }
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";
   ReplSession session;
   PipelineConfig pc=toP(c); pc.checkOnly=false;

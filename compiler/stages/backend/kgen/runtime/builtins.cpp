@@ -45,6 +45,9 @@
 #include "strings/format.hpp"
 #include "strings/utf8.hpp"
 
+#include "backend/kgen/repl_eval.hpp"
+#include "backend/kgen/runtime/terminal.hpp"
+
 namespace a {
 namespace {
 
@@ -1635,6 +1638,16 @@ std::uint64_t nextRandom() {
 
 }  // namespace
 
+namespace kgen {
+namespace {
+ReplEvalHandler g_replEvalHandler = nullptr;
+}  // namespace
+
+void setReplEvalHandler(ReplEvalHandler handler) { g_replEvalHandler = handler; }
+ReplEvalHandler replEvalHandler() { return g_replEvalHandler; }
+
+}  // namespace kgen
+
 Value KGENExecutionEngine::callStdlibBuiltin(const std::string& name, ArgList& args, Span span) {
   const std::string display = displayBuiltinName(name);
 
@@ -2821,6 +2834,67 @@ Value KGENExecutionEngine::callStdlibBuiltin(const std::string& name, ArgList& a
       if (!sent) fail(span, "'" + display + "' could not write the response: " + error + ".");
       if (once) return vBool(true);
     }
+  }
+
+  // ------------------------------------------------------------ terminal
+  if (name == "terminal_isatty") {
+    expectArgs(0);
+    return vBool(kgen::terminal::isTty());
+  }
+  if (name == "terminal_raw_mode") {
+    expectArgs(1);
+    const bool enable = expectBool(args[0], span, "The argument of 'terminal.raw_mode'");
+    return vBool(kgen::terminal::rawMode(enable));
+  }
+  if (name == "terminal_read_char" || name == "terminal_read_char_ms") {
+    const bool timed = name == "terminal_read_char_ms";
+    if (timed) expectArgs(1); else expectArgs(0);
+    int timeoutMs = -1;
+    if (timed) timeoutMs = static_cast<int>(expectInt(args[0], span, "The timeout of 'terminal.read_char'"));
+    std::string ch;
+    const int status = kgen::terminal::readChar(timeoutMs, ch);
+    if (status <= 0) return vNone();
+    return vString(std::move(ch));
+  }
+  if (name == "terminal_write") {
+    expectArgs(1);
+    kgen::terminal::writeOut(expectString(args[0], span, "The text passed to 'terminal.write'"));
+    return vVoid();
+  }
+  if (name == "terminal_flush") {
+    expectArgs(0);
+    kgen::terminal::flushOut();
+    return vVoid();
+  }
+  if (name == "terminal_size") {
+    expectArgs(0);
+    const auto dims = kgen::terminal::size();
+    return vArray({vInt(dims.first), vInt(dims.second)});
+  }
+  if (name == "terminal_home") {
+    expectArgs(0);
+    return vString(kgen::terminal::homeDir());
+  }
+
+  // ------------------------------------------------------------------ env
+  if (name == "env_get") {
+    expectArgs(1);
+    return vString(kgen::terminal::env(expectString(args[0], span, "The name passed to 'env.get'").c_str()));
+  }
+
+  // ----------------------------------------------------------------- repl
+  if (name == "repl_eval") {
+    expectArgs(1);
+    kgen::ReplEvalHandler handler = kgen::replEvalHandler();
+    if (!handler) {
+      fail(span, "'repl.eval' is only available inside 'a repl'.");
+    }
+    const std::string& source = expectString(args[0], span, "The source passed to 'repl.eval'");
+    const int rc = handler(source, in_, out_, err_);
+    // The line editor writes via ::write(2); flush buffered stdout so eval
+    // output always lands before the next prompt is drawn.
+    out_.flush();
+    return vInt(rc);
   }
 
   fail(span, "Internal error: unknown standard-library builtin '" + name + "'.");

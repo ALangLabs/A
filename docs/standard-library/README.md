@@ -409,6 +409,25 @@ TCP/UDP/TLS/polling primitives:
 
 > TLS/HTTPS support depends on the build having OpenSSL enabled.
 
+### 4.18 `terminal`, `env`, `repl` (native-backed, interactive REPL)
+
+Terminal primitives used by the self-hosted A REPL (`stdlib/std/repl/`, the
+IPython/`_pyrepl` analog run by `a repl` on a TTY). They are also usable from
+any interpreted program.
+
+| Module | API |
+|---|---|
+| `terminal` | `isatty() -> bool`, `raw_mode(enabled) -> bool`, `read_char() -> String?`, `read_char_ms(timeoutMs) -> String?`, `write(text)`, `flush()`, `size() -> [i64]` (`[cols, rows]`), `home() -> String` |
+| `env` | `get(name) -> String` (empty when unset) |
+| `repl` | `eval(source) -> i64` — evaluates source in the persistent REPL session (only inside `a repl`; 0 ok, 1 compile error, 2 runtime error, 3 nested eval rejected) |
+
+The REPL UI itself is written in A: `stdlib/std/repl/{main,editor,highlight,complete,history}.a`
+provides `In [n]:` prompts, persistent `~/.a_history`, up/down history,
+Ctrl-R reverse-i-search, Tab completion (keywords/builtins/modules/user
+names), live syntax highlighting, ghost-text autosuggest, multiline
+bracket/`:` continuation, and kill/yank editing (Ctrl-A/E/K/U/W/Y, Ctrl-L).
+Piped (non-TTY) `a repl` keeps the simple `>>>` line mode.
+
 ## 5. `std/*` package library
 
 `stdlib/std/` contains Mojo-inspired package structure. Some packages export pure A helpers; others are backed by native modules.

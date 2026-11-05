@@ -157,6 +157,17 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                          {"serve", "http_serve"},
                          {"serve_once", "http_serve_once"}},
                         {})},
+      {"terminal", makeSpec({{"isatty", "terminal_isatty"},
+                             {"raw_mode", "terminal_raw_mode"},
+                             {"read_char", "terminal_read_char"},
+                             {"read_char_ms", "terminal_read_char_ms"},
+                             {"write", "terminal_write"},
+                             {"flush", "terminal_flush"},
+                             {"size", "terminal_size"},
+                             {"home", "terminal_home"}},
+                            {})},
+      {"env", makeSpec({{"get", "env_get"}}, {})},
+      {"repl", makeSpec({{"eval", "repl_eval"}}, {})},
   };
   return modules;
 }
@@ -164,8 +175,9 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
 // Builtins implemented by the standard-library layer in the interpreter. The
 // LLVM and native backends cannot lower these and fall back to the interpreter.
 inline bool isStdlibBuiltin(const std::string& name) {
-  static const char* prefixes[] = {"json_",   "binary_", "testing_", "log_",
-                                   "metrics_", "trace_",  "net_",    "http_"};
+  static const char* prefixes[] = {"json_",     "binary_",   "testing_", "log_",
+                                   "metrics_",  "trace_",    "net_",    "http_",
+                                   "terminal_", "env_",      "repl_"};
   for (const char* prefix : prefixes) {
     const std::string_view p(prefix);
     if (name.size() >= p.size() && name.compare(0, p.size(), p) == 0) return true;
