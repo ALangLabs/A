@@ -237,7 +237,16 @@ against the compiler (2026-10-29).
 - [x] Canonical `stdlib/std/<pkg>/` package tree with `__init__.a` stubs/exports (Mojo `std/` analog).
 - [x] `stdlib/std/prelude/` package entry + auto-load support from `std/prelude` locations.
 - [x] Module loader resolves bare imports under `stdlib/std/`.
-- [x] Legacy compat copies kept at `stdlib/<pkg>/` for existing quoted imports (migrated key tests/examples to `std/`).
-- [ ] Remove legacy `stdlib/<pkg>` compat copies after all quoted imports migrate.
+- [x] Legacy compat copies removed for migrated `comptime/format/gpu/iter/simd/test/traits` paths; remaining quoted imports migrated in-tree.
+- [x] Stdlib layout smoke test added (`tests/integration/cases/stdlib/std_layout.a`).
 - [ ] Make native-module package stubs ergonomic (re-export/wrapper strategy without breaking module namespace semantics).
-- [ ] Self-host more of the stdlib in `.a` where semantics allow (compiler/runtime-limited today).
+- [ ] Self-host more of the stdlib in `.a` where semantics allow (compiler/runtime/FFI/backend-limited today).
+
+## 17. Rewrite/redesign blockers (explicit, 2026-11-05)
+- [x] Explicit typing-model doc added (`docs/typing-model.md`): current dynamic HEAD semantics + Mojo-inspired static-core/dynamic-boundary target.
+- [x] Compiler/stdlib redesign status + blockers documented (`docs/compiler-redesign.md`).
+- [ ] Full rewrite from scratch of compiler/frontends/backends/runtime while preserving behavior (large staged effort; not safe as one pass).
+- [ ] Full native-stdlib self-hosting in `.a` for runtime/FFI/OS/backend-bound modules.
+- [ ] MLIR dialect backend (LIT/KGEN/POP/HLCF-style): requires MLIR/toolchain integration + new backend architecture; no in-tree implementation.
+- [ ] Real SIMD vector codegen/specialization (current: scalar/list emulation).
+- [ ] Real GPU codegen/specialization/runtime integration (current: host/interpreter-oriented abstractions).
