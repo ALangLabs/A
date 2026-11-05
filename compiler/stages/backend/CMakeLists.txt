@@ -6,6 +6,7 @@ add_library(a_backend STATIC
   kgen/execution_engine_impl.cpp
   kgen/object_compiler.cpp
   kgen/codegen/llvm_emitter.cpp
+  kgen/codegen/c_emitter.cpp
   kgen/jit.cpp
   kgen/runtime/builtins.cpp
   kgen/runtime/terminal.cpp

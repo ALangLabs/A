@@ -21,6 +21,7 @@ namespace a {
 namespace {
 
 bool isStdlibModule(const ModuleGraph& graph, const Module& mod);
+bool nativeFloatScanOk(const ModuleGraph& graph);
 
 std::string extractString(const StringLitExpr& s) {
   std::string result;
@@ -1370,589 +1371,6 @@ class X86Emitter {
   }
 };
 
-// ============================================================================
-// C Source Emitter (for the in-process TinyCC JIT backend)
-// ============================================================================
-// Emits C99 for the same native subset as X86Emitter. Every A value is an
-// `aval` union ({ int64 i; double d; }); which member is live is tracked with
-// the same slotIsFloat_/globalIsFloat_ tables the asm emitter uses, so int and
-// float code share one representation without a heap.
-class CEmitter {
- public:
-  CEmitter(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out)
-      : graph_(graph), sema_(sema), out_(out) {}
-
-  bool emit() {
-    collectGlobals();
-    pretypeGlobals();
-
-    out_ << "typedef long long a_i64;\n";
-    out_ << "typedef union { a_i64 i; double d; } aval;\n";
-    out_ << "int printf(const char *, ...);\n";
-    out_ << "double sqrt(double);\n";
-    out_ << "double pow(double, double);\n";
-    out_ << "double fmod(double, double);\n";
-    static const char* kMath1[] = {
-        "floor", "ceil", "round", "exp", "log", "sin", "cos", "tan", "fabs"};
-    for (const char* n : kMath1) out_ << "double " << n << "(double);\n";
-    out_ << "\n";
-
-    for (const auto& n : globalNames_) out_ << "static aval g_" << n << ";\n";
-    if (!globalNames_.empty()) out_ << "\n";
-
-    std::vector<const FnDecl*> fns;
-    for (std::size_t i = 0; i < graph_.modules.size(); ++i) {
-      const auto& mod = graph_.modules[i];
-      if (!mod.program || isStdlibModule(graph_, mod)) continue;
-      for (const auto& stmt : mod.program->statements) {
-        if (stmt->kind == StmtKind::FnDecl)
-          fns.push_back(static_cast<const FnDecl*>(stmt.get()));
-      }
-    }
-    for (const FnDecl* fn : fns) {
-      out_ << "aval afn_" << fn->name << "(";
-      for (std::size_t i = 0; i < fn->params.size(); ++i) {
-        if (i) out_ << ", ";
-        out_ << "aval v_" << fn->params[i].name;
-      }
-      out_ << ");\n";
-    }
-    if (!fns.empty()) out_ << "\n";
-    for (const FnDecl* fn : fns) emitFunction(*fn);
-    emitMain();
-    return true;
-  }
-
- private:
-  const ModuleGraph& graph_;
-  const SemaResult& sema_;
-  std::ostream& out_;
-  bool inMain_ = false;
-  std::set<std::string> globalNames_;
-  std::unordered_map<std::string, bool> globalIsFloat_;
-  std::set<std::string> locals_;
-  std::unordered_map<std::string, bool> slotIsFloat_;
-
-  static std::string cIdent(const std::string& name) {
-    std::string r;
-    for (char c : name) {
-      r += (std::isalnum(static_cast<unsigned char>(c)) || c == '_') ? c : '_';
-    }
-    return r.empty() ? "_" : r;
-  }
-
-  // Module-level bindings, same set X86Emitter::collectGlobals builds.
-  void collectGlobals() {
-    if (graph_.entry < 0 ||
-        static_cast<std::size_t>(graph_.entry) >= graph_.modules.size()) return;
-    const auto& root = graph_.modules[static_cast<std::size_t>(graph_.entry)];
-    if (!root.program) return;
-    for (const auto& stmt : root.program->statements) {
-      std::string name;
-      if (stmt->kind == StmtKind::Let) {
-        name = static_cast<const LetStmt&>(*stmt).name;
-      } else if (stmt->kind == StmtKind::Assign &&
-                 static_cast<const AssignStmt&>(*stmt).target->kind == ExprKind::Ident) {
-        name = static_cast<const IdentExpr&>(*static_cast<const AssignStmt&>(*stmt).target).name;
-      }
-      if (!name.empty()) globalNames_.insert(cIdent(name));
-    }
-  }
-
-  // Type the globals before any function is emitted: functions are compiled
-  // above main, so without this they could not know whether a global holds a
-  // double. Walks top-level statements in order, same rule the emitter uses.
-  void pretypeGlobals() {
-    if (graph_.entry < 0 ||
-        static_cast<std::size_t>(graph_.entry) >= graph_.modules.size()) return;
-    const auto& root = graph_.modules[static_cast<std::size_t>(graph_.entry)];
-    if (!root.program) return;
-    for (const auto& stmt : root.program->statements) {
-      if (stmt->kind == StmtKind::Let) {
-        const auto& s = static_cast<const LetStmt&>(*stmt);
-        if (s.init && globalNames_.count(cIdent(s.name)))
-          globalIsFloat_[cIdent(s.name)] = exprIsFloat(*s.init);
-      } else if (stmt->kind == StmtKind::Assign) {
-        const auto& s = static_cast<const AssignStmt&>(*stmt);
-        if (s.target->kind != ExprKind::Ident) continue;
-        std::string n = cIdent(static_cast<const IdentExpr&>(*s.target).name);
-        if (!globalNames_.count(n)) continue;
-        bool vf = exprIsFloat(*s.value);
-        if (s.op == "=") globalIsFloat_[n] = vf;
-        else globalIsFloat_[n] = vf || globalIsFloat_[n];
-      }
-    }
-  }
-
-  // Does this expression evaluate to a double in the native subset?
-  bool exprIsFloat(const Expr& expr) {
-    switch (expr.kind) {
-      case ExprKind::FloatLit: return true;
-      case ExprKind::Ident: {
-        const std::string& n = cIdent(static_cast<const IdentExpr&>(expr).name);
-        auto li = slotIsFloat_.find(n);
-        if (li != slotIsFloat_.end()) return li->second;
-        auto gi = globalIsFloat_.find(n);
-        return gi != globalIsFloat_.end() && gi->second;
-      }
-      case ExprKind::Binary: {
-        const auto& b = static_cast<const BinaryExpr&>(expr);
-        static const std::set<std::string> arith = {"+","-","*","/","%"};
-        return arith.count(b.op) && (exprIsFloat(*b.lhs) || exprIsFloat(*b.rhs));
-      }
-      case ExprKind::Unary: {
-        const auto& u = static_cast<const UnaryExpr&>(expr);
-        return u.op == "-" && exprIsFloat(*u.operand);
-      }
-      case ExprKind::Call:
-        return exprIsFloatCall(static_cast<const CallExpr&>(expr).callee.get());
-      default: return false;
-    }
-  }
-  bool exprIsFloatCall(const Expr* callee) {
-    if (!callee || callee->kind != ExprKind::Ident) return false;
-    static const std::set<std::string> fns = {
-        "sqrt","pow","fmod","floor","ceil","round","exp","log","sin","cos","tan",
-        "fabs","f64","float"};
-    return fns.count(cIdent(static_cast<const IdentExpr&>(*callee).name)) != 0;
-  }
-
-  // Names bound anywhere in a statement list become C locals (declared at the
-  // top of the function, matching X86Emitter's flat frame slots).
-  void collectLocalNames(const std::vector<StmtPtr>& body) {
-    for (const auto& sp : body) {
-      const Stmt& s = *sp;
-      switch (s.kind) {
-        case StmtKind::Let: {
-          const auto& l = static_cast<const LetStmt&>(s);
-          std::string n = cIdent(l.name);
-          // `let` inside a function always shadows; at top level a name that
-          // is a module global stays a global (writes go to g_*).
-          if (!inMain_ || !globalNames_.count(n)) locals_.insert(n);
-          break;
-        }
-        case StmtKind::Assign: {
-          const auto& a = static_cast<const AssignStmt&>(s);
-          if (a.target->kind == ExprKind::Ident) {
-            std::string n = cIdent(static_cast<const IdentExpr&>(*a.target).name);
-            if (!globalNames_.count(n)) locals_.insert(n);
-          }
-          break;
-        }
-        case StmtKind::For: {
-          const auto& f = static_cast<const ForStmt&>(s);
-          std::string v = cIdent(f.var);
-          locals_.insert(v);
-          locals_.insert("__iter_" + v);
-          locals_.insert("__end_" + v);
-          collectLocalNames(f.body);
-          break;
-        }
-        case StmtKind::If: {
-          const auto& i = static_cast<const IfStmt&>(s);
-          for (const auto& br : i.branches) collectLocalNames(br.body);
-          collectLocalNames(i.elseBody);
-          break;
-        }
-        case StmtKind::While: {
-          collectLocalNames(static_cast<const WhileStmt&>(s).body);
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-
-  std::string lvalue(const std::string& rawName) {
-    std::string n = cIdent(rawName);
-    if (locals_.count(n)) return "v_" + n;
-    if (globalNames_.count(n)) return "g_" + n;
-    return "v_" + n;
-  }
-  std::string identA(const std::string& rawName) {
-    std::string n = cIdent(rawName);
-    if (locals_.count(n)) return "v_" + n;
-    if (globalNames_.count(n)) return "g_" + n;
-    return "(aval){.i=0}";
-  }
-  bool isGlobalLValue(const std::string& lv) { return lv.rfind("g_", 0) == 0; }
-
-  std::string floatLit(double v) {
-    char buf[64];
-    std::snprintf(buf, sizeof(buf), "%.17g", v);
-    std::string s = buf;
-    // C needs a decimal point or exponent for a double literal; "4" alone is
-    // an int constant (still converts correctly, but keep it explicit).
-    if (s.find_first_of(".eE") == std::string::npos) s += ".0";
-    return s;
-  }
-
-  std::string escapeC(const std::string& s) {
-    std::string r;
-    for (char c : s) {
-      switch (c) {
-        case '\n': r += "\\n"; break;
-        case '\t': r += "\\t"; break;
-        case '\r': r += "\\r"; break;
-        case '"': r += "\\\""; break;
-        case '\\': r += "\\\\"; break;
-        default: r += c; break;
-      }
-    }
-    return r;
-  }
-
-  // The printf call for print(arg), as a C expression-statement string.
-  std::string printCallC(const CallExpr& call) {
-    const auto& arg = *call.args[0].value;
-    if (arg.kind == ExprKind::StringLit) {
-      std::string lit = extractString(static_cast<const StringLitExpr&>(arg));
-      return "printf(\"%s\\n\", \"" + escapeC(lit) + "\")";
-    }
-    if (exprIsFloat(arg)) {
-      return "printf(\"%.17g\\n\", " + exprD(arg) + ")";
-    }
-    return "printf(\"%lld\\n\", (a_i64)(" + exprI(arg) + "))";
-  }
-
-  std::string condC(const Expr& e) {
-    if (exprIsFloat(e)) return "(" + exprD(e) + " != 0.0)";
-    return "(" + exprI(e) + " != 0)";
-  }
-
-  void emitFunction(const FnDecl& fn) {
-    locals_.clear();
-    slotIsFloat_.clear();
-    inMain_ = false;
-    for (const auto& p : fn.params) {
-      std::string n = cIdent(p.name);
-      locals_.insert(n);
-      slotIsFloat_[n] = false;
-    }
-    collectLocalNames(fn.body);
-
-    out_ << "aval afn_" << cIdent(fn.name) << "(";
-    for (std::size_t i = 0; i < fn.params.size(); ++i) {
-      if (i) out_ << ", ";
-      out_ << "aval v_" << cIdent(fn.params[i].name);
-    }
-    out_ << ") {\n";
-    for (const auto& n : locals_) out_ << "  aval v_" << n << " = {0};\n";
-    for (const auto& s : fn.body) emitStmt(*s);
-    out_ << "  return (aval){.i=0};\n";
-    out_ << "}\n\n";
-  }
-
-  void emitStmt(const Stmt& stmt) {
-    switch (stmt.kind) {
-      case StmtKind::Let: {
-        const auto& s = static_cast<const LetStmt&>(stmt);
-        if (!s.init) break;
-        std::string lv = lvalue(s.name);
-        out_ << "  " << lv << " = " << exprA(*s.init) << ";\n";
-        bool vf = exprIsFloat(*s.init);
-        std::string n = cIdent(s.name);
-        if (isGlobalLValue(lv)) globalIsFloat_[n] = vf;
-        else slotIsFloat_[n] = vf;
-        break;
-      }
-      case StmtKind::Assign: {
-        const auto& s = static_cast<const AssignStmt&>(stmt);
-        if (s.target->kind != ExprKind::Ident) break;
-        std::string raw = static_cast<const IdentExpr&>(*s.target).name;
-        std::string n = cIdent(raw);
-        std::string lv = lvalue(raw);
-        bool isG = isGlobalLValue(lv);
-        auto& ftab = isG ? globalIsFloat_ : slotIsFloat_;
-        bool vf = exprIsFloat(*s.value);
-        if (s.op == "=") {
-          out_ << "  " << lv << " = " << exprA(*s.value) << ";\n";
-          ftab[n] = vf;
-          break;
-        }
-        std::string base = s.op.substr(0, s.op.size() - 1);
-        bool cf = ftab[n];
-        if (vf || cf) {
-          ftab[n] = true;
-          std::string curD = cf ? lv + ".d" : "((double)(" + lv + ".i))";
-          std::string valD = exprD(*s.value);
-          if (base == "+") out_ << "  " << lv << ".d = " << curD << " + " << valD << ";\n";
-          else if (base == "-") out_ << "  " << lv << ".d = " << curD << " - " << valD << ";\n";
-          else if (base == "*") out_ << "  " << lv << ".d = " << curD << " * " << valD << ";\n";
-          else if (base == "/") out_ << "  " << lv << ".d = " << curD << " / " << valD << ";\n";
-          else if (base == "%") out_ << "  " << lv << ".d = fmod(" << curD << ", " << valD << ");\n";
-          else {
-            // Bitwise/shift compound ops on floats: truncate both sides,
-            // integer op, store back as double (matches X86Emitter).
-            std::string curI = "(a_i64)(" + curD + ")";
-            std::string valI = "(a_i64)(" + valD + ")";
-            std::string bop;
-            if (base == "&") bop = "&";
-            else if (base == "|") bop = "|";
-            else if (base == "^") bop = "^";
-            else if (base == "<<") { out_ << "  " << lv << ".d = (double)(" << curI << " << (" << valI << " & 63));\n"; break; }
-            else if (base == ">>") { out_ << "  " << lv << ".d = (double)(" << curI << " >> (" << valI << " & 63));\n"; break; }
-            else bop = "+";
-            out_ << "  " << lv << ".d = (double)(" << curI << " " << bop << " " << valI << ");\n";
-          }
-          break;
-        }
-        std::string valI = exprI(*s.value);
-        if (base == "+") out_ << "  " << lv << ".i += " << valI << ";\n";
-        else if (base == "-") out_ << "  " << lv << ".i -= " << valI << ";\n";
-        else if (base == "*") out_ << "  " << lv << ".i *= " << valI << ";\n";
-        else if (base == "/") out_ << "  " << lv << ".i /= " << valI << ";\n";
-        else if (base == "%") out_ << "  " << lv << ".i %= " << valI << ";\n";
-        else if (base == "&") out_ << "  " << lv << ".i &= " << valI << ";\n";
-        else if (base == "|") out_ << "  " << lv << ".i |= " << valI << ";\n";
-        else if (base == "^") out_ << "  " << lv << ".i ^= " << valI << ";\n";
-        else if (base == "<<") out_ << "  " << lv << ".i = " << lv << ".i << (" << valI << " & 63);\n";
-        else if (base == ">>") out_ << "  " << lv << ".i = " << lv << ".i >> (" << valI << " & 63);\n";
-        break;
-      }
-      case StmtKind::If: {
-        const auto& s = static_cast<const IfStmt&>(stmt);
-        for (std::size_t i = 0; i < s.branches.size(); ++i) {
-          const auto& br = s.branches[i];
-          out_ << (i == 0 ? "  if (" : "  else if (") << condC(*br.cond) << ") {\n";
-          for (const auto& b : br.body) emitStmt(*b);
-          out_ << "  }";
-        }
-        if (!s.elseBody.empty()) {
-          out_ << (s.branches.empty() ? "  {\n" : " else {\n");
-          for (const auto& b : s.elseBody) emitStmt(*b);
-          out_ << "  }";
-        }
-        out_ << "\n";
-        break;
-      }
-      case StmtKind::While: {
-        const auto& s = static_cast<const WhileStmt&>(stmt);
-        out_ << "  while (" << condC(*s.cond) << ") {\n";
-        for (const auto& b : s.body) emitStmt(*b);
-        out_ << "  }\n";
-        break;
-      }
-      case StmtKind::For: {
-        const auto& s = static_cast<const ForStmt&>(stmt);
-        if (s.iterable->kind != ExprKind::Range) break;
-        const auto& r = static_cast<const RangeExpr&>(*s.iterable);
-        std::string v = cIdent(s.var);
-        std::string itN = "v___iter_" + v;
-        std::string endN = "v___end_" + v;
-        std::string varN = "v_" + v;
-        slotIsFloat_[v] = false;
-        slotIsFloat_["__iter_" + v] = false;
-        slotIsFloat_["__end_" + v] = false;
-        out_ << "  " << itN << ".i = " << exprI(*r.start) << ";\n";
-        out_ << "  " << endN << ".i = " << exprI(*r.end) << ";\n";
-        out_ << "  for (; " << itN << ".i < " << endN << ".i; "
-             << itN << ".i = " << itN << ".i + 1) {\n";
-        out_ << "    " << varN << " = " << itN << ";\n";
-        for (const auto& b : s.body) emitStmt(*b);
-        out_ << "  }\n";
-        break;
-      }
-      case StmtKind::Return: {
-        const auto& s = static_cast<const ReturnStmt&>(stmt);
-        if (inMain_) {
-          // Top-level return exits the program; keep side effects, drop value.
-          if (s.value) out_ << "  (void)" << exprA(*s.value) << ";\n";
-          out_ << "  return 0;\n";
-          break;
-        }
-        out_ << "  return " << (s.value ? exprA(*s.value) : "(aval){.i=0}") << ";\n";
-        break;
-      }
-      case StmtKind::Expr: {
-        const auto& s = static_cast<const ExprStmt&>(stmt);
-        if (s.expr->kind == ExprKind::Call) {
-          const auto& c = static_cast<const CallExpr&>(*s.expr);
-          if (c.callee->kind == ExprKind::Ident &&
-              cIdent(static_cast<const IdentExpr&>(*c.callee).name) == "print" &&
-              c.args.size() == 1) {
-            out_ << "  " << printCallC(c) << ";\n";
-            break;
-          }
-        }
-        out_ << "  (void)" << exprA(*s.expr) << ";\n";
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  // ---- expression emitters: each returns a C expression of the given type --
-
-  // aval-typed expression
-  std::string exprA(const Expr& e) {
-    switch (e.kind) {
-      case ExprKind::IntLit:
-        return "(aval){.i=" + std::to_string(static_cast<const IntLitExpr&>(e).value) + "}";
-      case ExprKind::FloatLit:
-        return "(aval){.d=" + floatLit(static_cast<const FloatLitExpr&>(e).value) + "}";
-      case ExprKind::BoolLit:
-        return std::string("(aval){.i=") + (static_cast<const BoolLitExpr&>(e).value ? "1" : "0") + "}";
-      case ExprKind::Ident:
-        return identA(static_cast<const IdentExpr&>(e).name);
-      case ExprKind::Binary:
-      case ExprKind::Unary:
-      case ExprKind::Call:
-        if (exprIsFloat(e)) return "(aval){.d=" + exprD(e) + "}";
-        return "(aval){.i=" + exprI(e) + "}";
-      default:
-        return "(aval){.i=0}";
-    }
-  }
-
-  // double-typed expression; promotes integer operands
-  std::string exprD(const Expr& e) {
-    if (!exprIsFloat(e)) return "((double)(" + exprI(e) + "))";
-    switch (e.kind) {
-      case ExprKind::FloatLit:
-        return floatLit(static_cast<const FloatLitExpr&>(e).value);
-      case ExprKind::Ident: {
-        std::string n = cIdent(static_cast<const IdentExpr&>(e).name);
-        if (locals_.count(n)) return "v_" + n + ".d";
-        if (globalNames_.count(n)) return "g_" + n + ".d";
-        return "0.0";
-      }
-      case ExprKind::Binary: {
-        const auto& b = static_cast<const BinaryExpr&>(e);
-        if (b.op == "+") return "(" + exprD(*b.lhs) + " + " + exprD(*b.rhs) + ")";
-        if (b.op == "-") return "(" + exprD(*b.lhs) + " - " + exprD(*b.rhs) + ")";
-        if (b.op == "*") return "(" + exprD(*b.lhs) + " * " + exprD(*b.rhs) + ")";
-        if (b.op == "/") return "(" + exprD(*b.lhs) + " / " + exprD(*b.rhs) + ")";
-        if (b.op == "%") return "fmod(" + exprD(*b.lhs) + ", " + exprD(*b.rhs) + ")";
-        return "((double)(" + exprI(e) + "))";
-      }
-      case ExprKind::Unary: {
-        const auto& u = static_cast<const UnaryExpr&>(e);
-        if (u.op == "-") return "(-" + exprD(*u.operand) + ")";
-        return "((double)(" + exprI(e) + "))";
-      }
-      case ExprKind::Call: {
-        const auto& c = static_cast<const CallExpr&>(e);
-        if (c.callee->kind != ExprKind::Ident) return "0.0";
-        std::string name = cIdent(static_cast<const IdentExpr&>(*c.callee).name);
-        if (name == "sqrt" && !c.args.empty())
-          return "sqrt(" + exprD(*c.args[0].value) + ")";
-        if ((name == "pow" || name == "fmod") && c.args.size() >= 2)
-          return name + "(" + exprD(*c.args[0].value) + ", " + exprD(*c.args[1].value) + ")";
-        static const std::set<std::string> libm1 = {
-            "floor","ceil","round","exp","log","sin","cos","tan","fabs"};
-        if (libm1.count(name) && !c.args.empty())
-          return name + "(" + exprD(*c.args[0].value) + ")";
-        if ((name == "f64" || name == "float") && !c.args.empty())
-          return exprD(*c.args[0].value);
-        return "((double)(" + exprI(e) + "))";
-      }
-      default:
-        return "0.0";
-    }
-  }
-
-  // int64-typed expression; truncates doubles (cvttsd2si semantics)
-  std::string exprI(const Expr& e) {
-    if (exprIsFloat(e)) return "(a_i64)(" + exprD(e) + ")";
-    switch (e.kind) {
-      case ExprKind::IntLit:
-        return std::to_string(static_cast<const IntLitExpr&>(e).value);
-      case ExprKind::BoolLit:
-        return static_cast<const BoolLitExpr&>(e).value ? "1" : "0";
-      case ExprKind::Ident: {
-        std::string n = cIdent(static_cast<const IdentExpr&>(e).name);
-        if (locals_.count(n)) return "v_" + n + ".i";
-        if (globalNames_.count(n)) return "g_" + n + ".i";
-        return "0";
-      }
-      case ExprKind::Binary: {
-        const auto& b = static_cast<const BinaryExpr&>(e);
-        static const std::set<std::string> cmpOps = {"==","!=","<","<=",">",">="};
-        // Comparisons with a float operand still produce an int result.
-        if (cmpOps.count(b.op) &&
-            (exprIsFloat(*b.lhs) || exprIsFloat(*b.rhs))) {
-          std::string cop = b.op == "==" ? "==" : b.op == "!=" ? "!=" :
-                            b.op == "<" ? "<" : b.op == "<=" ? "<=" :
-                            b.op == ">" ? ">" : ">=";
-          return "(" + exprD(*b.lhs) + " " + cop + " " + exprD(*b.rhs) + ")";
-        }
-        std::string l = exprI(*b.lhs);
-        std::string r = exprI(*b.rhs);
-        if (b.op == "+") return "(" + l + " + " + r + ")";
-        if (b.op == "-") return "(" + l + " - " + r + ")";
-        if (b.op == "*") return "(" + l + " * " + r + ")";
-        if (b.op == "/") return "(" + l + " / " + r + ")";
-        if (b.op == "%") return "(" + l + " % " + r + ")";
-        if (b.op == "==") return "(" + l + " == " + r + ")";
-        if (b.op == "!=") return "(" + l + " != " + r + ")";
-        if (b.op == "<") return "(" + l + " < " + r + ")";
-        if (b.op == "<=") return "(" + l + " <= " + r + ")";
-        if (b.op == ">") return "(" + l + " > " + r + ")";
-        if (b.op == ">=") return "(" + l + " >= " + r + ")";
-        if (b.op == "&" || b.op == "and") return "(" + l + " & " + r + ")";
-        if (b.op == "|" || b.op == "or") return "(" + l + " | " + r + ")";
-        if (b.op == "^") return "(" + l + " ^ " + r + ")";
-        if (b.op == "<<") return "(" + l + " << (" + r + " & 63))";
-        if (b.op == ">>") return "(" + l + " >> (" + r + " & 63))";
-        return "(" + l + " + " + r + ")";
-      }
-      case ExprKind::Unary: {
-        const auto& u = static_cast<const UnaryExpr&>(e);
-        std::string o = exprI(*u.operand);
-        if (u.op == "-") return "(-" + o + ")";
-        if (u.op == "~") return "(~" + o + ")";
-        if (u.op == "not" || u.op == "!") return "(!" + o + ")";
-        return o;
-      }
-      case ExprKind::Call: {
-        const auto& c = static_cast<const CallExpr&>(e);
-        if (c.callee->kind != ExprKind::Ident) return "0";
-        std::string name = cIdent(static_cast<const IdentExpr&>(*c.callee).name);
-        if (name == "print" && c.args.size() == 1) {
-          // print returns no useful value; keep the side effect via comma.
-          return "(" + printCallC(c) + ", (a_i64)0)";
-        }
-        if (name == "int" && !c.args.empty()) return exprI(*c.args[0].value);
-        // User function: returns aval; take the int member.
-        std::string call = "afn_" + name + "(";
-        for (std::size_t i = 0; i < c.args.size(); ++i) {
-          if (i) call += ", ";
-          call += exprA(*c.args[i].value);
-        }
-        call += ")";
-        return "(" + call + ").i";
-      }
-      default:
-        return "0";
-    }
-  }
-
-  void emitMain() {
-    locals_.clear();
-    slotIsFloat_.clear();
-    inMain_ = true;
-
-    if (graph_.entry >= 0 && static_cast<std::size_t>(graph_.entry) < graph_.modules.size()) {
-      const auto& root = graph_.modules[static_cast<std::size_t>(graph_.entry)];
-      if (root.program) {
-        collectLocalNames(root.program->statements);
-        out_ << "int main(void) {\n";
-        for (const auto& n : locals_) out_ << "  aval v_" << n << " = {0};\n";
-        for (const auto& stmt : root.program->statements) {
-          if (stmt->kind != StmtKind::FnDecl) emitStmt(*stmt);
-        }
-        out_ << "  return 0;\n";
-        out_ << "}\n";
-      }
-    } else {
-      out_ << "int main(void) {\n  return 0;\n}\n";
-    }
-  }
-};
-
 }  // namespace
 
 bool emitLLVMIR(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out) {
@@ -1961,51 +1379,41 @@ bool emitLLVMIR(const ModuleGraph& graph, const SemaResult& sema, std::ostream& 
 }
 
 bool emitX86Assembly(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out) {
+  // The asm emitter cannot represent float args/returns on user calls; the C
+  // emitter (used by the JIT and `a build`) can. Refuse rather than miscompile.
+  if (!nativeFloatScanOk(graph)) return false;
   X86Emitter emitter(graph, sema, out);
-  return emitter.emit();
-}
-
-bool emitCSource(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out) {
-  CEmitter emitter(graph, sema, out);
   return emitter.emit();
 }
 
 bool buildLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
                      const std::string& outputPath, std::ostream& err) {
-  std::string tmpLL = outputPath + ".ll";
+  // The C emitter is the primary native backend: it handles the full dynamic
+  // subset (tagged aval values) and compiles with a plain C compiler.
+  std::string tmpC = outputPath + ".c";
   {
-    std::ofstream ofs(tmpLL);
+    std::ofstream ofs(tmpC);
     if (!ofs) {
-      err << "error: failed to open temporary file " << tmpLL << "\n";
+      err << "error: failed to open temporary file " << tmpC << "\n";
       return false;
     }
-    if (!emitLLVMIR(graph, sema, ofs)) {
-      err << "error: failed to generate LLVM IR\n";
+    if (!emitCSource(graph, sema, ofs)) {
+      err << "error: failed to generate C source\n";
       return false;
     }
   }
 
-  // Also emit direct x86-64 assembly to guarantee compilation into standalone ELF executable
-  std::string tmpS = outputPath + ".s";
-  {
-    std::ofstream ofs(tmpS);
-    if (!ofs) {
-      err << "error: failed to open temporary assembly file " << tmpS << "\n";
-      return false;
-    }
-    if (!emitX86Assembly(graph, sema, ofs)) {
-      err << "error: failed to generate x86 assembly\n";
-      return false;
-    }
-  }
-
-  // Assemble and link via gcc/as
-  std::string cmd = "gcc -no-pie " + tmpS + " -o " + outputPath + " -lm 2>/dev/null";
+  std::string cmd = "gcc -O2 -no-pie -x c " + tmpC + " -o " + outputPath + " -lm 2>/tmp/a_cc_err.txt";
   int ret = std::system(cmd.c_str());
   if (ret != 0) {
-    err << "error: assembly/linking failed with exit code " << ret << "\n";
+    std::ifstream ef("/tmp/a_cc_err.txt");
+    std::string line;
+    while (std::getline(ef, line)) err << line << "\n";
+    err << "error: C compilation/linking failed with exit code " << ret << "\n";
     return false;
   }
+  std::filesystem::remove("/tmp/a_cc_err.txt");
+  std::filesystem::remove(tmpC);
 
   return true;
 }
@@ -2510,13 +1918,16 @@ class NativeFloatScan {
   }
 };
 
+bool nativeFloatScanOk(const ModuleGraph& graph) {
+  NativeFloatScan scan(graph);
+  scan.run();
+  return scan.ok();
+}
+
 }  // namespace
 
 bool isLLVMSupported(const ModuleGraph& graph) {
   if (graph.modules.empty()) return false;
-  NativeFloatScan scan(graph);
-  scan.run();
-  if (!scan.ok()) return false;
   for (const auto& mod : graph.modules) {
     if (!mod.program || isStdlibModule(graph,mod)) continue;
     for (const auto& st : mod.program->statements) {
