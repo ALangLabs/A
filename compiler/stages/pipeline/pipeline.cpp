@@ -5,6 +5,7 @@
 #include <utility>
 #include "backend/kgen/execution_engine.hpp"
 #include "backend/kgen/execution_engine_impl.hpp"
+#include "backend/kgen/jit.hpp"
 #include "backend/kgen/kgen_backend.hpp"
 #include "backend/kgen/repl_eval.hpp"
 #include "diagnostics/diagnostics.hpp"
@@ -49,6 +50,13 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   // (Goose/Mojo-style). If native compilation is unavailable, fall back to
   // the internal engine so `run` keeps full dynamic semantics.
   if(!std::getenv("A_NO_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
+    // Goose-style in-process JIT first: TinyCC compiles the C emission in
+    // ~1ms with no subprocess or linker. Falls through to the gcc cache on
+    // any JIT failure (A_NO_JIT=1 skips it entirely).
+    if(!std::getenv("A_NO_JIT")){
+      int jitRc=kgen::runJitModule(*m.graph,*m.sema,err);
+      if(jitRc>=0) return jitRc;
+    }
     std::uint64_t h=srcHash;
     auto mix=[&](const std::string& d){for(unsigned char c:d){h^=c;h*=1099511628211ULL;}};
     // Include this binary's mtime so emitter/compiler changes invalidate

@@ -15,6 +15,9 @@ bool emitLLVMIR(const ModuleGraph& graph, const SemaResult& sema, std::ostream& 
 // Emits standard GNU x86-64 assembly (.s) directly from the module graph
 bool emitX86Assembly(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out);
 
+// Emits C99 source for the same native subset (consumed by the TinyCC JIT)
+bool emitCSource(const ModuleGraph& graph, const SemaResult& sema, std::ostream& out);
+
 // Compiles the module graph to a native binary using LLVM IR / x86-64 native assembly & linker
 bool buildLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
                      const std::string& outputPath, std::ostream& err);

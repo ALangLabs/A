@@ -6,13 +6,14 @@ add_library(a_backend STATIC
   kgen/execution_engine_impl.cpp
   kgen/object_compiler.cpp
   kgen/codegen/llvm_emitter.cpp
+  kgen/jit.cpp
   kgen/runtime/builtins.cpp
   kgen/runtime/terminal.cpp
   kgen/python_interop.cpp
   kgen/python_loader.cpp
 )
 target_link_libraries(a_backend PUBLIC a_type_checker a_runtime)
-target_link_libraries(a_backend PRIVATE a_kgen_mlir)
+target_link_libraries(a_backend PRIVATE a_kgen_mlir libtcc)
 find_package(OpenSSL QUIET)
 if(OpenSSL_FOUND)
   target_compile_definitions(a_backend PRIVATE A_HAVE_OPENSSL=1)
