@@ -109,4 +109,40 @@ inline void pyDecRef(PyObject* op) {
 #define PyFrozenSet_Type (*A_PY_G.sym_PyFrozenSet_Type)
 #define PyRange_Type (*A_PY_G.sym_PyRange_Type)
 
+// Type checks: the header's Py*_Check inlines were already parsed against the
+// real symbols, so redirect the check macros themselves. Py_TYPE/Py_IS_TYPE
+// are field accesses (no external symbols); subtype tests go through the
+// dlsym'd PyType_IsSubtype and the loaded type objects above.
+#undef PyObject_TypeCheck
+#define PyObject_TypeCheck(ob, type) \
+  ((ob) != nullptr && \
+   (Py_TYPE(ob) == (type) || A_PY_G.sym_PyType_IsSubtype(Py_TYPE(ob), (type))))
+#undef PyBool_Check
+#define PyBool_Check(op) PyObject_TypeCheck((op), &PyBool_Type)
+#undef PyLong_Check
+#define PyLong_Check(op) PyObject_TypeCheck((op), &PyLong_Type)
+#undef PyFloat_Check
+#define PyFloat_Check(op) PyObject_TypeCheck((op), &PyFloat_Type)
+#undef PyUnicode_Check
+#define PyUnicode_Check(op) PyObject_TypeCheck((op), &PyUnicode_Type)
+#undef PyBytes_Check
+#define PyBytes_Check(op) PyObject_TypeCheck((op), &PyBytes_Type)
+#undef PyList_Check
+#define PyList_Check(op) PyObject_TypeCheck((op), &PyList_Type)
+#undef PyTuple_Check
+#define PyTuple_Check(op) PyObject_TypeCheck((op), &PyTuple_Type)
+#undef PyDict_Check
+#define PyDict_Check(op) PyObject_TypeCheck((op), &PyDict_Type)
+#undef PySet_Check
+#define PySet_Check(op) PyObject_TypeCheck((op), &PySet_Type)
+#undef PyFrozenSet_Check
+#define PyFrozenSet_Check(op) PyObject_TypeCheck((op), &PyFrozenSet_Type)
+#undef PyCallable_Check
+#define PyCallable_Check(op) (A_PY_G.sym_PyCallable_Check((op)))
+
+// Py_SIZE is inline-only (no exported symbol) and its body asserts against
+// PyLong_Type/PyBool_Type; read ob_size directly instead.
+#undef Py_SIZE
+#define Py_SIZE(ob) (_PyVarObject_CAST(ob)->ob_size)
+
 #endif  // A_HAVE_PYTHON

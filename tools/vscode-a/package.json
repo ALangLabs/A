@@ -52,8 +52,8 @@
           "a"
         ],
         "icon": {
-          "dark": "./fileicons/a-dark.svg",
-          "light": "./fileicons/a-light.svg"
+          "dark": "./fileicons/a-dark.png",
+          "light": "./fileicons/a-light.png"
         },
         "extensions": [
           ".a"
