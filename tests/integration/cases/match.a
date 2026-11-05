@@ -1,6 +1,6 @@
 # Match: literal patterns, inclusive ranges, guards, and '_'.
 
-fn describe(code: i32) -> String:
+fn describe(code):
     return match code:
         200 => "OK"
         201 => "Created"
@@ -15,7 +15,7 @@ print(describe(503))
 print(describe(302))
 
 # Guards refine a wildcard; the final unguarded '_' catches the rest.
-fn classify(n: i32) -> String:
+fn classify(n):
     return match n:
         0 => "zero"
         _ if n < 0 => "negative"
@@ -25,7 +25,7 @@ fn classify(n: i32) -> String:
 print(classify(0), classify(-7), classify(999), classify(5))
 
 # String and char patterns.
-fn vowel(c: char) -> bool:
+fn vowel(c):
     return match c:
         'a' => true
         'e' => true

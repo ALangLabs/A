@@ -17,7 +17,7 @@ std::string typeParamsText(const std::vector<std::string>& typeParams);
 std::string signatureText(const FnDecl& decl);
 
 // Recovers the declaration keyword that the AST normalizes away (`var`,
-// `const`, `pvt`, `class`, `struct`, `metaclass`). `declaration` starts the
+// `class`, `struct`, `metaclass`). `declaration` starts the
 // statement and `name` starts the declared name.
 std::string declarationKeyword(const SourceText& source, const Span& declaration,
                                const Span& name);

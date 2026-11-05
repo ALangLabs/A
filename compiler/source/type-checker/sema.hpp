@@ -24,9 +24,33 @@ struct ModuleExports {
   StringMap<std::string> enums;  // name -> qualified enum name
 };
 
+struct VariantInfo {
+  std::string name;
+  std::vector<std::pair<std::string, TypePtr>> fields;  // payload fields
+};
+
+struct PatternBinding {
+  std::string name;
+  Span span;
+  TypePtr type;
+};
+
 struct EnumInfo {
   std::string name;  // qualified
-  StringMap<std::int64_t> values;
+  StringMap<std::int64_t> values;  // plain enums: constant value; algebraic: tag index
+  bool algebraic = false;
+  // Non-zero when this is the auto-loaded prelude declaration that maps onto
+  // a built-in kind: 1 = Option<T> (optional), 2 = Result<T, E> (result).
+  int builtinKind = 0;
+  std::vector<std::string> typeParams;
+  std::vector<TypePtr> typeParamVars;
+  std::vector<VariantInfo> variants;  // algebraic only; declaration order = tag order
+
+  const VariantInfo* findVariant(const std::string& name) const {
+    for (const VariantInfo& v : variants)
+      if (v.name == name) return &v;
+    return nullptr;
+  }
 };
 
 struct SemaResult {
@@ -140,6 +164,7 @@ class Sema {
   // declarations
   void registerStructLayout(StructDecl& decl);
   void registerEnum(EnumDecl& decl);
+  void resolveEnumPayloads(EnumDecl& decl);
   void registerFunctionSignature(FnDecl& decl);
   void registerMethodSignatures(StructDecl& decl);
   void checkFunctionBody(FnDecl& decl, const FnSig& sig);
@@ -180,7 +205,9 @@ class Sema {
   TypePtr inferMatch(MatchExpr& expr);
   TypePtr inferTry(TryExpr& expr);
   TypePtr inferComprehension(ComprehensionExpr& expr);
-  void checkPattern(Pattern& pattern, TypePtr subjectType);
+  void checkPattern(Pattern& pattern, TypePtr subjectType, std::vector<PatternBinding>& bindings);
+  void collectPatternCoverage(Pattern& pattern, const EnumInfo& info,
+                              std::vector<std::string>& covered, bool& catchAll);
   void checkLambdaAgainst(LambdaExpr& expr, TypePtr expected);
   void checkArgAgainst(Expr& expr, TypePtr expected, const std::string& context);
   void checkFixedArrayLength(Expr& value, TypePtr expected);
@@ -188,6 +215,9 @@ class Sema {
   TypePtr checkFunctionValueCall(const std::string& name, TypePtr fnType, CallExpr& call);
 
   TypePtr checkStructConstruction(const StructSym& sym, CallExpr& call);
+  TypePtr checkVariantConstruction(EnumInfo& info, FieldExpr& field, CallExpr& call);
+  TypePtr enumTypeFromInfo(const EnumInfo& info, NamedTypeExpr& named);
+  bool enumNamespaceUse(ExprPtr& object, const std::string& enumQ);
   TypePtr checkFunctionCall(const FnSig& sig, CallExpr& call);
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);

@@ -1,9 +1,9 @@
 # Pipelines, comprehensions, and higher-order builtins.
 
-fn double(x: i32) -> i32:
+fn double(x):
     return x * 2
 
-fn is_big(x: i32) -> bool:
+fn is_big(x):
     return x > 20
 
 squares = [n * n for n in 1..11]

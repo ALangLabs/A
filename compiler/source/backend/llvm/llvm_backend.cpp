@@ -6,6 +6,7 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <set>
 #include <filesystem>
 #include <cstdlib>
 #include <unistd.h>
@@ -1173,6 +1174,29 @@ bool checkSupportedStmt(const Stmt& stmt, bool isGlobal = false) {
     }
     case StmtKind::FnDecl: {
       const auto& fn = static_cast<const FnDecl&>(stmt);
+      // If function assigns to a global (defined at top-level), fallback (globals not yet implemented in LLVM/native without global storage)
+      // Collect globals from graph not possible here without graph ref; instead: if function has Assign to a name that is not a param and not Let in same fn, treat as unsupported.
+      // We approximate by checking: any Assign target name that never appears as Let or param in fn is a global mutation.
+      {
+        std::set<std::string> localNames;
+        for (auto& prm: fn.params) localNames.insert(prm.name);
+        // collect Lets recursively via stack
+        std::vector<const Stmt*> q; for (auto& s: fn.body) q.push_back(s.get());
+        while(!q.empty()){auto* cur=q.back(); q.pop_back();
+          if(cur->kind==StmtKind::Let){ localNames.insert(static_cast<const LetStmt&>(*cur).name); }
+          else if(cur->kind==StmtKind::If){ auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) q.push_back(s.get()); for(auto& s: ifs.elseBody) q.push_back(s.get()); }
+          else if(cur->kind==StmtKind::While){ auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) q.push_back(s.get()); }
+          else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); localNames.insert(fo.var); for(auto& s: fo.body) q.push_back(s.get()); }
+        }
+        // now check assigns
+        std::vector<const Stmt*> q2; for (auto& s: fn.body) q2.push_back(s.get());
+        while(!q2.empty()){auto* cur=q2.back(); q2.pop_back();
+          if(cur->kind==StmtKind::Assign){ auto& a=static_cast<const AssignStmt&>(*cur); if(a.target->kind==ExprKind::Ident){ auto& id=static_cast<const IdentExpr&>(*a.target); if(localNames.count(id.name)==0) return false; } }
+          else if(cur->kind==StmtKind::If){ auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) q2.push_back(s.get()); for(auto& s: ifs.elseBody) q2.push_back(s.get()); }
+          else if(cur->kind==StmtKind::While){ auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) q2.push_back(s.get()); }
+          else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); for(auto& s: fo.body) q2.push_back(s.get()); }
+        }
+      }
       for (const auto& st : fn.body) if (!checkSupportedStmt(*st, false)) return false;
       return true;
     }

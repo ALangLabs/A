@@ -106,11 +106,6 @@ StmtPtr Parser::parseStatement() {
        return parseEnumDecl();
      case Tok::KwType:
        return parseTypeAliasDecl();
-    case Tok::KwVar:
-      return parseVarDecl();
-    case Tok::KwConst:
-    case Tok::KwPvt:
-      return parseConstDecl();
     case Tok::KwIf:
       return parseIf();
     case Tok::KwWhile:
@@ -318,8 +313,7 @@ StmtPtr Parser::parseStructDecl() {
     FieldDecl field;
     field.name = fieldTok.lexeme;
     field.span = fieldTok.span;
-    expect(Tok::Colon, "':' after the field name");
-    field.type = parseTypeExpr();
+    if (match(Tok::Colon)) field.type = parseTypeExpr();
     expectNewline();
     decl->fields.push_back(std::move(field));
   }
@@ -343,53 +337,7 @@ StmtPtr Parser::parseTypeAliasDecl() {
   return decl;
 }
 
-StmtPtr Parser::parseVarDecl() {
-  Span start = cur().span;
-  expect(Tok::KwVar, "'var'");
-  if (check(Tok::LParen)) {
-    return parseDestructureDecl(/*mutableBinding=*/true, start);
-  }
-  const Token& nameTok = expect(Tok::Ident, "a variable name");
 
-  auto decl = std::make_unique<LetStmt>();
-  decl->name = nameTok.lexeme;
-  decl->nameSpan = nameTok.span;
-  decl->mutableBinding = true;
-
-  if (match(Tok::Colon)) {
-    decl->type = parseTypeExpr();
-  }
-  expect(Tok::Eq, "'=' (variables must be initialized)");
-  decl->init = parseExpression();
-  expectNewline();
-  decl->span = Span::join(start, previousSpan());
-  return decl;
-}
-
-StmtPtr Parser::parseConstDecl() {
-  Span start = cur().span;
-  if (cur().kind == Tok::KwPvt) {
-    advance(); // consume 'pvt'
-  } else {
-    expect(Tok::KwConst, "'const' or 'pvt'");
-  }
-  const Token& nameTok = expect(Tok::Ident, "a constant or private variable name");
-
-  auto decl = std::make_unique<LetStmt>();
-  decl->name = nameTok.lexeme;
-  decl->nameSpan = nameTok.span;
-  decl->mutableBinding = false;
-  decl->constantBinding = true;
-
-  if (match(Tok::Colon)) {
-    decl->type = parseTypeExpr();
-  }
-  expect(Tok::Eq, "'=' (constants must be initialized)");
-  decl->init = parseExpression();
-  expectNewline();
-  decl->span = Span::join(start, previousSpan());
-  return decl;
-}
 
 StmtPtr Parser::parseEnumDecl() {
   Span start = cur().span;
@@ -400,16 +348,46 @@ StmtPtr Parser::parseEnumDecl() {
   decl->name = nameTok.lexeme;
   decl->nameSpan = nameTok.span;
 
+  if (match(Tok::Lt)) {
+    while (!check(Tok::Gt) && !check(Tok::Eof)) {
+      const Token& tp = expect(Tok::Ident, "a type parameter name");
+      decl->typeParams.push_back(tp.lexeme);
+      if (!match(Tok::Comma)) break;
+    }
+    expect(Tok::Gt, "'>' after type parameters");
+  }
+
   expect(Tok::Colon, "':' after the enum name");
   expectNewline();
   expect(Tok::Indent, "an indented enum body");
   while (!check(Tok::Dedent) && !check(Tok::Eof)) {
     if (match(Tok::Newline)) continue;
-    const Token& variantTok = expect(Tok::Ident, "an enum variant name");
+    // 'None' is a keyword, but the prelude's Option declares a variant with
+    // that name; allow it in this one position.
+    Token variantTok;
+    if (check(Tok::KwNone)) {
+      variantTok = advance();
+    } else {
+      variantTok = expect(Tok::Ident, "an enum variant name");
+    }
     EnumVariant variant;
     variant.name = variantTok.lexeme;
     variant.span = variantTok.span;
-    if (match(Tok::Eq)) {
+    if (match(Tok::LParen)) {
+      if (!check(Tok::RParen)) {
+        while (true) {
+          const Token& fieldTok = expect(Tok::Ident, "a payload field name");
+          FieldDecl field;
+          field.name = fieldTok.lexeme;
+          field.span = fieldTok.span;
+          if (match(Tok::Colon)) field.type = parseTypeExpr();
+          variant.fields.push_back(std::move(field));
+          if (!match(Tok::Comma)) break;
+          if (check(Tok::RParen)) break;
+        }
+      }
+      expect(Tok::RParen, "')' after the payload fields");
+    } else if (match(Tok::Eq)) {
       variant.value = parseExpression();
     }
     expectNewline();
@@ -439,7 +417,7 @@ StmtPtr Parser::parseTypedDeclaration() {
   decl->nameSpan = nameTok.span;
   decl->type = std::move(type);
   decl->init = std::move(init);
-  decl->mutableBinding = false;
+  decl->mutableBinding = true;
   return decl;
 }
 
@@ -679,7 +657,7 @@ StmtPtr Parser::parseSimpleStatement() {
              "Use separate statements to update the bound names.");
       }
       return buildDestructure(std::move(target), std::move(value),
-                              /*mutableBinding=*/false,
+                              /*mutableBinding=*/true,
                               Span::join(start, previousSpan()));
     }
     auto stmt = std::make_unique<AssignStmt>();
@@ -1434,40 +1412,150 @@ ExprPtr Parser::parseLambda() {
   return lambda;
 }
 
+namespace {
+
+ExprPtr makeIdent(std::string name, Span span) {
+  auto expr = std::make_unique<IdentExpr>();
+  expr->name = std::move(name);
+  expr->span = span;
+  return expr;
+}
+
+ExprPtr makeFieldChain(const std::vector<std::string>& parts, const std::vector<Span>& spans) {
+  ExprPtr object = makeIdent(parts.front(), spans.front());
+  for (std::size_t i = 1; i < parts.size(); ++i) {
+    auto field = std::make_unique<FieldExpr>();
+    field->object = std::move(object);
+    field->field = parts[i];
+    field->fieldSpan = spans[i];
+    field->span = Span::join(field->object->span, spans[i]);
+    object = std::move(field);
+  }
+  return object;
+}
+
+}  // namespace
+
 Pattern Parser::parsePattern() {
+  Pattern primary = parsePrimaryPattern();
+  if (!check(Tok::Bar)) return primary;
+  Pattern orPattern;
+  orPattern.kind = Pattern::Kind::Or;
+  orPattern.span = primary.span;
+  orPattern.subpatterns.push_back(std::move(primary));
+  while (match(Tok::Bar)) {
+    Pattern alt = parsePrimaryPattern();
+    orPattern.span = Span::join(orPattern.span, alt.span);
+    orPattern.subpatterns.push_back(std::move(alt));
+  }
+  return orPattern;
+}
+
+Pattern Parser::parsePrimaryPattern() {
   Pattern pattern;
-  const Token& startTok = cur();
-  pattern.span = startTok.span;
-  if (check(Tok::Ident) && startTok.lexeme == "_") {
+  pattern.span = cur().span;
+  if (check(Tok::Ident) && cur().lexeme == "_") {
     advance();
     pattern.kind = Pattern::Kind::Wildcard;
     return pattern;
   }
-  auto expr = parseExpression();
-  if (auto* range = dynamic_cast<RangeExpr*>(expr.get())) {
-    if (range->step) {
-      fail(range->span, "Range patterns do not take a step.");
+
+  if (check(Tok::LParen)) {
+    Span start = cur().span;
+    advance();
+    while (!check(Tok::RParen) && !check(Tok::Eof)) {
+      pattern.subpatterns.push_back(parsePattern());
+      if (!match(Tok::Comma)) break;
     }
+    Span end = cur().span;
+    expect(Tok::RParen, "')' after the tuple pattern");
+    if (pattern.subpatterns.size() == 1) return std::move(pattern.subpatterns.front());
+    pattern.kind = Pattern::Kind::Tuple;
+    pattern.span = Span::join(start, end);
+    if (pattern.subpatterns.empty()) {
+      fail(start, "Empty tuple patterns are not allowed; use '_'.");
+    }
+    return pattern;
+  }
+
+  if (check(Tok::Ident)) {
+    std::vector<std::string> parts;
+    std::vector<Span> spans;
+    while (true) {
+      parts.push_back(cur().lexeme);
+      spans.push_back(cur().span);
+      advance();
+      if (check(Tok::Dot) && peek(1).kind == Tok::Ident) {
+        advance();
+        continue;
+      }
+      break;
+    }
+    if (parts.size() > 1 && check(Tok::LParen)) {
+      pattern.kind = Pattern::Kind::Variant;
+      pattern.ctor = makeFieldChain(parts, spans);
+      advance();
+      while (!check(Tok::RParen) && !check(Tok::Eof)) {
+        pattern.subpatterns.push_back(parsePattern());
+        if (!match(Tok::Comma)) break;
+      }
+      Span end = cur().span;
+      expect(Tok::RParen, "')' after the variant pattern payload");
+      pattern.span = Span::join(spans.front(), end);
+      return pattern;
+    }
+    if (parts.size() == 1 && check(Tok::LParen)) {
+      fail(cur().span, "Variant patterns must name their enum, e.g. Shape." + parts.front() +
+                           "(...).");
+    }
+    if (check(Tok::DotDot)) {
+      pattern.kind = Pattern::Kind::Range;
+      pattern.rangeStart = makeFieldChain(parts, spans);
+      advance();
+      pattern.rangeEnd = parseExpression(10);
+      if (check(Tok::DotDot)) {
+        fail(cur().span, "Range patterns do not take a step.");
+      }
+      pattern.span = Span::join(spans.front(), previousSpan());
+      return pattern;
+    }
+    if (parts.size() == 1) {
+      pattern.kind = Pattern::Kind::Binding;
+      pattern.name = parts.front();
+      pattern.span = spans.front();
+      return pattern;
+    }
+    pattern.kind = Pattern::Kind::Literal;  // plain enum tag, e.g. Color.Red
+    pattern.value = makeFieldChain(parts, spans);
+    pattern.span = spans.back();
+    return pattern;
+  }
+
+  auto expr = parseExpression(10);
+  if (check(Tok::DotDot)) {
     pattern.kind = Pattern::Kind::Range;
-    pattern.rangeStart = std::move(range->start);
-    pattern.rangeEnd = std::move(range->end);
-    pattern.span = expr->span;
+    pattern.rangeStart = std::move(expr);
+    advance();
+    pattern.rangeEnd = parseExpression(10);
+    if (check(Tok::DotDot)) {
+      fail(cur().span, "Range patterns do not take a step.");
+    }
+    pattern.span = Span::join(pattern.rangeStart->span, previousSpan());
     return pattern;
   }
   bool literal = dynamic_cast<IntLitExpr*>(expr.get()) ||
                  dynamic_cast<FloatLitExpr*>(expr.get()) ||
                  dynamic_cast<StringLitExpr*>(expr.get()) ||
                  dynamic_cast<CharLitExpr*>(expr.get()) ||
-                 dynamic_cast<BoolLitExpr*>(expr.get()) ||
-                 dynamic_cast<FieldExpr*>(expr.get());  // enum variant, e.g. Color.Red
+                 dynamic_cast<BoolLitExpr*>(expr.get());
   if (auto* unary = dynamic_cast<UnaryExpr*>(expr.get());
       unary && unary->op == "-") {
     literal = dynamic_cast<IntLitExpr*>(unary->operand.get()) ||
               dynamic_cast<FloatLitExpr*>(unary->operand.get());
   }
   if (!literal) {
-    fail(expr->span, "Match patterns must be literals, integer ranges, or '_'.",
-         "Ranges are inclusive, e.g. 400..499.");
+    fail(expr->span, "Match patterns must be literals, ranges, variant patterns, or '_'.",
+         "Ranges are inclusive, e.g. 400..499; variants destructure, e.g. Shape.Circle(r).");
   }
   pattern.kind = Pattern::Kind::Literal;
   pattern.span = expr->span;

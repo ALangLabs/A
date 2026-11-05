@@ -1,6 +1,6 @@
 # Classifying HTTP responses with match expressions.
 
-fn describe(status: i32) -> String:
+fn describe(status):
     return match status:
         200 => "OK"
         201 => "Created"
@@ -10,7 +10,7 @@ fn describe(status: i32) -> String:
         500..599 => "Server error"
         _ => "Unknown status"
 
-fn category(status: i32) -> String:
+fn category(status):
     return match status:
         _ if status < 100 => "invalid"
         _ if status < 200 => "informational"

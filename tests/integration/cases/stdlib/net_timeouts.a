@@ -1,6 +1,6 @@
 import net
 
-fn main() -> void:
+fn main():
     listener = net.tcp_listen("127.0.0.1", 0)
     port = net.local_port(listener)
     client = net.tcp_connect("127.0.0.1", port)

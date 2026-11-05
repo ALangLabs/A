@@ -1,12 +1,12 @@
 # Type system
 
-A is statically typed with local inference:
+A is untyped, Python-easy style with local inference (note: parser agent is adding optional struct field types):
 
-- Function parameters and return types can be inferred.
-- Bindings may carry annotations (`x: i32 = 1`).
+- Function parameters and return types are omitted: `fn f(x):`.
+- Bindings are plain assignments (`x = 1`).
 - Numeric operations require matching types; conversions are explicit.
 - Optionals are written `T?` and unwrapped with `??` or `!`.
-- Function types are written `fn(T, U) -> R`.
+- Function types are written `fn(x, y) => ...`.
 - Enums are `i32`-backed. An enum-typed binding (`c: Color`) is compatible
   with variant values and ordinary integer operations; the enum name itself is
   a namespace used for member access.

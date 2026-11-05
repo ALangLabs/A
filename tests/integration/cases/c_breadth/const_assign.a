@@ -1,5 +1,4 @@
-const LIMIT = 3
-
-fn main() -> void:
-    LIMIT = 4
-main()
+# Plain assignment: reassignment is allowed
+LIMIT = 3
+LIMIT = 4
+print(LIMIT)

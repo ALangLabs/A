@@ -1,7 +1,7 @@
 import net
 import http
 
-fn handler(method: String, path: String, headers: {String: String}, body: String) -> (i64, {String: String}, String):
+fn handler(method, path, headers, body):
     out_headers = {"Content-Type": "text/plain"}
     if path == "/ping":
         return (200, out_headers, "pong " + method)
@@ -9,7 +9,7 @@ fn handler(method: String, path: String, headers: {String: String}, body: String
         return (201, out_headers, "echo:" + body)
     return (404, out_headers, "missing")
 
-fn main() -> void:
+fn main():
     print(net.resolve("127.0.0.1"))
     listener = net.tcp_listen("127.0.0.1", 0)
     port = net.local_port(listener)

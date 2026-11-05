@@ -1,4 +1,4 @@
-fn main() -> void:
+fn main():
     print("A\x42C")
     print("\u{1F600}")
     print("bell\tdone")

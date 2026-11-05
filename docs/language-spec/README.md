@@ -21,7 +21,7 @@ and indented consistently; braces are not used for blocks.
   perform no escape processing and no interpolation, and strip exactly one
   newline immediately after the opening quotes. Dedenting is not performed.
   A triple-quoted string used as a statement is the idiomatic multi-line
-  comment: it is evaluated and discarded.
+  comment
 - Character literals use single quotes, cover one Unicode code point, and
   accept the same escapes as strings.
 - Operators (27+): `+ - * / % ** & | ^ ~ << >> .. in not in == != < <= > >= = += -= *= /= %=
@@ -30,12 +30,25 @@ and indented consistently; braces are not used for blocks.
 
 ## Bindings and types
 
+Untyped, Python-easy style (before -> after):
+
+```a
+# before: fn fib(n: i32) -> i32: / x: i32 = 0 / const PI = 3.14
+fn fib(n):
+    return n
+x = 0
+PI = 3.14
+```
+
+Struct fields are bare names (parser agent is adding optional struct field types):
+`struct Point:` with fields `x` / `y`. All declarations (`var`/`const`/`let`/`mut`/`pub`) are plain assignments, and reassignment is allowed.
+
 ```a
 answer = 42              # mutable by default (Python style), inferred as i32
 answer = 43              # rebind in place
 total += 5               # compound assignment
-name: String = "Ada"     # explicit type annotation (also accepts 'str', 'int', 'float')
-const PI = 3.14159       # immutable constant
+name = "Ada"     # plain assignment, type inferred
+PI = 3.14159       # plain assignment, reassignable
 ```
 
 The first assignment to an unknown name declares a mutable binding (Python-style variable declaration).
@@ -43,8 +56,8 @@ The first assignment to an unknown name declares a mutable binding (Python-style
 To define an immutable value that cannot be reassigned, use `const`:
 
 ```a
-const LIMIT = 10
-const NAME: String = "A"
+LIMIT = 10
+NAME = "A"
 ```
 
 Built-in types:
@@ -267,7 +280,7 @@ expression.
 
 ```a
 double = fn(n) => n * 2
-add = fn(a: i32, b: i32) -> i32 => a + b
+add = fn(a, b) => a + b
 print((fn() => 99)())
 ```
 
@@ -316,7 +329,7 @@ desc = match status:
 `None` is the empty optional; `Some(x)` wraps a value:
 
 ```a
-var maybe: i32? = None
+maybe = None
 print(maybe ?? 0)      # 0; the fallback is evaluated lazily
 maybe = Some(41)
 print(maybe! + 1)      # unwraps; runtime error on None
@@ -383,10 +396,10 @@ error.
 ## Functions
 
 ```a
-fn add(a: i32, b: i32) -> i32:
+fn add(a, b):
     return a + b
 
-fn greet(name: String) -> void: print("Hello, {name}")
+fn greet(name): print("Hello, {name}")
 ```
 
 - Functions may call functions declared later in the file.
@@ -423,7 +436,7 @@ from math import sqrt, PI
   functions are called as `m.fn(...)`, structs as `m.Point(...)`, and enum
   variants as `m.Color.Red`.
 - `from ... import` binds names in the importer's scope. Imports are not
-  transitive: importing a module does not expose that module's own imports.
+  transitive
 - Functions and lambdas see the globals of the module where they are defined.
 
 ## Tuples
@@ -431,11 +444,11 @@ from math import sqrt, PI
 Tuples group fixed-length heterogeneous values:
 
 ```a
-fn divmod(a: i32, b: i32) -> (i32, i32):
+fn divmod(a, b):
     return (a / b, a % b)
 
 (q, r) = divmod(17, 5)       # immutable destructuring
-var (lo, hi) = (1, 2)        # mutable destructuring
+(lo, hi) = (1, 2)        # mutable destructuring
 (_, rem) = divmod(9, 4)      # '_' discards a slot
 print((1, "two", true))      # (1, "two", true)
 ```
@@ -450,13 +463,13 @@ Both `class` (or `Class`) and `struct` are supported:
 
 ```a
 class Animal:
-    sound: str
+    sound
 
-    fn speak(self) -> str:
+    fn speak(self):
         return self.sound
 
 class Dog(Animal):
-    name: str
+    name
 
 d = Dog("Woof", "Rex")
 print(d.name, "says", d.speak())
@@ -469,7 +482,7 @@ metaclass ModelMeta:
     pass
 
 class BaseModel(metaclass=ModelMeta):
-    id: int
+    id
 
 m = BaseModel(1)
 ```
@@ -489,7 +502,7 @@ enum Color:
     Green = 5        # explicit value
     Blue             # 6, the previous value plus one
 
-var c: Color = Color.Blue
+c = Color.Blue
 print(Color.Green)   # 5
 ```
 
@@ -653,12 +666,12 @@ declaration order.
 
 ```a
 class Resource:
-    name: str
+    name
 
-    fn drop(self) -> void:
+    fn drop(self):
         print("drop " + self.name)
 
-fn use() -> void:
+fn use():
     r = Resource("local")
     defer print("defer")     # runs first
                              # then r.drop()
@@ -699,8 +712,8 @@ handles (copying a pointer does not copy the storage).
 Annotate an array with a length to require that exact size:
 
 ```a
-numbers: i32[5] = [1, 2, 3, 4, 5]
-grid: i32[2][3] = [[1, 2, 3], [4, 5, 6]]
+numbers = [1, 2, 3, 4, 5]
+grid = [[1, 2, 3], [4, 5, 6]]
 ```
 
 The length suffix binds from the outside in, so `i32[2][3]` is two rows of

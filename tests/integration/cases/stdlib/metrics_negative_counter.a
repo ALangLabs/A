@@ -1,6 +1,6 @@
 import metrics
 
-fn main() -> void:
+fn main():
     metrics.counter("downloads", -1)
 
 main()

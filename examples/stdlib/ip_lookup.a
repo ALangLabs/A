@@ -3,13 +3,13 @@
 import http
 import json
 
-fn fetch(url: String) -> Json:
+fn fetch(url):
     (status, _, body) = http.get(url)
     if status != 200:
         panic("request to " + url + " returned status " + str(status))
     return json.parse(body)
 
-fn field(doc: Json, key: String) -> String:
+fn field(doc, key):
     if json.has(doc, key):
         return json.as_str(json.get(doc, key)!) ?? "n/a"
     return "n/a"

@@ -1,6 +1,6 @@
 import http
 
-fn main() -> void:
+fn main():
     print(http.get("http://127.0.0.1:1/ping"))
 
 main()

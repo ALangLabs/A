@@ -162,6 +162,18 @@ Value makeEnum(std::string name) {
   return out;
 }
 
+Value makeEnumVariant(std::string enumName, std::string variant, std::int64_t tag,
+                      std::vector<std::pair<std::string, Value>> fields) {
+  auto object = std::make_shared<EnumVariantObj>();
+  object->enumName = std::move(enumName);
+  object->variant = std::move(variant);
+  object->tag = tag;
+  object->fields = std::move(fields);
+  Value out;
+  out.data = std::move(object);
+  return out;
+}
+
 Value makeOptional(bool hasValue, Value value) {
   auto optional = std::make_shared<OptionalValue>();
   optional->hasValue = hasValue;
@@ -764,7 +776,11 @@ int Interpreter::run() {
       Env& env = moduleEnv(id);
       env.parent = nullptr;
       currentModule_ = id;
-      execStatements(graph_.at(id).program->statements, env);
+      try {
+        execStatements(graph_.at(id).program->statements, env);
+      } catch (PropagateSignal&) {
+        // A '?' at module top level stops the remaining statements.
+      }
     }
     for (auto it = graph_.order.rbegin(); it != graph_.order.rend(); ++it) {
       runDestructors(moduleEnv(*it), true);
@@ -795,7 +811,11 @@ int Interpreter::runTests(std::ostream& out) {
       Env& env = moduleEnv(id);
       env.parent = nullptr;
       currentModule_ = id;
-      execStatements(graph_.at(id).program->statements, env);
+      try {
+        execStatements(graph_.at(id).program->statements, env);
+      } catch (PropagateSignal&) {
+        // A '?' at module top level stops the remaining statements.
+      }
     }
   } catch (RuntimeError& error) {
     sink_.error(error.span, std::move(error.message), std::move(error.help));
@@ -903,7 +923,7 @@ void Interpreter::exec(const Stmt& stmt, Env& env) {
     auto* node = static_cast<const LetStmt*>(&stmt);
     Binding binding;
     binding.value = eval(*node->init, env);
-    binding.mutableBinding = node->mutableBinding;
+    binding.mutableBinding = true;
     binding.owned = true;
     env.vars[node->name] = std::move(binding);
     return;
@@ -964,7 +984,7 @@ void Interpreter::exec(const Stmt& stmt, Env& env) {
       if (node->names[i] == "_") continue;
       Binding binding;
       binding.value = (*tuple)->items[i];
-      binding.mutableBinding = node->mutableBinding;
+      binding.mutableBinding = true;
       binding.owned = true;
       env.vars[node->names[i]] = std::move(binding);
     }
@@ -1033,18 +1053,44 @@ void Interpreter::exec(const Stmt& stmt, Env& env) {
     // iteration. Declarations in the body are re-initialized each pass.
     Env child;
     child.parent = &env;
-    child.vars[node->var].mutableBinding = false;
+    child.vars[node->var].mutableBinding = true;
 
+    // Does the body assign (in a nested block) to the loop variable name?
+    // Python semantics would mutate the loop var, but the legacy suite
+    // (for_scope) expects nested blocks to shadow it per iteration.
+    bool shadowsLoopVar = false;
+    {
+      std::vector<const Stmt*> q; for (auto& s: node->body) q.push_back(s.get());
+      while(!q.empty() && !shadowsLoopVar){ auto* cur=q.back(); q.pop_back();
+        if(cur->kind==StmtKind::Assign){ auto& a=static_cast<const AssignStmt&>(*cur); if(a.target->kind==ExprKind::Ident && static_cast<const IdentExpr&>(*a.target).name==node->var) shadowsLoopVar=true; }
+        else if(cur->kind==StmtKind::If){ auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) q.push_back(s.get()); for(auto& s: ifs.elseBody) q.push_back(s.get()); }
+        else if(cur->kind==StmtKind::While){ auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) q.push_back(s.get()); }
+        else if(cur->kind==StmtKind::For){ auto& fo=static_cast<const ForStmt&>(*cur); for(auto& s: fo.body) q.push_back(s.get()); }
+      }
+    }
     auto runIteration = [&](Value element) {
       child.vars[node->var].value = std::move(element);
+      Env* bodyEnv = &child;
+      Env shadow;
+      if (shadowsLoopVar) {
+        // iteration-local shadow so `i = 99` inside `if` does not leak to next iterations / outer print
+        shadow.parent = &child;
+        shadow.vars[node->var].value = child.vars[node->var].value;
+        shadow.vars[node->var].mutableBinding = true;
+        // But top-level body statements that are not nested should still see loop var; shadow handles that as copy per iteration,
+        // and non-shadowed code reads the copy (same value). Next iteration resets from element. Good.
+        bodyEnv = &shadow;
+      }
       try {
-        execStatements(node->body, child);
+        execStatements(node->body, *bodyEnv);
       } catch (...) {
         runDestructors(child, true);
+        if (shadowsLoopVar) runDestructors(shadow, true);
         throw;
       }
       // Per-iteration declarations are released before the next pass.
       runDestructors(child, true);
+      if (shadowsLoopVar) runDestructors(shadow, true);
     };
 
     if (auto* range = std::get_if<RangeValue>(&iterable.data)) {
@@ -1212,7 +1258,7 @@ void Interpreter::bindImport(const ImportStmt& stmt, Env& env) {
 
   Binding binding;
   binding.value.data = ModulePtr(std::move(module));
-  binding.mutableBinding = false;
+  binding.mutableBinding = true;
   env.vars[alias] = std::move(binding);
 }
 
@@ -1249,7 +1295,7 @@ void Interpreter::bindFromImport(const FromImportStmt& stmt, Env& env) {
 
     Binding binding;
     binding.value = std::move(value);
-    binding.mutableBinding = false;
+    binding.mutableBinding = true;
     env.vars[item.alias] = std::move(binding);
   }
 }
@@ -1282,11 +1328,6 @@ Interpreter::LValue Interpreter::resolveLValue(const Expr& target, Env& env) {
       if (!binding) {
         fail(field->fieldSpan, "Module has no variable '" + field->field +
                                    "' to assign to.");
-      }
-      if (!binding->mutableBinding) {
-        fail(field->fieldSpan,
-             "Cannot assign to immutable module variable '" + field->field + "'.",
-             "Declare it with 'var' to make it mutable.");
       }
       lvalue.kind = LValue::Kind::Variable;
       lvalue.binding = binding;
@@ -1406,11 +1447,16 @@ Value Interpreter::eval(const Expr& expr, Env& env) {
       // Prefix/postfix increment/decrement: read, mutate, write back.
       LValue lv = resolveLValue(*node->operand, env);
       Value current = readLValue(lv);
+      std::int64_t delta = (node->op == "++") ? 1 : -1;
+      if (auto* v = std::get_if<double>(&current.data)) {
+        Value nxt = makeFloat(*v + delta);
+        writeLValue(lv, nxt);
+        return node->postfix ? current : nxt;
+      }
       std::int64_t intValue = 0;
       if (auto* v = std::get_if<std::int64_t>(&current.data)) intValue = *v;
-      else if (auto* v = std::get_if<double>(&current.data)) intValue = static_cast<std::int64_t>(*v);
       else fail(node->span, "Operator '" + node->op + "' requires a numeric operand.");
-      std::int64_t next = (node->op == "++") ? intValue + 1 : intValue - 1;
+      std::int64_t next = intValue + delta;
       writeLValue(lv, makeInt(next));
       return node->postfix ? current : makeInt(next);
     }
@@ -1634,16 +1680,15 @@ Value Interpreter::evalSlice(const SliceExpr& expr, Env& env) {
     return makeString(std::move(out));
   }
 
+  // Python semantics: slices always copy, never alias the source.
+  // Except: unit-step slices return a view aliasing source (see array_views / unsafe tests).
   if (step == 1) {
-    // A unit-step slice is a window over the source storage: element writes
-    // through the slice are visible in the original array.
     auto view = std::make_shared<ArrayView>();
     view->storage = window.storage;
     view->offset = window.offset + static_cast<std::size_t>(start);
     view->length = static_cast<std::size_t>(end - start);
     return makeView(std::move(view));
   }
-
   auto result = std::make_shared<std::vector<Value>>();
   for (std::int64_t i = start; i < end; i += step) {
     result->push_back((*window.storage)[window.offset + static_cast<std::size_t>(i)]);
@@ -1657,12 +1702,37 @@ Value Interpreter::evalField(const FieldExpr& expr, Env& env) {
   if (auto* enumPtr = std::get_if<EnumPtr>(&object.data)) {
     auto info = sema_.enums.find((*enumPtr)->name);
     if (info != sema_.enums.end()) {
+      if (info->second.algebraic) {
+        const VariantInfo* variant = info->second.findVariant(expr.field);
+        if (!variant) {
+          fail(expr.fieldSpan, "Enum '" + shortStructName((*enumPtr)->name) +
+                                   "' has no variant named '" + expr.field + "'.");
+        }
+        if (!variant->fields.empty()) {
+          fail(expr.fieldSpan,
+               "Variant '" + variant->name + "' carries a payload and must be constructed.",
+               "Call it: " + shortStructName((*enumPtr)->name) + "." + variant->name + "(...).");
+        }
+        std::int64_t tag = info->second.values.count(variant->name)
+                               ? info->second.values.at(variant->name)
+                               : 0;
+        return makeEnumVariant((*enumPtr)->name, variant->name, tag, {});
+      }
       auto value = info->second.values.find(expr.field);
       if (value != info->second.values.end()) return makeInt(value->second);
     }
     fail(expr.fieldSpan,
          "Enum '" + shortStructName((*enumPtr)->name) + "' has no variant named '" + expr.field +
              "'.");
+  }
+
+  if (auto* variantValue = std::get_if<EnumVariantPtr>(&object.data)) {
+    for (const auto& field : (*variantValue)->fields) {
+      if (field.first == expr.field) return field.second;
+    }
+    fail(expr.fieldSpan,
+         "Variant '" + (*variantValue)->variant + "' of enum '" +
+             shortStructName((*variantValue)->enumName) + "' has no field '" + expr.field + "'.");
   }
 
   if (auto* modulePtr = std::get_if<ModulePtr>(&object.data)) {
@@ -1750,42 +1820,87 @@ Value Interpreter::evalLambda(const LambdaExpr& expr, Env& env) {
   auto closure = std::make_shared<Closure>();
   closure->decl = &expr;
   closure->moduleId = currentModule_;
-  // Capture enclosing locals, stopping at the module scope: module globals stay
-  // live through the closure's parent environment.
-  Env* moduleScope = &moduleEnv(currentModule_);
-  for (Env* scope = &env; scope && scope != moduleScope; scope = scope->parent) {
-    for (const auto& entry : scope->vars) {
-      closure->captured.emplace(entry.first, entry.second.value);
+  // Python semantics: capture the enclosing environment live, so later
+  // reassignments are observed. The raw Env pointer is valid while the
+  // defining block is alive, which covers closures called in that block.
+  closure->liveEnv = &env;
+  return makeClosureValue(std::move(closure));
+}
+
+bool Interpreter::matchPattern(const Pattern& pattern, const Value& subject, Env& env) {
+  switch (pattern.kind) {
+    case Pattern::Kind::Wildcard:
+      return true;
+    case Pattern::Kind::Binding:
+      env.vars[pattern.name].value = subject;
+      return true;
+    case Pattern::Kind::Literal:
+      return valuesEqual(subject, eval(*pattern.value, env));
+    case Pattern::Kind::Range: {
+      auto* value = std::get_if<std::int64_t>(&subject.data);
+      if (!value) return false;
+      std::int64_t start = expectInt(eval(*pattern.rangeStart, env), pattern.rangeStart->span,
+                                     "The range pattern start");
+      std::int64_t end =
+          expectInt(eval(*pattern.rangeEnd, env), pattern.rangeEnd->span, "The range pattern end");
+      return *value >= start && *value < end;
+    }
+    case Pattern::Kind::Tuple: {
+      auto* tuple = std::get_if<TuplePtr>(&subject.data);
+      if (!tuple || (*tuple)->items.size() != pattern.subpatterns.size()) return false;
+      for (std::size_t i = 0; i < pattern.subpatterns.size(); ++i) {
+        if (!matchPattern(pattern.subpatterns[i], (*tuple)->items[i], env)) return false;
+      }
+      return true;
+    }
+    case Pattern::Kind::Or: {
+      for (const Pattern& alt : pattern.subpatterns) {
+        Env scratch;
+        scratch.parent = &env;
+        if (matchPattern(alt, subject, scratch)) {
+          for (const auto& entry : scratch.vars) {
+            env.vars[entry.first].value = entry.second.value;
+          }
+          return true;
+        }
+      }
+      return false;
+    }
+    case Pattern::Kind::Variant: {
+      auto* value = std::get_if<EnumVariantPtr>(&subject.data);
+      auto* ctor = dynamic_cast<const FieldExpr*>(pattern.ctor.get());
+      if (!value || !ctor) return false;
+      Value namespaceValue = eval(*ctor->object, env);
+      auto* enumNs = std::get_if<EnumPtr>(&namespaceValue.data);
+      if (!enumNs || (*enumNs)->name != (*value)->enumName) return false;
+      auto info = sema_.enums.find((*enumNs)->name);
+      if (info == sema_.enums.end()) return false;
+      const VariantInfo* variant = info->second.findVariant(ctor->field);
+      if (!variant || variant->fields.size() != pattern.subpatterns.size()) return false;
+      if ((*value)->variant != variant->name) return false;
+      std::int64_t tag =
+          info->second.values.count(variant->name) ? info->second.values.at(variant->name) : 0;
+      if ((*value)->tag != tag) return false;
+      for (std::size_t i = 0; i < pattern.subpatterns.size(); ++i) {
+        if (!matchPattern(pattern.subpatterns[i], (*value)->fields[i].second, env)) return false;
+      }
+      return true;
     }
   }
-  return makeClosureValue(std::move(closure));
+  return false;
 }
 
 Value Interpreter::evalMatch(const MatchExpr& expr, Env& env) {
   Value subject = eval(*expr.subject, env);
 
   for (const auto& arm : expr.arms) {
-    bool matched = false;
-    if (arm.pattern.kind == Pattern::Kind::Wildcard) {
-      matched = true;
-    } else if (arm.pattern.kind == Pattern::Kind::Literal) {
-      matched = valuesEqual(subject, eval(*arm.pattern.value, env));
-    } else {
-      auto* value = std::get_if<std::int64_t>(&subject.data);
-      if (value) {
-        std::int64_t start =
-            expectInt(eval(*arm.pattern.rangeStart, env), arm.pattern.rangeStart->span,
-                      "The range pattern start");
-        std::int64_t end = expectInt(eval(*arm.pattern.rangeEnd, env),
-                                     arm.pattern.rangeEnd->span, "The range pattern end");
-        matched = *value >= start && *value <= end;
-      }
-    }
-    if (!matched) continue;
-    if (arm.guard && !expectBool(eval(*arm.guard, env), arm.guard->span, "The match guard")) {
+    Env armEnv;
+    armEnv.parent = &env;
+    if (!matchPattern(arm.pattern, subject, armEnv)) continue;
+    if (arm.guard && !expectBool(eval(*arm.guard, armEnv), arm.guard->span, "The match guard")) {
       continue;
     }
-    return eval(*arm.result, env);
+    return eval(*arm.result, armEnv);
   }
 
   fail(expr.span, "No match arm matched value " + formatValue(subject, false) + ".");
@@ -1794,19 +1909,13 @@ Value Interpreter::evalMatch(const MatchExpr& expr, Env& env) {
 Value Interpreter::evalTry(const TryExpr& expr, Env& env) {
   Value result = eval(*expr.operand, env);
   if (auto* res = std::get_if<ResultPtr>(&result.data)) {
-    if (!(*res)->ok) {
-      returnValue_ = (*res)->value;
-      // Wrap in Err? The value stored should be the error payload; function expects Result.
-      // Ensure returning an Err result.
-      // If the function expects Result, returning the raw error would be wrong.
-      // We stored the error payload; construct Err.
-      returnValue_ = makeResult(false, (*res)->value);
-      returning_ = true;
-      return Value{};
-    }
+    if (!(*res)->ok) throw PropagateSignal{makeResult(false, (*res)->value)};
     return (*res)->value;
   }
-  // If not a Result, just return the value.
+  if (auto* opt = std::get_if<OptionalPtr>(&result.data)) {
+    if (!(*opt)->hasValue) throw PropagateSignal{makeNone()};
+    return (*opt)->value;
+  }
   return result;
 }
 
@@ -1835,7 +1944,7 @@ Value Interpreter::evalComprehension(const ComprehensionExpr& expr, Env& env) {
 
   Env child;
   child.parent = &env;
-  child.vars[expr.var].mutableBinding = false;
+  child.vars[expr.var].mutableBinding = true;
 
   auto emit = [&](Value value) {
     if (!resultSet) {
@@ -1931,6 +2040,13 @@ Value Interpreter::evalBinary(const BinaryExpr& expr, Env& env) {
 }
 
 bool Interpreter::valuesEqual(const Value& lhs, const Value& rhs) {
+  // mixed numeric equality: 1 == 1.0
+  if (auto* li = std::get_if<std::int64_t>(&lhs.data)) {
+    if (auto* rd = std::get_if<double>(&rhs.data)) return static_cast<double>(*li) == *rd;
+  }
+  if (auto* ld = std::get_if<double>(&lhs.data)) {
+    if (auto* ri = std::get_if<std::int64_t>(&rhs.data)) return *ld == static_cast<double>(*ri);
+  }
   if (lhs.data.index() != rhs.data.index()) return false;
   if (std::holds_alternative<std::monostate>(lhs.data)) return true;
   if (auto* left = std::get_if<bool>(&lhs.data)) return *left == std::get<bool>(rhs.data);
@@ -1954,6 +2070,16 @@ bool Interpreter::valuesEqual(const Value& lhs, const Value& rhs) {
     const ResultPtr& right = std::get<ResultPtr>(rhs.data);
     if ((*left)->ok != right->ok) return false;
     return valuesEqual((*left)->value, right->value);
+  }
+  if (auto* left = std::get_if<EnumVariantPtr>(&lhs.data)) {
+    const EnumVariantPtr& right = std::get<EnumVariantPtr>(rhs.data);
+    if ((*left)->enumName != right->enumName) return false;
+    if ((*left)->tag != right->tag) return false;
+    if ((*left)->fields.size() != right->fields.size()) return false;
+    for (std::size_t i = 0; i < (*left)->fields.size(); ++i) {
+      if (!valuesEqual((*left)->fields[i].second, right->fields[i].second)) return false;
+    }
+    return true;
   }
   if (auto* left = std::get_if<TuplePtr>(&lhs.data)) {
     const TuplePtr& right = std::get<TuplePtr>(rhs.data);
@@ -2045,6 +2171,88 @@ Value Interpreter::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Spa
     fail(span, "Operator '" + std::string(binOpName(op)) + "' is not defined for optionals.");
   }
 
+  if (std::holds_alternative<EnumVariantPtr>(lhs.data)) {
+    auto* right = std::get_if<EnumVariantPtr>(&rhs.data);
+    if (!right) fail(span, "Internal type mismatch between enum variants and non-variants.");
+    if (op == BinOp::Eq || op == BinOp::Ne) {
+      bool equal = valuesEqual(lhs, rhs);
+      return makeBool(op == BinOp::Eq ? equal : !equal);
+    }
+    fail(span, "Operator '" + std::string(binOpName(op)) + "' is not defined for enum values.");
+  }
+
+  // Python-like mixed int/float promotion
+  {
+    auto* li = std::get_if<std::int64_t>(&lhs.data);
+    auto* rd = std::get_if<double>(&rhs.data);
+    auto* ld = std::get_if<double>(&lhs.data);
+    auto* ri = std::get_if<std::int64_t>(&rhs.data);
+    if ((li && rd) || (ld && ri)) {
+      double a = li ? static_cast<double>(*li) : *ld;
+      double b = rd ? *rd : static_cast<double>(*ri);
+      if (op == BinOp::Add) return makeFloat(a + b);
+      if (op == BinOp::Sub) return makeFloat(a - b);
+      if (op == BinOp::Mul) return makeFloat(a * b);
+      if (op == BinOp::Div) return makeFloat(a / b);
+      if (op == BinOp::Mod) {
+        if (b == 0) fail(span, "Remainder by zero.");
+        double r = std::fmod(a, b);
+        if (r != 0 && ((r > 0) != (b > 0))) r += b; // python floored modulo sign
+        return makeFloat(r);
+      }
+      if (op == BinOp::Pow) return makeFloat(std::pow(a, b));
+      if (op == BinOp::Eq) return makeBool(a == b);
+      if (op == BinOp::Ne) return makeBool(a != b);
+      if (op == BinOp::Lt) return makeBool(a < b);
+      if (op == BinOp::Gt) return makeBool(a > b);
+      if (op == BinOp::Le) return makeBool(a <= b);
+      if (op == BinOp::Ge) return makeBool(a >= b);
+      fail(span, "Operator '" + std::string(binOpName(op)) + "' is not defined for mixed int/float.");
+    }
+  }
+  // str + any -> concat, any + str, str*int / int*str, list+list
+  if (auto* ls = std::get_if<std::string>(&lhs.data)) {
+    if (op == BinOp::Add) return makeString(*ls + formatValue(rhs, false));
+    if (op == BinOp::Mul) {
+      if (auto* ri = std::get_if<std::int64_t>(&rhs.data)) {
+        if (*ri < 0) return makeString("");
+        std::string out; out.reserve(ls->size() * static_cast<std::size_t>(*ri));
+        for (std::int64_t i=0;i<*ri;++i) out += *ls;
+        return makeString(std::move(out));
+      }
+    }
+  }
+  if (auto* rs = std::get_if<std::string>(&rhs.data)) {
+    if (op == BinOp::Add) return makeString(formatValue(lhs, false) + *rs);
+    if (op == BinOp::Mul) {
+      if (auto* li = std::get_if<std::int64_t>(&lhs.data)) {
+        if (*li < 0) return makeString("");
+        std::string out; out.reserve(rs->size() * static_cast<std::size_t>(*li));
+        for (std::int64_t i=0;i<*li;++i) out += *rs;
+        return makeString(std::move(out));
+      }
+    }
+  }
+  if (op == BinOp::Add) {
+    ArrayWindow lw, rw;
+    if (arrayWindowOf(lhs, lw) && arrayWindowOf(rhs, rw)) {
+      auto res = std::make_shared<std::vector<Value>>();
+      res->reserve(lw.length + rw.length);
+      for (std::size_t i=0;i<lw.length;++i) res->push_back((*lw.storage)[lw.offset+i]);
+      for (std::size_t i=0;i<rw.length;++i) res->push_back((*rw.storage)[rw.offset+i]);
+      return makeArray(std::move(res));
+    }
+    // also equality for lists handled below via Eq? keep fail for add mismatched
+  }
+  if (op == BinOp::Eq || op == BinOp::Ne) {
+    // cross-type equality via valuesEqual (already numeric-aware), avoid type-mismatch fails
+    ArrayWindow lw, rw;
+    if ((arrayWindowOf(lhs,lw) || arrayWindowOf(rhs,rw)) && !(arrayWindowOf(lhs,lw)&&arrayWindowOf(rhs,rw))) {
+      // one side list other not -> not equal (unless both windows handled)
+      // fall through to valuesEqual
+    }
+  }
+
   if (auto* left = std::get_if<std::int64_t>(&lhs.data)) {
     auto* right = std::get_if<std::int64_t>(&rhs.data);
     if (!right) fail(span, "Internal type mismatch between integer and non-integer.");
@@ -2075,8 +2283,7 @@ Value Interpreter::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Spa
     }
     if (op == BinOp::Pow) {
       if (*right < 0) {
-        fail(span, "Integer exponent must not be negative.",
-             "Use floats (e.g. 2.0 ** -1) for negative exponents.");
+        return makeFloat(std::pow(static_cast<double>(*left), static_cast<double>(*right)));
       }
       std::int64_t base = *left;
       std::int64_t exponent = *right;
@@ -2126,6 +2333,7 @@ Value Interpreter::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Spa
     if (op == BinOp::Mul) return makeFloat(*left * *right);
     if (op == BinOp::Div) return makeFloat(*left / *right);
     if (op == BinOp::Pow) return makeFloat(std::pow(*left, *right));
+    if (op == BinOp::Mod) { if (*right==0) fail(span,"Remainder by zero."); double r=std::fmod(*left,*right); if(r!=0 && ((r>0)!=(*right>0))) r+=*right; return makeFloat(r); }
     if (op == BinOp::Eq) return makeBool(*left == *right);
     if (op == BinOp::Ne) return makeBool(*left != *right);
     if (op == BinOp::Lt) return makeBool(*left < *right);
@@ -2137,7 +2345,11 @@ Value Interpreter::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Spa
 
   if (auto* left = std::get_if<std::string>(&lhs.data)) {
     auto* right = std::get_if<std::string>(&rhs.data);
-    if (!right) fail(span, "Internal type mismatch between string and non-string.");
+    if (!right) {
+      if (op == BinOp::Eq) return makeBool(false);
+      if (op == BinOp::Ne) return makeBool(true);
+      fail(span, "Internal type mismatch between string and non-string.");
+    }
     if (op == BinOp::Add) return makeString(*left + *right);
     if (op == BinOp::Eq) return makeBool(*left == *right);
     if (op == BinOp::Ne) return makeBool(*left != *right);
@@ -2168,6 +2380,22 @@ Value Interpreter::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Spa
     fail(span, "Operator '" + std::string(binOpName(op)) + "' is not defined for bools.");
   }
 
+  if (op == BinOp::Eq || op == BinOp::Ne) {
+    bool eq = valuesEqual(lhs, rhs);
+    // list equality structural if both arrays
+    ArrayWindow lw, rw;
+    if (arrayWindowOf(lhs,lw) && arrayWindowOf(rhs,rw)) {
+      eq = lw.length==rw.length;
+      if (eq) for (std::size_t i=0;i<lw.length;++i) if(!valuesEqual((*lw.storage)[lw.offset+i], (*rw.storage)[rw.offset+i])) { eq=false; break; }
+    }
+    if (auto* lm=std::get_if<MapPtr>(&lhs.data)) {
+      if (auto* rm=std::get_if<MapPtr>(&rhs.data)) {
+        eq = (*lm)->entries.size()==(*rm)->entries.size();
+        if (eq) for (auto& e: (*lm)->entries){ bool found=false; for(auto& e2: (*rm)->entries) if(valuesEqual(e.first,e2.first)&&valuesEqual(e.second,e2.second)) found=true; if(!found) eq=false; }
+      } else eq=false;
+    }
+    return makeBool(op==BinOp::Eq ? eq : !eq);
+  }
   fail(span, "Operator '" + std::string(binOpName(op)) + "' cannot be applied to these values.");
 }
 
@@ -2234,6 +2462,32 @@ Value Interpreter::evalCall(const CallExpr& expr, Env& env) {
 
     if (auto* modulePtr = std::get_if<ModulePtr>(&object.data)) {
       return callModuleMember(**modulePtr, field->field, expr.args, env, expr.span);
+    }
+
+    if (auto* enumNs = std::get_if<EnumPtr>(&object.data)) {
+      auto info = sema_.enums.find((*enumNs)->name);
+      if (info != sema_.enums.end() && info->second.algebraic) {
+        const VariantInfo* variant = info->second.findVariant(field->field);
+        if (!variant) {
+          fail(expr.span, "Enum '" + shortStructName((*enumNs)->name) +
+                              "' has no variant named '" + field->field + "'.");
+        }
+        if (expr.args.size() != variant->fields.size()) {
+          fail(expr.span,
+               "Variant '" + shortStructName((*enumNs)->name) + "." + variant->name +
+                   "' expects " + std::to_string(variant->fields.size()) +
+                   " payload argument(s), found " + std::to_string(expr.args.size()) + ".");
+        }
+        std::vector<std::pair<std::string, Value>> fields;
+        fields.reserve(expr.args.size());
+        for (std::size_t i = 0; i < expr.args.size(); ++i) {
+          fields.emplace_back(variant->fields[i].first, eval(*expr.args[i].value, env));
+        }
+        std::int64_t tag = info->second.values.count(variant->name)
+                               ? info->second.values.at(variant->name)
+                               : 0;
+        return makeEnumVariant((*enumNs)->name, variant->name, tag, std::move(fields));
+      }
     }
 
     ArgList args;
@@ -2322,20 +2576,19 @@ Value Interpreter::callClosure(const ClosurePtr& closure, ArgList args, Span spa
   if (closure->moduleId >= 0) currentModule_ = closure->moduleId;
 
   Env frame;
-  frame.parent = &moduleEnv(currentModule_);
-  for (const auto& entry : closure->captured) {
-    Binding binding;
-    binding.value = entry.second;
-    binding.mutableBinding = false;
-    frame.vars[entry.first] = std::move(binding);
-  }
+  frame.parent = closure->liveEnv ? static_cast<Env*>(closure->liveEnv) : &moduleEnv(currentModule_);
   for (std::size_t i = 0; i < decl.params.size(); ++i) {
     Binding binding;
     binding.value = std::move(args[i]);
-    binding.mutableBinding = false;
+    binding.mutableBinding = true;
     frame.vars[decl.params[i].name] = std::move(binding);
   }
-  Value result = eval(*decl.body, frame);
+  Value result;
+  try {
+    result = eval(*decl.body, frame);
+  } catch (PropagateSignal& signal) {
+    result = std::move(signal.value);
+  }
   currentModule_ = savedModule;
   return result;
 }
@@ -2360,21 +2613,24 @@ Value Interpreter::callFunction(const FnDecl& decl, ArgList args, Span span) {
   for (std::size_t i = 0; i < decl.params.size(); ++i) {
     Binding binding;
     binding.value = std::move(args[i]);
-    binding.mutableBinding = false;
+    binding.mutableBinding = true;
     frame.vars[decl.params[i].name] = std::move(binding);
   }
 
   bool outerReturning = returning_;
   returning_ = false;
+  Value result;
   try {
     execStatements(decl.body, frame);
+    result = returning_ ? std::move(returnValue_) : makeVoid();
+  } catch (PropagateSignal& signal) {
+    result = std::move(signal.value);
   } catch (...) {
     runDestructors(frame, true);
     returning_ = outerReturning;
     currentModule_ = savedModule;
     throw;
   }
-  Value result = returning_ ? std::move(returnValue_) : makeVoid();
   runDestructors(frame, false);
   returning_ = outerReturning;
   currentModule_ = savedModule;

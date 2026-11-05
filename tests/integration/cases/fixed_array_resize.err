@@ -1,1 +1,0 @@
-'append' cannot resize a fixed-size array of type i32[3].

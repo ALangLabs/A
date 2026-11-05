@@ -375,15 +375,8 @@ class Formatter {
       case StmtKind::Let: {
         const auto& decl = static_cast<const LetStmt&>(statement);
         const std::string keyword = declarationKeyword(source_, decl.span, decl.nameSpan);
-        std::string text;
-        if (keyword == "pvt") {
-          text = "pvt ";
-        } else if (keyword == "const" || decl.constantBinding) {
-          text = "const ";
-        } else if (decl.mutableBinding || keyword == "var") {
-          text = "var ";
-        }
-        text += decl.name;
+        (void)keyword;
+        std::string text = decl.name;
         if (decl.type) text += ": " + typeText(decl.type.get());
         text += " = " + exprText(*decl.init, 0, level);
         return text;

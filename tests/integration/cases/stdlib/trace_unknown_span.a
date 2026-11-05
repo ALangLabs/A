@@ -1,6 +1,6 @@
 import trace
 
-fn main() -> void:
+fn main():
     trace.end(999)
 
 main()

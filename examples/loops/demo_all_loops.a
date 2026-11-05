@@ -1,7 +1,7 @@
 # Demo: All four loop types in A using type inference (no explicit data types).
 # A infers types automatically, so we write `x = 0` instead of `x: i32 = 0`.
 
-fn main() -> void:
+fn main():
     # -----------------------------------------------------------
     # 1. while loop  (pre-test: condition checked before each run)
     # -----------------------------------------------------------

@@ -1,7 +1,7 @@
-fn is_prime(n: i32) -> bool:
+fn is_prime(n):
     if n < 2:
         return false
-    var d = 2
+    d = 2
     while d * d <= n:
         if n % d == 0:
             return false

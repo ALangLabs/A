@@ -1,10 +1,10 @@
 import json
 
 struct Point:
-    x: i64
-    y: i64
+    x
+    y
 
-fn main() -> void:
+fn main():
     print(json.stringify(42))
     print(json.stringify(3.25))
     print(json.stringify("hi\n"))

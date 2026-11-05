@@ -25,7 +25,7 @@ fn add( a:i32,b:i32 )->i32:
   return a+b
 
 # A note.
-var value=0xFF # trailing
+value=0xFF # trailing
 EOF
 
 EXPECTED="$WORK_DIR/expected.a"
@@ -35,7 +35,7 @@ fn add(a: i32, b: i32) -> i32:
     return a + b
 
 # A note.
-var value = 0xFF  # trailing
+value = 0xFF  # trailing
 EOF
 
 "$A_BIN" fmt "$SOURCE" >"$WORK_DIR/formatted.a"
@@ -81,7 +81,7 @@ PY
 WARNABLE="$WORK_DIR/warn.a"
 cat >"$WARNABLE" <<'EOF'
 fn f() -> i32:
-    var unused = 1
+    unused = 1
     return 0
 
 print(f())

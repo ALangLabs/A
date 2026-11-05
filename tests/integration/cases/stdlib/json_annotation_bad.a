@@ -1,9 +1,9 @@
 import json
 
-fn summarize(doc: Json) -> String:
+fn summarize(doc):
     return json.kind(doc)
 
-fn main() -> void:
+fn main():
     print(summarize(42))
 
 main()

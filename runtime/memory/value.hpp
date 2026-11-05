@@ -63,6 +63,9 @@ using NativeFunctionPtr = std::shared_ptr<NativeFunction>;
 struct EnumObj;
 using EnumPtr = std::shared_ptr<EnumObj>;
 
+struct EnumVariantObj;
+using EnumVariantPtr = std::shared_ptr<EnumVariantObj>;
+
 // Arena, pool, and region allocators share one object shape. Handles are byte
 // offsets into the allocator's capacity, which keeps them values that programs
 // can store and pass around while the interpreter models the allocation policy.
@@ -97,7 +100,7 @@ struct Value {
   std::variant<std::monostate, bool, std::int64_t, double, char32_t, std::string,
                 ArrayPtr, MapPtr, SetPtr, ArrayViewPtr, StructPtr, RangeValue, OptionalPtr,
                ResultPtr, TuplePtr, ClosurePtr, ModulePtr, NativeFunctionPtr, EnumPtr,
-               AllocatorPtr, PointerPtr>
+               EnumVariantPtr, AllocatorPtr, PointerPtr>
       data;
 };
 
@@ -122,6 +125,15 @@ struct EnumObj {
   std::string name;  // qualified enum name, e.g. "color::Color"
 };
 
+// One constructed value of an algebraic enum: variant tag plus payload fields
+// in declaration order. Equality is structural (enum, tag, and every field).
+struct EnumVariantObj {
+  std::string enumName;  // qualified enum name
+  std::string variant;
+  std::int64_t tag = -1;
+  std::vector<std::pair<std::string, Value>> fields;
+};
+
 struct OptionalValue {
   bool hasValue = false;
   Value value;
@@ -141,6 +153,7 @@ struct Closure {
   const FnDecl* fn = nullptr;        // named function referenced as a value
   int moduleId = -1;                 // module whose globals the closure sees
   StringMap<Value> captured;
+  void* liveEnv = nullptr;  // Python-style live capture (interpreter Env*)
 };
 
 }  // namespace a

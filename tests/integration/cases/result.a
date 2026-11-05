@@ -1,9 +1,9 @@
-fn divide(a: i32, b: i32) -> Result<i32, String>:
+fn divide(a, b):
     if b == 0:
         return Err("division by zero")
     return Ok(a / b)
 
-fn compute(x: i32, y: i32) -> Result<i32, String>:
+fn compute(x, y):
     q = divide(x, y)?
     return Ok(q + 1)
 

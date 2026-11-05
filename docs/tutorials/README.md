@@ -3,6 +3,8 @@
 Start with the language reference at [docs/language-spec](../language-spec/README.md)
 and the programs under `examples/`.
 
+All examples use untyped style, e.g. `fn f(x):` instead of `fn f(x: i32) -> i32:`, and `x = 1` instead of `x: i32 = 1` or `const x = 1`.
+
 Suggested order:
 
 1. `examples/hello-world` — printing.
@@ -45,7 +47,7 @@ enum Level:
     Medium = 5
     High
 
-fn describe(level: Level) -> String:
+fn describe(level):
     return match level:
         Level.Low => "low"
         Level.Medium => "medium"
@@ -66,8 +68,8 @@ Enum variants auto-increment, `const` declares named immutable values, and
 ## Tour: closures
 
 ```a
-fn make_shifter() -> fn(i32) -> i32:
-    var bump = 1
+fn make_shifter():
+    bump = 1
     shift = fn(n: i32) => n + bump
     bump = 100     # not observed: locals are captured by value
     return shift

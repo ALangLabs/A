@@ -1,27 +1,27 @@
 import core
 
-var passed = 0
-var failed = 0
+passed = 0
+failed = 0
 
-fn check(name: String, condition: bool) -> void:
+fn check(name, condition):
     if condition:
         passed = passed + 1
     else:
         failed = failed + 1
         eprint("FAIL " + name)
 
-fn equal(name: String, expected: i64, actual: i64) -> void:
+fn equal(name, expected, actual):
     if expected == actual:
         passed = passed + 1
     else:
         failed = failed + 1
         eprint("FAIL " + name + ": expected " + str(expected) + ", found " + str(actual))
 
-fn require(condition: bool, message: String) -> void:
+fn require(condition, message):
     core.assert(condition, message)
 
-fn summary() -> i64:
+fn summary():
     return failed
 
-fn report() -> void:
+fn report():
     print(str(passed) + " passed, " + str(failed) + " failed")

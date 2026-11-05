@@ -9,7 +9,7 @@ print("sum:", sum(nums))
 print("join:", join(nums, ", "))
 
 # Named functions work as first-class values too.
-fn triple(n: i32) -> i32:
+fn triple(n):
     return n * 3
 
 print("named:", map(nums, triple))

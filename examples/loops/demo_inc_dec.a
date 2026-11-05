@@ -1,6 +1,6 @@
 # Demo: ++ and -- operators in A (type inference, no explicit data types).
 
-fn main() -> void:
+fn main():
     # ---- prefix ++i and --i ----
     a = 5
     print("prefix ++a = {++a}")   # 6, a is now 6

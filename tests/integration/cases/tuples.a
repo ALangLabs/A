@@ -1,10 +1,10 @@
-fn divmod(a: i32, b: i32) -> (i32, i32):
+fn divmod(a, b):
     return (a / b, a % b)
 
 (q, r) = divmod(17, 5)
 print(q, r)
 
-var (x, y) = (10, 20)
+(x, y) = (10, 20)
 print(x + y)
 
 # '_' discards a slot.

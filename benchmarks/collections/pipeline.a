@@ -1,4 +1,4 @@
-fn main() -> void:
+fn main():
     data = [n for n in 0..5000]
     total = data
         |> filter(fn(n) => n % 3 == 0)

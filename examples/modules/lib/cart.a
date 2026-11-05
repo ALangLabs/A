@@ -2,18 +2,18 @@ import "money.a"
 from "money.a" import Money
 
 struct Cart:
-    items: [String]
-    total: Money
+    items
+    total
 
-    fn add(self, name: String, price: Money) -> void:
+    fn add(self, name, price):
         self.items.append(name)
         self.total = Money(self.total.cents + price.cents)
 
-    fn render(self) -> void:
+    fn render(self):
         print("Cart:")
         for item in self.items:
             print("  - " + item)
         print("  total: " + self.total.format())
 
-fn empty() -> Cart:
+fn empty():
     return Cart(items=[], total=money.Money(0))

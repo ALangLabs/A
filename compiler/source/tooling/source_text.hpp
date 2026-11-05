@@ -27,7 +27,7 @@ class SourceText {
   std::string slice(const Span& span) const;
 
   // Text from the start of `span` up to the start of `end`, trimmed. This is
-  // used to recover syntax that the AST normalizes away, such as the `pvt`,
+  // used to recover syntax that the AST normalizes away.
   // `const`, `class`, `struct`, and `metaclass` keywords.
   std::string between(const Span& span, const Span& end) const;
 

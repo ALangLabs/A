@@ -163,26 +163,13 @@ DocItem letItem(const LetStmt& decl, const DocMap& docs, const SourceText& sourc
   DocItem item;
   const std::string keyword = declarationKeyword(source, decl.span, decl.nameSpan);
   item.name = decl.name;
-  if (keyword == "const" || keyword == "pvt" || decl.constantBinding) {
-    item.kind = DocItem::Kind::Constant;
-    item.isPrivate = keyword == "pvt";
-  } else if (decl.mutableBinding || keyword == "var") {
-    item.kind = DocItem::Kind::Variable;
-  } else {
-    item.kind = DocItem::Kind::Constant;
-  }
+  item.kind = DocItem::Kind::Variable;
+  item.isPrivate = false;
+  (void)keyword;
   (void)topLevel;
 
   std::string signature;
-  if (keyword == "pvt") {
-    signature = "pvt " + decl.name;
-  } else if (keyword == "const" || decl.constantBinding) {
-    signature = "const " + decl.name;
-  } else if (decl.mutableBinding || keyword == "var") {
-    signature = "var " + decl.name;
-  } else {
-    signature = decl.name;
-  }
+  signature = decl.name;
   if (decl.type) signature += ": " + typeText(decl.type.get());
   item.signature = signature;
   item.doc = docFor(docs, decl.span);

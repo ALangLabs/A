@@ -1,17 +1,17 @@
 # Object-oriented programming in A: Classes, Inheritance, and Metaclasses
 
 class Entity:
-    id: int
-    name: str
+    id
+    name
 
-    fn describe(self) -> str:
+    fn describe(self):
         return "#{self.id}: {self.name}"
 
 class User(Entity):
-    email: str
-    active: bool
+    email
+    active
 
-    fn greet(self) -> void:
+    fn greet(self):
         print("Hello, my name is {self.name} ({self.email})")
 
 # Metaclass declaration
@@ -19,10 +19,10 @@ metaclass RegisteredMeta:
     pass
 
 class Service(metaclass=RegisteredMeta):
-    name: str
-    port: int
+    name
+    port
 
-    fn url(self) -> str:
+    fn url(self):
         return "http://localhost:{self.port}"
 
 # Instantiation & usage

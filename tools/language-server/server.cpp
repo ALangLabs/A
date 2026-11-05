@@ -257,10 +257,10 @@ Value hoverMarkdown(const std::string& signature, const std::string& documentati
 }
 
 const char* const kKeywords[] = {
-    "var", "const", "fn", "if", "elif", "else", "while", "do", "for", "in", "loop",
+    "fn", "if", "elif", "else", "while", "do", "for", "in", "loop",
     "break", "continue", "return", "defer", "struct", "class", "metaclass", "enum",
     "self", "true", "false", "and", "or", "not", "import", "from", "as", "match",
-    "None", "pass", "type", "pvt",
+    "None", "pass", "type",
 };
 
 int completionKind(SymbolKind kind) {
@@ -1200,8 +1200,7 @@ class LanguageServer {
         const auto& decl = static_cast<const a::LetStmt&>(statement);
         symbol["name"] = decl.name;
         symbol["detail"] = a::lsp::typeExprText(decl.type.get());
-        symbol["kind"] = static_cast<int>(decl.constantBinding ? SymbolKind::Constant
-                                                               : SymbolKind::Variable);
+        symbol["kind"] = static_cast<int>(SymbolKind::Variable);
         symbol["range"] = symbolRange(text, decl.span);
         symbol["selectionRange"] = symbolRange(text, decl.nameSpan);
         return symbol;

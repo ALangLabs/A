@@ -1,12 +1,12 @@
 import http
 import net
 
-fn handler(method: String, path: String, headers: {String: String}, body: String) -> (i64, {String: String}, String):
+fn handler(method, path, headers, body):
     if path == "/stop":
         return (0, {}, "")
     return (200, {"Content-Type": "text/plain"}, "served " + path)
 
-fn main() -> void:
+fn main():
     listener = net.tcp_listen("127.0.0.1", 0)
     port = net.local_port(listener)
 

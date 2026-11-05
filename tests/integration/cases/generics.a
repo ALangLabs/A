@@ -1,13 +1,13 @@
-fn identity<T>(x: T) -> T:
+fn identity(x):
     return x
 
-fn first<T>(items: [T]) -> T:
+fn first(items):
     return items[0]
 
-struct Box<T>:
-    value: T
+struct Box:
+    value
 
-    fn get(self) -> T:
+    fn get(self):
         return self.value
 
 print(identity(5))

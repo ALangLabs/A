@@ -1,6 +1,6 @@
 import metrics
 
-fn main() -> void:
+fn main():
     metrics.reset()
     metrics.counter("http_requests", 2, "route", "/home", "method", "GET")
     metrics.counter("http_requests", 1, "route", "/home", "method", "GET")

@@ -5,16 +5,16 @@ enum Color:
     Yellow = -2
     Purple
 
-const ANSWER = 42
+ANSWER = 42
 
-fn describe(c: Color) -> String:
+fn describe(c):
     return match c:
         Color.Red => "red"
         Color.Green => "green"
         Color.Blue => "blue"
         _ => "other"
 
-fn main() -> void:
+fn main():
     print(Color.Red)
     print(Color.Green)
     print(Color.Blue)
@@ -23,6 +23,6 @@ fn main() -> void:
     print(ANSWER)
     print(describe(Color.Green))
     print(describe(Color.Purple))
-    var c: Color = Color.Blue
+    c = Color.Blue
     print(c + 1)
 main()

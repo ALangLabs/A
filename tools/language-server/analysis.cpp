@@ -187,8 +187,8 @@ class IndexBuilder {
         std::string type =
             decl.type ? typeExprText(decl.type.get()) : exprTypeName(decl.init.get());
         addSymbol(decl.name, decl.nameSpan,
-                  decl.constantBinding ? SymbolKind::Constant : SymbolKind::Variable,
-                  varDetail(decl.name, type, decl.mutableBinding, decl.constantBinding), type,
+                  SymbolKind::Variable,
+                  varDetail(decl.name, type, decl.mutableBinding, false), type,
                   scope, false);
         walkExpr(decl.init.get(), scope);
         return;

@@ -1,7 +1,7 @@
 import http
 import net
 
-fn preload(payload: String) -> i64:
+fn preload(payload):
     listener = net.tcp_listen("127.0.0.1", 0)
     bound = net.local_port(listener)
     client = net.tcp_connect("127.0.0.1", bound)
@@ -11,7 +11,7 @@ fn preload(payload: String) -> i64:
     net.close(listener)
     return client
 
-fn main() -> void:
+fn main():
     (status, headers, body) = http.request(preload("HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nX-Test: yes\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello"), "GET", "/ping", {"Accept": "text/plain"}, "")
     print(status)
     print(body)

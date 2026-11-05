@@ -1,14 +1,14 @@
 # Optional values: Some, None, ??, !, optional chaining, equality.
 
 struct Address:
-    city: String
-    country: String
+    city
+    country
 
 struct User:
-    name: String
-    address: Address
+    name
+    address
 
-var missing: i32? = None
+missing = None
 print("missing:", missing)
 print("fallback:", missing ?? 0)
 
@@ -18,15 +18,15 @@ print("unwrapped:", present! + 1)
 
 # Chained optional struct navigation.
 user = User("Ada", Address("London", "UK"))
-maybeUser: User? = Some(user)
+maybeUser = Some(user)
 print("safe:", maybeUser?.name, maybeUser?.address?.city)
 print("other:", maybeUser?.address?.country)
 
 # Optional-of-optional flattens through ??.
-var nested: (i32?)? = Some(Some(5))
+nested = Some(Some(5))
 print("nested:", (nested ?? Some(0)) ?? 1)
 
 # Equality works for optionals and None.
 print("eq:", present == Some(41), missing == None, present == None)
-var flag: bool? = None
+flag = None
 print("flag:", flag, flag == None)

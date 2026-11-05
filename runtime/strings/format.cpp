@@ -118,6 +118,16 @@ std::string formatValue(const Value& value, bool quoteStrings) {
     if ((*result)->ok) return "Ok(" + formatValue((*result)->value, true) + ")";
     return "Err(" + formatValue((*result)->value, true) + ")";
   }
+  if (auto* variant = std::get_if<EnumVariantPtr>(&value.data)) {
+    if ((*variant)->fields.empty()) return (*variant)->variant;
+    std::string out = (*variant)->variant + "(";
+    for (std::size_t i = 0; i < (*variant)->fields.size(); ++i) {
+      if (i) out += ", ";
+      out += formatValue((*variant)->fields[i].second, true);
+    }
+    out += ")";
+    return out;
+  }
   if (auto* tuple = std::get_if<TuplePtr>(&value.data)) {
     std::string out = "(";
     for (std::size_t i = 0; i < (*tuple)->items.size(); ++i) {

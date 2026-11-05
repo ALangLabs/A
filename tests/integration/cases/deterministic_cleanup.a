@@ -1,15 +1,15 @@
 class Resource:
-    name: str
+    name
 
-    fn drop(self) -> void:
+    fn drop(self):
         print("drop " + self.name)
 
-fn use() -> void:
+fn use():
     local = Resource("local")
     defer print("defer inside")
     print("using " + local.name)
 
-fn churn() -> void:
+fn churn():
     item = Resource("first")
     print("using " + item.name)
     item = Resource("second")

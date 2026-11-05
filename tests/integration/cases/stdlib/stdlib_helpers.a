@@ -21,7 +21,7 @@ remove_dir("sandbox")
 print(file_exists("sandbox"))
 print(len(current_dir()) > 0)
 
-var start = now()
+start = now()
 sleep(2)
 print(now() >= start)
 test.report()

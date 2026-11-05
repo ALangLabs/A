@@ -1,9 +1,8 @@
-const SCALE = 3
+# Plain assignment, no const scope
+SCALE = 3
 
-fn area(w: i32, h: i32) -> i32:
-    const BONUS = 1
+fn area(w, h):
+    BONUS = 1
     return w * h + BONUS
 
-fn main() -> void:
-    print(area(2, 4) * SCALE)
-main()
+print(area(2, 4) * SCALE)

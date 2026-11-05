@@ -1,14 +1,14 @@
-fn main() -> void:
-    var total = 0
+fn main():
+    total = 0
     for i in 0..4:
-        var doubled = i * 2
+        doubled = i * 2
         total += doubled
     print(total)
 
-    # Nested blocks still shadow the loop binding per iteration.
+    # Python-style: loop var is mutable, assignment sticks within iteration.
     for i in 0..3:
         if i == 1:
-            var i = 99
+            i = 99
             print(i)
         print(i)
 

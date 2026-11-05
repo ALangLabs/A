@@ -2,6 +2,6 @@ enum Color:
     Red
     Green
 
-fn main() -> void:
+fn main():
     print(Color.Pink)
 main()

@@ -1,13 +1,13 @@
 import trace
 import json
 
-fn inner() -> void:
+fn inner():
     child = trace.start("inner")
     trace.set_attribute(child, "rows", 3)
     trace.add_event(child, "cache_miss")
     trace.end(child)
 
-fn main() -> void:
+fn main():
     trace.reset()
     print(trace.current())
     root = trace.start("request")

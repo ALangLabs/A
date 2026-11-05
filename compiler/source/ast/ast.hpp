@@ -382,12 +382,15 @@ struct ComprehensionExpr : Expr {
 };
 
 struct Pattern {
-  enum class Kind { Literal, Range, Wildcard };
+  enum class Kind { Literal, Range, Wildcard, Variant, Binding, Tuple, Or };
   Kind kind = Kind::Wildcard;
   Span span;
   ExprPtr value;       // Literal patterns
   ExprPtr rangeStart;  // Range patterns (inclusive)
   ExprPtr rangeEnd;
+  ExprPtr ctor;                    // Variant patterns: dotted FieldExpr chain, e.g. Shape.Circle
+  std::vector<Pattern> subpatterns;  // Variant/Tuple/Or sub-patterns
+  std::string name;                // Binding patterns
 };
 
 struct MatchArm {
@@ -422,7 +425,6 @@ struct LetStmt : Stmt {
   Span nameSpan;
   TypeExprPtr type;  // may be null
   bool mutableBinding = false;
-  bool constantBinding = false;
   ExprPtr init;
 };
 
@@ -562,13 +564,22 @@ struct EnumVariant {
   std::string name;
   Span span;
   ExprPtr value;  // may be null (auto-incremented from the previous variant)
+  std::vector<FieldDecl> fields;  // non-empty for payload (algebraic) variants
 };
 
 struct EnumDecl : Stmt {
   EnumDecl() : Stmt(StmtKind::EnumDecl) {}
   std::string name;
   Span nameSpan;
+  std::vector<std::string> typeParams;  // generic type parameters
   std::vector<EnumVariant> variants;
+
+  bool isAlgebraic() const {
+    if (!typeParams.empty()) return true;
+    for (const EnumVariant& v : variants)
+      if (!v.fields.empty()) return true;
+    return false;
+  }
 };
 
 struct TypeAliasDecl : Stmt {

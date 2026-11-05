@@ -32,9 +32,9 @@ fn add( a:i32,b:i32 )->i32:
   return a+b
 
 # A leading comment.
-var hex=0xFF # trailing comment
-var big=1_000
-var text="a\tb"
+hex=0xFF # trailing comment
+big=1_000
+text="a\tb"
 )";
 
 const char* kFormatted = R"(## Adds two numbers.
@@ -43,9 +43,9 @@ fn add(a: i32, b: i32) -> i32:
     return a + b
 
 # A leading comment.
-var hex = 0xFF  # trailing comment
-var big = 1_000
-var text = "a\tb"
+hex = 0xFF  # trailing comment
+big = 1_000
+text = "a\tb"
 )";
 
 void testFormatter() {
@@ -67,7 +67,7 @@ void testFormatter() {
   const std::string commented =
       "fn f() -> void:\n"
       "    # keep me\n"
-      "    var values = [1, 2]  # inline\n";
+      "    values = [1, 2]  # inline\n";
   a::tooling::FormatResult commentResult = a::tooling::formatSource(commented, commentSink);
   check(commentResult.ok, "formatter handles interior comments");
   check(commentResult.text.find("# keep me") != std::string::npos,
@@ -102,7 +102,7 @@ enum Color:
     Green
 
 ## The mathematical constant.
-const PI: f64 = 3.14159
+PI: f64 = 3.14159
 )";
 
   a::DiagnosticSink sink;

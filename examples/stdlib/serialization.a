@@ -2,7 +2,7 @@
 import json
 import binary
 
-fn describe(doc: Json) -> void:
+fn describe(doc):
     print(json.kind(doc) + " with " + str(json.len(doc)) + " members")
 
 settings = json.parse("\{\"name\": \"queue\", \"replicas\": 3, \"tags\": [\"a\", \"b\"], \"debug\": false\}")

@@ -23,7 +23,7 @@ import net
 import http
 import test
 
-fn tour_handler(method: String, path: String, headers: {String: String}, body: String) -> (i64, {String: String}, String):
+fn tour_handler(method, path, headers, body):
 
     reply = method + " " + path + " note=" + headers["x-note"] + " body=" + body
     return (200, {"Content-Type": "text/plain"}, reply)
@@ -65,13 +65,13 @@ print("strings: " + str(len("añb")) + " code points, " + str("abc".count("b")) 
 
 # --- collections -------------------------------------------------------------
 nums = [3, 1, 2]
-print("collections: map=" + str(collections.map(nums, fn(n: i64) -> i64 => n * 2)))
-print("collections: filter=" + str(collections.filter(nums, fn(n: i64) -> bool => n > 1)))
+print("collections: map=" + str(collections.map(nums, fn(n) => n * 2)))
+print("collections: filter=" + str(collections.filter(nums, fn(n) => n > 1)))
 print(
-    "collections: reduce=" + str(collections.reduce(nums, 0, fn(acc: i64, n: i64) -> i64 => acc + n)),
+    "collections: reduce=" + str(collections.reduce(nums, 0, fn(acc, n) => acc + n)),
 )
 print(
-    "collections: sum=" + str(collections.sum(nums)) + " any=" + str(collections.any(nums, fn(n: i64) -> bool => n == 2)) + " all=" + str(collections.all(nums, fn(n: i64) -> bool => n > 0)),
+    "collections: sum=" + str(collections.sum(nums)) + " any=" + str(collections.any(nums, fn(n) => n == 2)) + " all=" + str(collections.all(nums, fn(n) => n > 0)),
 )
 unique = collections.set([1, 1, 2, 3])
 print("collections: set size=" + str(len(unique)) + " contains 2=" + str(unique.contains(2)))
@@ -133,7 +133,7 @@ print(
 # --- testing (property-based) ------------------------------------------------
 testing.seed(11)
 print(
-    "testing: bounded ints = " + str(testing.for_all_int(25, -50, 50, fn(n: i64) -> bool => n >= -50 and n <= 50)),
+    "testing: bounded ints = " + str(testing.for_all_int(25, -50, 50, fn(n) => n >= -50 and n <= 50)),
 )
 print(
     "testing: json round trip = " + str(
@@ -141,13 +141,13 @@ print(
             15,
             0,
             1000,
-            fn(n: i64) -> bool => json.as_int(json.parse(str(n)))! == n,
+            fn(n) => json.as_int(json.parse(str(n)))! == n,
         ),
     ),
 )
-print("testing: elements = " + str(testing.for_all_elem(nums, fn(n: i64) -> bool => n != 0)))
+print("testing: elements = " + str(testing.for_all_elem(nums, fn(n) => n != 0)))
 print(
-    "testing: strings = " + str(testing.for_all_string(10, 8, fn(s: String) -> bool => len(s) <= 8)),
+    "testing: strings = " + str(testing.for_all_string(10, 8, fn(s) => len(s) <= 8)),
 )
 
 # --- log, metrics, trace -----------------------------------------------------

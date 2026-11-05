@@ -3,9 +3,9 @@ enum Color:
     Green = 5
     Blue
 
-const LIMIT = 3
+LIMIT = 3
 
-fn name_of(c: Color) -> String:
+fn name_of(c):
     return match c:
         Color.Red => "red"
         Color.Green => "green"
@@ -13,8 +13,8 @@ fn name_of(c: Color) -> String:
         _ => "unknown"
 
 struct Swatch:
-    color: Color
-    label: String
+    color
+    label
 
-    fn describe(self) -> String:
+    fn describe(self):
         return self.label + ":" + name_of(self.color)

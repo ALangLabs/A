@@ -1,9 +1,9 @@
 # Advanced & simple syntax demo in A
 
 # 1. Ultra-clean single line expression functions (no ':' or 'return' needed)
-fn square(x) = x * x
-fn add(a, b) = a + b
-fn is_even(n) = n % 2 == 0
+fn square(x)= x * x
+fn add(a, b)= a + b
+fn is_even(n)= n % 2 == 0
 
 # 2. Hex and Binary numeric literals
 hex_val = 0xFF
@@ -22,7 +22,7 @@ print("items[-2]:", items[-2])
 print("slice items[-3..]:", items[-3..])
 
 # 4. Ergonomic collection methods: reverse(), contains(), join()
-var words = ["A", "is", "simpler", "than", "Python"]
+words = ["A", "is", "simpler", "than", "Python"]
 print("contains('simpler'):", words.contains("simpler"))
 print("join words:", words.join(" "))
 

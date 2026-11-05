@@ -108,6 +108,12 @@ std::string ModuleLoader::uniqueModuleName(const std::string& stem) const {
 ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySource) {
   if (options_.stdlibRoot.empty()) options_.stdlibRoot = defaultStdlibRoot();
 
+  // The prelude loads before the entry so its declarations are in scope
+  // everywhere. Programs compiled without a stdlib on disk are unaffected.
+  std::error_code exists;
+  const fs::path prelude = fs::path(options_.stdlibRoot) / "prelude.a";
+  if (fs::exists(prelude, exists)) loadModule(prelude.string(), prelude.string(), nullptr);
+
   int entry = loadModule(entryPath, entryPath, &entrySource);
   graph_.entry = entry;
   return std::move(graph_);

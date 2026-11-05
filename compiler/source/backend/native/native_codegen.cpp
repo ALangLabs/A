@@ -862,6 +862,19 @@ bool checkNativeStmt(const Stmt& stmt) {
 
 bool isNativeSupported(const ModuleGraph& graph) {
   if (graph.modules.empty()) return false;
+  // Decline (fallback to interpreter) when a function assigns to a top-level
+  // (global) name: native emitter has no global storage, first Assign would
+  // declare a function-local shadow instead of mutating the global.
+  {
+    std::set<std::string> globals;
+    for (auto& mod: graph.modules) { if(!mod.program) continue; for(auto& st: mod.program->statements){ if(st->kind==StmtKind::Assign){ auto& a=static_cast<const AssignStmt&>(*st); if(a.target->kind==ExprKind::Ident) globals.insert(static_cast<const IdentExpr&>(*a.target).name); } else if(st->kind==StmtKind::Let){ globals.insert(static_cast<const LetStmt&>(*st).name); } } }
+    if(!globals.empty()){
+      for(auto& mod: graph.modules){ if(!mod.program) continue; for(auto& st: mod.program->statements){ if(st->kind!=StmtKind::FnDecl) continue; auto& fn=static_cast<const FnDecl&>(*st); std::set<std::string> locals; for(auto& prm: fn.params) locals.insert(prm.name); std::vector<const Stmt*> qq; for(auto& s: fn.body) qq.push_back(s.get()); while(!qq.empty()){auto* cur=qq.back(); qq.pop_back(); if(cur->kind==StmtKind::Let) locals.insert(static_cast<const LetStmt&>(*cur).name); else if(cur->kind==StmtKind::If){auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) qq.push_back(s.get()); for(auto& s: ifs.elseBody) qq.push_back(s.get());} else if(cur->kind==StmtKind::While){auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) qq.push_back(s.get());} else if(cur->kind==StmtKind::For){auto& fo=static_cast<const ForStmt&>(*cur); locals.insert(fo.var); for(auto& s: fo.body) qq.push_back(s.get());} }
+        // check assigns in fn
+        std::vector<const Stmt*> q2; for(auto& s: fn.body) q2.push_back(s.get()); while(!q2.empty()){auto* cur=q2.back(); q2.pop_back(); if(cur->kind==StmtKind::Assign){auto& a=static_cast<const AssignStmt&>(*cur); if(a.target->kind==ExprKind::Ident){ auto& nm=static_cast<const IdentExpr&>(*a.target).name; if(globals.count(nm) && !locals.count(nm)) return false; }} else if(cur->kind==StmtKind::If){auto& ifs=static_cast<const IfStmt&>(*cur); for(auto& br: ifs.branches) for(auto& s: br.body) q2.push_back(s.get()); for(auto& s: ifs.elseBody) q2.push_back(s.get());} else if(cur->kind==StmtKind::While){auto& wh=static_cast<const WhileStmt&>(*cur); for(auto& s: wh.body) q2.push_back(s.get());} else if(cur->kind==StmtKind::For){auto& fo=static_cast<const ForStmt&>(*cur); for(auto& s: fo.body) q2.push_back(s.get());} }
+      } }
+    }
+  }
   for (const auto& mod : graph.modules) {
     if (!mod.program) continue;
     for (const auto& st : mod.program->statements) {

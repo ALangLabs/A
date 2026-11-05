@@ -1,6 +1,6 @@
 import net
 
-fn main() -> void:
+fn main():
     receiver = net.udp_socket()
     net.udp_bind(receiver, "127.0.0.1", 0)
     port = net.local_port(receiver)

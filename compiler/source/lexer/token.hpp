@@ -19,7 +19,6 @@ enum class Tok {
   String,
   Char,
 
-  KwVar,
   KwFn,
   KwIf,
   KwElif,
@@ -47,8 +46,6 @@ enum class Tok {
   KwAs,
   KwMatch,
   KwNone,
-  KwConst,
-  KwPvt,
   KwEnum,
   KwDo,
   KwType,

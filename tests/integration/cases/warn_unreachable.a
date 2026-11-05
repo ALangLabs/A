@@ -1,4 +1,4 @@
-fn pick(flag: bool) -> i32:
+fn pick(flag):
     if flag:
         return 1
     else:

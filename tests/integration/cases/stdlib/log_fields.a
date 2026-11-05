@@ -1,6 +1,6 @@
 import log
 
-fn main() -> void:
+fn main():
     log.set_json(false)
     log.set_level("info")
     log.info("user signup", "user_id", 42, "plan", "pro")

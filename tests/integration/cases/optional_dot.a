@@ -1,4 +1,4 @@
 struct Point:
-    x: i32
+    x
 p = Point(1)
 print(p?.x)

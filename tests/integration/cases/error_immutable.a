@@ -1,2 +1,4 @@
-const x = 1
+# Plain assignment: reassignment is allowed (Python-style mutable by default)
+x = 1
 x = 2
+print(x)

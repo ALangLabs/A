@@ -1,5 +1,5 @@
 from fs import read_file
 
-fn main() -> void:
+fn main():
     print(read_file("definitely-not-here.txt"))
 main()

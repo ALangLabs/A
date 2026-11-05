@@ -3,12 +3,12 @@
 import net
 import http
 
-fn handler(method: String, path: String, headers: {String: String}, body: String) -> (i64, {String: String}, String):
+fn handler(method, path, headers, body):
 
     reply = method + " " + path + " note=" + headers["x-note"] + " body=" + body
     return (200, {"Content-Type": "text/plain"}, reply)
 
-fn tcp_round_trip() -> void:
+fn tcp_round_trip():
     listener = net.tcp_listen("127.0.0.1", 0)
     port = net.local_port(listener)
     client = net.tcp_connect("127.0.0.1", port)
@@ -21,7 +21,7 @@ fn tcp_round_trip() -> void:
     net.close(client)
     net.close(listener)
 
-fn udp_round_trip() -> void:
+fn udp_round_trip():
     receiver = net.udp_socket()
     sender = net.udp_socket()
     net.udp_bind(receiver, "127.0.0.1", 0)

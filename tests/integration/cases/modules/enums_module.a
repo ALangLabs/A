@@ -7,13 +7,13 @@ print(c.Color.Blue)
 print(c.LIMIT)
 print(LIMIT)
 
-var v: c.Color = c.Color.Blue
+v = c.Color.Blue
 print(name_of(v))
 
 s = c.Swatch(color = c.Color.Green, label = "grass")
 print(s.describe())
 
-var r = match v:
+r = match v:
     c.Color.Red => "r"
     c.Color.Green => "g"
     _ => "other"

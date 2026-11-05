@@ -44,8 +44,6 @@ class Parser {
   StmtPtr parseStructDecl();
   StmtPtr parseEnumDecl();
   StmtPtr parseTypeAliasDecl();
-  StmtPtr parseVarDecl();
-  StmtPtr parseConstDecl();
   StmtPtr parseIf();
   StmtPtr parseWhile();
   StmtPtr parseDoWhile();
@@ -73,6 +71,7 @@ class Parser {
   ExprPtr parseLambda();
   ExprPtr parseMatch();
   Pattern parsePattern();
+  Pattern parsePrimaryPattern();
   ExprPtr parseCallOrIndexPostfix(ExprPtr base);
   std::vector<CallArg> parseCallArgs();
   std::vector<StringPart> parseStringParts(const Token& token);

@@ -1,11 +1,11 @@
 struct Point:
-    x: i32
-    y: i32
+    x
+    y
 
-    fn sum(self) -> i32:
+    fn sum(self):
         return self.x + self.y
 
-    fn shift(self, dx: i32, dy: i32) -> void:
+    fn shift(self, dx, dy):
         self.x = self.x + dx
         self.y = self.y + dy
 

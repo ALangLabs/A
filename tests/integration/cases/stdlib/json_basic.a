@@ -1,6 +1,6 @@
 import json
 
-fn main() -> void:
+fn main():
     doc = json.parse("\{\"name\": \"Ada\", \"scores\": [1, 2, 3], \"active\": true, \"score\": 9.5, \"parent\": null\}")
     print(json.kind(doc))
     print(json.has(doc, "name"))

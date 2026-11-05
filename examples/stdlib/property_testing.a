@@ -4,7 +4,7 @@ import testing
 import binary
 import json
 
-fn encode_decode(s: String) -> Json?:
+fn encode_decode(s):
     return binary.decode(binary.encode(s))
 
 testing.seed(2024)
@@ -15,19 +15,19 @@ print(
         40,
         -1000,
         1000,
-        fn(n: i64) -> bool => json.as_int(json.parse(str(n)))! == n,
+        fn(n) => json.as_int(json.parse(str(n)))! == n,
     ),
 )
 
 # Encoding and decoding with the binary module is lossless for text.
-print(testing.for_all_string(25, 12, fn(s: String) -> bool => json.as_str(encode_decode(s)!)! == s))
+print(testing.for_all_string(25, 12, fn(s) => json.as_str(encode_decode(s)!)! == s))
 
-print(testing.for_all_bool(8, fn(b: bool) -> bool => b == (not not b)))
-print(testing.for_all_float(20, 0.0, 100.0, fn(x: f64) -> bool => x >= 0.0 and x <= 100.0))
+print(testing.for_all_bool(8, fn(b) => b == (not not b)))
+print(testing.for_all_float(20, 0.0, 100.0, fn(x) => x >= 0.0 and x <= 100.0))
 
 # Elements are drawn from the collection that is passed in.
 words = ["alpha", "beta", "gamma"]
-print(testing.for_all_elem(words, fn(w: String) -> bool => words.contains(w)))
+print(testing.for_all_elem(words, fn(w) => words.contains(w)))
 
 # A failing property reports the counterexample and exits with status 2.
 # print(testing.for_all_int(50, 0, 1000, fn(n: i64) -> bool => n < 500))

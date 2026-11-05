@@ -4,7 +4,7 @@ import metrics
 import trace
 import json
 
-fn handle(route: String, millis: f64) -> void:
+fn handle(route, millis):
     span = trace.start("handle")
     trace.set_attribute(span, "http.route", route)
     metrics.counter("requests_total", 1, "route", route)

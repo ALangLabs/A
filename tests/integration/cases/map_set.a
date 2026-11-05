@@ -40,10 +40,10 @@ for key in m:
   total += len(key)
 print(total)
 
-empty_map: {str: [i32]} = {}
+empty_map = {}
 empty_map["row"] = [1, 2]
 print(empty_map)
 
-empty_set: {f64} = set()
+empty_set = set()
 empty_set.add(1.5)
 print(empty_set)

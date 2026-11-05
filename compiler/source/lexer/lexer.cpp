@@ -17,7 +17,6 @@ const char* tokName(Tok kind) {
     case Tok::Float: return "float literal";
     case Tok::String: return "string literal";
     case Tok::Char: return "character literal";
-    case Tok::KwVar: return "'var'";
     case Tok::KwFn: return "'fn'";
     case Tok::KwIf: return "'if'";
     case Tok::KwElif: return "'elif'";
@@ -45,8 +44,6 @@ const char* tokName(Tok kind) {
     case Tok::KwAs: return "'as'";
     case Tok::KwMatch: return "'match'";
     case Tok::KwNone: return "'None'";
-    case Tok::KwConst: return "'const'";
-    case Tok::KwPvt: return "'pvt'";
     case Tok::KwEnum: return "'enum'";
     case Tok::KwDo: return "'do'";
   case Tok::KwType: return "'type'";
@@ -129,7 +126,7 @@ namespace {
 
 const std::unordered_map<std::string, Tok>& keywordTable() {
   static const std::unordered_map<std::string, Tok> table = {
-      {"var", Tok::KwVar},       {"fn", Tok::KwFn},         {"if", Tok::KwIf},
+      {"fn", Tok::KwFn},         {"if", Tok::KwIf},
       {"elif", Tok::KwElif},     {"else", Tok::KwElse},     {"while", Tok::KwWhile},
       {"for", Tok::KwFor},       {"in", Tok::KwIn},         {"loop", Tok::KwLoop},
       {"break", Tok::KwBreak},   {"continue", Tok::KwContinue},
@@ -139,8 +136,7 @@ const std::unordered_map<std::string, Tok>& keywordTable() {
       {"self", Tok::KwSelf},     {"true", Tok::KwTrue},     {"false", Tok::KwFalse},
       {"and", Tok::KwAnd},       {"or", Tok::KwOr},         {"not", Tok::KwNot},
       {"import", Tok::KwImport}, {"from", Tok::KwFrom},       {"as", Tok::KwAs},
-      {"match", Tok::KwMatch},   {"None", Tok::KwNone},       {"const", Tok::KwConst},
-      {"pvt", Tok::KwPvt},
+      {"match", Tok::KwMatch},   {"None", Tok::KwNone},
        {"enum", Tok::KwEnum},     {"do", Tok::KwDo},     {"type", Tok::KwType},
   };
   return table;

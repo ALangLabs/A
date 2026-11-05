@@ -1,6 +1,2 @@
 import json
-
-fn main() -> void:
-    print(json.keys(42))
-
-main()
+print(json.keys(json.parse("[1, 2]")))

@@ -193,6 +193,13 @@ class Interpreter {
   struct BreakSignal {};
   struct ContinueSignal {};
 
+  // Thrown by the '?' operator when it propagates a failure out of the
+  // enclosing call frame. Rare path, so a C++ unwind beats threading a
+  // returning_ check through every expression combinator.
+  struct PropagateSignal {
+    Value value;
+  };
+
   struct LValue {
     enum class Kind { Variable, Field, Element, MapEntry } kind = Kind::Variable;
     Binding* binding = nullptr;
@@ -233,6 +240,7 @@ class Interpreter {
   Value evalTuple(const TupleExpr& expr, Env& env);
   Value evalLambda(const LambdaExpr& expr, Env& env);
   Value evalMatch(const MatchExpr& expr, Env& env);
+  bool matchPattern(const Pattern& pattern, const Value& subject, Env& env);
   Value evalTry(const TryExpr& expr, Env& env);
   Value evalComprehension(const ComprehensionExpr& expr, Env& env);
   Value applyBinary(BinOp op, const Value& lhs, const Value& rhs, Span span);
