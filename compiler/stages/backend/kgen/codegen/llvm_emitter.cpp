@@ -1653,6 +1653,13 @@ bool checkSupportedExpr(const Expr& expr) {
       return checkSupportedExpr(*cp.element) && checkSupportedExpr(*cp.iterable) &&
              (!cp.condition || checkSupportedExpr(*cp.condition));
     }
+    case ExprKind::MapLit: {
+      const auto& m = static_cast<const MapLitExpr&>(expr);
+      for (const auto& kv : m.entries)
+        if (!checkSupportedExpr(*kv.first) || !checkSupportedExpr(*kv.second))
+          return false;
+      return true;
+    }
     case ExprKind::Lambda: {
       const auto& l = static_cast<const LambdaExpr&>(expr);
       return checkSupportedExpr(*l.body);

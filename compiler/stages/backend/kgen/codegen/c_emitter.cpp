@@ -138,10 +138,12 @@ class CEmitter {
             "  if (v.f == 2) r.i = ((a_obj *)v.i)->len; else r.i = 0;\n"
             "  return r;\n"
             "}\n"
+            "static aval a_dict_get(aval d, aval k);\n"
             "static aval a_index(aval o, aval ix) {\n"
             "  aval r; r.i = 0; r.d = 0; r.f = 0;\n"
             "  if (o.f != 2) return r;\n"
             "  a_obj *ob = (a_obj *)o.i;\n"
+            "  if (ob->type == 3) return a_dict_get(o, ix);\n"
             "  a_i64 k = ai(ix);\n"
             "  if (k < 0 || k >= ob->len) return r;\n"
             "  if (ob->type == 2) return ((aval *)ob->data)[k];\n"
@@ -197,6 +199,49 @@ class CEmitter {
             "  }\n"
             "  return r;\n"
             "}\n"
+            "static int a_aval_eq(aval a, aval b) {\n"
+            "  if (a.f == 2 && b.f == 2) {\n"
+            "    a_obj *ao = (a_obj *)a.i, *bo = (a_obj *)b.i;\n"
+            "    if (ao->type == 1 && bo->type == 1)\n"
+            "      return ao->len == bo->len && memcmp(ao->data, bo->data, (size_t)ao->len) == 0;\n"
+            "    return ao == bo;\n"
+            "  }\n"
+            "  if (a.f == 1 || b.f == 1) return ad(a) == ad(b);\n"
+            "  return ai(a) == ai(b);\n"
+            "}\n"
+            "static aval a_dict_get(aval d, aval k) {\n"
+            "  aval r; r.i = 0; r.d = 0; r.f = 0;\n"
+            "  if (d.f != 2 || ((a_obj *)d.i)->type != 3) return r;\n"
+            "  a_obj *o = (a_obj *)d.i;\n"
+            "  aval *pairs = (aval *)o->data;\n"
+            "  for (a_i64 i = 0; i < o->len; ++i)\n"
+            "    if (a_aval_eq(pairs[i * 2], k)) return pairs[i * 2 + 1];\n"
+            "  return r;\n"
+            "}\n"
+            "static void a_dict_set(aval d, aval k, aval v) {\n"
+            "  if (d.f != 2 || ((a_obj *)d.i)->type != 3) return;\n"
+            "  a_obj *o = (a_obj *)d.i;\n"
+            "  aval *pairs = (aval *)o->data;\n"
+            "  for (a_i64 i = 0; i < o->len; ++i) {\n"
+            "    if (a_aval_eq(pairs[i * 2], k)) { pairs[i * 2 + 1] = v; return; }\n"
+            "  }\n"
+            "  if (o->len >= o->cap) {\n"
+            "    a_i64 nc = o->cap ? o->cap * 2 : 8;\n"
+            "    aval *nd = (aval *)malloc(sizeof(aval) * (size_t)nc * 2);\n"
+            "    if (!nd) { printf(\"out of memory\\n\"); exit(1); }\n"
+            "    memcpy(nd, o->data, sizeof(aval) * (size_t)o->len * 2);\n"
+            "    o->data = nd; o->cap = nc;\n"
+            "    pairs = (aval *)o->data;\n"
+            "  }\n"
+            "  pairs[o->len * 2] = k;\n"
+            "  pairs[o->len * 2 + 1] = v;\n"
+            "  o->len += 1;\n"
+            "}\n"
+            "static aval a_dict_new(void) {\n"
+            "  aval r; r.f = 2; r.d = 0;\n"
+            "  r.i = (a_i64)a_new_obj(3, 0, 0, 0);\n"
+            "  return r;\n"
+            "}\n"
             "typedef aval (*a_fn)(aval);\n"
             "static aval a_map(aval l, aval f) {\n"
             "  aval r; r.f = 2; r.i = (a_i64)a_new_obj(2, 0, 0, 0); r.d = 0;\n"
@@ -229,6 +274,25 @@ class CEmitter {
             "  return acc;\n"
             "}\n"
             "static void a_print_obj(a_obj *o) {\n"
+            "  if (o->type == 3) {\n"
+            "    printf(\"{\");\n"
+            "    aval *pairs = (aval *)o->data;\n"
+            "    for (a_i64 k = 0; k < o->len; ++k) {\n"
+            "      if (k) printf(\", \");\n"
+            "      aval key = pairs[k * 2];\n"
+            "      if (key.f == 2 && ((a_obj *)key.i)->type == 1)\n"
+            "        printf(\"\\\"%s\\\": \", (char *)((a_obj *)key.i)->data);\n"
+            "      else if (key.f == 2) a_print_obj((a_obj *)key.i), printf(\": \");\n"
+            "      else if (key.f == 1) { char b[64]; a_fmt_double(b, key.d); printf(\"%s: \", b); }\n"
+            "      else printf(\"%lld: \", key.i);\n"
+            "      aval val = pairs[k * 2 + 1];\n"
+            "      if (val.f == 2) a_print_obj((a_obj *)val.i);\n"
+            "      else if (val.f == 1) { char b[64]; a_fmt_double(b, val.d); printf(\"%s\", b); }\n"
+            "      else printf(\"%lld\", val.i);\n"
+            "    }\n"
+            "    printf(\"}\");\n"
+            "    return;\n"
+            "  }\n"
             "  if (o->type == 1) { printf(\"\\\"%s\\\"\", (char *)o->data); return; }\n"
             "  if (o->type != 2) { printf(\"<obj>\"); return; }\n"
             "  printf(\"[\");\n"
@@ -507,6 +571,13 @@ class CEmitter {
         if (cp.condition) collectExprStrings(*cp.condition);
         break;
       }
+      case ExprKind::MapLit: {
+        for (const auto& kv : static_cast<const MapLitExpr&>(e).entries) {
+          collectExprStrings(*kv.first);
+          collectExprStrings(*kv.second);
+        }
+        break;
+      }
       case ExprKind::Call: {
         const auto& c = static_cast<const CallExpr&>(e);
         for (const auto& a : c.args) collectExprStrings(*a.value);
@@ -626,6 +697,13 @@ class CEmitter {
         collectExprLambdas(*cp.element);
         collectExprLambdas(*cp.iterable);
         if (cp.condition) collectExprLambdas(*cp.condition);
+        break;
+      }
+      case ExprKind::MapLit: {
+        for (const auto& kv : static_cast<const MapLitExpr&>(e).entries) {
+          collectExprLambdas(*kv.first);
+          collectExprLambdas(*kv.second);
+        }
         break;
       }
       case ExprKind::Call: {
@@ -938,6 +1016,18 @@ class CEmitter {
         out_ << "  }\n";
         return res;
       }
+      case ExprKind::MapLit: {
+        const auto& m = static_cast<const MapLitExpr&>(e);
+        int ti = tmpTop_++;
+        std::string tn = "_t" + std::to_string(ti);
+        out_ << "  " << tn << " = a_dict_new();\n";
+        for (const auto& kv : m.entries) {
+          std::string kvA = evalA(*kv.first);
+          std::string vvA = evalA(*kv.second);
+          out_ << "  a_dict_set(" << tn << ", " << kvA << ", " << vvA << ");\n";
+        }
+        return tn;
+      }
       case ExprKind::Index: {
         const auto& x = static_cast<const IndexExpr&>(e);
         std::string ov = evalA(*x.object);
@@ -1080,8 +1170,7 @@ class CEmitter {
     out_ << "  if (" << tn << ".f == 2) {\n"
          << "    a_obj *o_ = (a_obj *)" << tn << ".i;\n"
          << "    if (o_->type == 1) printf(\"%s\\n\", (char *)o_->data);\n"
-         << "    else if (o_->type == 2) { a_print_obj(o_); printf(\"\\n\"); }\n"
-         << "    else printf(\"<obj>\\n\");\n"
+         << "    else a_print_obj(o_), printf(\"\\n\");\n"
          << "  } else if (" << tn << ".f) a_print_double(" << tn << ".d);"
          << " else printf(\"%lld\\n\", " << tn << ".i);\n";
   }
@@ -1150,6 +1239,9 @@ class CEmitter {
           out_ << "      a_obj *_o" << ti << " = (a_obj *)" << tn << ".i;\n";
           out_ << "      if (_k" << ti << " >= 0 && _k" << ti << " < _o" << ti
                << "->len) ((aval *)_o" << ti << "->data)[_k" << ti << "] = " << vv << ";\n";
+          out_ << "    } else if (" << tn << ".f == 2 && ((a_obj *)" << tn
+               << ".i)->type == 3) {\n";
+          out_ << "      a_dict_set(" << tn << ", " << iv << ", " << vv << ");\n";
           out_ << "    }\n  }\n";
           break;
         }

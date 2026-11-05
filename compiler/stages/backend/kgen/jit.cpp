@@ -73,6 +73,7 @@ int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream&
   tcc_add_symbol(s, "memset", (void*)memset);
   tcc_add_symbol(s, "memcpy", (void*)memcpy);
   tcc_add_symbol(s, "memmove", (void*)memmove);
+  tcc_add_symbol(s, "memcmp", (void*)memcmp);
   // a_print_double's formatting helpers.
   tcc_add_symbol(s, "snprintf", (void*)snprintf);
   tcc_add_symbol(s, "strtod", (void*)strtod);
