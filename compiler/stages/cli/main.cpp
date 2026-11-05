@@ -34,6 +34,7 @@ void printUsage(std::ostream& os) {
      << "\n"
      << "Options:\n"
      << "  -o <file>        output path (build/doc)\n"
+     << "  -c <code>        run inline A source instead of a file (with run, or alone)\n"
      << "  -w, --write      rewrite source in place (fmt)\n"
      << "  --check          exit nonzero if file needs formatting (fmt)\n"
      << "  --indent <n>     indentation width (fmt, default 4)\n"
@@ -58,6 +59,7 @@ bool isTerminal() {
 struct Options {
   std::string command;
   std::string path;
+  std::string commandCode;
   std::string outputPath;
   bool emitLLVM = false;
   std::vector<std::string> modulePaths;
@@ -102,6 +104,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       options.modulePaths.push_back(argv[++i]);
     } else if (arg.rfind("-I", 0) == 0 && arg.size() > 2) {
       options.modulePaths.push_back(arg.substr(2));
+    } else if (arg == "-c" || arg == "--command") {
+      if (i + 1 >= argc) { err << "error: '-c' requires source code\n"; return false; }
+      options.commandCode = argv[++i];
+    } else if (arg.rfind("-c", 0) == 0 && arg.size() > 2) {
+      options.commandCode = arg.substr(2);
     } else if (arg == "--stdlib") {
       if (i + 1 >= argc) { err << "error: '--stdlib' requires a directory\n"; return false; }
       options.stdlibRoot = argv[++i];
@@ -110,16 +117,30 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     else if (!arg.empty() && arg[0] == '-') { err << "error: unknown option '" << arg << "'\n"; return false; }
     else positional.push_back(arg);
   }
-  if (positional.empty()) { printUsage(std::cerr); return false; }
-  options.command = positional[0];
+  if (positional.empty()) {
+    if (options.commandCode.empty()) { printUsage(std::cerr); return false; }
+    options.command = "run";  // `a -c "..."` implies run, like `python -c`
+  } else {
+    options.command = positional[0];
+  }
   if (options.command == "version") { std::cout << a::kVersionLine << "\n"; std::exit(0); }
   if (options.command == "help") { printUsage(std::cout); std::exit(0); }
   if (options.command == "repl") {
     if (positional.size() > 1) { err << "error: 'repl' takes no file argument\n"; return false; }
   } else {
-    if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
-    if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
-    options.path = positional[1];
+    if (!options.commandCode.empty() && options.command != "run") {
+      err << "error: '-c' is only valid with 'run'\n"; return false;
+    }
+    if (!options.commandCode.empty() && positional.size() > 1) {
+      err << "error: '-c' cannot be combined with a file argument\n"; return false;
+    }
+    if (options.commandCode.empty()) {
+      if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
+      if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
+      options.path = positional[1];
+    } else if (positional.size() > 2) {
+      err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
+    }
   }
   if (options.command != "build" && options.command != "doc" && !options.outputPath.empty()) { err << "error: '-o' is only valid with 'build' or 'doc'\n"; return false; }
   if (options.command != "build" && options.emitLLVM) { err << "error: '--emit-llvm' is only valid with 'build'\n"; return false; }
@@ -148,7 +169,12 @@ int main(int argc, char** argv) {
   config.backend = "llvm"; // single backend (Mojo-style LLVM pipeline)
   config.modulePaths = options.modulePaths;
   config.stdlibRoot = options.stdlibRoot;
-  if (options.command == "run") return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
+  if (options.command == "run") {
+    if (!options.commandCode.empty()) {
+      return a::runSource("<command>", options.commandCode, config, std::cin, std::cout, std::cerr);
+    }
+    return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
+  }
   if (options.command == "repl") return a::repl(config, std::cin, std::cout, std::cerr);
   if (options.command == "test") return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "build") {

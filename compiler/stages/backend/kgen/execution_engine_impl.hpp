@@ -229,6 +229,7 @@ class KGENExecutionEngine {
   [[noreturn]] void fail(Span span, std::string message, std::string help = {});
 
   void execStatements(const std::vector<StmtPtr>& statements, Env& env);
+  void execStatements(const StmtPtr* first, const StmtPtr* last, Env& env);
   void exec(const Stmt& stmt, Env& env);
   void execBlock(const std::vector<StmtPtr>& body, Env& parent);
 

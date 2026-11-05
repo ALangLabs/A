@@ -818,9 +818,8 @@ int KGENExecutionEngine::evalPending() {
       env.parent = nullptr;
       currentModule_ = id;
       try {
-        std::vector<StmtPtr> pending(statements.begin() + static_cast<std::ptrdiff_t>(done),
-                                     statements.end());
-        execStatements(pending, env);
+        execStatements(statements.data() + static_cast<std::ptrdiff_t>(done),
+                       statements.data() + statements.size(), env);
       } catch (PropagateSignal&) {
         // A '?' at module top level stops the remaining statements.
       } catch (...) {
@@ -916,11 +915,16 @@ int KGENExecutionEngine::runTests(std::ostream& out) {
 // ---------------------------------------------------------------- execution
 
 void KGENExecutionEngine::execStatements(const std::vector<StmtPtr>& statements, Env& env) {
+  execStatements(statements.data(), statements.data() + statements.size(), env);
+}
+
+void KGENExecutionEngine::execStatements(const StmtPtr* first, const StmtPtr* last, Env& env) {
   std::vector<const Stmt*> defers;
   std::exception_ptr pending;
 
   try {
-    for (const auto& statement : statements) {
+    for (const StmtPtr* it = first; it != last; ++it) {
+      const auto& statement = *it;
       if (auto* defer = asStmt<DeferStmt>(*statement, StmtKind::Defer)) {
         defers.push_back(defer->body.get());
         continue;

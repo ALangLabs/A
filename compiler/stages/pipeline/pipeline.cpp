@@ -3,6 +3,7 @@
 #include <sstream>
 #include <utility>
 #include "backend/kgen/execution_engine.hpp"
+#include "backend/kgen/execution_engine_impl.hpp"
 #include "backend/kgen/kgen_backend.hpp"
 #include "diagnostics/diagnostics.hpp"
 #include "ir/ir.hpp"
@@ -58,5 +59,24 @@ int emitLLVMPipeline(const std::string& path,const std::string& outputPath,const
 int emitIRPipeline(const std::string& path,const PipelineConfig& config,bool optimize,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn; DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
   ir::Program p=ir::lowerProgram(*m.graph,*m.sema); if(optimize) a::ir::runAll(p); out<<ir::printProgram(p); return kOk;
+}
+ReplSession::~ReplSession() = default;
+int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
+  DiagnosticSink frontendSink;
+  auto m=runFrontendPipeline("<repl>",source,config,frontendSink,out,err);
+  if(!m.ok) return 1;
+  if(!session.primed){
+    session.graph=std::move(m.graph); session.sema=std::move(m.sema);
+    if(!session.sink) session.sink=std::make_unique<DiagnosticSink>();
+    session.engine=std::make_unique<KGENExecutionEngine>(*session.graph,*session.sema,*session.sink,in,out,err);
+    session.engine->setReplEcho(true);
+    session.primed=true;
+  }else{
+    // Mutate in place: the engine holds references to these objects.
+    *session.graph=std::move(*m.graph); *session.sema=std::move(*m.sema);
+  }
+  int rc=session.engine->evalPending();
+  session.sink->flush(err,false);
+  return rc;
 }
 }
