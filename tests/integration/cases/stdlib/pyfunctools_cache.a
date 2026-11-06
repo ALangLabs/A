@@ -1,0 +1,35 @@
+# functools.cache / lru_cache: memoization.
+import functools
+
+square = fn(x) => x * x
+c = functools.cache(square)
+print(c.call([4]))
+print(c.call([4]))
+print(c.call([5]))
+info = c.cache_info()
+print(info.hits, info.misses, info.maxsize, info.currsize)
+
+# lru_cache with a bound: oldest entries are evicted.
+b = functools.lru_cache(fn(x) => x * 10, 2)
+print(b.call([1]))
+print(b.call([2]))
+print(b.call([1]))   # hit
+print(b.call([3]))   # evicts key 2
+print(b.call([2]))   # miss again
+bi = b.cache_info()
+print(bi.hits, bi.misses, bi.maxsize, bi.currsize)
+
+# Multi-argument keys (via lru_cache; see README for the sema note on
+# reusing one wrapper name with different-arity callables).
+add = functools.lru_cache(fn(a, b) => a + b, 0)
+print(add.call([2, 3]))
+print(add.call([2, 3]))
+print(add.call([2, 4]))
+ai = add.cache_info()
+print(ai.hits, ai.misses, ai.currsize)
+
+# cache_clear resets values but keeps counters.
+c.cache_clear()
+print(c.cache_info().currsize)
+print(c.call([4]))
+print(c.cache_info().hits, c.cache_info().misses)

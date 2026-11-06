@@ -1,0 +1,134 @@
+# std.collections.ordereddict — Python `collections.OrderedDict` port.
+#
+# A's `{K: V}` maps already preserve insertion order (new keys append,
+# updating an existing key keeps its position), which is exactly
+# OrderedDict's core guarantee. This wrapper adds the OrderedDict-specific
+# API that plain maps lack: `popitem(last)`, `move_to_end`, and
+# order-sensitive `eq`. Plain dict API (`get`/`set`/`pop`/`update`/...) is
+# re-exposed for a drop-in feel.
+import core
+
+## OrderedDict: insertion-ordered key/value map.
+## `data` is public for interop with plain-map helpers.
+struct OrderedDict:
+    data
+
+    ## at(k) -> value for k; runtime error when absent
+    ## (Python raises KeyError).
+    fn at(self, k):
+        if k in self.data:
+            return self.data[k]
+        core.panic("OrderedDict has no key '" + str(k) + "'")
+
+    fn get(self, k):
+        return self.data.get(k)
+
+    fn get_or(self, k, default):
+        return self.data.get(k, default)
+
+    ## set(k, v) -> insert or update (Python `od[k] = v`).
+    fn set(self, k, v):
+        self.data[k] = v
+
+    ## contains(k) -> true when the key exists.
+    fn contains(self, k):
+        return k in self.data
+
+    ## pop(k) -> remove k and return its value; runtime error when absent.
+    fn pop(self, k):
+        if k not in self.data:
+            core.panic("OrderedDict has no key '" + str(k) + "'")
+        return self.data.pop(k)
+
+    ## pop_or(k, default) -> remove k and return its value or default.
+    fn pop_or(self, k, default):
+        return self.data.pop(k, default)
+
+    ## popitem(last) -> remove and return the (key, value) pair.
+    ## last=true removes the most recently inserted pair (Python default);
+    ## last=false removes the oldest (FIFO, `popitem(last=False)`).
+    fn popitem(self, last):
+        ks = self.data.keys()
+        if len(ks) == 0:
+            core.panic("popitem from empty OrderedDict")
+        if last:
+            k = ks[len(ks) - 1]
+        else:
+            k = ks[0]
+        v = self.data[k]
+        self.data.pop(k)
+        return (k, v)
+
+    ## move_to_end(k, last) -> move an existing key to the end
+    ## (last=true, Python default) or to the front (last=false).
+    ## Runtime error when k is absent (Python raises KeyError).
+    fn move_to_end(self, k, last):
+        if k not in self.data:
+            core.panic("OrderedDict has no key '" + str(k) + "'")
+        v = self.data[k]
+        self.data.pop(k)
+        if last:
+            self.data[k] = v
+        else:
+            rebuilt = {}
+            rebuilt[k] = v
+            for other in self.data.keys():
+                rebuilt[other] = self.data[other]
+            self.data = rebuilt
+
+    fn keys(self):
+        return self.data.keys()
+
+    fn values(self):
+        return self.data.values()
+
+    fn items(self):
+        return self.data.items()
+
+    fn update(self, other):
+        self.data.update(other)
+
+    fn clear(self):
+        self.data.clear()
+
+    fn copy(self):
+        return OrderedDict(self.data.copy())
+
+    fn size(self):
+        return len(self.data)
+
+    ## reversed() -> keys in reverse insertion order
+    ## (Python `reversed(od)`).
+    fn reversed(self):
+        ks = self.data.keys()
+        out = []
+        i = len(ks) - 1
+        while i >= 0:
+            out.append(ks[i])
+            i = i - 1
+        return out
+
+    ## eq(other) -> true when both have the same keys in the same order
+    ## with equal values (Python OrderedDict.__eq__ is order-sensitive
+    ## against other OrderedDicts).
+    fn eq(self, other):
+        if len(self.data) != len(other.data):
+            return false
+        sk = self.data.keys()
+        ok = other.data.keys()
+        i = 0
+        while i < len(sk):
+            if sk[i] != ok[i]:
+                return false
+            if self.data[sk[i]] != other.data[ok[i]]:
+                return false
+            i = i + 1
+        return true
+
+## ordered_dict_fromkeys(keys, value) -> OrderedDict with every key in
+## `keys` mapped to `value` (Python `OrderedDict.fromkeys`).
+fn ordered_dict_fromkeys(keys, value):
+    od = OrderedDict({})
+    for k in keys:
+        od.data[k] = value
+    return od

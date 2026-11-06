@@ -1,0 +1,28 @@
+# functools.partial: positional partial application.
+import functools
+
+add3 = fn(a, b, c) => a + b + c
+p = functools.partial(add3, [10, 20])
+print(p.call([5]))
+print(p.bound)
+
+q = functools.partial1(fn(a, b) => "{a}-{b}", "x")
+print(q.call(["y"]))
+
+r = functools.partial1(fn(x, y) => x * y, 6)
+print(r.call([7]))
+
+s = functools.partial3(fn(a, b, c, d) => a + b + c + d, 1, 2, 3)
+print(s.call([4]))
+
+# Heterogeneous bound args via the partialN constructors.
+t = functools.partial2(fn(a, b, c) => "{a}{b}{c}", 100, "!")
+print(t.call(["hi"]))
+
+# Array-bound form with a dynamically built (heterogeneous) array.
+# Same arity as `add3` so the wrapper's inferred signature stays consistent.
+mixed = []
+mixed.append(100)
+mixed.append("!")
+u = functools.partial(fn(a, b, c) => "{a}{b}{c}", mixed)
+print(u.call(["hi"]))

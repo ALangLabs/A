@@ -1,3 +1,11 @@
 # Compatibility: collections split into modular files (Mojo-style).
 from "list.a" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
 from "dict.a" import dict_get, dict_has
+from "namedtuple.a" import namedtuple, NamedTuple, NamedTupleSpec
+from "counter.a" import Counter
+from "ordereddict.a" import OrderedDict, ordered_dict_fromkeys
+from "defaultdict.a" import defaultdict, DefaultDict
+from "chainmap.a" import ChainMap, chain_map, chain_map_of
+from "userdict.a" import UserDict, user_dict, user_dict_of
+from "userlist.a" import UserList, user_list, user_list_of
+from "deque.a" import deque, deque_of, deque_bounded, Deque

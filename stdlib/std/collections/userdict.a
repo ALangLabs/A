@@ -1,0 +1,103 @@
+# std.collections.userdict — Python `collections.UserDict` port.
+#
+# UserDict is a thin wrapper around a plain dict that exposes the
+# MutableMapping API. A's `{K: V}` maps already provide the storage, so
+# `data` is a public map field; this class adds the Python method surface
+# (`at`/`get_or`/`pop_or`/`setdefault`/`remove`/`popitem`/...).
+# Iterators are materialized to lists per the porting guide.
+import core
+
+## UserDict: dict wrapper with the MutableMapping-style API.
+## Construct with `UserDict({...})` or `user_dict()` for an empty one.
+struct UserDict:
+    data
+
+    ## at(k) -> value for k; runtime error when absent
+    ## (Python `ud[k]` raises KeyError).
+    fn at(self, k):
+        if k in self.data:
+            return self.data[k]
+        core.panic("UserDict has no key '" + str(k) + "'")
+
+    ## get(k) -> value or None when absent (Python `ud.get(k)`).
+    fn get(self, k):
+        return self.data.get(k)
+
+    ## get_or(k, default) -> value or default when absent.
+    fn get_or(self, k, default):
+        return self.data.get(k, default)
+
+    ## set(k, v) -> insert or update (Python `ud[k] = v`).
+    fn set(self, k, v):
+        self.data[k] = v
+
+    ## setdefault(k, v) -> value for k, inserting v when absent.
+    fn setdefault(self, k, v):
+        if k in self.data:
+            return self.data[k]
+        self.data[k] = v
+        return v
+
+    ## remove(k) -> delete k; runtime error when absent
+    ## (Python `del ud[k]`).
+    fn remove(self, k):
+        if k not in self.data:
+            core.panic("UserDict has no key '" + str(k) + "'")
+        self.data.pop(k)
+
+    ## pop(k) -> remove k and return its value; runtime error when absent.
+    fn pop(self, k):
+        if k not in self.data:
+            core.panic("UserDict has no key '" + str(k) + "'")
+        return self.data.pop(k)
+
+    ## pop_or(k, default) -> remove k and return its value or default.
+    fn pop_or(self, k, default):
+        return self.data.pop(k, default)
+
+    ## popitem() -> remove and return the last-inserted (key, value)
+    ## pair (Python `ud.popitem()`).
+    fn popitem(self):
+        ks = self.data.keys()
+        if len(ks) == 0:
+            core.panic("popitem from empty UserDict")
+        k = ks[len(ks) - 1]
+        v = self.data[k]
+        self.data.pop(k)
+        return (k, v)
+
+    fn contains(self, k):
+        return k in self.data
+
+    fn keys(self):
+        return self.data.keys()
+
+    fn values(self):
+        return self.data.values()
+
+    fn items(self):
+        return self.data.items()
+
+    fn update(self, other):
+        self.data.update(other)
+
+    fn clear(self):
+        self.data.clear()
+
+    fn copy(self):
+        return UserDict(self.data.copy())
+
+    fn size(self):
+        return len(self.data)
+
+    ## eq(other) -> true when both wrap equal maps (Python `==`).
+    fn eq(self, other):
+        return self.data == other.data
+
+## user_dict() -> empty UserDict (Python `UserDict()`).
+fn user_dict():
+    return UserDict({})
+
+## user_dict_of(d) -> UserDict wrapping an existing map.
+fn user_dict_of(d):
+    return UserDict(d)

@@ -1,0 +1,30 @@
+# std.functools.reduce (CPython functools.reduce port).
+#
+# CPython: `reduce(function, iterable[, initializer])` — with no initializer
+# the first element seeds the accumulator and an empty iterable raises
+# TypeError. A's builtin `reduce` has the different order
+# `reduce(array, init, fn)`; these wrappers restore the Python argument
+# order. There is no exception mechanism, so the empty-iterable contract
+# violation is a runtime `panic` (matching stdlib style).
+import core
+
+## reduce(function, xs) -> fold `xs` left-to-right with `function(acc, x)`,
+## seeded by the first element. Panics on an empty `xs` (CPython raises
+## TypeError).
+fn reduce(function, xs):
+    if len(xs) == 0:
+        core.panic("reduce() of empty iterable with no initial value")
+    acc = xs[0]
+    i = 1
+    while i < len(xs):
+        acc = function(acc, xs[i])
+        i = i + 1
+    return acc
+
+## reduce_init(function, xs, init) -> fold `xs` left-to-right with
+## `function(acc, x)`, seeded by `init`. Works on empty `xs` (returns init).
+fn reduce_init(function, xs, init):
+    acc = init
+    for x in xs:
+        acc = function(acc, x)
+    return acc

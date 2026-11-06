@@ -1,0 +1,17 @@
+10
+24
+16
+7
+a,b,c
+[1, 2, 3]
+[3, 1, 2]
+["a", "bb", "dd", "ccc"]
+["ccc", "bb", "dd", "a"]
+[5]
+[]
+int:5
+str:hi
+float:1.5
+default
+int:9
+default

@@ -1,0 +1,122 @@
+# std.functools._apply (internal helpers).
+#
+# A has no `*args`/`**kwargs`, no splat, and strict fixed-arity calls, so a
+# truly variadic `functools.partial`/`lru_cache` wrapper cannot forward an
+# arbitrary argument list directly. These helpers recover dynamic arity by
+# dispatching on `len(args)` to per-arity trampolines. Each `_callN` calls the
+# function value with exactly N arguments, so sema infers a matching function
+# type per helper (calling one helper with several arities fails type-check).
+#
+# Supported arity: 0..8 call arguments / cache-key arguments. Larger arities
+# are a runtime error (documented deviation from CPython, which is unbounded).
+import core
+
+fn _call0(f):
+    return f()
+
+fn _call1(f, args):
+    return f(args[0])
+
+fn _call2(f, args):
+    return f(args[0], args[1])
+
+fn _call3(f, args):
+    return f(args[0], args[1], args[2])
+
+fn _call4(f, args):
+    return f(args[0], args[1], args[2], args[3])
+
+fn _call5(f, args):
+    return f(args[0], args[1], args[2], args[3], args[4])
+
+fn _call6(f, args):
+    return f(args[0], args[1], args[2], args[3], args[4], args[5])
+
+fn _call7(f, args):
+    return f(args[0], args[1], args[2], args[3], args[4], args[5], args[6])
+
+fn _call8(f, args):
+    return f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
+
+## _apply(f, args) -> calls function value `f` with the elements of `args`.
+## `args` must be an array built dynamically (e.g. via `append`) when it mixes
+## types; array literals require homogeneous element types.
+fn _apply(f, args):
+    n = len(args)
+    if n == 0:
+        return _call0(f)
+    if n == 1:
+        return _call1(f, args)
+    if n == 2:
+        return _call2(f, args)
+    if n == 3:
+        return _call3(f, args)
+    if n == 4:
+        return _call4(f, args)
+    if n == 5:
+        return _call5(f, args)
+    if n == 6:
+        return _call6(f, args)
+    if n == 7:
+        return _call7(f, args)
+    if n == 8:
+        return _call8(f, args)
+    core.panic("functools._apply: at most 8 arguments supported")
+    return None
+
+# Cache-key builders. The first tuple element is the arity, so keys of
+# different arities can never collide; the second element is the argument
+# tuple (or the single scalar argument for arity 1, wrapped as (1, x)).
+
+fn _key0():
+    return (0, 0)
+
+fn _key1(args):
+    return (1, args[0])
+
+fn _key2(args):
+    return (2, (args[0], args[1]))
+
+fn _key3(args):
+    return (3, (args[0], args[1], args[2]))
+
+fn _key4(args):
+    return (4, (args[0], args[1], args[2], args[3]))
+
+fn _key5(args):
+    return (5, (args[0], args[1], args[2], args[3], args[4]))
+
+fn _key6(args):
+    return (6, (args[0], args[1], args[2], args[3], args[4], args[5]))
+
+fn _key7(args):
+    return (7, (args[0], args[1], args[2], args[3], args[4], args[5], args[6]))
+
+fn _key8(args):
+    return (8, (args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
+
+## _key(args) -> map key uniquely identifying the argument list.
+## Requires hashable arguments (scalars, strings, tuples thereof); composite
+## arguments such as arrays key by identity and will simply never hit.
+fn _key(args):
+    n = len(args)
+    if n == 0:
+        return _key0()
+    if n == 1:
+        return _key1(args)
+    if n == 2:
+        return _key2(args)
+    if n == 3:
+        return _key3(args)
+    if n == 4:
+        return _key4(args)
+    if n == 5:
+        return _key5(args)
+    if n == 6:
+        return _key6(args)
+    if n == 7:
+        return _key7(args)
+    if n == 8:
+        return _key8(args)
+    core.panic("functools._key: at most 8 arguments supported")
+    return (9, 9)

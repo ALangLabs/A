@@ -1,0 +1,140 @@
+# std.types.tags — runtime type-tag vocabulary (CPython `types` port, part 1).
+#
+# CPython's `types` module exposes runtime *type objects* (`type(x)` results)
+# used with `isinstance`/`issubclass`. A has no runtime type objects and no
+# `isinstance`, so this port provides the honest equivalent: `type_tag(x)`
+# returns a Python-style type name as a string, and the module-level constants
+# below name the tags for types that A values cannot currently produce
+# (functions, modules, frames, ...). They are vocabulary for comparisons and
+# documentation, not usable with `isinstance` (which does not exist).
+#
+# Deviations vs CPython (see README.md):
+#   * `type(x)` -> `type_tag(x) -> String`; there is no type object to
+#     instantiate, subclass, or pass to `isinstance`.
+#   * Optional values (`Some(x)`) report the tag of their inner value because
+#     `json.kind` unwraps optionals; `Ok`/`Err` results and closures report
+#     "unknown" (they have no JSON/binary representation to inspect).
+#   * A `struct` instance reports its struct name (parsed from `str(x)`),
+#     matching Python's `cls.__name__` behaviour for user classes.
+import json
+
+## _slice(s, start, end) -> substring s[start:end] (chars, end exclusive).
+## A strings have no slice syntax; this is the minimal helper used across
+## the Python-port modules.
+fn _slice(s, start, end):
+    cs = s.chars()
+    out = ""
+    i = start
+    while i < end and i < len(cs):
+        out = out + str(cs[i])
+        i = i + 1
+    return out
+
+## type_tag(x) -> Python-style type name for any A value.
+##
+## Mapping (CPython `type(x).__name__` analog):
+##   None            -> "NoneType"
+##   bool            -> "bool"
+##   int / float     -> "int" / "float"
+##   string / char   -> "str"
+##   list, Json list -> "list"
+##   set             -> "set"
+##   tuple           -> "tuple"
+##   dict, Json obj  -> "dict"
+##   struct instance -> the struct name (e.g. "Point")
+##   range, fn, Ok/Err, other opaque -> "unknown"
+fn type_tag(x) -> str:
+    kind = json.kind(x)
+    if kind == "null":
+        return "NoneType"
+    if kind == "bool":
+        return "bool"
+    if kind == "number":
+        if json.as_int(x) != None:
+            return "int"
+        return "float"
+    if kind == "string":
+        return "str"
+    if kind == "array":
+        if json.as_array(x) != None:
+            return "list"
+        # Native set or tuple: `str` renders them '{...}' / '(...)'.
+        s = str(x)
+        if s.startswith("{"):
+            return "set"
+        if s.startswith("("):
+            return "tuple"
+        return "unknown"
+    if kind == "object":
+        s = str(x)
+        if s.startswith("{"):
+            return "dict"
+        # Struct instance: str renders 'Name(field=...)'.
+        i = s.find("(")
+        if i > 0:
+            return _slice(s, 0, i)
+        return "object"
+    return "unknown"
+
+## type_name(x) -> alias for type_tag(x), mirroring `type(x).__name__`.
+fn type_name(x) -> str:
+    return type_tag(x)
+
+# ---------------------------------------------------------------------------
+# Type-tag constants. In CPython these are classes (type objects); here they
+# are the string tags a ported module would compare `type_tag(x)` against.
+# A cannot currently *produce* values of most of these kinds, but the
+# vocabulary is kept for parity with `types.__all__`-style imports.
+# ---------------------------------------------------------------------------
+
+## types.NoneType — tag for None (JSON null).
+NoneType = "NoneType"
+
+## types.FunctionType / LambdaType — user-defined function tag.
+FunctionType = "function"
+LambdaType = "function"
+
+## types.BuiltinFunctionType — native/builtin function tag.
+BuiltinFunctionType = "builtin_function_or_method"
+
+## types.MethodType — bound method tag.
+MethodType = "method"
+
+## types.ModuleType — imported module tag.
+ModuleType = "module"
+
+## types.CodeType — compiled code object tag.
+CodeType = "code"
+
+## types.TracebackType — exception traceback tag (A has no exceptions).
+TracebackType = "traceback"
+
+## types.FrameType — execution frame tag.
+FrameType = "frame"
+
+## types.GeneratorType — generator tag (A has no generators).
+GeneratorType = "generator"
+
+## types.CoroutineType — coroutine tag (A has no async).
+CoroutineType = "coroutine"
+
+## types.AsyncGeneratorType — async generator tag.
+AsyncGeneratorType = "async_generator"
+
+## types.CellType — closure cell tag.
+CellType = "cell"
+
+## types.MappingProxyType — read-only mapping proxy tag.
+MappingProxyType = "mappingproxy"
+
+## types.GenericAlias — `list[int]`-style alias tag (A generics erase at runtime).
+GenericAlias = "GenericAlias"
+
+## types.UnionType — `int | str` union tag.
+UnionType = "UnionType"
+
+## types.EllipsisType — `...` literal tag.
+EllipsisType = "ellipsis"
+
+## types.NotImplementedType — `NotImplemented` singleton tag.
+NotImplementedType = "NotImplementedType"

@@ -1,0 +1,66 @@
+# std.keyword — port of CPython 3.14 Lib/keyword.py, adapted to A.
+#
+# CPython's `keyword` module is a data module: `kwlist` (hard keywords),
+# `softkwlist` (soft keywords), `iskeyword`, `issoftkeyword`. This port
+# keeps the same API shape but the *primary* lists describe **A's**
+# keywords (see docs/language-spec/README.md §2.3 and the lexer keyword
+# table in compiler/stages/lexer/lexer.cpp). Python's own lists are kept
+# under `python_kwlist` / `python_softkwlist` for compatibility tooling,
+# with `ispykeyword` / `ispysoftkeyword` predicates.
+#
+# Deviations from CPython:
+#   * `kwlist`/`iskeyword` refer to A keywords, not Python's.
+#   * `iskeyword`/`issoftkeyword` take a String and return bool; CPython's
+#     are `frozenset.__contains__` callables — same call syntax.
+#   * CPython's `iskeyword` does not check soft keywords; same here.
+#   * No `__all__`.
+
+# -- A keywords ----------------------------------------------------------------
+# Exact set produced by the lexer keyword table (includes the capitalized
+# `Class`/`Metaclass` alias forms and the `true`/`false`/`None` literals,
+# which the A lexer treats as keyword tokens).
+
+kwlist = [
+    "fn", "if", "elif", "else", "while", "for", "in", "loop",
+    "break", "continue", "return", "defer", "struct", "class", "Class",
+    "metaclass", "Metaclass", "pass", "self", "true", "false",
+    "and", "or", "not", "import", "from", "as", "match", "None",
+    "enum", "do", "type", "trait", "where", "comptime", "impl",
+]
+
+# -- Python keywords (CPython 3.14 Lib/keyword.py, verbatim) --------------------
+
+python_kwlist = [
+    "False", "None", "True", "and", "as", "assert", "async", "await",
+    "break", "class", "continue", "def", "del", "elif", "else", "except",
+    "finally", "for", "from", "global", "if", "import", "in", "is",
+    "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try",
+    "while", "with", "yield",
+]
+
+python_softkwlist = [
+    "_", "case", "match", "type",
+]
+
+# `softkwlist` mirrors the CPython name: it lists *Python's* soft keywords
+# (kept for source-level compat tooling). A has no soft-keyword concept —
+# every entry in `kwlist` is a hard keyword.
+softkwlist = python_softkwlist
+
+# -- predicates ----------------------------------------------------------------
+
+fn iskeyword(s):
+    "True if `s` is a reserved A keyword (member of `kwlist`)."
+    return kwlist.contains(s)
+
+fn issoftkeyword(s):
+    "True if `s` is a Python soft keyword (member of `softkwlist`)."
+    return softkwlist.contains(s)
+
+fn ispykeyword(s):
+    "True if `s` is a Python hard keyword (member of `python_kwlist`)."
+    return python_kwlist.contains(s)
+
+fn ispysoftkeyword(s):
+    "True if `s` is a Python soft keyword (member of `python_softkwlist`)."
+    return python_softkwlist.contains(s)

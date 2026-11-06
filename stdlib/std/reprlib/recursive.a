@@ -1,0 +1,49 @@
+# std.reprlib.recursive — CPython `reprlib.recursive_repr` port.
+#
+# CPython: `@recursive_repr(fillvalue='...')` decorates a `__repr__` method
+# so recursive calls on the same object return `fillvalue` instead of
+# recursing forever. The guard set is keyed by (id(self), thread id).
+#
+# A has no decorators and no callable objects, so the port returns a
+# `RecursiveRepr` record invoked via `.call(args)` (same convention as
+# `functools.LRUCache.call`):
+#
+#   rr = recursive_repr("...")        # decorator factory (fillvalue required;
+#   wrapped = rr(my_repr_fn)          #   A has no default arguments)
+#   wrapped.call([obj])               # -> repr string or "..." on recursion
+#
+# The running set stores the *argument value*; for containers A hashes map
+# keys by identity (like CPython's id()), so self-references are detected.
+# Scalar arguments compare by value, which is harmless: scalars cannot be
+# recursive anyway.
+import core
+
+## _call1(f, x) -> f(x); indirect call so sema sees a plain function value
+## (same trampoline pattern as functools._apply).
+fn _call1(f, x):
+    return f(x)
+
+## RecursiveRepr — recursion-guarded wrapper around a repr function.
+struct RecursiveRepr:
+    user_function
+    fillvalue
+    running    # set of in-flight arguments
+
+    ## call(self, args) -> user_function(args[0]) or fillvalue when the
+    ## same argument is already being repr'd (recursion detected).
+    ## Exactly one argument is supported, matching CPython's wrapper(self).
+    fn call(self, args):
+        if len(args) != 1:
+            core.panic("recursive_repr: expected exactly 1 argument")
+        key = args[0]
+        if key in self.running:
+            return self.fillvalue
+        self.running.add(key)
+        result = _call1(self.user_function, key)
+        self.running.discard(key)
+        return result
+
+## recursive_repr(fillvalue) -> decorator producing a RecursiveRepr.
+## Pass "..." to match the CPython default (no default args in A).
+fn recursive_repr(fillvalue):
+    return fn(user_function) => RecursiveRepr(user_function, fillvalue, set())
