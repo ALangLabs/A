@@ -1,45 +1,44 @@
-# metrics
+# `std.metrics`
 
-A process-local metrics registry that renders the Prometheus text exposition
-format.
+Standard library package `std.metrics` for A.
+
+## Status
+
+- **Kind:** Native-backed module (registered in the A toolchain/runtime)
+- **Backend:** Metrics collection and rendering.
+- **Source path:** `stdlib/std/metrics/`
+
+## Import
+
+```a
+import metrics
+```
+
+## What It Provides
+
+- **Functions:** `counter`, `gauge`, `histogram`, `render`, `reset`
+
+## Example
 
 ```a
 import metrics
 
-metrics.counter("http_requests", 2, "route", "/home", "method", "GET")
-metrics.gauge("queue_depth", 7.5)
-metrics.histogram("latency_ms", 12.5, {"route": "/home"})
-print(metrics.render())
+# Inspect the available functions/constants in this build.
+# Then call `metrics.<member>(...)` using the API overview above.
 ```
 
-| Member | Signature |
-| ------ | --------- |
-| `counter` | `(name, increment[, labels])` — adds a non-negative integer |
-| `gauge` | `(name, value[, labels])` — sets the current value |
-| `histogram` | `(name, value[, labels])` — records one observation |
-| `render` | `() -> String` — Prometheus text format |
-| `reset` | `()` — forgets every series |
+## Usage Notes
 
-Labels are either one map (or struct) or alternating `name, value` pairs; values
-are converted with the same rules as log fields and are sorted by label name, so
-`{"a": 1, "b": 2}` and `("b", 2, "a", 1)` describe the same series. Registering
-the same name with a different metric type is a runtime error.
+- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
 
-Rendered output contains one `# TYPE` line per metric family, then one line per
-series; histogram series expand into cumulative `_bucket` lines (with an `le`
-label), plus `_sum` and `_count`. Buckets are the Prometheus defaults:
-`0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, +Inf`.
+## Source Files
 
-```
-# TYPE http_requests counter
-http_requests{method="GET",route="/home"} 2
-```
+- `__init__.a`
 
-`render` is a plain string, so a program can serve it from an HTTP handler:
+## Related Docs / Tests
 
-```a
-fn handler(method: String, path: String, headers: {String: String}, body: String) -> (i64, {String: String}, String):
-    if path == "/metrics":
-        return (200, {"Content-Type": "text/plain; version=0.0.4"}, metrics.render())
-    return (200, {"Content-Type": "text/plain"}, "ok")
-```
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

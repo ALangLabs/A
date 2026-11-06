@@ -1,4 +1,4 @@
-# std.string — port of CPython Lib/string.py (constants + selected helpers).
+# std.string - port of CPython Lib/string.py (constants + selected helpers).
 #
 # Pure-A subset. Provides ASCII character classification constants and
 # `capwords`. `Formatter`/`Template` are not ported.
@@ -15,65 +15,77 @@ ascii_letters = ascii_lowercase + ascii_uppercase
 digits = "0123456789"
 hexdigits = "0123456789abcdefABCDEF"
 octdigits = "01234567"
-# Punctuation without backtick/brace interpolation issues; close to CPython.
 punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_~"
 printable = digits + ascii_letters + punctuation + whitespace
 
 fn _is_space_char(ch):
-    return whitespace.contains(ch)
+    if ch == " ":
+        return true
+    if ch == "\t":
+        return true
+    if ch == "\n":
+        return true
+    if ch == "\r":
+        return true
+    return false
 
 fn _capitalize_word(w):
     if len(w) == 0:
         return w
-    chars = []
-    for c in w:
-        chars.append(str(c))
-    first = chars[0].upper()
+    s = str(w)
+    first = str(s[0]).upper()
     rest = ""
     i = 1
-    while i < len(chars):
-        rest = rest + chars[i].lower()
+    while i < len(s):
+        rest = rest + str(s[i]).lower()
         i = i + 1
     return first + rest
 
 fn _split_whitespace_runs(s):
     out = []
     cur = ""
-    for c in str(s):
-        ch = str(c)
+    src = str(s)
+    i = 0
+    while i < len(src):
+        ch = str(src[i])
         if _is_space_char(ch):
             if len(cur) > 0:
                 out.append(cur)
                 cur = ""
         else:
             cur = cur + ch
+        i = i + 1
     if len(cur) > 0:
         out.append(cur)
     return out
 
 fn _split_on_sep(s, sep):
-    if sep == "":
-        return [s]
+    src = str(s)
+    sp = str(sep)
+    if sp == "":
+        return [src]
     out = []
     cur = ""
     i = 0
-    seplen = len(sep)
-    src = str(s)
-    while i < len(src):
-        j = 0
-        match = true
-        while j < seplen and (i + j) < len(src):
-            if src[i + j] != sep[j]:
-                match = false
-                break
-            j = j + 1
-        if match and j == seplen:
-            out.append(cur)
-            cur = ""
-            i = i + seplen
-        else:
-            cur = cur + str(src[i])
-            i = i + 1
+    seplen = len(sp)
+    srclen = len(src)
+    while i < srclen:
+        if i + seplen <= srclen:
+            # compare slice
+            is_match = true
+            j = 0
+            while j < seplen:
+                if str(src[i + j]) != str(sp[j]):
+                    is_match = false
+                    break
+                j = j + 1
+            if is_match:
+                out.append(cur)
+                cur = ""
+                i = i + seplen
+                continue
+        cur = cur + str(src[i])
+        i = i + 1
     out.append(cur)
     return out
 
@@ -88,6 +100,15 @@ fn capwords(s, sep):
         join_sep = str(sep)
         words = _split_on_sep(str(s), join_sep)
     caps = []
-    for w in words:
-        caps.append(_capitalize_word(w))
-    return join_sep.join(caps)
+    i = 0
+    while i < len(words):
+        caps.append(_capitalize_word(words[i]))
+        i = i + 1
+    out = ""
+    i = 0
+    while i < len(caps):
+        if i > 0:
+            out = out + join_sep
+        out = out + caps[i]
+        i = i + 1
+    return out

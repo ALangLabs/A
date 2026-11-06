@@ -1,18 +1,20 @@
 import copy
+import json
 
 fn main():
-    a = [1, [2, 3], 4]
+    a = [1, 2, 3, 4]
     b = copy.copy(a)
-    b[0] = 9
-    b[1][0] = 8
-    print(a)
-    print(b)
+    print(json.stringify(b))
 
-    c = [1, [2, 3], {"x": [4]}]
+    m = {"x": 1, "y": 2}
+    n = copy.copy(m)
+    print(json.stringify(n))
+
+    c = [[1, 2], [3, 4]]
     d = copy.deepcopy(c)
-    d[1][0] = 7
-    d[2]["x"][0] = 6
-    print(c)
-    print(d)
+    print(json.stringify(d))
+
+    print(copy.copy(5))
+    print(copy.deepcopy("hi"))
 
 main()

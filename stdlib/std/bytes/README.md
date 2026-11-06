@@ -1,16 +1,48 @@
-# std.bytes
+# `std.bytes`
 
-A analogue of Python's `bytes`-type helpers (there is no `bytes` module in
-CPython; this package provides the conversions byte-oriented ports need).
+Standard library package `std.bytes` for A.
 
-| A | Python |
-|---|---|
-| `bytes.chr(cp)` | `chr(cp)` -> 1-char string, `None` off-range |
-| `bytes.ord(c)` | `ord(c)` -> code point, `None` off-char |
-| `bytes.utf8_encode(s)` | `s.encode("utf-8")` -> `[i64]` |
-| `bytes.utf8_decode(b)` | `bytes(b).decode("utf-8")` -> `String?` |
-| `bytes.b2s(b)` / `s2b(s)` | Latin-1 byte<->string view |
+## Status
 
-Bytes are `[i64]` arrays of values 0-255 (same convention as `binary.decode`).
-`chr`/`ord` ride the `binary` codec's char tag so all Unicode scalar values
-work. Verified against CPython behaviour in `pybytes_basic`.
+- **Kind:** Pure A stdlib package (`stdlib/std/bytes`)
+- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
+- **Source path:** `stdlib/std/bytes/`
+
+## Import
+
+```a
+import bytes
+```
+
+```a
+# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
+from "std/bytes/__init__.a" import *
+```
+
+## What It Provides
+
+- **Exports:** re-exported from submodules (see `__init__.a`).
+
+## Example
+
+```a
+import bytes
+
+# Use the exports listed above from this package.
+```
+
+## Usage Notes
+
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+- Prefer reading `__init__.a` and source files for exact signatures/behavior in this version of A.
+
+## Source Files
+
+- `__init__.a`, `bytes.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

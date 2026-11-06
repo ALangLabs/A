@@ -85,6 +85,10 @@ class DiagnosticSink {
   void writeJson(std::ostream& os) const;
 
  private:
+  // file() body without locking; callers that already hold mutex_ must use
+  // this to avoid self-deadlock on the non-recursive mutex.
+  const SourceFile* fileLocked(FileId id) const;
+
   mutable std::mutex mutex_;
   std::vector<std::shared_ptr<const SourceFile>> files_;
   std::vector<Diagnostic> diagnostics_;

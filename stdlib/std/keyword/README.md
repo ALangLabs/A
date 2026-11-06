@@ -1,38 +1,48 @@
-# keyword
+# `std.keyword`
 
-Port of CPython 3.14 `Lib/keyword.py` — a data module of language
-keywords and membership predicates, adapted so the primary lists describe
-**A's** keywords.
+Standard library package `std.keyword` for A.
 
-```python
+## Status
+
+- **Kind:** Pure A stdlib package (`stdlib/std/keyword`)
+- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
+- **Source path:** `stdlib/std/keyword/`
+
+## Import
+
+```a
 import keyword
-
-keyword.iskeyword("fn")        # true  — A keyword
-keyword.iskeyword("def")       # false — not an A keyword
-keyword.ispykeyword("def")     # true  — Python keyword
-keyword.issoftkeyword("match") # true  — Python soft keyword
 ```
 
-## API coverage
+```a
+# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
+from "std/keyword/__init__.a" import *
+```
 
-| CPython | A | Notes |
-| --- | --- | --- |
-| `kwlist` | `kwlist` | **A's** keyword list (36 entries, from the lexer keyword table — includes `Class`/`Metaclass` alias forms and `true`/`false`/`None` literals) |
-| `softkwlist` | `softkwlist` | Python's soft keywords (`_`, `case`, `match`, `type`); A has no soft keywords |
-| `iskeyword(s)` | `iskeyword(s)` | membership in `kwlist` (A keywords) |
-| `issoftkeyword(s)` | `issoftkeyword(s)` | membership in `softkwlist` |
-| — | `python_kwlist` | CPython `kwlist`, verbatim (35 entries) |
-| — | `python_softkwlist` | CPython `softkwlist`, verbatim |
-| — | `ispykeyword(s)` / `ispysoftkeyword(s)` | predicates over the Python lists |
+## What It Provides
 
-## Semantic deviations
+- **Functions/exports (detected):** `iskeyword`, `issoftkeyword`, `ispykeyword`, `ispysoftkeyword`
 
-- `kwlist`/`iskeyword` describe **A**, not Python — this is A's `keyword`
-  module. Use `ispykeyword`/`python_kwlist` when you need CPython's set
-  (e.g. porting Python source-analysis tools).
-- `iskeyword` is a plain function, not a `frozenset.__contains__`
-  callable; call syntax `keyword.iskeyword("fn")` is identical.
-- Case-sensitive membership, matching both CPython and A's lexer
-  (`Class`/`Metaclass` are distinct keyword spellings, `class`/`metaclass`
-  are separate entries).
-- No `__all__`.
+## Example
+
+```a
+import keyword
+
+# Use the exports listed above from this package.
+```
+
+## Usage Notes
+
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+- Prefer reading `__init__.a` and source files for exact signatures/behavior in this version of A.
+
+## Source Files
+
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

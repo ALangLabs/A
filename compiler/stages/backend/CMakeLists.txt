@@ -9,8 +9,8 @@ add_library(a_backend STATIC
   kgen/jit.cpp
   kgen/runtime/builtins.cpp
   kgen/runtime/terminal.cpp
-  kgen/python_interop.cpp
-  kgen/python_loader.cpp
+  kgen/python/python_interop.cpp
+  kgen/python/python_loader.cpp
 )
 target_link_libraries(a_backend PUBLIC a_type_checker a_runtime)
 target_link_libraries(a_backend PRIVATE a_kgen_mlir libtcc)

@@ -1,5 +1,5 @@
-#include "backend/kgen/python_interop.hpp"
-#include "backend/kgen/python_shim.hpp"
+#include "backend/kgen/python/python_interop.hpp"
+#include "backend/kgen/python/python_shim.hpp"
 #include "strings/format.hpp"
 
 #include <cstdlib>

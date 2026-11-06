@@ -1,30 +1,44 @@
-# testing
+# `std.testing`
 
-Property-based testing: generate random inputs, check that a property holds for
-every one of them, and report the first counterexample.
+Standard library package `std.testing` for A.
+
+## Status
+
+- **Kind:** Native-backed module (registered in the A toolchain/runtime)
+- **Backend:** Property-testing helpers (native-backed).
+- **Source path:** `stdlib/std/testing/`
+
+## Import
+
+```a
+import testing
+```
+
+## What It Provides
+
+- **Functions:** `seed`, `for_all_int`, `for_all_float`, `for_all_bool`, `for_all_string`, `for_all_elem`
+
+## Example
 
 ```a
 import testing
 
-testing.seed(42)
-ok = testing.for_all_int(200, -1000, 1000, fn(n: i64) -> bool => n + 0 == n)
-print(ok)                                 # true
-
-bad = testing.for_all_int(50, 0, 1000, fn(n: i64) -> bool => n < 500)
-print(bad)                                # false, counterexample on stderr
+# Inspect the available functions/constants in this build.
+# Then call `testing.<member>(...)` using the API overview above.
 ```
 
-| Member | Signature |
-| ------ | --------- |
-| `seed` | `(u64)` — makes a run reproducible; the default seed is time-based |
-| `for_all_int` | `(runs, low, high, fn(i64) -> bool)` |
-| `for_all_float` | `(runs, low, high, fn(f64) -> bool)` |
-| `for_all_bool` | `(runs, fn(bool) -> bool)` |
-| `for_all_string` | `(runs, maxLength, fn(String) -> bool)` — printable ASCII |
-| `for_all_elem` | `([T], fn(T) -> bool)` — every element of a fixed array |
+## Usage Notes
 
-Each `for_all_*` returns `true` when the property held for every generated
-input. On the first failure it writes `Property failed after N test(s): input =
-X` to stderr and returns `false`; the program keeps running, so tests can
-collect several results. Runs must be non-negative and at most 1,000,000, and
-`low <= high`. Use `test.a` (the A-file `test` module) for plain assertions.
+- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+
+## Source Files
+
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

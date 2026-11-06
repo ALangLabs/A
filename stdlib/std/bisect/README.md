@@ -1,32 +1,60 @@
-# std.bisect
+# `std.bisect`
 
-Pure-A port of CPython 3.14 `Lib/bisect.py` (`/usr/lib/python3.14/bisect.py`).
-The C accelerator (`_bisect`) only changes speed, not semantics, so the
-pure-Python fallback algorithms are mirrored exactly.
+Sorted-list search and insertion helpers inspired by Python's `bisect` module.
 
-Import with `import bisect` or `from bisect import bisect_left, ...`.
+Pure-A implementation of bisection algorithms for maintaining sorted lists. Because A does not support Python-style default parameters, range variants are provided explicitly.
 
-## Coverage vs Python
+## Status
 
-| CPython API | Status | A equivalent |
-|---|---|---|
-| `bisect_left(a, x, lo=0, hi=len(a), *, key=None)` | Ported | `bisect_left(a, x)` and `bisect_left_range(a, x, lo, hi)` |
-| `bisect_right(a, x, lo=0, hi=len(a), *, key=None)` | Ported | `bisect_right(a, x)` and `bisect_right_range(a, x, lo, hi)` |
-| `insort_left(a, x, lo=0, hi=len(a), *, key=None)` | Ported | `insort_left(a, x)` and `insort_left_range(a, x, lo, hi)` (mutates `a`) |
-| `insort_right(a, x, lo=0, hi=len(a), *, key=None)` | Ported | `insort_right(a, x)` and `insort_right_range(a, x, lo, hi)` (mutates `a`) |
-| `bisect = bisect_right`, `insort = insort_right` | Ported | `bisect(a, x)`, `bisect_range(a, x, lo, hi)`, `insort(a, x)`, `insort_range(a, x, lo, hi)` |
-| `key=` callable | Missing | A has no keyword arguments; callers pre-key their data |
-| `lo < 0` -> `ValueError` | Mapped | `core.panic` (runtime error), matching stdlib contract-violation style |
+- **Kind:** Pure A stdlib package (`stdlib/std/bisect`)
+- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
+- **Source path:** `stdlib/std/bisect/`
 
-## Semantic deviations
+## Import
 
-- **No default parameters.** A does not support `lo=0, hi=len(a)` defaults or
-  keyword-only `key=`. Each function therefore comes in a 2-argument form
-  (whole list) and a `*_range` form (explicit `lo`/`hi` bounds).
-- **Lists are `[T]`.** `a.insert(pos, x)` has Python list semantics including
-  negative/out-of-range clamping; `insort_*` mutate the caller's array
-  (arrays have reference semantics).
-- **`hi` is not clamped.** Like CPython, an out-of-range `hi` surfaces as an
-  index error at the midpoint probe rather than being silently clamped.
-- Works on any ordered comparable element type the language supports
-  (numbers, strings), same as CPython's duck-typed `<` comparisons.
+```a
+import bisect
+```
+
+```a
+# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
+from "std/bisect/__init__.a" import *
+```
+
+## What It Provides
+
+- **Functions/exports (detected):** `bisect_left_range`, `bisect_left`, `bisect_right_range`, `bisect_right`, `insort_left_range`, `insort_left`, `insort_right_range`, `insort_right`, `bisect`, `bisect_range`, `insort`, `insort_range`
+
+## API Reference (Practical)
+
+- `bisect_left(a, x)`, `bisect_right(a, x)`, `bisect(a, x)` — insertion points.
+- `bisect_left_range(a, x, lo, hi)`, `bisect_right_range(a, x, lo, hi)`, `bisect_range(a, x, lo, hi)` — explicit bounds.
+- `insort_left(a, x)`, `insort_right(a, x)`, `insort(a, x)` — in-place insertion.
+- `insort_left_range(...)`, `insort_right_range(...)`, `insort_range(...)` — in-place insertion with bounds.
+
+## Examples
+
+```a
+import bisect
+
+a = [1, 3, 5]
+bisect.insort(a, 4)
+print(a)
+print(bisect.bisect_left(a, 4))
+print(bisect.bisect_right(a, 4))
+```
+
+## Usage Notes
+
+- Use `*_range` functions instead of Python's `lo`/`hi` default arguments.
+- `key=` is not supported in this subset.
+
+## Source Files
+
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

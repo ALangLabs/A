@@ -1,1 +1,12 @@
-error: Expected ']' after the index, found ':'.
+["This is a simple", "sentence that should", "wrap nicely for", "testing."]
+This is a simple
+sentence that should
+wrap nicely for
+testing.
+  hello
+  world
+end
+> a
+
+> b
+hello  [...]

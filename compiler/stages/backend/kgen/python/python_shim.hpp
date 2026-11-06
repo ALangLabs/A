@@ -3,7 +3,7 @@
 // g_pySymbols, which python_loader.cpp fills via dlopen/dlsym. Include this
 // AFTER Python.h (i.e. after python_interop.hpp). Only python_interop.cpp
 // should include it — other TUs must see the real declarations.
-#include "backend/kgen/python_symbols.hpp"
+#include "backend/kgen/python/python_symbols.hpp"
 
 #ifdef A_HAVE_PYTHON
 

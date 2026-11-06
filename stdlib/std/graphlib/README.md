@@ -1,54 +1,48 @@
-# std.graphlib
+# `std.graphlib`
 
-Port of CPython 3.14 `Lib/graphlib.py`: `TopologicalSorter` for
-topologically sorting a graph of hashable nodes.
+Standard library package `std.graphlib` for A.
 
-## Usage
+## Status
+
+- **Kind:** Pure A stdlib package (`stdlib/std/graphlib`)
+- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
+- **Source path:** `stdlib/std/graphlib/`
+
+## Import
+
+```a
+import graphlib
+```
+
+```a
+# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
+from "std/graphlib/__init__.a" import *
+```
+
+## What It Provides
+
+- **Exports:** re-exported from submodules (see `__init__.a`).
+
+## Example
 
 ```a
 import graphlib
 
-# From a {node: [predecessors]} map (Python: TopologicalSorter(graph)):
-ts = graphlib.TopologicalSorter_from({
-    "a": ["b", "c"],
-    "b": ["c"],
-    "c": [],
-})
-print(ts.static_order())   # e.g. ["c", "b", "a"]
-
-# Or build incrementally (Python: TopologicalSorter()):
-ts2 = graphlib.TopologicalSorter_new()
-ts2.add("x", ["y", "z"])
-ts2.add_node("z")
-ts2.prepare()
-ready = ts2.get_ready()    # nodes with no predecessors
-ts2.done(ready)            # or ts2.done_one(node)
-while ts2.is_active():
-    group = ts2.get_ready()
-    ts2.done(group)
+# Use the exports listed above from this package.
 ```
 
-## API coverage vs Python
+## Usage Notes
 
-| Python | A | Notes |
-| --- | --- | --- |
-| `TopologicalSorter(graph=None)` | `TopologicalSorter_new()`, `TopologicalSorter_from(graph)` | no optional ctor args in A; `graph` is a `{node: [predecessors]}` map |
-| `add(node, *predecessors)` | `add(node, predecessors)` + `add_node(node)` | predecessors is an array |
-| `prepare()` | `prepare()` | panics on cycles (see below) |
-| `get_ready()` | `get_ready()` | returns `[T]` instead of tuple |
-| `done(*nodes)` | `done(nodes)` + `done_one(node)` | nodes is an array |
-| `is_active()` | `is_active()` | `__bool__` has no A equivalent |
-| `static_order()` | `static_order()` | returns `[T]` instead of generator |
-| `CycleError` | `panic("nodes are in a cycle")` | exceptions -> runtime errors |
-| `_NodeInfo`, `_NODE_OUT`, `_NODE_DONE` | same names | internal bookkeeping, exported for parity |
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+- Prefer reading `__init__.a` and source files for exact signatures/behavior in this version of A.
 
-## Semantic deviations
+## Source Files
 
-- **Exceptions -> panic.** `prepare()` on a cyclic graph, `get_ready()`/
-  `done()`/`is_active()` before `prepare()`, and `done()` on unknown or
-  already-processed nodes are runtime errors (`panic`). Unlike CPython,
-  there is no way to catch `CycleError` and keep draining `get_ready()`.
-- **Iterables -> arrays.** `get_ready()` returns an array; `static_order()`
-  returns a fully materialized topological ordering.
-- **Varargs -> arrays.** `add`/`done` take arrays of nodes.
-- Node keys must be usable as A map keys (strings, ints, etc.).
+- `__init__.a`, `graphlib.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

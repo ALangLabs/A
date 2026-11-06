@@ -1,13 +1,48 @@
-# std.html
+# `std.html`
 
-Port of CPython 3.14 `Lib/html/__init__.py` (+ `entities.py` data).
+Standard library package `std.html` for A.
 
-- `html.escape(s, quote)` — full parity (`& < > " '`).
-- `html.unescape(s)` — named entities (`&amp;`), legacy semicolon-less
-  forms (`&amp`, `&notit` -> `¬it`), decimal `&#65;` and hex `&#x42;`
-  references; invalid refs left literal, like CPython.
-- `html/entities.a` — complete generated `html5` entity table (2231 entries,
-  regenerate from `/usr/lib/python3.14/html/entities.py`).
+## Status
 
-Not ported: `html.parser` (needs the `re` engine), `html.entities.html5`
-dict is exposed as `html5()` function.
+- **Kind:** Pure A stdlib package (`stdlib/std/html`)
+- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
+- **Source path:** `stdlib/std/html/`
+
+## Import
+
+```a
+import html
+```
+
+```a
+# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
+from "std/html/__init__.a" import *
+```
+
+## What It Provides
+
+- **Functions/exports (detected):** `escape`, `unescape`
+
+## Example
+
+```a
+import html
+
+# Use the exports listed above from this package.
+```
+
+## Usage Notes
+
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+- Prefer reading `__init__.a` and source files for exact signatures/behavior in this version of A.
+
+## Source Files
+
+- `__init__.a`, `entities.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

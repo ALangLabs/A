@@ -1,37 +1,44 @@
-# AGENTS.md
+# Agent instructions for the A toolchain
 
-## What this is
-- C++20 toolchain for the **A** language (`CMakeLists.txt`: `project(Alang VERSION 0.0.1)`), producing `build/a` (CLI) and `build/a-lsp` (LSP server). Language source files use `.a`.
-- **Current semantics (HEAD, commit `7894e30`) are Python-style dynamic, not the static-typed marketing in `README.md`:** no `pvt`/`var`/`const`/`let`/`mut`; plain assignment creates a mutable variable; type annotations are optional; interpreter does dynamic arithmetic/promotion. Trust code and tests over README/docs prose where they conflict.
+This repo contains the **A programming language** compiler/toolchain (`a`), LSP (`a-lsp`), runtime, stdlib, docs, examples, and tests. Prefer reading existing docs and nearby code before changing behavior.
 
-## Commands
+## Read first
+- [`README.md`](README.md) — overview, CLI quickstart, language/stdlib highlights.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, conventions, versioning, docs/stdlib/LSP expectations.
+- [`docs/README.md`](docs/README.md) and [`docs/standard-library/README.md`](docs/standard-library/README.md) — language/spec and stdlib API reference (current implementation).
+- [`examples/README.md`](examples/README.md) — runnable examples by category.
+
+## Build and test
 ```sh
-tooling/build/build.sh                              # configure Release + Werror, build, ctest
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
-tests/integration/run_tests.sh build/a              # golden language suite (also a ctest)
-python3 tools/lsp/smoke_test.py build/a-lsp
-tests/tooling/run_cli_tests.sh build/a              # fmt/doc/check/test CLI (also a ctest)
-for f in examples/*/*.a; do build/a run "$f" >/dev/null || echo "FAIL $f"; done
-./build/a run|check|test|build|fmt|doc|ir <file.a>  # --help for flags; `--backend native|llvm` (code default is `llvm`, help text is stale)
-./ac prog.a                                         # wrapper: finds `build/a` or `a` on PATH, runs with `--backend=llvm`
 ```
-- Single focused checks: `ctest --test-dir build -R 'ir-tests|tooling-tests|tooling-cli' --output-on-failure`, or run one case directly with `build/a run tests/integration/cases/<name>.a`.
-- Sanitizers (CI job): `cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug -DA_WARNINGS_AS_ERRORS=ON -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer" && cmake --build build-asan -j && tests/integration/run_tests.sh build-asan/a`
-- Prerequisites: CMake 3.20+, C++20 compiler, `g++` on PATH (`a build` shells out to `g++ -O3 -std=c++20`).
+`tooling/build/build.sh` performs the same Release build + ctest. Build outputs (`a`, `a-lsp`, tests) live at the build root.
 
-## Architecture
-- One CMake build, layered static libs in `CMakeLists.txt` (order matters): `a_diagnostics` (incl. `lexer/source.cpp`, to avoid a diagnostics/lexer cycle) -> `a_lexer` -> `a_parser` -> `a_name_resolution` -> `a_type_checker` -> `a_ownership`; `a_ir` -> `a_optimization`; `a_runtime`, `a_backend` (interpreter, native C++ codegen, LLVM), `a_tooling` (formatter/docgen), `a_driver` -> executables `a`, `a-lsp`.
-- Entrypoints: `compiler/stages/cli/main.cpp` (`a` subcommands), `compiler/stages/driver/driver.cpp` (pipeline/glue), `tools/lsp/server.cpp` (`a-lsp`, stdio LSP). Pipeline stages live under `compiler/stages/{diagnostics,lexer,parser,ast,name-resolution,type-checker,ownership,ir,optimization,backend,tooling,driver,cli}/` (one CMake module per stage, plus `cmake/AOptions.cmake` and `compiler/a.hpp` umbrella header); runtime support under `runtime/`.
-- Lang/stdlib additions usually touch 3 places: implementation (`name-resolution/native_modules.hpp`, `backend/stdlib/builtins.cpp`, `type-checker/method_signatures.hpp`), LSP docs (`name-resolution/builtin_docs.hpp`), and `docs/standard-library/README.md` plus a runnable example. LSP completion/hover is data-driven from those tables; formatter/docgen or LSP changes should extend golden cases or `smoke_test.py`.
-- **Self-hosted layout (Mojo-analog, `/tmp/mojo-ref/Mojo/stdlib/std`):** `stdlib/std/` is the canonical stdlib package tree. Each builtin/feature area has a `std/<pkg>/` package with `__init__.a` (e.g. `builtin/`, `collections/`, `math/`, `memory/`, `simd/`, `traits/`, `iter/`, `format/`, `test/`, `comptime/`, `gpu/`, plus native-backed package stubs `binary/`, `core/`, `fs/`, `http/`, `json/`, `log/`, `metrics/`, `net/`, `time/`, `trace/`, `testing/`). Auto-loaded prelude vocabulary lives at `stdlib/prelude.a` and `stdlib/std/prelude/` (Mojo `std/prelude` analog). Legacy compatibility copies remain at some `stdlib/<pkg>/` paths for existing quoted imports; new work should target `stdlib/std/`. Native module implementations remain in C++ (`name-resolution/native_modules.hpp`, `backend/stdlib/builtins.cpp`). `kernels/` = A-written MAX-analog compute library (`kernels/src/`). Compiler stays C++ per Modular KGEN precedent. Type-checker/codegen specialization and real GPU/SIMD backends are TODOs.
+Useful targeted checks:
+- Integration/golden suite only: `tests/integration/run_tests.sh build/a` (cases in `tests/integration/cases/`: `*.a` plus optional `.out/.in/.err/.exit/.flags`; `.flags` with `check` runs `a check`).
+- CTest targets defined in [`tests/CMakeLists.txt`](tests/CMakeLists.txt): `language-suite`, `tooling-tests`, `ir-tests`, `tooling-cli`, and `language-server-smoke` when Python 3 is available.
+- LSP smoke test directly: `python3 tools/lsp/smoke_test.py build/a-lsp`.
+- Examples sanity: `for f in examples/*/*.a; do ./build/a run "$f" >/dev/null || echo "FAIL $f"; done` (pick specific categories when faster).
 
-## Tests & conventions
-- Golden tests: `tests/integration/cases/**/*.a`, excluding `lib/` fixtures. Companions: `.out` stdout, `.in` stdin, `.err` stderr substrings, `.exit`, `.flags` (`check`/`test` instead of `run`). Other suites: `tests/tooling/tooling_tests.cpp`, `tests/ir/ir_tests.cpp`, `tests/tooling/run_cli_tests.sh`.
-- Version must stay in sync in 4 places or CI fails: `CMakeLists.txt` (`project(Alang VERSION ...)`), `compiler/stages/driver/version.hpp` (`kVersion`), `tools/lsp/server.cpp` (`kServerVersion`), `tools/vscode-a/package.json`.
-- Style: C++20, `namespace a`, headers next to implementations, keep warnings clean (CI builds with `-Werror`). `.editorconfig`: 4 spaces for `*.a`/`*.md`, 2 for C++/JSON/YAML/shell.
-- Commits: Conventional-style, area-scoped (`feat(lsp): ...`, `fix(sema): ...`), imperative, one logical change per commit. PRs: one behavior per PR, explain *why*, follow `.github/PULL_REQUEST_TEMPLATE.md`.
-- Do not commit `build*/`, `*.a` build artifacts, `dist/`, `*.vsix`, `compile_commands.json` (`.gitignore` already handles these; only source `*.a` under `examples/ tests/ stdlib/ benchmarks/` is tracked).
-- Optional dependency: OpenSSL enables real TLS (`net.tls_connect`/`https`); without it, it reports unavailable - do not treat that as a failure.
-- Reference docs: `CONTRIBUTING.md` (layout, testing, versioning), `docs/` (`language-spec`, `type-system`, `memory-model`, `compiler-design`, `standard-library`), `TODO.md` for the implemented/missing feature audit.
+CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ctest, checks version consistency across `CMakeLists.txt`, `compiler/stages/driver/version.hpp`, `tools/lsp/server.cpp` (`kServerVersion`), and `tools/vscode-a/package.json`, and runs an ASan/UBSan integration pass.
+
+## Project layout (high level)
+- `compiler/` — toolchain sources (`a.hpp` umbrella; `stages/*` modules such as lexer, parser, ast, diagnostics, name-resolution, type-checker, ownership, ir, optimization, backend, tooling, pipeline, object, driver, cli).
+- `runtime/` — runtime values, memory, strings, collections, IO.
+- `stdlib/` — stdlib docs/notes and A-file modules (many capabilities are native-backed; some modules are interpreter/KGEN-path oriented — confirm via docs/tests when changing behavior).
+- `kernels/` — A compute kernels.
+- `tools/lsp/` — `a-lsp` (stdio LSP) and smoke test; `tools/vscode-a/` — VS Code extension.
+- `tests/` — integration, IR, and tooling tests; `examples/` — runnable programs; `docs/` — spec/CLI/compiler/stdlib docs.
+- `third_party/tinycc/` — vendored TinyCC used by the in-process JIT backend.
+
+## Coding and change conventions
+- C++20 in `namespace a`; keep headers next to implementations; follow the existing stage/module structure. Keep warnings clean — CI treats warnings as errors.
+- Use Conventional-style commit subjects scoped by area when committing (e.g., `fix(sema): ...`, `feat(lsp): ...`). Keep PRs focused on one behavior.
+- **Version bumps:** update all version sources together when changing the project version (see CI check above).
+- **Stdlib/native member changes:** update [`docs/standard-library/README.md`](docs/standard-library/README.md), the LSP builtin docs table (`builtin_docs.hpp` under compiler/name-resolution/tooling as used by the project), and add/adjust a runnable example or test coverage when appropriate.
+- **Tooling/LSP behavior changes:** extend golden integration cases and/or `tools/lsp/smoke_test.py` as relevant.
+- `a build` compiles emitted C++ via `g++ -O3 -std=c++20` on `PATH`. Python interop is discovered at runtime (not linked at build time); some stdlib modules behave differently across interpreter/native backends — validate with the right command path (`a run`, `a test`, `a check`, `a build`).
+
+Do not edit generated/local build artifacts under `build/` unless explicitly requested.

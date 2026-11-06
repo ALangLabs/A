@@ -57,6 +57,10 @@ FileId DiagnosticSink::addFile(std::shared_ptr<const SourceFile> source) {
 
 const SourceFile* DiagnosticSink::file(FileId id) const {
   std::lock_guard<std::mutex> lock(mutex_);
+  return fileLocked(id);
+}
+
+const SourceFile* DiagnosticSink::fileLocked(FileId id) const {
   if (id >= 0 && static_cast<std::size_t>(id) < files_.size()) return files_[id].get();
   return files_.empty() ? nullptr : files_.front().get();
 }
@@ -141,7 +145,7 @@ void DiagnosticSink::flush(std::ostream& os, bool useColor) {
 
     if (!diagnostic.span.valid()) continue;
 
-    const SourceFile* source = file(diagnostic.span.fileId);
+    const SourceFile* source = fileLocked(diagnostic.span.fileId);
     if (!source) continue;
 
     const std::string lineNumber = std::to_string(diagnostic.span.line);
@@ -181,7 +185,7 @@ void DiagnosticSink::writeJson(std::ostream& os) const {
   for (const Diagnostic& diagnostic : diagnostics_) {
     if (!first) os << ",";
     first = false;
-    const SourceFile* source = file(diagnostic.span.fileId);
+    const SourceFile* source = fileLocked(diagnostic.span.fileId);
     os << "{\"severity\":\""
        << (diagnostic.severity == Severity::Error ? "error" : "warning") << "\""
        << ",\"code\":\"" << escapeJson(diagnostic.code) << "\""

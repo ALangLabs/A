@@ -1,4 +1,4 @@
-# std.textwrap — port of Python Lib/textwrap.py (pure-A subset).
+# std.textwrap - port of Python Lib/textwrap.py (pure-A subset).
 #
 # Implements practical wrapping/filling plus dedent/indent/shorten.
 # Python's regex-heavy word splitting and sentence-end fixing are not
@@ -15,22 +15,40 @@ fn _substr(s, start, end):
     out = ""
     i = start
     src = str(s)
-    while i < end and i < len(src):
+    n = len(src)
+    e = end
+    if e > n:
+        e = n
+    while i < e:
         out = out + str(src[i])
         i = i + 1
     return out
 
+fn _is_ws(ch):
+    if ch == " ":
+        return true
+    if ch == "\t":
+        return true
+    if ch == "\n":
+        return true
+    if ch == "\r":
+        return true
+    return false
+
 fn _split_words_ws(text):
     out = []
     cur = ""
-    for c in str(text):
-        ch = str(c)
-        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+    src = str(text)
+    i = 0
+    while i < len(src):
+        ch = str(src[i])
+        if _is_ws(ch):
             if len(cur) > 0:
                 out.append(cur)
                 cur = ""
         else:
             cur = cur + ch
+        i = i + 1
     if len(cur) > 0:
         out.append(cur)
     return out
@@ -43,7 +61,9 @@ fn wrap(text, width):
     words = _split_words_ws(text)
     lines = []
     line = ""
-    for w in words:
+    i = 0
+    while i < len(words):
+        w = str(words[i])
         if len(line) == 0:
             line = w
         elif len(line) + 1 + len(w) <= wlimit:
@@ -51,20 +71,29 @@ fn wrap(text, width):
         else:
             lines.append(line)
             if len(w) > wlimit:
-                rest = str(w)
+                rest = w
                 while len(rest) > wlimit:
                     lines.append(_substr(rest, 0, wlimit))
                     rest = _substr(rest, wlimit, len(rest))
                 line = rest
             else:
                 line = w
+        i = i + 1
     if len(line) > 0:
         lines.append(line)
     return lines
 
 fn fill(text, width):
     "Wrap text and join lines with newlines."
-    return "\n".join(wrap(text, width))
+    lines = wrap(text, width)
+    out = ""
+    i = 0
+    while i < len(lines):
+        if i > 0:
+            out = out + "\n"
+        out = out + str(lines[i])
+        i = i + 1
+    return out
 
 fn _split_on_nl_keep(s):
     out = []
@@ -86,7 +115,9 @@ fn _strip_nl(s):
     src = str(s)
     if src.endswith("\r\n"):
         return _substr(src, 0, len(src) - 2)
-    if src.endswith("\n") or src.endswith("\r"):
+    if src.endswith("\n"):
+        return _substr(src, 0, len(src) - 1)
+    if src.endswith("\r"):
         return _substr(src, 0, len(src) - 1)
     return src
 
@@ -100,26 +131,36 @@ fn _nl_of(s):
         return "\r"
     return ""
 
+fn _is_indent_ch(ch):
+    if ch == " ":
+        return true
+    if ch == "\t":
+        return true
+    return false
+
 fn _leading_ws(s):
     out = ""
-    for c in str(s):
-        ch = str(c)
-        if ch == " " or ch == "\t":
+    src = str(s)
+    i = 0
+    while i < len(src):
+        ch = str(src[i])
+        if _is_indent_ch(ch):
             out = out + ch
+            i = i + 1
         else:
             break
     return out
 
-fn _lstrip_ws(s):
-    i = 0
+fn _is_blank_line(s):
     src = str(s)
+    i = 0
     while i < len(src):
         ch = str(src[i])
-        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+        if _is_ws(ch):
             i = i + 1
         else:
-            break
-    return _substr(src, i, len(src))
+            return false
+    return true
 
 fn _common_prefix(a, b):
     out = ""
@@ -138,26 +179,35 @@ fn dedent(text):
     "Remove common leading whitespace from all non-empty lines."
     s = str(text)
     raw_lines = _split_on_nl_keep(s)
-    margin = None
-    for ln in raw_lines:
+    has_margin = false
+    margin = ""
+    i = 0
+    while i < len(raw_lines):
+        ln = str(raw_lines[i])
         content = _strip_nl(ln)
-        if len(_lstrip_ws(content)) == 0:
-            continue
-        lead = _leading_ws(content)
-        if margin == None:
-            margin = lead
-        else:
-            margin = _common_prefix(margin, lead)
-    if margin == None or margin == "":
+        if not _is_blank_line(content):
+            lead = _leading_ws(content)
+            if not has_margin:
+                margin = lead
+                has_margin = true
+            else:
+                margin = _common_prefix(margin, lead)
+        i = i + 1
+    if not has_margin:
+        return s
+    if margin == "":
         return s
     out = ""
-    for ln in raw_lines:
+    i = 0
+    while i < len(raw_lines):
+        ln = str(raw_lines[i])
         content = _strip_nl(ln)
         nl = _nl_of(ln)
         if content.startswith(margin):
             out = out + _substr(content, len(margin), len(content)) + nl
         else:
             out = out + ln
+        i = i + 1
     return out
 
 fn indent(text, prefix):
@@ -166,13 +216,16 @@ fn indent(text, prefix):
     p = str(prefix)
     lines = _split_on_nl_keep(s)
     out = ""
-    for ln in lines:
+    i = 0
+    while i < len(lines):
+        ln = str(lines[i])
         content = _strip_nl(ln)
         nl = _nl_of(ln)
-        if len(content.strip()) > 0:
+        if not _is_blank_line(content):
             out = out + p + content + nl
         else:
             out = out + ln
+        i = i + 1
     return out
 
 fn shorten(text, width, placeholder):
@@ -184,10 +237,12 @@ fn shorten(text, width, placeholder):
     if len(words) == 0:
         return ""
     line = ""
-    for w in words:
-        candidate = str(w)
+    i = 0
+    while i < len(words):
+        w = str(words[i])
+        candidate = w
         if len(line) > 0:
-            candidate = line + " " + str(w)
+            candidate = line + " " + w
         if len(candidate) <= wlimit:
             line = candidate
         else:
@@ -195,14 +250,13 @@ fn shorten(text, width, placeholder):
                 allowed = wlimit - len(ph)
                 if allowed < 0:
                     allowed = 0
-                return _substr(str(w), 0, allowed) + ph
+                return _substr(w, 0, allowed) + ph
             result = line
             if len(result) + len(ph) <= wlimit:
-                result = result + ph
-            else:
-                cut = wlimit - len(ph)
-                if cut < 0:
-                    cut = 0
-                result = _substr(result, 0, cut) + ph
-            return result
+                return result + ph
+            cut = wlimit - len(ph)
+            if cut < 0:
+                cut = 0
+            return _substr(result, 0, cut) + ph
+        i = i + 1
     return line

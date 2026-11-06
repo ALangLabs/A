@@ -250,9 +250,187 @@ std::string nativeModuleForAlias(const a::lsp::FileIndex& file, const std::strin
   return {};
 }
 
-Value hoverMarkdown(const std::string& signature, const std::string& documentation) {
-  std::string markdown = "```a\n" + signature + "\n```";
-  if (!documentation.empty()) markdown += "\n\n" + documentation;
+// Splits a signature string into its head, top-level parameters, and tail.
+// For `fn name(a: i64, b: String) -> i64` this yields head `fn name`,
+// params {`a: i64`, `b: String`}, tail ` -> i64`. Constants (`PI: f64`) and
+// anything without parentheses return no parameters.
+struct SignatureParts {
+  std::string head;
+  std::vector<std::string> params;
+  std::string tail;
+  bool callable = false;
+};
+
+SignatureParts splitSignature(const std::string& signature) {
+  SignatureParts parts;
+  const std::size_t open = signature.find('(');
+  if (open == std::string::npos) {
+    parts.head = signature;
+    return parts;
+  }
+  int depth = 0;
+  std::size_t close = std::string::npos;
+  for (std::size_t i = open; i < signature.size(); ++i) {
+    const char c = signature[i];
+    if (c == '(' || c == '[' || c == '{') ++depth;
+    if (c == ')' || c == ']' || c == '}') {
+      if (--depth == 0) { close = i; break; }
+    }
+  }
+  if (close == std::string::npos) {
+    parts.head = signature;
+    return parts;
+  }
+  parts.callable = true;
+  parts.head = signature.substr(0, open);
+  parts.tail = signature.substr(close + 1);
+  const std::string inside = signature.substr(open + 1, close - open - 1);
+  std::string current;
+  depth = 0;
+  for (char c : inside) {
+    if (c == '(' || c == '[' || c == '{') ++depth;
+    if (c == ')' || c == ']' || c == '}') --depth;
+    if (c == ',' && depth == 0) {
+      parts.params.push_back(current);
+      current.clear();
+    } else {
+      current += c;
+    }
+  }
+  const std::string last = current;
+  bool blank = true;
+  for (char c : last) if (!std::isspace(static_cast<unsigned char>(c))) blank = false;
+  if (!blank) parts.params.push_back(last);
+  for (std::string& param : parts.params) {
+    const std::size_t begin = param.find_first_not_of(" \t");
+    const std::size_t end = param.find_last_not_of(" \t\r\n");
+    param = (begin == std::string::npos) ? "" : param.substr(begin, end - begin + 1);
+  }
+  return parts;
+}
+
+// Pyright-style layout: signatures with 3+ parameters or longer than ~48
+// characters render as a multi-line block with one indented parameter per
+// line, e.g.
+//   fn print(
+//       value
+//   )
+// Short signatures stay on one line.
+std::string formatSignature(const std::string& signature) {
+  const SignatureParts parts = splitSignature(signature);
+  if (!parts.callable || parts.params.empty()) return signature;
+  if (parts.params.size() < 3 && signature.size() <= 48) return signature;
+  std::string formatted = parts.head + "(\n";
+  for (std::size_t i = 0; i < parts.params.size(); ++i) {
+    formatted += "    " + parts.params[i];
+    if (i + 1 < parts.params.size()) formatted += ",";
+    formatted += "\n";
+  }
+  formatted += ")" + parts.tail;
+  return formatted;
+}
+
+std::string trimLine(const std::string& line) {
+  const std::size_t begin = line.find_first_not_of(" \t\r");
+  if (begin == std::string::npos) return "";
+  const std::size_t end = line.find_last_not_of(" \t\r\n");
+  return line.substr(begin, end - begin + 1);
+}
+
+std::string lowerAscii(std::string text) {
+  for (char& c : text) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return text;
+}
+
+// Renders a docstring body with structured sections (Args:/Parameters:,
+// Returns:, Example:/Examples:, See Also:) as Pyright/Pylance-style markdown.
+// Plain text without section headings is returned unchanged.
+std::string renderDocSections(const std::string& documentation) {
+  if (documentation.empty()) return "";
+  static const std::pair<const char*, const char*> kSections[] = {
+      {"args:", "Args:"}, {"arguments:", "Args:"}, {"parameters:", "Parameters:"},
+      {"params:", "Parameters:"}, {"returns:", "Returns:"}, {"return:", "Returns:"},
+      {"example:", "Example:"}, {"examples:", "Example:"},
+      {"see also:", "See Also:"}, {"note:", "Note:"},
+  };
+  std::vector<std::string> lines;
+  {
+    std::istringstream stream(documentation);
+    std::string line;
+    while (std::getline(stream, line)) lines.push_back(trimLine(line));
+  }
+  auto headingFor = [](const std::string& line) -> const char* {
+    const std::string lowered = lowerAscii(line);
+    for (const auto& [prefix, label] : kSections) {
+      if (lowered.rfind(prefix, 0) == 0) return label;
+    }
+    return nullptr;
+  };
+  bool anySection = false;
+  for (const std::string& line : lines) if (headingFor(line)) anySection = true;
+  if (!anySection) return documentation;
+
+  const char* section = nullptr;
+  bool exampleMode = false;
+  std::string rendered;
+  auto flushBlock = [&]() {
+    if (!rendered.empty()) rendered += "\n";
+  };
+  for (std::string line : lines) {
+    if (const char* label = headingFor(line)) {
+      if (exampleMode) { rendered += "```\n"; exampleMode = false; }
+      flushBlock();
+      rendered += std::string("**") + label + "**";
+      const std::size_t colon = line.find(':');
+      const std::string rest = colon == std::string::npos ? "" : trimLine(line.substr(colon + 1));
+      if (!rest.empty()) rendered += " " + rest;
+      rendered += "\n";
+      section = label;
+      continue;
+    }
+    if (line.empty()) { rendered += "\n"; continue; }
+    const bool isExample = section && std::string(section) == "Example:";
+    if (isExample) {
+      if (!exampleMode) { rendered += "```a\n"; exampleMode = true; }
+      rendered += line + "\n";
+      continue;
+    }
+    const bool isParams = section && (std::string(section) == "Args:" || std::string(section) == "Parameters:");
+    if (isParams && line.rfind("- ", 0) != 0 && line.rfind("* ", 0) != 0) {
+      rendered += "- " + line + "\n";
+    } else {
+      rendered += line + "\n";
+    }
+  }
+  if (exampleMode) rendered += "```\n";
+  while (!rendered.empty() && (rendered.back() == '\n' || rendered.back() == '\r')) rendered.pop_back();
+  return rendered;
+}
+
+Value hoverMarkdown(const std::string& signature, const std::string& documentation,
+                    const std::string& example = "", const std::string& seeAlso = "") {
+  std::string markdown = "```a\n" + formatSignature(signature) + "\n```";
+  const std::string body = renderDocSections(documentation);
+  if (!body.empty()) markdown += "\n\n" + body;
+  if (!example.empty()) {
+    markdown += "\n\n**Example:**\n\n```a\n" + example + "\n```";
+  }
+  if (!seeAlso.empty()) {
+    markdown += "\n\n**See Also:** ";
+    bool first = true;
+    std::size_t pos = 0;
+    while (pos <= seeAlso.size()) {
+      const std::size_t comma = seeAlso.find(',', pos);
+      const std::string entry = trimLine(seeAlso.substr(pos, comma == std::string::npos ? std::string::npos : comma - pos));
+      if (!entry.empty()) {
+        if (!first) markdown += ", ";
+        markdown += "`" + entry + "`";
+        first = false;
+      }
+      if (comma == std::string::npos) break;
+      pos = comma + 1;
+    }
+  }
   Value contents = Value::object();
   contents["kind"] = "markdown";
   contents["value"] = std::move(markdown);
@@ -1069,7 +1247,16 @@ class LanguageServer {
 
     std::vector<std::string> lines;
     int expected = span.line - 1;
-    for (std::size_t index = comments->size(); index > 0; --index) {
+    // Find the doc comment ending right above the declaration, then walk
+    // backward through the contiguous block (comments are in source order,
+    // so the block is not necessarily at the end of the file).
+    std::size_t start = comments->size();
+    for (std::size_t i = 0; i < comments->size(); ++i) {
+      if ((*comments)[i].span.line == expected) { start = i; break; }
+      if ((*comments)[i].span.line > expected) break;
+    }
+    if (start == comments->size()) return {};
+    for (std::size_t index = start + 1; index > 0; --index) {
       const a::Comment& comment = (*comments)[index - 1];
       if (!comment.doc || comment.trailing || comment.span.line != expected) break;
       std::string line = comment.text;
@@ -1347,10 +1534,11 @@ class LanguageServer {
           break;
         }
       }
-      std::string markdown = "```a\n" + description + "\n```";
+      std::string markdown = "```a\n" + formatSignature(description) + "\n```";
       const std::string documentation =
           docCommentText(compilation, *resolved.file, resolved.symbol->span);
-      if (!documentation.empty()) markdown += "\n\n" + documentation;
+      const std::string body = renderDocSections(documentation);
+      if (!body.empty()) markdown += "\n\n" + body;
       // Definition link, like pyrefly hover.
       if (resolved.file->path != file->path || resolved.symbol->span.line != line + 1) {
         markdown += "\n\n[Definition](file://" + resolved.file->path + "#L" +
@@ -1383,7 +1571,9 @@ class LanguageServer {
             if (!builtinName) builtinName = a::nativeConstant(moduleName, token->lexeme);
             if (builtinName) {
               if (const a::BuiltinDoc* doc = a::findBuiltinDoc(*builtinName)) {
-                reply(id, hoverMarkdown(doc->signature, doc->documentation));
+                reply(id, hoverMarkdown(doc->signature, doc->documentation,
+                                        doc->example ? doc->example : "",
+                                        doc->seeAlso ? doc->seeAlso : ""));
                 return;
               }
             }
@@ -1394,7 +1584,8 @@ class LanguageServer {
             if (const std::vector<a::MethodSig>* table =
                     methodTableForType(base.symbol->typeName)) {
               if (const a::MethodSig* method = findMethodSig(*table, token->lexeme)) {
-                reply(id, hoverMarkdown(method->signature, method->documentation));
+                reply(id, hoverMarkdown(method->signature, method->documentation,
+                                        method->example ? method->example : ""));
                 return;
               }
             }
@@ -1409,7 +1600,9 @@ class LanguageServer {
         return;
       }
       if (const a::BuiltinDoc* doc = a::findBuiltinDoc(token->lexeme)) {
-        reply(id, hoverMarkdown(doc->signature, doc->documentation));
+        reply(id, hoverMarkdown(doc->signature, doc->documentation,
+                                doc->example ? doc->example : "",
+                                doc->seeAlso ? doc->seeAlso : ""));
         return;
       }
     }

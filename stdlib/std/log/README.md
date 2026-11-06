@@ -1,32 +1,44 @@
-# log
+# `std.log`
 
-Structured logging to stderr. Records are either human-readable or single-line
-JSON, and a level threshold filters out anything below it.
+Standard library package `std.log` for A.
+
+## Status
+
+- **Kind:** Native-backed module (registered in the A toolchain/runtime)
+- **Backend:** Structured logging.
+- **Source path:** `stdlib/std/log/`
+
+## Import
+
+```a
+import log
+```
+
+## What It Provides
+
+- **Functions:** `set_level`, `set_json`, `debug`, `info`, `warn`, `error`
+
+## Example
 
 ```a
 import log
 
-log.set_level("info")            # debug | info | warn | error
-log.set_json(false)              # true emits one JSON object per line
-log.info("user signup", "user_id", 42, "plan", "pro")
-log.warn("slow request", {"route": "/home", "ms": "850"})
-log.error("boom", "code", 500, "tags", ["a", "b"])
+# Inspect the available functions/constants in this build.
+# Then call `log.<member>(...)` using the API overview above.
 ```
 
-| Member | Signature |
-| ------ | --------- |
-| `set_level` | `(String)` — `debug`, `info`, `warn`, or `error` |
-| `set_json` | `(bool)` — output format |
-| `debug` / `info` / `warn` / `error` | `(message[, fields])` |
+## Usage Notes
 
-Fields may be given as one map (or struct) or as alternating `name, value`
-pairs; anything else is a runtime error. The default format is
+- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
 
-```
-2026-01-31T12:00:00.000Z INFO user signup user_id=42 plan="pro"
-```
+## Source Files
 
-and the JSON format adds `timestamp`, `level`, and `message` keys before the
-fields, one record per line. Field names that collide with those three keys are
-dropped from JSON output. Timestamps are UTC with millisecond precision, so
-golden tests should match stable substrings instead of whole lines.
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

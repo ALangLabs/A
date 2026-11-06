@@ -1,264 +1,385 @@
 'use strict';
 
-// A Language extension. With a built a-lsp, the language server analyzes the
-// programs as they are edited and answers the editor's queries; otherwise,
-// and in an untrusted workspace, saved files are checked with `a check
-// --json` (the check-on-save mode). Either way the `a` compiler drives the
-// Run/Build/Test/Check/Format tasks, keybindings and the debug picker.
+// VS Code extension host for the A programming language. It prefers the a-lsp
+// language server (diagnostics as you type, hover, go to definition, symbols,
+// formatting, signature help) and falls back to check-on-save plus lexical
+// features when the server is missing, disabled, or the workspace is untrusted.
+// Tasks always run the `a` compiler directly. No dependencies: the LSP client
+// and analysis live in plain Node modules beside this file.
 
 const vscode = require('vscode');
 const path = require('node:path');
+const { LanguageClient } = require('./lsp-client');
+const { declarations, imports } = require('./language');
+const { STDLIB, KEYWORDS, BUILTINS, BUILTIN_SIGS } = require('./stdlib-data');
 const {
-    settings, argumentsFor, serverPath, compilerPath, isExecutable, modulePaths, absolute,
+    absolute, compilerPath, serverPath, isExecutable, settings, argumentsFor,
     quotedImportCandidates, bareImportCandidates
 } = require('./config');
-const { runCheck, CheckQueue } = require('./diagnostics');
-const { declarations, imports } = require('./language');
-const { LanguageClient, toRange } = require('./lsp-client');
 
-const isA = doc => doc.languageId === 'a' && doc.uri.scheme === 'file';
+const ACTION_TITLES = { run: 'Run Program', build: 'Build Executable', test: 'Run Tests', check: 'Check Program', fmt: 'Format File' };
+const A_DOC = { language: 'a', scheme: 'file' };
+const A_SELECTOR = [A_DOC, { language: 'a', scheme: 'untitled' }];
 
-const ACTION_TITLES = {
-    run: 'Run Program',
-    build: 'Build Executable',
-    test: 'Run Tests',
-    check: 'Check Program',
-    fmt: 'Format File'
-};
+function isA(doc) { return doc && doc.languageId === 'a'; }
+function cwdOf(doc) { return path.dirname(doc.uri.fsPath); }
 
-// What deactivation stops: the language server of the window, if one runs.
-let stopOnDeactivate = async () => {};
+function completionKindFor(name, moduleName) {
+    if (!moduleName) return vscode.CompletionItemKind.Module;
+    if (/^[A-Z]/.test(name)) return vscode.CompletionItemKind.Class;
+    if (moduleName && typeof name === 'string' && name === name.toUpperCase() && name.length > 2) return vscode.CompletionItemKind.Constant;
+    return vscode.CompletionItemKind.Function;
+}
 
-async function activate(context) {
-    const output = vscode.window.createOutputChannel('A');
-    output.appendLine(`> a-language extension activating (v${require('./package.json').version})`);
-    try {
-        await activateImpl(context, output);
-    } catch (error) {
-        output.appendLine(`ERROR during activation: ${error && error.stack || error}`);
-        throw error;
+function stdlibCompletionItems() {
+    const items = [];
+    for (const kw of KEYWORDS) {
+        const it = new vscode.CompletionItem(kw, vscode.CompletionItemKind.Keyword);
+        it.detail = 'A keyword';
+        items.push(it);
+    }
+    for (const b of BUILTINS) {
+        const it = new vscode.CompletionItem(b, vscode.CompletionItemKind.Function);
+        it.detail = 'A builtin';
+        items.push(it);
+    }
+    for (const [name, mod] of Object.entries(STDLIB)) {
+        const it = new vscode.CompletionItem(name, vscode.CompletionItemKind.Module);
+        it.detail = mod.detail || 'A stdlib module';
+        it.documentation = new vscode.MarkdownString(mod.doc || '');
+        items.push(it);
+    }
+    return items;
+}
+
+function memberCompletions(moduleName) {
+    const mod = STDLIB[moduleName];
+    if (!mod) return [];
+    return (mod.members || []).map(name => {
+        const it = new vscode.CompletionItem(name, completionKindFor(name, moduleName));
+        it.detail = `${moduleName}.${name} — ${mod.detail || 'stdlib'}`;
+        it.documentation = new vscode.MarkdownString((mod.doc || '') + `\n\nMember of \`std.${moduleName}\`.`);
+        return it;
+    });
+}
+
+function fallbackCompletionProvider() {
+    return {
+        provideCompletionItems(document, position) {
+            const line = document.lineAt(position).text.slice(0, position.character);
+            // import <module>
+            const imp = /\b(?:from|import)\s+([A-Za-z_][\w/]*)?$/.exec(line);
+            if (imp && !line.includes('.')) {
+                return Object.keys(STDLIB).map(name => {
+                    const mod = STDLIB[name];
+                    const it = new vscode.CompletionItem(name, vscode.CompletionItemKind.Module);
+                    it.detail = mod.detail || 'A stdlib module';
+                    it.documentation = new vscode.MarkdownString(mod.doc || '');
+                    return it;
+                });
+            }
+            // <module>.
+            const dot = /([A-Za-z_]\w*)\.$/.exec(line);
+            if (dot) return memberCompletions(dot[1]);
+            // local declarations + curated stdlib/global completions
+            const declItems = declarations(document.getText()).map(d => {
+                const it = new vscode.CompletionItem(d.name, symbolKind(d.kind));
+                it.detail = `local ${d.detail}`;
+                return it;
+            });
+            const seen = new Set(declItems.map(i => i.label));
+            const items = [...declItems];
+            for (const it of stdlibCompletionItems()) {
+                if (!seen.has(it.label)) { seen.add(it.label); items.push(it); }
+            }
+            return items;
+        }
+    };
+}
+
+// Pyright-style layout: 3+ params or >48 chars render multi-line with one
+// indented parameter per line. Mirrors the a-lsp hover renderer.
+function splitTopLevelParams(inside) {
+    const params = [];
+    let current = '', depth = 0;
+    for (const c of inside) {
+        if (c === '(' || c === '[' || c === '{') depth++;
+        if (c === ')' || c === ']' || c === '}') depth--;
+        if (c === ',' && depth === 0) { params.push(current); current = ''; } else current += c;
+    }
+    if (current.trim()) params.push(current);
+    return params.map(p => p.trim());
+}
+
+function formatSignature(signature) {
+    const open = signature.indexOf('(');
+    if (open < 0) return signature;
+    let depth = 0, close = -1;
+    for (let i = open; i < signature.length; i++) {
+        const c = signature[i];
+        if (c === '(' || c === '[' || c === '{') depth++;
+        if (c === ')' || c === ']' || c === '}') { if (--depth === 0) { close = i; break; } }
+    }
+    if (close < 0) return signature;
+    const head = signature.slice(0, open), tail = signature.slice(close + 1);
+    const params = splitTopLevelParams(signature.slice(open + 1, close));
+    if (!params.length) return signature;
+    if (params.length < 3 && signature.length <= 48) return signature;
+    let out = `${head}(\n`;
+    params.forEach((p, i) => { out += `    ${p}${i + 1 < params.length ? ',' : ''}\n`; });
+    return out + `)${tail}`;
+}
+
+const DOC_SECTIONS = { args: 'Args', arguments: 'Args', parameters: 'Parameters', params: 'Parameters', returns: 'Returns', return: 'Returns', example: 'Example', examples: 'Example', 'see also': 'See Also', note: 'Note' };
+
+function renderDocSections(documentation) {
+    if (!documentation) return '';
+    const lines = String(documentation).split(/\r?\n/);
+    const headingOf = line => {
+        const m = /^([A-Za-z][A-Za-z ]*?):\s*(.*)$/.exec(line.trim());
+        if (!m) return null;
+        const label = DOC_SECTIONS[m[1].trim().toLowerCase()];
+        return label ? { label, rest: m[2] } : null;
+    };
+    if (!lines.some(l => headingOf(l))) return documentation;
+    let section = null, exampleMode = false, out = '';
+    for (const raw of lines) {
+        const line = raw.trim();
+        const head = headingOf(line);
+        if (head) {
+            if (exampleMode) { out += '```\n'; exampleMode = false; }
+            if (out && !out.endsWith('\n\n')) out += '\n';
+            out += `**${head.label}:**${head.rest ? ' ' + head.rest : ''}\n`;
+            section = head.label;
+            continue;
+        }
+        if (!line) { out += '\n'; continue; }
+        if (section === 'Example') {
+            if (!exampleMode) { out += '```a\n'; exampleMode = true; }
+            out += line + '\n';
+        } else if ((section === 'Args' || section === 'Parameters') && !line.startsWith('- ') && !line.startsWith('* ')) {
+            out += `- ${line}\n`;
+        } else {
+            out += line + '\n';
+        }
+    }
+    if (exampleMode) out += '```\n';
+    return out.replace(/\n+$/, '');
+}
+
+function richHover(markdown, range) {
+    const md = new vscode.MarkdownString();
+    md.appendMarkdown(markdown);
+    md.supportThemeIcons = false;
+    return new vscode.Hover(md, range);
+}
+
+function buildRichHover(signature, documentation, example, seeAlso, range) {
+    let text = '```a\n' + formatSignature(signature) + '\n```';
+    const body = renderDocSections(documentation);
+    if (body) text += '\n\n' + body;
+    if (example) text += '\n\n**Example:**\n\n```a\n' + example + '\n```';
+    if (seeAlso) text += '\n\n**See Also:** ' + seeAlso.split(',').map(s => '`' + s.trim() + '`').filter(s => s !== '``').join(', ');
+    return richHover(text, range);
+}
+
+function fallbackHoverProvider() {
+    return {
+        provideHover(document, position) {
+            const range = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/);
+            if (!range) return null;
+            const name = document.getText(range);
+            const line = document.lineAt(position).text;
+            // Local declarations first: signature line + ## doc comment above.
+            const decl = declarations(document.getText()).find(d => d.name === name);
+            if (decl) {
+                const declLine = document.lineAt(document.positionAt(decl.start).line).text.trim();
+                // Reconstruct a Pyright-style signature from the decl line.
+                const header = /^fn\s+\w+\s*\((.*)\)\s*(->\s*\S+)?/.exec(declLine);
+                const sig = header
+                    ? `fn ${name}(${header[1]})${header[2] ? ' ' + header[2] : ''}`
+                    : declLine.replace(/:\s*$/, '');
+                const lines = document.getText().split('\n');
+                const docLines = [];
+                for (let i = document.positionAt(decl.start).line - 1; i >= 0; i--) {
+                    const m = /^\s*##\s?(.*)$/.exec(lines[i] || '');
+                    if (!m) break;
+                    docLines.unshift(m[1].replace(/\s+$/, ''));
+                }
+                const hover = buildRichHover(sig, docLines.join('\n'), null, null, range);
+                return hover;
+            }
+            // module.member
+            const mm = new RegExp(`\\b([A-Za-z_]\\w*)\\.${name}\\b`).exec(line);
+            if (mm && STDLIB[mm[1]]) {
+                const mod = STDLIB[mm[1]];
+                if ((mod.members || []).includes(name)) {
+                    const sig = BUILTIN_SIGS[name] ? BUILTIN_SIGS[name].signature.replace(/^(\w+)/, `${mm[1]}.$1`) : `${mm[1]}.${name}`;
+                    const info = BUILTIN_SIGS[name];
+                    return buildRichHover(sig, info ? info.documentation : (mod.doc || ''), info && info.example, info && info.seeAlso, range);
+                }
+            }
+            if (STDLIB[name]) {
+                const mod = STDLIB[name];
+                let text = '```a\nimport ' + name + '\n```\n\n' + (mod.doc || '');
+                text += '\n\nMembers: ' + (mod.members || []).slice(0, 16).map(m => '`' + m + '`').join(', ') + ((mod.members || []).length > 16 ? ', ...' : '');
+                return richHover(text, range);
+            }
+            if (BUILTIN_SIGS[name] || BUILTINS.includes(name)) {
+                const info = BUILTIN_SIGS[name];
+                if (info) return buildRichHover(info.signature, info.documentation, info.example, info.seeAlso, range);
+                return richHover('```a\n' + name + '\n```\n\nA builtin function/value (fallback hover; use `a-lsp` for precise signatures).', range);
+            }
+            return null;
+        }
+    };
+}
+
+// ---------------- diagnostics / check-on-save queue (kept compatible) ----------------
+
+class CheckQueue {
+    constructor(output, diagnostics) {
+        this.output = output;
+        this.diagnostics = diagnostics;
+        this.jobs = new Map();
+        this.results = new Map();
+        this.waiting = new Map();
+        this.checked = new Set();
+        this.onStateChanged = () => {};
+    }
+    stale(cwd) {
+        for (const map of [this.jobs, this.results]) {
+            for (const item of map.values()) if (item.config.cwd === cwd) item.stale = true;
+        }
+        this.onStateChanged();
+    }
+    invalidate() {
+        for (const job of this.jobs.values()) { if (job.timer) clearTimeout(job.timer); if (job.kill) job.kill(); }
+        this.jobs.clear();
+        this.waiting.clear();
+        this.results.clear();
+        this.checked.clear();
+        this.diagnostics.clear();
+        this.onStateChanged();
+    }
+    async schedule(config, delay = 250) {
+        if (!config.checkOnSave || !vscode.workspace.isTrusted) return undefined;
+        const key = config.cwd;
+        if (this.jobs.has(key)) {
+            const existing = this.jobs.get(key);
+            if (existing.timer) clearTimeout(existing.timer);
+            existing.config = config;
+            return new Promise(resolve => {
+                existing.timer = setTimeout(async () => resolve(await this.run(key)), delay);
+            });
+        }
+        return new Promise(resolve => {
+            this.jobs.set(key, { config, resolve, timer: setTimeout(async () => resolve(await this.run(key)), delay) });
+        });
+    }
+    async run(key) {
+        const job = this.jobs.get(key);
+        if (!job) return undefined;
+        job.timer = undefined;
+        job.startedAt = Date.now();
+        this.onStateChanged();
+        const config = job.config;
+        const result = await runCheck(config, this.output, (kill) => { if (this.jobs.get(key) === job) job.kill = kill; });
+        this.jobs.delete(key);
+        if (!result.cancelled) {
+            this.results.set(key, { config, result, stale: false, startedAt: job.startedAt });
+            this.checked.add(config.file);
+            applyDiagnostics(this.diagnostics, result, config);
+        }
+        this.onStateChanged();
+        if (job.resolve) job.resolve(result);
+        return result;
     }
 }
 
-async function activateImpl(context, output) {
-    const checkDiagnostics = vscode.languages.createDiagnosticCollection('a-check');
-    let disposed = false;
-    let publication = 0;
-    let reportedFailure = '';
-
-    // The extension runs in one of two modes. With a compiler that serves an
-    // editor (a-lsp), the language server analyzes the programs as they are
-    // edited and answers the editor's queries; otherwise, and in an untrusted
-    // workspace, the saved files are checked with `a check` (the check-on-save
-    // mode: the queue, the outline and the import links below). `server` is
-    // the language server's state: off, starting or running, with the setup
-    // it was started for.
-    let server = { status: 'off' };
-    // The check-on-save mode's subscriptions while it runs.
-    let fallback;
-
-    // What the last check of each entry file found: a failure with no source
-    // location, or the number of errors, and whether sources changed since.
-    const checked = new Map();
-    // The status of the active file's entry, in the bottom status bar. With
-    // the server: the errors it reports, over every file. Without: the last
-    // check, marked stale once sources change, with a spinner while a new
-    // check runs.
-    const checkStatus = vscode.window.createStatusBarItem('a.check', vscode.StatusBarAlignment.Left, 4);
-    checkStatus.name = 'A: Check';
-    function updateCheckStatus() {
-        const doc = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
-        if (!vscode.workspace.isTrusted || !doc || doc.languageId !== 'a') { checkStatus.hide(); return; }
-        checkStatus.command = 'a.showOutput';
-        checkStatus.backgroundColor = undefined;
-        if (server.status !== 'off') {
-            if (server.status === 'starting') {
-                checkStatus.text = '$(sync~spin) A: Starting';
-                checkStatus.tooltip = 'Starting the A language server.';
-            } else if (server.client && server.client.checking) {
-                checkStatus.text = '$(sync~spin) A: Checking';
-                checkStatus.tooltip = 'The language server is checking in the background.';
-            } else {
-                let errors = 0;
-                for (const [, items] of vscode.languages.getDiagnostics()) {
-                    errors += items.filter(item => item.severity === vscode.DiagnosticSeverity.Error).length;
-                }
-                if (errors) {
-                    checkStatus.text = `$(error) A: ${errors} error${errors === 1 ? '' : 's'}`;
-                    checkStatus.tooltip = 'The A language server reports errors. Click to open Problems.';
-                    checkStatus.command = 'workbench.actions.view.problems';
-                } else {
-                    checkStatus.text = '$(check) A';
-                    checkStatus.tooltip = 'The A language server reports no errors. Click to open the A output.';
-                }
-            }
-            checkStatus.show();
-            return;
-        }
-        const config = isA(doc) ? settings(vscode, doc.uri) : undefined;
-        const running = config && queue.jobs.has(config.file);
-        const last = config && checked.get(config.file);
-        if (running) {
-            checkStatus.text = '$(sync~spin) A: Checking';
-            checkStatus.tooltip = last && !last.stale ? 'Checking again.' : 'Checking the saved files.';
-        } else if (!last) {
-            checkStatus.text = '$(circle-outline) A';
-            checkStatus.tooltip = config && config.checkOnSave ? 'Not checked yet. Save to check.' : 'Not checked yet. Run A: Check Program to check.';
-        } else if (last.problem) {
-            checkStatus.text = `$(warning) A: ${last.problem.title}`;
-            checkStatus.tooltip = `${last.problem.message.split('\n').slice(0, 6).join('\n')}\n\nClick to open the A output.`;
-            checkStatus.backgroundColor = new vscode.ThemeColor('statusBarItem.warningBackground');
-        } else if (last.errors > 0) {
-            checkStatus.text = `$(error) A: ${last.errors} error${last.errors === 1 ? '' : 's'}`;
-            checkStatus.tooltip = 'The last A check found errors. Click to open Problems.';
-            checkStatus.command = 'workbench.actions.view.problems';
-        } else {
-            checkStatus.text = '$(check) A';
-            checkStatus.tooltip = 'The last A check found no errors. Click to open the A output.';
-        }
-        if (last && last.stale && !running) {
-            checkStatus.text += ' (stale)';
-            checkStatus.tooltip = `Edited since this check; save to check again.\n\n${checkStatus.tooltip}`;
-        }
-        checkStatus.show();
-    }
-
-    // A result's diagnostics, built once when it lands, against the sources it
-    // checked: a stale result keeps them as they were while files are edited.
-    async function build(result) {
-        const { config, error } = result;
-        const lines = new Map();
-        async function sourceLine(file, line) {
-            if (!lines.has(file)) {
-                const open = vscode.workspace.textDocuments.find(doc => doc.uri.fsPath === file);
-                try {
-                    const source = open ? open.getText() : Buffer.from(await vscode.workspace.fs.readFile(vscode.Uri.file(file))).toString('utf8');
-                    lines.set(file, source.split(/\r?\n/));
-                } catch { lines.set(file, []); }
-            }
-            return lines.get(file)[line];
-        }
-        const outputText = result.output || '';
-        output.appendLine(`> ${config.compiler} ${(result.args || argumentsFor('check', config, { json: true })).map(arg => JSON.stringify(arg)).join(' ')}`);
-        if (outputText.trim()) output.appendLine(outputText.trimEnd());
-        // A failure with no source location is not an error on any line. It is
-        // listed in Problems against the checked file at an empty range, so it
-        // marks no text. It also goes to the status bar and the output channel.
-        let problem;
-        const items = Array.isArray(result.diagnostics) ? result.diagnostics : [];
-        if (error && !items.some(item => item.severity === 'error')) {
-            const missing = error.code === 'ENOENT';
-            const message = missing
-                ? `A compiler not found: ${config.compiler}. Set a.compilerPath to the executable.`
-                : error.killed ? `A check exceeded ${config.timeout} ms or was terminated.`
-                : failureMessage(outputText) || error.message;
-            problem = { message, title: missing ? 'Compiler Not Found' : error.killed ? 'Check Timed Out' : 'Check Failed' };
-            items.push({ file: config.file, line: 0, column: 0, empty: true, severity: 'warning', message: `A check failed: ${message}`, help: '' });
-            if (missing && reportedFailure !== message) {
-                reportedFailure = message;
-                void vscode.window.showWarningMessage(message);
-            }
-        } else if (!error) reportedFailure = '';
-        const files = new Map();
-        let errors = 0;
-        for (const item of items) {
-            // The compiler reports paths as given or relative to its cwd.
-            const filePath = path.isAbsolute(item.file) ? item.file : path.resolve(config.cwd, item.file);
-            const line = (await sourceLine(filePath, item.line)) ?? '';
-            const start = item.column === undefined ? Math.max(0, line.search(/\S/)) : Math.min(item.column, line.length);
-            const from = new vscode.Position(item.line, start);
-            let range;
-            if (item.empty) {
-                range = new vscode.Range(from, from);
-            } else {
-                // Underline the identifier at the column, or one character.
-                const end = item.column === undefined
-                    ? line.length
-                    : Math.min(line.length, start + (line.slice(start).match(/^[A-Za-z_]\w*/) || [''])[0].length || 1);
-                range = new vscode.Range(item.line, start, item.line, Math.max(start, end));
-            }
-            const diagnostic = new vscode.Diagnostic(range,
-                item.help ? `${item.message}\n\n${item.help}` : item.message,
-                item.severity === 'warning' ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error);
-            diagnostic.source = 'a';
-            const entry = files.get(filePath) || [];
-            if (entry.some(other => other.message === diagnostic.message && other.range.isEqual(range))) continue;
-            entry.push(diagnostic);
-            files.set(filePath, entry);
-            if (diagnostic.severity === vscode.DiagnosticSeverity.Error) errors++;
-        }
-        return { files, problem, errors };
-    }
-    const built = new WeakMap();
-
-    async function publish(results) {
-        if (disposed) return;
-        const generation = ++publication;
-        const current = [...results.values()];
-        for (const result of current) if (!built.has(result)) built.set(result, build(result));
-        const found = await Promise.all(current.map(result => built.get(result)));
-        if (disposed || generation !== publication) return;
-        const grouped = new Map();
-        checked.clear();
-        current.forEach((result, i) => {
-            const { files, problem, errors } = found[i];
-            checked.set(result.config.file, { problem, errors, stale: !!result.stale });
-            for (const [file, items] of files) {
-                const entry = grouped.get(file) || [];
-                for (const diagnostic of items) {
-                    if (!entry.some(other => other.message === diagnostic.message && other.range.isEqual(diagnostic.range))) entry.push(diagnostic);
-                }
-                grouped.set(file, entry);
-            }
+async function runCheck(config, output, setKill) {
+    const cp = require('node:child_process');
+    return await new Promise(resolve => {
+        const args = argumentsFor('check', config, { json: true });
+        output.appendLine(`> ${config.compiler} ${args.map(a => JSON.stringify(a)).join(' ')}`);
+        const child = cp.spawn(config.compiler, args, { cwd: config.cwd, windowsHide: true });
+        if (setKill) setKill(() => { try { child.kill(); } catch {} });
+        let out = '', err = '', done = false;
+        const finish = (payload) => { if (done) return; done = true; resolve(payload); };
+        const timer = setTimeout(() => { try { child.kill(); } catch {} finish({ ok: false, cancelled: false, timeout: true, diagnostics: [], error: `Timed out after ${config.timeout} ms.` }); }, config.timeout);
+        child.stdout.on('data', d => out += d.toString('utf8'));
+        child.stderr.on('data', d => err += d.toString('utf8'));
+        child.on('error', error => { clearTimeout(timer); finish({ ok: false, cancelled: false, diagnostics: [], error: error.message }); });
+        child.on('close', code => {
+            clearTimeout(timer);
+            let diagnostics = [];
+            try { diagnostics = JSON.parse(out || '[]'); } catch { diagnostics = parseTextDiagnostics(out + '\n' + err, config.cwd); }
+            if (err.trim()) output.appendLine(err.trim());
+            finish({ ok: code === 0, cancelled: false, diagnostics, code, error: code === 0 ? '' : failureMessage(err || out) });
         });
-        checkDiagnostics.clear();
-        checkDiagnostics.set([...grouped].map(([file, items]) => [vscode.Uri.file(file), items]));
-        updateCheckStatus();
-    }
-
-    const queue = new CheckQueue(runCheck, results => {
-        void publish(results).catch(error => output.appendLine(`Diagnostics: ${error.message}`));
     });
-    const cwdOf = doc => settings(vscode, doc.uri).cwd;
-    const dirtyIn = cwd => vscode.workspace.textDocuments.some(doc => isA(doc) && doc.isDirty && cwdOf(doc) === cwd);
+}
 
-    function check(doc) {
-        if (disposed || !fallback || !vscode.workspace.isTrusted || !isA(doc) || doc.isDirty) return;
-        const config = settings(vscode, doc.uri);
-        if (config.checkOnSave && !dirtyIn(config.cwd)) void queue.schedule(config);
+function parseTextDiagnostics(text, cwd) {
+    const diagnostics = [];
+    const lines = String(text || '').split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+        const m = /^(error|warning)(?:\[[^\]]*\])?:\s*(.*)$/.exec(lines[i]);
+        if (!m) continue;
+        const loc = /^\s*-->+\s+(.+?):(\d+):(\d+)/.exec(lines[i + 1] || '');
+        diagnostics.push({ severity: m[1], message: m[2], file: loc ? path.resolve(cwd, loc[1]) : '', line: loc ? Number(loc[2]) : 1, column: loc ? Number(loc[3]) : 1 });
+    }
+    return diagnostics;
+}
+
+function applyDiagnostics(collection, result, config) {
+    const byFile = new Map();
+    for (const item of result.diagnostics || []) {
+        const file = item.file ? (path.isAbsolute(item.file) ? item.file : path.resolve(config.cwd, item.file)) : config.file;
+        if (!byFile.has(file)) byFile.set(file, []);
+        const line = Math.max(0, (item.line || 1) - 1);
+        const col = Math.max(0, (item.column || 1) - 1);
+        const d = new vscode.Diagnostic(new vscode.Range(line, col, line, col + 1), item.message || 'A check failed', /warn/i.test(item.severity || '') ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Error);
+        d.source = 'a';
+        byFile.get(file).push(d);
+    }
+    collection.clear();
+    for (const [file, list] of byFile) collection.set(vscode.Uri.file(file), list);
+    if (!byFile.size && result.ok) collection.clear();
+}
+
+async function activate(context) {
+    let disposed = false;
+    let fallback = undefined;
+    let stopOnDeactivate = async () => {};
+    const output = vscode.window.createOutputChannel('A');
+    const checkDiagnostics = vscode.languages.createDiagnosticCollection('a-check');
+    const queue = new CheckQueue(output, checkDiagnostics);
+    const server = { status: 'off' };
+    const openedDocuments = new Set();
+    const changeTimers = new Map();
+    const checkStatus = vscode.window.createStatusBarItem('a.check', vscode.StatusBarAlignment.Left, 4);
+    checkStatus.name = 'A: Check Status';
+    checkStatus.command = 'a.showOutput';
+
+    function updateCheckStatus() {
+        const active = vscode.window.activeTextEditor && isA(vscode.window.activeTextEditor.document) ? vscode.window.activeTextEditor.document : undefined;
+        if (!active || !vscode.workspace.isTrusted) { checkStatus.hide(); return; }
+        if (server.status === 'starting') { checkStatus.text = '$(sync~spin) A'; checkStatus.tooltip = 'Starting a-lsp'; checkStatus.show(); return; }
+        if (server.status === 'running') { checkStatus.text = '$(check) A'; checkStatus.tooltip = 'A language server active (a-lsp). Fallback completion/hover enabled only when server is off.'; checkStatus.show(); return; }
+        checkStatus.text = '$(search) A'; checkStatus.tooltip = 'Using fallback check-on-save + lexical/stdlib completions'; checkStatus.show();
+    }
+    queue.onStateChanged = updateCheckStatus;
+
+    function recheck() {
+        for (const doc of vscode.workspace.textDocuments) if (isA(doc) && !doc.isDirty) queue.schedule(settings(vscode, doc.uri), 0);
     }
 
-    // Check the entry files of open documents in cwd (or everywhere), and drop
-    // the results of entries no open document checks any more.
-    function recheck(cwd) {
-        if (!fallback) return;
-        const entries = new Map();
-        for (const doc of vscode.workspace.textDocuments) {
-            if (!isA(doc)) continue;
-            const config = settings(vscode, doc.uri);
-            if (config.checkOnSave && !entries.has(config.file)) entries.set(config.file, { doc, cwd: config.cwd });
-        }
-        queue.retain(file => entries.has(file));
-        for (const entry of entries.values()) if (!cwd || entry.cwd === cwd) check(entry.doc);
-    }
-
-    // Sources in cwd were saved, closed or changed on disk: what was found
-    // stays, stale, until rechecked.
-    function refresh(cwd) {
-        queue.stale(cwd);
-        recheck(cwd);
-    }
-
-    // The check-on-save mode: the checks of saved files, the outline from a
-    // lexical scan, go to definition and the import links, which the server
-    // provides otherwise.
     function startFallback() {
         if (fallback || disposed) return;
-        output.appendLine('> a-lsp is not in use (missing, disabled by a.useLanguageServer, or the workspace is untrusted).');
-        output.appendLine('> Checking saved files with the A compiler instead; set a.server.path or A_LSP_PATH to enable the language server.');
+        output.appendLine('> a-lsp is not in use (missing, disabled by a.useLanguageServer, or workspace untrusted).');
+        output.appendLine('> Using compiler check-on-save plus lexical/curated stdlib completion and hover fallback.');
         const watcher = vscode.workspace.createFileSystemWatcher('**/*.a');
-        // Declarations per file, for lexical go to definition; cleared whenever
-        // sources change.
         const declCache = new Map();
         async function fileInfo(uri) {
             const key = uri.toString();
@@ -266,220 +387,138 @@ async function activateImpl(context, output) {
             let info = { text: '', decls: [] };
             try {
                 const open = vscode.workspace.textDocuments.find(doc => doc.uri.toString() === key);
-                const text = open ? open.getText()
-                    : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
+                const text = open ? open.getText() : Buffer.from(await vscode.workspace.fs.readFile(uri)).toString('utf8');
                 info = { text, decls: declarations(text) };
-            } catch { /* Unreadable file: no declarations. */ }
-            declCache.set(key, info);
-            return info;
+            } catch {}
+            declCache.set(key, info); return info;
         }
         function nameLocation(document, decl) {
-            return new vscode.Location(document.uri, new vscode.Range(
-                document.positionAt(decl.nameStart), document.positionAt(decl.nameEnd)));
+            return new vscode.Location(document.uri, new vscode.Range(document.positionAt(decl.nameStart), document.positionAt(decl.nameEnd)));
         }
-        // Offset range to an LSP-style position pair for files that are not
-        // open in the editor.
         function offsetRange(text, start, end) {
-            const position = offset => {
-                const before = text.lastIndexOf('\n', Math.max(0, offset - 1));
-                const line = text.slice(0, offset).split('\n').length - 1;
-                return { line, character: offset - before - 1 };
-            };
-            const s = position(start), e = position(end);
-            return new vscode.Range(s.line, s.character, e.line, e.character);
+            const pos = offset => { const before = text.slice(0, offset); const parts = before.split('\n'); return { line: parts.length - 1, character: parts[parts.length - 1].length }; };
+            const s = pos(start), e = pos(end); return new vscode.Range(s.line, s.character, e.line, e.character);
         }
         const changedOnDisk = async uri => {
             const cwd = settings(vscode, uri).cwd;
-            // Filesystem notifications can arrive after a manual check of a just-
-            // saved file. Do not cancel that check or erase its current results.
             let modified = Infinity;
-            try { modified = (await vscode.workspace.fs.stat(uri)).mtime; } catch { /* Deleted file. */ }
+            try { modified = (await vscode.workspace.fs.stat(uri)).mtime; } catch {}
             if (disposed || !fallback) return;
-            // A stale result is already due to be replaced, so it does not count.
             const existing = [...queue.results.values(), ...queue.jobs.values()].filter(item => item.config.cwd === cwd && !item.stale);
             if (existing.length && existing.every(item => item.startedAt === undefined || item.startedAt > modified)) return;
-            declCache.clear();
-            refresh(cwd);
+            declCache.clear(); recheck();
         };
         fallback = vscode.Disposable.from(
-            vscode.languages.registerDocumentSymbolProvider([{ language: 'a', scheme: 'file' }, { language: 'a', scheme: 'untitled' }], {
+            vscode.languages.registerDocumentSymbolProvider(A_SELECTOR, {
                 provideDocumentSymbols(doc) {
-                    return declarations(doc.getText()).map(item => new vscode.DocumentSymbol(item.name, item.detail,
-                        symbolKind(item.kind),
-                        new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end)),
-                        new vscode.Range(doc.positionAt(item.nameStart), doc.positionAt(item.nameEnd))));
+                    return declarations(doc.getText()).map(item => new vscode.DocumentSymbol(item.name, item.detail, symbolKind(item.kind), new vscode.Range(doc.positionAt(item.start), doc.positionAt(item.end)), new vscode.Range(doc.positionAt(item.nameStart), doc.positionAt(item.nameEnd))));
                 }
             }),
-            vscode.languages.registerDocumentLinkProvider({ language: 'a', scheme: 'file' }, {
+            vscode.languages.registerDocumentLinkProvider(A_DOC, {
                 async provideDocumentLinks(doc, token) {
-                    const config = settings(vscode, doc.uri);
-                    const links = [];
+                    const config = settings(vscode, doc.uri); const links = [];
                     for (const item of imports(doc.getText())) {
-                        const candidates = item.quoted
-                            ? quotedImportCandidates(item.spec, doc.uri.fsPath, config)
-                            : bareImportCandidates(item.spec, config);
+                        const candidates = item.quoted ? quotedImportCandidates(item.spec, doc.uri.fsPath, config) : bareImportCandidates(item.spec, config);
                         for (const candidate of candidates) {
                             if (token.isCancellationRequested) return [];
                             try {
-                                const uri = vscode.Uri.file(candidate);
-                                const stat = await vscode.workspace.fs.stat(uri);
+                                const uri = vscode.Uri.file(candidate); const stat = await vscode.workspace.fs.stat(uri);
                                 if (!(stat.type & vscode.FileType.File)) continue;
-                                const range = new vscode.Range(
-                                    new vscode.Position(item.line, item.startChar),
-                                    new vscode.Position(item.line, item.endChar));
-                                const link = new vscode.DocumentLink(range, uri);
-                                link.tooltip = 'Open A module';
-                                links.push(link);
-                                break;
-                            } catch { /* Try the next location, as the compiler does. */ }
+                                const range = new vscode.Range(new vscode.Position(item.line, item.startChar), new vscode.Position(item.line, item.endChar));
+                                const link = new vscode.DocumentLink(range, uri); link.tooltip = 'Open A module'; links.push(link); break;
+                            } catch {}
                         }
                     }
                     return links;
                 }
             }),
-            vscode.languages.registerDefinitionProvider({ language: 'a', scheme: 'file' }, {
+            vscode.languages.registerDefinitionProvider(A_DOC, {
                 async provideDefinition(document, position, token) {
-                    const word = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/);
-                    if (!word) return null;
-                    const name = document.getText(word);
-                    const config = settings(vscode, document.uri);
-                    // On an import specifier: jump to the module file, as the
-                    // compiler's import links do.
+                    const word = document.getWordRangeAtPosition(position, /[A-Za-z_]\w*/); if (!word) return null;
+                    const name = document.getText(word); const config = settings(vscode, document.uri);
                     for (const item of imports(document.getText())) {
-                        if (position.line !== item.line ||
-                            position.character < item.startChar || position.character > item.endChar) continue;
-                        const candidates = item.quoted
-                            ? quotedImportCandidates(item.spec, document.uri.fsPath, config)
-                            : bareImportCandidates(item.spec, config);
+                        if (position.line !== item.line || position.character < item.startChar || position.character > item.endChar) continue;
+                        const candidates = item.quoted ? quotedImportCandidates(item.spec, document.uri.fsPath, config) : bareImportCandidates(item.spec, config);
                         for (const candidate of candidates) {
                             if (token.isCancellationRequested) return null;
-                            try {
-                                const uri = vscode.Uri.file(candidate);
-                                const stat = await vscode.workspace.fs.stat(uri);
-                                if (stat.type & vscode.FileType.File) {
-                                    return new vscode.Location(uri, new vscode.Range(0, 0, 0, 0));
-                                }
-                            } catch { /* Try the next location. */ }
+                            try { const uri = vscode.Uri.file(candidate); const stat = await vscode.workspace.fs.stat(uri); if (stat.type & vscode.FileType.File) return new vscode.Location(uri, new vscode.Range(0,0,0,0)); } catch {}
                         }
                     }
-                    // Declarations in this file first.
                     const local = declarations(document.getText()).filter(decl => decl.name === name);
                     if (local.length) return local.map(decl => nameLocation(document, decl));
-                    // Then every other .a file in the workspace.
-                    const files = await vscode.workspace.findFiles('**/*.a', '{**/node_modules/**,**/.git/**}');
+                    const files = await vscode.workspace.findFiles('**/*.a', '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}');
                     const locations = [];
                     for (const uri of files) {
                         if (token.isCancellationRequested || locations.length >= 50) return locations.length ? locations : null;
                         if (uri.toString() === document.uri.toString()) continue;
                         const { text, decls } = await fileInfo(uri);
-                        for (const decl of decls) {
-                            if (decl.name === name) {
-                                locations.push(new vscode.Location(uri, offsetRange(text, decl.nameStart, decl.nameEnd)));
-                            }
-                        }
+                        for (const decl of decls) if (decl.name === name) locations.push(new vscode.Location(uri, offsetRange(text, decl.nameStart, decl.nameEnd)));
                     }
                     return locations.length ? locations : null;
                 }
             }),
-            vscode.workspace.onDidOpenTextDocument(check),
-            vscode.workspace.onDidSaveTextDocument(doc => {
-                if (isA(doc)) { declCache.clear(); refresh(cwdOf(doc)); }
-            }),
-            vscode.workspace.onDidChangeTextDocument(event => {
-                if (isA(event.document) && event.contentChanges.length) {
-                    declCache.clear();
-                    queue.stale(cwdOf(event.document));
-                }
-            }),
-            vscode.workspace.onDidCloseTextDocument(doc => {
-                if (isA(doc)) refresh(cwdOf(doc));
-            }),
+            vscode.languages.registerCompletionItemProvider(A_SELECTOR, fallbackCompletionProvider(), '.', '"', '(', ','),
+            vscode.languages.registerHoverProvider(A_SELECTOR, fallbackHoverProvider()),
+            vscode.workspace.onDidOpenTextDocument(doc => { if (isA(doc)) queue.schedule(settings(vscode, doc.uri), 0); }),
+            vscode.workspace.onDidSaveTextDocument(doc => { if (isA(doc)) { declCache.clear(); queue.schedule(settings(vscode, doc.uri), 0); } }),
+            vscode.workspace.onDidChangeTextDocument(event => { if (isA(event.document) && event.contentChanges.length) { declCache.clear(); queue.stale(cwdOf(event.document)); } }),
+            vscode.workspace.onDidCloseTextDocument(doc => { if (isA(doc)) updateCheckStatus(); }),
             watcher, watcher.onDidCreate(changedOnDisk), watcher.onDidChange(changedOnDisk), watcher.onDidDelete(changedOnDisk)
         );
-        recheck();
-        updateCheckStatus();
+        recheck(); updateCheckStatus();
     }
 
     function stopFallback() {
         if (!fallback) return;
-        fallback.dispose();
-        fallback = undefined;
-        queue.invalidate();
-        checkDiagnostics.clear();
-        checked.clear();
+        fallback.dispose(); fallback = undefined;
+        queue.invalidate(); checkDiagnostics.clear();
     }
-
-    // --- the language server ---------------------------------------------
 
     async function stopServer() {
         const client = server.client;
-        server = { status: 'off' };
+        server.status = 'off'; server.client = undefined;
         openedDocuments.clear();
         for (const timer of changeTimers.values()) clearTimeout(timer);
         changeTimers.clear();
-        if (client) {
-            try { await client.stop(); } catch { /* It may be gone already. */ }
-        }
+        if (client) { try { await client.stop(); } catch {} }
         updateCheckStatus();
     }
     stopOnDeactivate = stopServer;
 
     async function startServer(setup) {
-        await stopServer();
-        if (disposed) return;
-        const client = new LanguageClient(setup.path, setup.args,
-            { modulePaths: setup.modulePaths, stdlibRoot: setup.stdlib, jobs: setup.jobs }, output);
-        // Async checking spinner: the server debounces edits (200 ms) and
-        // publishes diagnostics from a worker; show progress meanwhile.
-        client.onCheckingChanged = (checking) => updateCheckStatus();
-        server = { status: 'starting', client, setup };
-        updateCheckStatus();
+        await stopServer(); if (disposed) return;
+        const client = new LanguageClient(setup.path, setup.args, { modulePaths: setup.modulePaths, stdlibRoot: setup.stdlib, jobs: setup.jobs }, output);
+        client.onCheckingChanged = () => updateCheckStatus();
+        server.status = 'starting'; server.client = client; server.setup = setup; updateCheckStatus();
         output.appendLine(`> ${setup.path} ${(setup.args || []).map(arg => JSON.stringify(arg)).join(' ')}  (language server)`);
         try {
             await client.start();
             if (server.client !== client) return;
             server.status = 'running';
             for (const document of vscode.workspace.textDocuments) {
-                if (isA(document)) {
-                    const key = document.uri.toString();
-                    openedDocuments.add(key);
-                    client.openDocument(document);
-                }
+                if (isA(document)) { const key = document.uri.toString(); openedDocuments.add(key); client.openDocument(document); }
             }
         } catch (error) {
             if (server.client !== client) return;
             output.appendLine(`The A language server did not start: ${error.message}`);
-            server = { status: 'off' };
-            try { client.stop(); } catch { /* It may be gone already. */ }
-            void vscode.window.showWarningMessage(`The A language server did not start (${error.message}); checking saved files instead. See the A output.`);
+            server.status = 'off'; server.client = undefined;
+            try { client.stop(); } catch {}
+            void vscode.window.showWarningMessage(`The A language server did not start (${error.message}); using fallback analysis. See the A output.`);
             startFallback();
         }
         updateCheckStatus();
     }
 
-    // Which mode runs: the server where the settings ask for one, the
-    // workspace is trusted and a-lsp is found, else the checks of saved files.
-    // Decided again when that may have changed: the settings, the folders,
-    // the workspace's trust, a restart. A server already running for the same
-    // setup stays.
     let deciding = Promise.resolve();
     function decide(restart = false) {
         deciding = deciding.then(async () => {
             if (disposed) return;
             const setup = serverSetup();
-            output.appendLine(`> mode check: trusted=${vscode.workspace.isTrusted} useLanguageServer=${setup.enabled} lsp=${setup.path || '(not found)'} compiler=${compilerPath(vscode.workspace.getConfiguration('a').get('compilerPath', ''), vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0] ? vscode.workspace.workspaceFolders[0].uri.fsPath : process.cwd())}`);
-            // A bare command name (no path separators) is resolved on PATH by
-            // the spawn; anything path-like must exist and be executable.
             const runnable = setup.path && (isExecutable(setup.path) || !/[\\/]/.test(setup.path));
             const wanted = vscode.workspace.isTrusted && setup.enabled && runnable;
-            if (!wanted) {
-                await stopServer();
-                startFallback();
-                return;
-            }
+            if (!wanted) { await stopServer(); startFallback(); return; }
             if (!restart && server.client && JSON.stringify(server.setup) === JSON.stringify(setup)) return;
-            stopFallback();
-            await startServer(setup);
+            stopFallback(); await startServer(setup);
         }).catch(error => output.appendLine(`Language server: ${error.message}`));
         return deciding;
     }
@@ -493,42 +532,21 @@ async function activateImpl(context, output) {
         const config = vscode.workspace.getConfiguration('a', first && first.uri ? first.uri : doc && doc.uri);
         const configured = config.get('server.path', '') || process.env.A_LSP_PATH || '';
         const stdlibRaw = config.get('stdlibPath', '');
-        // a-lsp usually sits next to the a compiler (build/a-lsp); try that
-        // before falling back to PATH-only discovery.
         const compiler = compilerPath(config.get('compilerPath', ''), cwd);
-        const beside = compiler && /[\\/]/.test(compiler)
-            ? path.join(path.dirname(compiler), process.platform === 'win32' ? 'a-lsp.exe' : 'a-lsp')
-            : '';
+        const beside = compiler && /[\\/]/.test(compiler) ? path.join(path.dirname(compiler), process.platform === 'win32' ? 'a-lsp.exe' : 'a-lsp') : '';
         const jobsRaw = Number(config.get('jobs', 0));
-        return {
-            enabled: config.get('useLanguageServer', true),
-            path: serverPath(configured, cwd, context.extensionPath) || (beside && isExecutable(beside) ? beside : ''),
-            args: Array.isArray(config.get('server.args', [])) ? config.get('server.args', []) : [],
-            modulePaths: modulePaths(config, cwd, ''),
-            stdlib: stdlibRaw ? absolute(stdlibRaw, cwd, '') : '',
-            jobs: Number.isFinite(jobsRaw) && jobsRaw >= 0 ? Math.trunc(jobsRaw) : 0
-        };
+        const mod = require('./config');
+        return { enabled: config.get('useLanguageServer', true), path: serverPath(configured, cwd, context.extensionPath) || (beside && isExecutable(beside) ? beside : ''), args: Array.isArray(config.get('server.args', [])) ? config.get('server.args', []) : [], modulePaths: mod.modulePaths(config, cwd, ''), stdlib: stdlibRaw ? absolute(stdlibRaw, cwd, '') : '', jobs: Number.isFinite(jobsRaw) && jobsRaw >= 0 ? Math.trunc(jobsRaw) : 0 };
     }
 
-    // The document a command acts on, the active editor's or the one at
-    // `uri`, saved with the open A files of its folder.
     async function savedDocument(uri) {
-        const pick = async () => uri
-            ? vscode.workspace.openTextDocument(uri).then(doc => doc, () => undefined)
-            : vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
-        const doc = await pick();
-        if (!doc || !isA(doc)) return undefined;
-        if (!vscode.workspace.isTrusted) {
-            void vscode.window.showWarningMessage('Trust this workspace to run the A compiler.');
-            return undefined;
-        }
+        const pick = async () => uri ? vscode.workspace.openTextDocument(uri).then(doc => doc, () => undefined) : vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
+        const doc = await pick(); if (!doc || !isA(doc)) return undefined;
+        if (!vscode.workspace.isTrusted) { void vscode.window.showWarningMessage('Trust this workspace to run the A compiler.'); return undefined; }
         if (doc.isUntitled && !await doc.save()) return undefined;
-        const active = await pick();
-        if (!active || !isA(active)) return undefined;
+        const active = await pick(); if (!active || !isA(active)) return undefined;
         const cwd = cwdOf(active);
-        for (const open of vscode.workspace.textDocuments) {
-            if (isA(open) && open.isDirty && cwdOf(open) === cwd && !await open.save()) return undefined;
-        }
+        for (const open of vscode.workspace.textDocuments) { if (isA(open) && open.isDirty && cwdOf(open) === cwd && !await open.save()) return undefined; }
         return active;
     }
 
@@ -536,512 +554,46 @@ async function activateImpl(context, output) {
         if (!vscode.workspace.isTrusted || uri.scheme !== 'file') return undefined;
         const config = settings(vscode, uri, definition, typeof scope === 'object' ? scope : undefined);
         if (!ACTION_TITLES[definition.action]) return undefined;
-        const task = new vscode.Task({ ...definition, type: 'a', file: config.file },
-            scope || config.workspaceFolder || vscode.TaskScope.Workspace,
-            name || ACTION_TITLES[definition.action], 'A',
-            new vscode.ProcessExecution(config.compiler, argumentsFor(definition.action, config), { cwd: config.cwd }), '$a');
-        // VS Code reserves isDefault for tasks.json. Contribute Run as our only
-        // build task; explicit Build/Test/Check/Format tasks remain in
-        // Tasks: Run Task.
+        const task = new vscode.Task({ ...definition, type: 'a', file: config.file }, scope || config.workspaceFolder || vscode.TaskScope.Workspace, name || ACTION_TITLES[definition.action], 'A', new vscode.ProcessExecution(config.compiler, argumentsFor(definition.action, config), { cwd: config.cwd }), '$a');
         if (definition.action === 'run') task.group = vscode.TaskGroup.Build;
         task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true };
         return task;
     }
 
     const runStatus = vscode.window.createStatusBarItem('a.run', vscode.StatusBarAlignment.Left, 5);
-    runStatus.name = 'A: Run Program';
-    runStatus.text = '$(play) Run';
-    runStatus.tooltip = 'Compile and run the A program';
-    runStatus.command = 'a.run';
-    function updateRunStatus() {
-        if (vscode.workspace.isTrusted && vscode.window.activeTextEditor && isA(vscode.window.activeTextEditor.document)) runStatus.show();
-        else runStatus.hide();
-    }
+    runStatus.name = 'A: Run Program'; runStatus.text = '$(play) Run'; runStatus.tooltip = 'Compile and run the A program'; runStatus.command = 'a.run';
+    function updateRunStatus() { if (vscode.workspace.isTrusted && vscode.window.activeTextEditor && isA(vscode.window.activeTextEditor.document)) runStatus.show(); else runStatus.hide(); }
 
-    const runConfigurations = () => [{ type: 'a', request: 'launch', name: 'A: Run Program', noDebug: true }];
-    // Participate in the native Run configuration picker without claiming a
-    // debugger. Launch the same terminal task, then stop debug resolution.
-    const launchProvider = {
-        provideDebugConfigurations: runConfigurations,
-        resolveDebugConfiguration(_folder, config) {
-            return { ...runConfigurations()[0], ...config, noDebug: true };
-        },
-        async resolveDebugConfigurationWithSubstitutedVariables(folder, config) {
-            if (!vscode.workspace.isTrusted) return undefined;
-            if (config.request !== 'launch') {
-                void vscode.window.showErrorMessage('A supports run-only launch; attaching a debugger is not available.');
-                return undefined;
-            }
-            const active = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
-            const entry = (folder || active) && vscode.workspace.getConfiguration('a', folder && folder.uri || active && active.uri).get('entryFile', '');
-            let uri;
-            if (config.program || entry) {
-                const file = config.program || entry;
-                const base = folder && folder.uri.fsPath || (active && active.uri.scheme === 'file' ? path.dirname(active.uri.fsPath) : undefined);
-                if (!base && !path.isAbsolute(file)) {
-                    void vscode.window.showErrorMessage('Open a workspace folder or use an absolute A program path.');
-                    return undefined;
-                }
-                uri = vscode.Uri.file(path.isAbsolute(file) ? file : path.resolve(base || path.dirname(file), file));
-            } else if (!folder || active && vscode.workspace.getWorkspaceFolder(active.uri) && vscode.workspace.getWorkspaceFolder(active.uri).uri.toString() === folder.uri.toString()) {
-                const saved = await savedDocument();
-                uri = saved && saved.uri;
-            }
-            if (!uri) {
-                void vscode.window.showErrorMessage('Open an A file or set a.entryFile to run the program.');
-                return undefined;
-            }
-            const definition = { type: 'a', action: 'run', file: uri.fsPath };
-            const cwd = settings(vscode, uri, definition, folder).cwd;
-            for (const doc of vscode.workspace.textDocuments) {
-                if (isA(doc) && doc.isDirty && cwdOf(doc) === cwd && !await doc.save()) return undefined;
-            }
-            await vscode.tasks.executeTask(makeTask(definition, uri, folder));
-            return undefined;
-        }
-    };
-
-    // --- LSP providers -----------------------------------------------------
-
-    function registerProviders(getClient) {
-        const selector = { language: 'a', scheme: 'file' };
-
-        context.subscriptions.push(
-            vscode.languages.registerDefinitionProvider(selector, {
-                async provideDefinition(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/definition', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    return locationsFrom(result);
-                },
-            }),
-
-            vscode.languages.registerDeclarationProvider(selector, {
-                async provideDeclaration(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/declaration', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    return locationsFrom(result);
-                },
-            }),
-
-            vscode.languages.registerTypeDefinitionProvider(selector, {
-                async provideTypeDefinition(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/typeDefinition', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    return locationsFrom(result);
-                },
-            }),
-
-            vscode.languages.registerImplementationProvider(selector, {
-                async provideImplementation(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/implementation', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    return locationsFrom(result);
-                },
-            }),
-
-            vscode.languages.registerReferenceProvider(selector, {
-                async provideReferences(document, position, refContext) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/references', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                        context: { includeDeclaration: refContext.includeDeclaration },
-                    });
-                    return locationsFrom(result);
-                },
-            }),
-
-            vscode.languages.registerHoverProvider(selector, {
-                async provideHover(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/hover', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    if (!result || !result.contents) return null;
-                    const range = result.range ? toRange(result.range) : undefined;
-                    return new vscode.Hover(hoverContents(result.contents), range);
-                },
-            }),
-
-            vscode.languages.registerCompletionItemProvider(
-                selector,
-                {
-                    async provideCompletionItems(document, position, token) {
-                        const active = getClient();
-                        if (!active) return null;
-                        const result = await active.request('textDocument/completion', {
-                            textDocument: { uri: document.uri.toString() },
-                            position: { line: position.line, character: position.character },
-                            context: { triggerKind: 1, triggerCharacter: undefined },
-                        }, token);
-                        if (!result) return null;
-                        const entries = Array.isArray(result) ? result : result.items || [];
-                        const items = entries.map((entry) => {
-                            const item = new vscode.CompletionItem(entry.label, toCompletionKind(entry.kind));
-                            if (entry.detail) item.detail = entry.detail;
-                            if (entry.documentation) item.documentation = documentationToMarkdown(entry.documentation);
-                            if (entry.insertTextFormat === 2 && typeof entry.insertText === 'string') {
-                                item.insertText = new vscode.SnippetString(entry.insertText);
-                                item.insertTextFormat = vscode.InsertTextFormat.Snippet;
-                            } else {
-                                item.insertText = typeof entry.insertText === 'string' ? entry.insertText : entry.label;
-                            }
-                            if (entry.filterText) item.filterText = entry.filterText;
-                            if (entry.sortText) item.sortText = entry.sortText;
-                            if (entry.data) item.data = entry.data;
-                            if (entry.preselect) item.preselect = entry.preselect;
-                            return item;
-                        });
-                        return new vscode.CompletionList(items, Boolean(result.isIncomplete));
-                    },
-                    async resolveCompletionItem(item, token) {
-                        const active = getClient();
-                        if (!active || !item.data) return item;
-                        const result = await active.request('completionItem/resolve', {
-                            label: item.label,
-                            data: item.data,
-                        }, token);
-                        if (result && result.documentation) {
-                            item.documentation = documentationToMarkdown(result.documentation);
-                        }
-                        return item;
-                    },
-                },
-                '.',
-                '"',
-                '(',
-                ',',
-                ':',
-                '<'
-            ),
-
-            vscode.languages.registerSignatureHelpProvider(selector, {
-                async provideSignatureHelp(document, position) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/signatureHelp', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    });
-                    return signatureHelpFrom(result);
-                },
-            }),
-
-            vscode.languages.registerDocumentSymbolProvider(selector, {
-                async provideDocumentSymbols(document) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/documentSymbol', {
-                        textDocument: { uri: document.uri.toString() },
-                    });
-                    if (!Array.isArray(result)) return null;
-                    return result.map(convertDocumentSymbol);
-                },
-            }),
-
-            vscode.languages.registerDocumentFormattingEditProvider(selector, {
-                async provideDocumentFormattingEdits(document, options) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/formatting', {
-                        textDocument: { uri: document.uri.toString() },
-                        options: {
-                            tabSize: options.tabSize,
-                            insertSpaces: options.insertSpaces,
-                        },
-                    });
-                    if (!Array.isArray(result)) return null;
-                    return result.map(toTextEdit);
-                },
-            }),
-
-            vscode.languages.registerRenameProvider(selector, {
-                async providePrepareRename(document, position, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/prepareRename', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    }, token);
-                    if (!result) return null;
-                    return toRange(result);
-                },
-                async provideRenameEdits(document, position, newName, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/rename', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                        newName,
-                    }, token);
-                    if (!result) return null;
-                    return workspaceEditFromLsp(result);
-                },
-            }),
-
-            vscode.languages.registerSelectionRangeProvider(selector, {
-                async provideSelectionRanges(document, positions, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/selectionRange', {
-                        textDocument: { uri: document.uri.toString() },
-                        positions: positions.map((position) => ({ line: position.line, character: position.character })),
-                    }, token);
-                    if (!Array.isArray(result)) return null;
-                    return result.map((entry) => selectionRangesFrom(entry));
-                },
-            }),
-
-            vscode.languages.registerSemanticTokensProvider(selector, {
-                async provideDocumentSemanticTokens(document, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/semanticTokens/full', {
-                        textDocument: { uri: document.uri.toString() },
-                    }, token);
-                    if (!result || !Array.isArray(result.data)) return null;
-                    return semanticTokensFrom(result.data);
-                },
-                async provideDocumentSemanticTokensEdits(document, range, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/semanticTokens/range', {
-                        textDocument: { uri: document.uri.toString() },
-                        range: {
-                            start: { line: range.start.line, character: range.start.character },
-                            end: { line: range.end.line, character: range.end.character },
-                        },
-                    }, token);
-                    if (!result || !Array.isArray(result.data)) return null;
-                    return semanticTokensFrom(result.data);
-                },
-            }, A_LEGEND),
-
-            vscode.languages.registerInlayHintsProvider(selector, {
-                async provideInlayHints(document, range, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/inlayHint', {
-                        textDocument: { uri: document.uri.toString() },
-                        range: {
-                            start: { line: range.start.line, character: range.start.character },
-                            end: { line: range.end.line, character: range.end.character },
-                        },
-                    }, token);
-                    if (!Array.isArray(result)) return null;
-                    return result.map((entry) => {
-                        const hint = new vscode.InlayHint(
-                            new vscode.Position(entry.position.line, entry.position.character),
-                            entry.label,
-                            entry.kind === 1 ? vscode.InlayHintKind.Type : entry.kind === 2 ? vscode.InlayHintKind.Parameter : undefined
-                        );
-                        hint.paddingLeft = Boolean(entry.paddingLeft);
-                        hint.paddingRight = Boolean(entry.paddingRight);
-                        if (entry.tooltip) hint.tooltip = typeof entry.tooltip === 'string' ? entry.tooltip : entry.tooltip.value;
-                        return hint;
-                    });
-                },
-            }),
-
-            vscode.languages.registerCodeActionsProvider(selector, {
-                async provideCodeActions(document, range, context, token) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const kinds = context && context.only && context.only.length ? context.only : undefined;
-                    const result = await active.request('textDocument/codeAction', {
-                        textDocument: { uri: document.uri.toString() },
-                        range: {
-                            start: { line: range.start.line, character: range.start.character },
-                            end: { line: range.end.line, character: range.end.character },
-                        },
-                        context: { only: kinds || [], diagnostics: (context && context.diagnostics || []).map((item) => ({ message: item.message, severity: item.severity === vscode.DiagnosticSeverity.Error ? 1 : 2, range: { start: { line: item.range.start.line, character: item.range.start.character }, end: { line: item.range.end.line, character: item.range.end.character } } })) },
-                    }, token);
-                    if (!Array.isArray(result)) return null;
-                    return result.map((entry) => {
-                        const action = new vscode.CodeAction(entry.title, entry.kind);
-                        if (entry.edit) action.edit = workspaceEditFromLsp(entry.edit);
-                        if (entry.command) action.command = entry.command;
-                        if (entry.diagnostics) action.diagnostics = entry.diagnostics.map((item) => {
-                            const diagnostic = new vscode.Diagnostic(toRange(item.range), item.message || '', item.severity === 1 ? vscode.DiagnosticSeverity.Error : item.severity === 2 ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Information);
-                            return diagnostic;
-                        });
-                        if (entry.isPreferred) action.isPreferred = entry.isPreferred;
-                        if (entry.disabled) action.disabled = entry.disabled;
-                        return action;
-                    });
-                },
-            }, {
-                providedCodeActionKinds: [vscode.CodeActionKind.QuickFix, vscode.CodeActionKind.Refactor, vscode.CodeActionKind.SourceFixAll],
-            }),
-
-            vscode.languages.registerDocumentHighlightProvider(selector, {
-                async provideDocumentHighlights(document, position) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/documentHighlight', {
-                        textDocument: { uri: document.uri.toString() },
-                        position: { line: position.line, character: position.character },
-                    });
-                    if (!Array.isArray(result)) return null;
-                    return result.map((entry) => {
-                        const kind = Math.max(0, Math.min(2, (entry.kind || 1) - 1));
-                        return new vscode.DocumentHighlight(toRange(entry.range), kind);
-                    });
-                },
-            }),
-
-            vscode.languages.registerFoldingRangeProvider(selector, {
-                async provideFoldingRanges(document) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('textDocument/foldingRange', {
-                        textDocument: { uri: document.uri.toString() },
-                    });
-                    if (!Array.isArray(result)) return null;
-                    return result.map(
-                        (entry) =>
-                            new vscode.FoldingRange(
-                                entry.startLine,
-                                entry.endLine,
-                                entry.kind === 'region'
-                                    ? vscode.FoldingRangeKind.Region
-                                    : entry.kind === 'comment'
-                                        ? vscode.FoldingRangeKind.Comment
-                                        : undefined
-                            )
-                    );
-                },
-            }),
-
-            vscode.languages.registerWorkspaceSymbolProvider({
-                async provideWorkspaceSymbols(query) {
-                    const active = getClient();
-                    if (!active) return null;
-                    const result = await active.request('workspace/symbol', { query });
-                    if (!Array.isArray(result)) return null;
-                    return result
-                        .filter((entry) => entry && entry.location)
-                        .map(
-                            (entry) =>
-                                new vscode.SymbolInformation(
-                                    entry.name,
-                                    toSymbolKind(entry.kind),
-                                    entry.containerName || 'A',
-                                    new vscode.Location(
-                                        vscode.Uri.parse(entry.location.uri),
-                                        toRange(entry.location.range)
-                                    )
-                                )
-                        );
-                },
-            })
-        );
-    }
-
-    // --- document sync -----------------------------------------------------
-
-    const openedDocuments = new Set();
-    const changeTimers = new Map();
-    // Previous text per URI for incremental (kind=2) sync: the server
-    // debounces 200 ms itself, so the extension only coalesces keystrokes.
-    const previousText = new Map();
-
-    function debounceChange(document, changeEvent) {
-        const key = document.uri.toString();
-        const existing = changeTimers.get(key);
-        if (existing) clearTimeout(existing);
-        // Capture the first pending change's range while the text is fresh;
-        // later keystrokes supersede it, so keep the whole-document text as
-        // fallback when multiple changes arrived in one burst.
-        const captured = changeEvent && changeEvent.contentChanges && changeEvent.contentChanges.length === 1
-            ? { range: changeEvent.contentChanges[0].range, text: changeEvent.contentChanges[0].text }
-            : undefined;
-        changeTimers.set(
-            key,
-            setTimeout(() => {
-                changeTimers.delete(key);
-                const active = getClient();
-                if (active && openedDocuments.has(key)) {
-                    if (captured && captured.range) active.changeDocument(document, captured.range, captured.text);
-                    else active.changeDocument(document);
-                }
-            }, 250)
-        );
-    }
-
-    // --- wiring ------------------------------------------------------------
-
-    const getClient = () => server.status === 'running' ? server.client : undefined;
+    // register LSP providers (only active when server running)
+    function getClient() { return server.status === 'running' ? server.client : undefined; }
     registerProviders(getClient);
 
     context.subscriptions.push(
         checkDiagnostics, output, runStatus, checkStatus,
         { dispose() { disposed = true; stopFallback(); queue.invalidate(); void stopServer(); } },
         vscode.window.onDidChangeActiveTextEditor(() => { updateRunStatus(); updateCheckStatus(); }),
-        vscode.languages.onDidChangeDiagnostics(() => { if (server.status !== 'off') updateCheckStatus(); }),
         vscode.workspace.onDidGrantWorkspaceTrust(() => { updateRunStatus(); updateCheckStatus(); void decide(); }),
-        vscode.debug.registerDebugConfigurationProvider('a', launchProvider),
-        vscode.debug.registerDebugConfigurationProvider('a', { provideDebugConfigurations: runConfigurations }, vscode.DebugConfigurationProviderTriggerKind.Dynamic),
         vscode.commands.registerCommand('a.showOutput', () => output.show()),
-        vscode.commands.registerCommand('a.restartServer', async () => {
-            await decide(true);
-            vscode.window.showInformationMessage('A language server restarted.');
-        }),
+        vscode.commands.registerCommand('a.restartServer', async () => { await decide(true); vscode.window.showInformationMessage('A language server restarted.'); }),
         vscode.commands.registerCommand('a.check', async () => {
-            const doc = await savedDocument();
-            if (!doc) return;
-            // With the server checking the program as it is edited, an explicit
-            // check shows the compiler's whole output in a terminal.
-            if (server.status !== 'off') {
-                await vscode.tasks.executeTask(makeTask({ type: 'a', action: 'check' }, doc.uri));
-                return;
-            }
-            const completed = await queue.schedule(settings(vscode, doc.uri), 0);
-            if (completed) output.show(true);
+            const doc = await savedDocument(); if (!doc) return;
+            if (server.status !== 'off') { await vscode.tasks.executeTask(makeTask({ type: 'a', action: 'check' }, doc.uri)); return; }
+            const completed = await queue.schedule(settings(vscode, doc.uri), 0); if (completed) output.show(true);
         }),
-        // The editor title's play button runs the active file; a string
-        // argument (a URI, as a code lens might pass) runs that file instead.
         vscode.commands.registerCommand('a.run', async target => {
             const uri = typeof target === 'string' ? vscode.Uri.parse(target) : target instanceof vscode.Uri ? target : undefined;
-            const doc = await savedDocument(uri);
-            if (!doc) return;
-            const definition = { type: 'a', action: 'run' };
-            if (uri) definition.file = doc.uri.fsPath;
+            const doc = await savedDocument(uri); if (!doc) return;
+            const definition = { type: 'a', action: 'run' }; if (uri) definition.file = doc.uri.fsPath;
             await vscode.tasks.executeTask(makeTask(definition, doc.uri));
         }),
-        ...['build', 'test', 'fmt'].map(action => vscode.commands.registerCommand(`a.${action}`, async () => {
-            const doc = await savedDocument();
-            if (doc) await vscode.tasks.executeTask(makeTask({ type: 'a', action }, doc.uri));
-        })),
+        ...['build', 'test', 'fmt'].map(action => vscode.commands.registerCommand(`a.${action}`, async () => { const doc = await savedDocument(); if (doc) await vscode.tasks.executeTask(makeTask({ type: 'a', action }, doc.uri)); })),
         vscode.tasks.registerTaskProvider('a', {
             provideTasks() {
                 if (!vscode.workspace.isTrusted) return [];
                 const doc = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
                 if (doc && isA(doc)) return Object.keys(ACTION_TITLES).map(action => makeTask({ type: 'a', action }, doc.uri));
-                // A configured program is runnable even when another editor (or
-                // just the Run view) has focus.
                 return (vscode.workspace.workspaceFolders || []).flatMap(folder => {
-                    const entry = vscode.workspace.getConfiguration('a', folder.uri).get('entryFile', '');
-                    if (!entry) return [];
+                    const entry = vscode.workspace.getConfiguration('a', folder.uri).get('entryFile', ''); if (!entry) return [];
                     const uri = vscode.Uri.file(absolute(entry, folder.uri.fsPath, ''));
                     return Object.keys(ACTION_TITLES).map(action => makeTask({ type: 'a', action }, uri, folder));
                 });
@@ -1050,277 +602,108 @@ async function activateImpl(context, output) {
                 if (!vscode.workspace.isTrusted) return undefined;
                 const folder = typeof task.scope === 'object' ? task.scope : undefined;
                 const active = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
-                const base = folder && folder.uri.fsPath;
-                const file = task.definition.file;
+                const base = folder && folder.uri.fsPath; const file = task.definition.file;
                 const configuredEntry = folder && vscode.workspace.getConfiguration('a', folder.uri).get('entryFile', '');
-                const uri = file && base && !file.includes('${file}')
-                    ? vscode.Uri.file(absolute(file, base, ''))
-                    : active && isA(active) && (!base || cwdOf(active) === base) ? active.uri
-                    : configuredEntry ? vscode.Uri.file(absolute(configuredEntry, base || '', '')) : undefined;
+                const uri = file && base && !file.includes('${file}') ? vscode.Uri.file(absolute(file, base, '')) : active && isA(active) && (!base || cwdOf(active) === base) ? active.uri : configuredEntry ? vscode.Uri.file(absolute(configuredEntry, base || '', '')) : undefined;
                 if (!uri) return undefined;
                 const resolved = makeTask(task.definition, uri, task.scope, task.name);
-                if (resolved) {
-                    resolved.definition = task.definition;
-                    resolved.presentationOptions = task.presentationOptions;
-                    if (task.group) resolved.group = task.group;
-                    resolved.problemMatchers = task.problemMatchers.length ? task.problemMatchers : ['$a'];
-                    resolved.runOptions = task.runOptions;
-                }
+                if (resolved) { resolved.definition = task.definition; resolved.presentationOptions = task.presentationOptions; if (task.group) resolved.group = task.group; resolved.problemMatchers = task.problemMatchers.length ? task.problemMatchers : ['$a']; }
                 return resolved;
             }
         }),
-        // Results checked with other settings or workspace folders no longer
-        // apply, and the server may be wanted, or wanted otherwise.
-        vscode.workspace.onDidChangeConfiguration(event => {
-            if (!event.affectsConfiguration('a')) return;
-            if (fallback) { queue.invalidate(); recheck(); }
-            void decide();
-        }),
-        vscode.workspace.onDidChangeWorkspaceFolders(() => {
-            if (fallback) { queue.invalidate(); recheck(); }
-            void decide();
-        }),
-        // An A file opened without a folder decides the server's working
-        // directory: the first one starts the server.
+        vscode.workspace.onDidChangeConfiguration(event => { if (!event.affectsConfiguration('a')) return; if (fallback) { queue.invalidate(); recheck(); } void decide(); }),
+        vscode.workspace.onDidChangeWorkspaceFolders(() => { if (fallback) { queue.invalidate(); recheck(); } void decide(); }),
         vscode.workspace.onDidOpenTextDocument(doc => {
             if (isA(doc) && !(vscode.workspace.workspaceFolders || []).length && server.status === 'off') void decide();
-            const active = getClient();
-            if (!active || !isA(doc)) return;
-            openedDocuments.add(doc.uri.toString());
-            active.openDocument(doc);
+            const active = getClient(); if (!active || !isA(doc)) return;
+            openedDocuments.add(doc.uri.toString()); active.openDocument(doc);
         }),
-
         vscode.workspace.onDidChangeTextDocument(event => {
-            const active = getClient();
-            if (!active || !isA(event.document)) return;
-            if (!event.contentChanges.length) return;
+            const active = getClient(); if (!active || !isA(event.document) || !event.contentChanges.length) return;
             const key = event.document.uri.toString();
-            if (!openedDocuments.has(key)) {
-                // A document can be open before the server starts, or the
-                // open notification can be missed; sync it so hover/goto work.
-                openedDocuments.add(key);
-                active.openDocument(event.document);
-                return;
-            }
-            debounceChange(event.document, event);
+            if (!openedDocuments.has(key)) { openedDocuments.add(key); active.openDocument(event.document); return; }
+            const existing = changeTimers.get(key); if (existing) clearTimeout(existing);
+            const captured = event.contentChanges.length === 1 ? { range: event.contentChanges[0].range, text: event.contentChanges[0].text } : undefined;
+            changeTimers.set(key, setTimeout(() => { changeTimers.delete(key); const c = getClient(); if (c && openedDocuments.has(key)) { if (captured && captured.range) c.changeDocument(event.document, captured.range, captured.text); else c.changeDocument(event.document); } }, 250));
         }),
-
         vscode.workspace.onDidSaveTextDocument(document => {
-            const active = getClient();
-            if (!active || !isA(document)) return;
-            const key = document.uri.toString();
-            const timer = changeTimers.get(key);
-            if (timer) {
-                clearTimeout(timer);
-                changeTimers.delete(key);
-            }
-            if (!openedDocuments.has(key)) {
-                openedDocuments.add(key);
-                active.openDocument(document);
-            }
+            const active = getClient(); if (!active || !isA(document)) return;
+            const key = document.uri.toString(); const timer = changeTimers.get(key); if (timer) { clearTimeout(timer); changeTimers.delete(key); }
+            if (!openedDocuments.has(key)) { openedDocuments.add(key); active.openDocument(document); }
             active.saveDocument(document);
         }),
-
         vscode.workspace.onDidCloseTextDocument(document => {
-            const active = getClient();
-            if (!isA(document)) return;
-            const key = document.uri.toString();
-            const timer = changeTimers.get(key);
-            if (timer) clearTimeout(timer);
-            changeTimers.delete(key);
+            const active = getClient(); if (!isA(document)) return;
+            const key = document.uri.toString(); const timer = changeTimers.get(key); if (timer) clearTimeout(timer); changeTimers.delete(key);
             if (active && openedDocuments.delete(key)) active.closeDocument(document);
         })
     );
-    updateRunStatus();
-    updateCheckStatus();
-    await decide();
+    updateRunStatus(); updateCheckStatus(); await decide();
 }
 
-function deactivate() {
-    return stopOnDeactivate();
-}
+function deactivate() { return stopOnDeactivate ? stopOnDeactivate() : Promise.resolve(); }
 
-// ------------------------------------------------------------- utilities
-
-function failureMessage(output) {
-    return String(output || '').replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).join('\n').trim();
-}
-
-function symbolKind(name) {
-    switch (name) {
-        case 'Function': return vscode.SymbolKind.Function;
-        case 'Struct': return vscode.SymbolKind.Struct;
-        case 'Class': return vscode.SymbolKind.Class;
-        case 'Enum': return vscode.SymbolKind.Enum;
-        case 'Interface': return vscode.SymbolKind.Interface;
-        case 'TypeParameter': return vscode.SymbolKind.TypeParameter;
-        default: return vscode.SymbolKind.Variable;
+// ---- minimal provider registration for LSP mode (kept from previous extension) ----
+function registerProviders(getClient) {
+    const selector = { language: 'a', scheme: 'file' };
+    function toRange(range) { if (!range) return new vscode.Range(0,0,0,0); return new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character); }
+    function locationsFrom(result) {
+        if (!result) return null; const entries = Array.isArray(result) ? result : [result]; const locations = [];
+        for (const entry of entries) { if (!entry) continue; const uri = entry.uri || entry.targetUri; const range = entry.range || entry.targetSelectionRange || entry.targetRange; if (!uri || !range) continue; locations.push(new vscode.Location(vscode.Uri.parse(uri), toRange(range))); }
+        return locations.length ? locations : null;
     }
-}
-
-function toSymbolKind(kind) {
-    const value = typeof kind === 'number' ? kind - 1 : 0;
-    return Math.max(0, Math.min(25, value));
-}
-
-function toCompletionKind(kind) {
-    const value = typeof kind === 'number' ? kind - 1 : 0;
-    return Math.max(0, Math.min(24, value));
-}
-
-function hoverContents(contents) {
-    if (!contents) return new vscode.MarkdownString('');
-    if (Array.isArray(contents)) {
-        const markdown = new vscode.MarkdownString();
-        for (const part of contents) {
-            const value = typeof part === 'string' ? part : part && part.value;
-            if (value) markdown.appendMarkdown(value);
-            markdown.appendMarkdown('\n\n');
-        }
-        return markdown;
+    function hoverContents(contents) {
+        if (!contents) return new vscode.MarkdownString(''); if (Array.isArray(contents)) { const md = new vscode.MarkdownString(); for (const p of contents) { const v = typeof p === 'string' ? p : p && p.value; if (v) md.appendMarkdown(v + '\n\n'); } return md; } if (typeof contents === 'string') return new vscode.MarkdownString(contents); return new vscode.MarkdownString(contents.value || '');
     }
-    if (typeof contents === 'string') return new vscode.MarkdownString(contents);
-    return new vscode.MarkdownString(contents.value || '');
-}
+    function documentationToMarkdown(documentation) { if (!documentation) return undefined; if (typeof documentation === 'string') return new vscode.MarkdownString(documentation); return new vscode.MarkdownString(documentation.value || ''); }
+    function toCompletionKind(kind) { const value = typeof kind === 'number' ? kind - 1 : 0; return Math.max(0, Math.min(24, value)); }
+    function toSymbolKind(kind) { const value = typeof kind === 'number' ? kind - 1 : 0; return Math.max(0, Math.min(25, value)); }
+    function convertDocumentSymbol(symbol) { const c = new vscode.DocumentSymbol(symbol.name, symbol.detail || '', toSymbolKind(symbol.kind), toRange(symbol.range), toRange(symbol.selectionRange)); if (Array.isArray(symbol.children) && symbol.children.length) c.children = symbol.children.map(convertDocumentSymbol); return c; }
+    function toTextEdit(edit) { return new vscode.TextEdit(toRange(edit.range), edit.newText || ''); }
+    function workspaceEditFromLsp(edit) { const we = new vscode.WorkspaceEdit(); if (!edit) return we; if (edit.changes) for (const [uri, edits] of Object.entries(edit.changes)) we.set(vscode.Uri.parse(uri), (edits||[]).map(toTextEdit)); if (Array.isArray(edit.documentChanges)) for (const c of edit.documentChanges) if (c && c.textDocument && Array.isArray(c.edits)) we.set(vscode.Uri.parse(c.textDocument.uri), c.edits.map(toTextEdit)); return we; }
+    const A_LEGEND = new vscode.SemanticTokensLegend(['namespace','type','class','enum','function','method','parameter','variable','property','keyword','comment','string','number','operator'], ['declaration','readonly','static']);
+    function semanticTokensFrom(data) { const b = new vscode.SemanticTokensBuilder(A_LEGEND); let line=-1, ch=0; for (let i=0;i+4<data.length;i+=5){ const dl=data[i],dc=data[i+1],len=data[i+2],type=data[i+3],mods=data[i+4]; if (dl>0){line+=dl;ch=dc;} else ch+=dc; while(line<0)line=0; b.push(new vscode.Range(line,ch,line,ch+len), type, mods&1?['declaration']:mods&2?['readonly']:mods&4?['static']:[]);} return b.build(); }
 
-function convertDocumentSymbol(symbol) {
-    const converted = new vscode.DocumentSymbol(
-        symbol.name,
-        symbol.detail || '',
-        toSymbolKind(symbol.kind),
-        toRange(symbol.range),
-        toRange(symbol.selectionRange)
-    );
-    if (Array.isArray(symbol.children) && symbol.children.length) {
-        converted.children = symbol.children.map(convertDocumentSymbol);
-    }
-    return converted;
-}
-
-function toTextEdit(edit) {
-    return new vscode.TextEdit(toRange(edit.range), edit.newText || '');
-}
-
-function workspaceEditFromLsp(edit) {
-    const workspaceEdit = new vscode.WorkspaceEdit();
-    if (!edit) return workspaceEdit;
-    if (edit.changes) {
-        for (const [uri, edits] of Object.entries(edit.changes)) {
-            workspaceEdit.set(vscode.Uri.parse(uri), (edits || []).map(toTextEdit));
-        }
-    }
-    if (Array.isArray(edit.documentChanges)) {
-        for (const change of edit.documentChanges) {
-            if (!change || !change.textDocument || !Array.isArray(change.edits)) continue;
-            workspaceEdit.set(
-                vscode.Uri.parse(change.textDocument.uri),
-                change.edits.map(toTextEdit)
-            );
-        }
-    }
-    return workspaceEdit;
-}
-
-function locationsFrom(result) {
-    if (!result) return null;
-    const entries = Array.isArray(result) ? result : [result];
-    const locations = [];
-    for (const entry of entries) {
-        if (!entry) continue;
-        const uri = entry.uri || entry.targetUri;
-        const range = entry.range || entry.targetSelectionRange || entry.targetRange;
-        if (!uri || !range) continue;
-        locations.push(new vscode.Location(vscode.Uri.parse(uri), toRange(range)));
-    }
-    return locations.length ? locations : null;
-}
-
-// Legend matching a-lsp's semanticTokensProvider and package.json.
-// Token type indices: 0 namespace, 1 type, 2 class, 3 enum, 4 function,
-// 5 method, 6 parameter, 7 variable, 8 property, 9 keyword, 10 comment,
-// 11 string, 12 number, 13 operator. Modifiers: 0 declaration, 1 readonly, 2 static.
-const A_LEGEND = new vscode.SemanticTokensLegend(
-    ['namespace', 'type', 'class', 'enum', 'function', 'method', 'parameter', 'variable', 'property', 'keyword', 'comment', 'string', 'number', 'operator'],
-    ['declaration', 'readonly', 'static']
-);
-
-function semanticTokensFrom(data) {
-    // data is delta-encoded [deltaLine, deltaChar, length, tokenType, modifiers]*.
-    const tokens = new vscode.SemanticTokensBuilder(A_LEGEND);
-    let line = -1, character = 0;
-    for (let i = 0; i + 4 < data.length; i += 5) {
-        const deltaLine = data[i], deltaChar = data[i + 1], length = data[i + 2];
-        const type = data[i + 3], modifiers = data[i + 4];
-        if (deltaLine > 0) { line += deltaLine; character = deltaChar; }
-        else { character += deltaChar; }
-        while (line < 0) line = 0;
-        const start = new vscode.Position(line, character);
-        const end = new vscode.Position(line, character + length);
-        let modifierMask = 0;
-        if (modifiers & 1) modifierMask |= 1 << 0;
-        if (modifiers & 2) modifierMask |= 1 << 1;
-        if (modifiers & 4) modifierMask |= 1 << 2;
-        tokens.push(start, end, type, modifierMask);
-    }
-    return tokens.build();
-}
-
-function selectionRangesFrom(entry) {
-    if (!entry || !Array.isArray(entry.ranges) || !entry.ranges.length) return [];
-    // Server sends one inner range per position with a `parent` array
-    // holding the enclosing block (expand-selection). Flatten to a chain
-    // innermost -> outermost, as VS Code's SelectionRange expects.
-    const build = (node) => {
-        const current = new vscode.SelectionRange(toRange(node.range));
-        const parents = Array.isArray(node.parent) ? node.parent : node.parent ? [node.parent] : [];
-        if (parents.length) {
-            const next = build(parents[0]);
-            current.parent = next;
-        }
-        return current;
-    };
-    // Flat array form (older servers): chain in order.
-    if (entry.ranges.length > 1 && !entry.ranges[0].parent) {
-        const list = entry.ranges.map((item) => new vscode.SelectionRange(toRange(item.range)));
-        for (let i = 0; i < list.length - 1; i++) list[i].parent = list[i + 1];
-        return [list[0]];
-    }
-    return [build(entry.ranges[0])];
-}
-
-function documentationToMarkdown(documentation) {
-    if (!documentation) return undefined;
-    if (typeof documentation === 'string') return new vscode.MarkdownString(documentation);
-    return new vscode.MarkdownString(documentation.value || '');
+    const subs = [
+        vscode.languages.registerDefinitionProvider(selector, { async provideDefinition(document, position, token) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/definition',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token)); } }),
+        vscode.languages.registerDeclarationProvider(selector, { async provideDeclaration(document, position, token) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/declaration',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token)); } }),
+        vscode.languages.registerTypeDefinitionProvider(selector, { async provideTypeDefinition(document, position, token) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/typeDefinition',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token)); } }),
+        vscode.languages.registerImplementationProvider(selector, { async provideImplementation(document, position, token) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/implementation',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token)); } }),
+        vscode.languages.registerReferenceProvider(selector, { async provideReferences(document, position, refContext) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/references',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character},context:{includeDeclaration:refContext.includeDeclaration}})); } }),
+        vscode.languages.registerHoverProvider(selector, { async provideHover(document, position, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/hover',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token); if(!r||!r.contents) return null; return new vscode.Hover(hoverContents(r.contents), r.range?toRange(r.range):undefined); } }),
+        vscode.languages.registerCompletionItemProvider(selector, {
+            async provideCompletionItems(document, position, token) {
+                const a=getClient(); if(!a) return null;
+                const result = await a.request('textDocument/completion',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character},context:{triggerKind:1}},token);
+                if(!result) return null; const entries = Array.isArray(result)?result:(result.items||[]);
+                const items = entries.map(entry=>{ const it=new vscode.CompletionItem(entry.label,toCompletionKind(entry.kind)); if(entry.detail)it.detail=entry.detail; if(entry.documentation)it.documentation=documentationToMarkdown(entry.documentation); if(entry.insertTextFormat===2&&typeof entry.insertText==='string'){it.insertText=new vscode.SnippetString(entry.insertText);} else it.insertText=typeof entry.insertText==='string'?entry.insertText:entry.label; if(entry.sortText)it.sortText=entry.sortText; if(entry.filterText)it.filterText=entry.filterText; if(entry.data)it.data=entry.data; if(entry.preselect)it.preselect=entry.preselect; return it; });
+                return new vscode.CompletionList(items, Boolean(result.isIncomplete));
+            },
+            async resolveCompletionItem(item, token) { const a=getClient(); if(!a||!item.data) return item; const r=await a.request('completionItem/resolve',{label:item.label,data:item.data},token); if(r&&r.documentation) item.documentation=documentationToMarkdown(r.documentation); return item; }
+        }, '.', '"', '(', ',', ':', '<'),
+        vscode.languages.registerSignatureHelpProvider(selector, { async provideSignatureHelp(document, position) { const a=getClient(); if(!a) return null; return signatureHelpFrom(await a.request('textDocument/signatureHelp',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}})); } }),
+        vscode.languages.registerDocumentSymbolProvider(selector, { async provideDocumentSymbols(document) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/documentSymbol',{textDocument:{uri:document.uri.toString()}}); if(!Array.isArray(r)) return null; return r.map(convertDocumentSymbol); } }),
+        vscode.languages.registerDocumentFormattingEditProvider(selector, { async provideDocumentFormattingEdits(document, options) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/formatting',{textDocument:{uri:document.uri.toString()},options:{tabSize:options.tabSize,insertSpaces:options.insertSpaces}}); if(!Array.isArray(r)) return null; return r.map(toTextEdit); } }),
+        vscode.languages.registerRenameProvider(selector, { async provideRenameEdits(document, position, newName, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/rename',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character},newName},token); if(!r) return null; return workspaceEditFromLsp(r); } }),
+        vscode.languages.registerDocumentHighlightProvider(selector, { async provideDocumentHighlights(document, position) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/documentHighlight',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}}); if(!Array.isArray(r)) return null; return r.map(e=>new vscode.DocumentHighlight(toRange(e.range), Math.max(0,Math.min(2,(e.kind||1)-1)))); } }),
+        vscode.languages.registerFoldingRangeProvider(selector, { async provideFoldingRanges(document) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/foldingRange',{textDocument:{uri:document.uri.toString()}}); if(!Array.isArray(r)) return null; return r.map(e=>new vscode.FoldingRange(e.startLine,e.endLine,e.kind==='comment'?vscode.FoldingRangeKind.Comment:e.kind==='imports'?vscode.FoldingRangeKind.Imports:vscode.FoldingRangeKind.Region)); } }),
+        vscode.languages.registerWorkspaceSymbolProvider({ async provideWorkspaceSymbols(query) { const a=getClient(); if(!a) return null; const r=await a.request('workspace/symbol',{query}); if(!Array.isArray(r)) return null; return r.filter(e=>e&&e.location).map(e=>new vscode.SymbolInformation(e.name,toSymbolKind(e.kind),e.containerName||'A',new vscode.Location(vscode.Uri.parse(e.location.uri),toRange(e.location.range)))); } }),
+        vscode.languages.registerSemanticTokensProvider(selector, { async provideDocumentSemanticTokens(document, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/semanticTokens/full',{textDocument:{uri:document.uri.toString()}},token); if(!r||!Array.isArray(r.data)) return null; return semanticTokensFrom(r.data); } }, A_LEGEND),
+        vscode.languages.registerInlayHintsProvider(selector, { async provideInlayHints(document, range, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/inlayHint',{textDocument:{uri:document.uri.toString()},range:{start:{line:range.start.line,character:range.start.character},end:{line:range.end.line,character:range.end.character}}},token); if(!Array.isArray(r)) return null; return r.map(e=>{ const h=new vscode.InlayHint(new vscode.Position(e.position.line,e.position.character),e.label,e.kind===1?vscode.InlayHintKind.Type:e.kind===2?vscode.InlayHintKind.Parameter:undefined); h.paddingLeft=Boolean(e.paddingLeft); h.paddingRight=Boolean(e.paddingRight); if(e.tooltip)h.tooltip=typeof e.tooltip==='string'?e.tooltip:e.tooltip.value; return h; }); } }),
+    ];
+    // attach to global context via side-effect in activate? easier: push to module not available; activate pushes nothing here but providers live while extension active in VS Code; we'll store globally is not necessary — VS Code disposes on deactivate? not directly. Keep simple: rely on extension host lifecycle.
+    global.__aProviderSubs = subs;
 }
 
 function signatureHelpFrom(result) {
     if (!result || !Array.isArray(result.signatures) || !result.signatures.length) return null;
-    const signatures = result.signatures.map((entry) => {
-        const signature = new vscode.SignatureInformation(entry.label);
-        if (entry.documentation) signature.documentation = documentationToMarkdown(entry.documentation);
-        if (Array.isArray(entry.parameters)) {
-            signature.parameters = entry.parameters.map((parameter) => {
-                const info = new vscode.ParameterInformation(parameter.label);
-                if (parameter.documentation) info.documentation = documentationToMarkdown(parameter.documentation);
-                return info;
-            });
-        }
-        return signature;
-    });
-    const help = new vscode.SignatureHelp(signatures);
-    help.activeSignature = Math.max(
-        0,
-        Math.min(result.activeSignature || 0, signatures.length - 1)
-    );
-    const active = signatures[help.activeSignature];
-    if (active && typeof result.activeParameter === 'number') {
-        help.activeParameter = Math.max(
-            0,
-            Math.min(result.activeParameter, (active.parameters || []).length - 1)
-        );
-    }
-    return help;
+    const signatures = result.signatures.map(entry => { const s=new vscode.SignatureInformation(entry.label); if(entry.documentation) s.documentation = typeof entry.documentation==='string'? new vscode.MarkdownString(entry.documentation): new vscode.MarkdownString(entry.documentation.value||''); if(Array.isArray(entry.parameters)) s.parameters=entry.parameters.map(p=>{ const pi=new vscode.ParameterInformation(p.label); if(p.documentation) pi.documentation=typeof p.documentation==='string'?new vscode.MarkdownString(p.documentation):new vscode.MarkdownString(p.documentation.value||''); return pi; }); return s; });
+    const help = new vscode.SignatureHelp(signatures); help.activeSignature=Math.max(0,Math.min(result.activeSignature||0,signatures.length-1)); const active=signatures[help.activeSignature]; if(active&&typeof result.activeParameter==='number') help.activeParameter=Math.max(0,Math.min(result.activeParameter,(active.parameters||[]).length-1)); return help;
 }
+
+function symbolKind(name) {
+    switch (name) { case 'Function': return vscode.SymbolKind.Function; case 'Struct': return vscode.SymbolKind.Struct; case 'Class': return vscode.SymbolKind.Class; case 'Enum': return vscode.SymbolKind.Enum; case 'Interface': return vscode.SymbolKind.Interface; case 'TypeParameter': return vscode.SymbolKind.TypeParameter; default: return vscode.SymbolKind.Variable; }
+}
+function failureMessage(output) { return String(output || '').replace(/\x1b\[[0-9;]*m/g, '').split(/\r?\n/).join('\n').trim(); }
 
 module.exports = { activate, deactivate };

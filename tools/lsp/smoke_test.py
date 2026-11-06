@@ -34,6 +34,21 @@ doc = json.parse("[1, 2]")
 words = "abc"
 print("total = {total}")
 print(doc, words.strip())
+
+## Adds things.
+## Args:
+##   a: first number
+##   b: second number
+##   c: third number
+## Returns:
+##   The sum.
+## Example:
+## >>> add3(1, 2, 3)
+## 6
+fn add3(a: i32, b: i32, c: i32) -> i32:
+    return a + b + c
+
+total = add3(1, 2, 3)
 """
 
 
@@ -287,6 +302,30 @@ def main() -> int:
         )["result"]
         if not hover or "strip([chars])" not in hover["contents"]["value"]:
             fail("hover did not describe the string method strip")
+
+        # Rich hover: builtin docs render Example and See Also sections.
+        print_line, print_col = position_of('print("total = {total}")')
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": print_line, "character": print_col + 2}},
+        )["result"]
+        if not hover or "**Example:**" not in hover["contents"]["value"] or "**See Also:**" not in hover["contents"]["value"]:
+            fail(f"hover did not render Example/See Also for print: {hover}")
+
+        # Rich hover: a 3-parameter user function renders a multi-line
+        # signature plus structured doc sections (Args/Returns/Example).
+        rich_line, rich_col = position_of("total = add3(1, 2, 3)")
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": rich_line, "character": rich_col + len("total = ") + 1}},
+        )["result"]
+        text = hover["contents"]["value"] if hover else ""
+        if "fn add3(\n    a: i32,\n    b: i32,\n    c: i32\n) -> i32" not in text:
+            fail(f"hover did not render a multi-line signature: {text!r}")
+        if "**Args:**" not in text or "**Returns:**" not in text or "**Example:**" not in text:
+            fail(f"hover did not render structured doc sections: {text!r}")
+        if "[Definition](" not in text:
+            fail(f"hover did not include a definition link: {text!r}")
 
         # Signature help inside `json.parse(` names the parameter.
         signature = client.request(

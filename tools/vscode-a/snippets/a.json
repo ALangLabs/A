@@ -1,17 +1,26 @@
 {
   "Main function": {
     "prefix": "main",
-    "body": ["fn main():", "\t$0"],
+    "body": [
+      "fn main():",
+      "\t$0"
+    ],
     "description": "Program entry point"
   },
   "Function": {
     "prefix": "fn",
-    "body": ["fn ${1:name}(${2:args}):", "\t$0"],
+    "body": [
+      "fn ${1:name}(${2:args}):",
+      "\t$0"
+    ],
     "description": "Function declaration"
   },
   "Function with return type": {
     "prefix": "fnret",
-    "body": ["fn ${1:name}(${2:args}) -> ${3:String}:", "\treturn $0"],
+    "body": [
+      "fn ${1:name}(${2:args}) -> ${3:String}:",
+      "\treturn $0"
+    ],
     "description": "Function with an annotated return type"
   },
   "Lambda": {
@@ -21,22 +30,38 @@
   },
   "Struct": {
     "prefix": "struct",
-    "body": ["struct ${1:Name}:", "\t${2:field}", "", "\tfn ${3:method}(self):", "\t\t$0"],
+    "body": [
+      "struct ${1:Name}:",
+      "\t${2:field}",
+      "",
+      "\tfn ${3:method}(self):",
+      "\t\t$0"
+    ],
     "description": "Struct with fields and methods"
   },
   "Class": {
     "prefix": "class",
-    "body": ["class ${1:Name}:", "\t$0"],
+    "body": [
+      "class ${1:Name}:",
+      "\t$0"
+    ],
     "description": "Class declaration"
   },
   "Enum": {
     "prefix": "enum",
-    "body": ["enum ${1:Name}:", "\t${2:Variant}", "\t$0"],
+    "body": [
+      "enum ${1:Name}:",
+      "\t${2:Variant}",
+      "\t$0"
+    ],
     "description": "Enum declaration"
   },
   "Trait": {
     "prefix": "trait",
-    "body": ["trait ${1:Name}:", "\t$0"],
+    "body": [
+      "trait ${1:Name}:",
+      "\t$0"
+    ],
     "description": "Trait declaration"
   },
   "Type alias": {
@@ -61,27 +86,45 @@
   },
   "If": {
     "prefix": "if",
-    "body": ["if ${1:condition}:", "\t$0"],
+    "body": [
+      "if ${1:condition}:",
+      "\t$0"
+    ],
     "description": "Conditional block"
   },
   "If else": {
     "prefix": "ife",
-    "body": ["if ${1:condition}:", "\t$2", "else:", "\t$0"],
+    "body": [
+      "if ${1:condition}:",
+      "\t$2",
+      "else:",
+      "\t$0"
+    ],
     "description": "Conditional with fallback"
   },
   "For": {
     "prefix": "for",
-    "body": ["for ${1:item} in ${2:items}:", "\t$0"],
+    "body": [
+      "for ${1:item} in ${2:items}:",
+      "\t$0"
+    ],
     "description": "Iterate over a range or collection"
   },
   "While": {
     "prefix": "while",
-    "body": ["while ${1:condition}:", "\t$0"],
+    "body": [
+      "while ${1:condition}:",
+      "\t$0"
+    ],
     "description": "While loop"
   },
   "Match": {
     "prefix": "match",
-    "body": ["match ${1:value}:", "\t${2:pattern} => ${3:result}", "\t_ => $0"],
+    "body": [
+      "match ${1:value}:",
+      "\t${2:pattern} => ${3:result}",
+      "\t_ => $0"
+    ],
     "description": "Pattern match"
   },
   "List comprehension": {
@@ -96,12 +139,94 @@
   },
   "Test function": {
     "prefix": "test",
-    "body": ["fn test_${1:name}():", "\tassert(${2:condition})$0"],
+    "body": [
+      "fn test_${1:name}():",
+      "\tassert(${2:condition})$0"
+    ],
     "description": "Test run by 'a test'"
   },
   "Assert": {
     "prefix": "assert",
     "body": "assert(${1:condition})$0",
     "description": "Assertion"
+  },
+  "Import string": {
+    "prefix": "imstring",
+    "body": "import string$0",
+    "description": "Import A stdlib string module"
+  },
+  "Import textwrap": {
+    "prefix": "imtextwrap",
+    "body": "import textwrap$0",
+    "description": "Import A stdlib textwrap module"
+  },
+  "Import statistics": {
+    "prefix": "imstats",
+    "body": "import statistics$0",
+    "description": "Import A stdlib statistics module"
+  },
+  "Import copy": {
+    "prefix": "imcopy",
+    "body": "import copy$0",
+    "description": "Import A stdlib copy module"
+  },
+  "Import json": {
+    "prefix": "imjson",
+    "body": "import json$0",
+    "description": "Import A stdlib json module"
+  },
+  "Import fs": {
+    "prefix": "imfs",
+    "body": "import fs$0",
+    "description": "Import A stdlib fs module"
+  },
+  "capwords": {
+    "prefix": "capwords",
+    "body": "string.capwords(${1:text}, ${2:None})$0",
+    "description": "Capitalize words (A std.string)"
+  },
+  "textwrap fill": {
+    "prefix": "fill",
+    "body": "textwrap.fill(${1:text}, ${2:width})$0",
+    "description": "Wrap and fill text (A std.textwrap)"
+  },
+  "statistics mean": {
+    "prefix": "mean",
+    "body": "statistics.mean(${1:data})$0",
+    "description": "Mean of numeric data (A std.statistics)"
+  },
+  "json parse": {
+    "prefix": "jparse",
+    "body": "json.parse(${1:text})$0",
+    "description": "Parse JSON text"
+  },
+  "json stringify": {
+    "prefix": "jstringify",
+    "body": "json.stringify(${1:value})$0",
+    "description": "Serialize value to JSON"
+  },
+  "deepcopy": {
+    "prefix": "deepcopy",
+    "body": "copy.deepcopy(${1:value})$0",
+    "description": "Deep copy a value"
+  },
+  "Try-like guard comment": {
+    "prefix": "guard",
+    "body": [
+      "# A ports often use core.panic/assert for invalid input instead of Python exceptions.",
+      "core.assert(${1:condition}, \"${2:message}\")$0"
+    ],
+    "description": "A-style guard/assert pattern"
+  },
+  "Docstring": {
+    "prefix": "doc",
+    "body": [
+      "\"\"\"${1:Summary.}",
+      "",
+      "${2:Details.}",
+      "\"\"\"",
+      "$0"
+    ],
+    "description": "Triple-quoted docstring"
   }
 }

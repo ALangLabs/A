@@ -426,6 +426,7 @@ extern long double strtold (const char *__nptr, char **__endptr);
 #define VSTACK_SIZE         512
 #define STRING_MAX_SIZE     1024
 #define TOKSTR_MAX_SIZE     256
+#define TOK_MAX_SIZE         6
 #define PACK_STACK_SIZE     8
 
 #define TOK_HASH_SIZE       16384 /* must be a power of two */

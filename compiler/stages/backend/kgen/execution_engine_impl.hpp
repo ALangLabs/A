@@ -17,7 +17,7 @@
 #include "collections/transparent_map.hpp"
 #include "memory/value.hpp"
 #include "type-checker/sema.hpp"
-#include "backend/kgen/python_interop.hpp"
+#include "backend/kgen/python/python_interop.hpp"
 
 namespace a {
 

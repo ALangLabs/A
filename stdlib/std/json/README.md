@@ -1,43 +1,61 @@
-# json
+# `std.json`
 
-JSON parsing and serialization. Values live in the opaque `Json` type: you can
-hold them in variables, name the type in a signature (`fn f(doc: Json) -> Json?`),
-pass them to `json.*` functions, and convert them back to A values with the
-`as_*` accessors, but `Json` has no operators of its own.
+JSON parsing, serialization, validation, and access to A's opaque `Json` values.
+
+`json` is native-backed. Parse text into `Json`, inspect it with `kind`/`get`/`at`/accessors, and convert/serialize A values with `stringify`/`pretty`.
+
+## Status
+
+- **Kind:** Native-backed module (registered in the A toolchain/runtime)
+- **Backend:** JSON parsing, serialization, and opaque Json access.
+- **Source path:** `stdlib/std/json/`
+
+## Import
+
+```a
+import json
+```
+
+## What It Provides
+
+- **Functions:** `parse`, `stringify`, `pretty`, `is_valid`, `get`, `at`, `len`, `has`, `keys`, `kind`, `as_str`, `as_int`, `as_float`, `as_bool`, `as_array`, `as_map`
+
+## API Reference (Practical)
+
+- `parse(text)` — parse JSON text into `Json` (runtime error on malformed input).
+- `is_valid(text)` — check whether text is valid JSON.
+- `stringify(value)`, `pretty(value)` — compact or indented JSON output.
+- `kind(value)` — returns type tag such as `object`, `array`, `string`, `number`, `bool`, `null`.
+- `has(obj, key)`, `get(obj, key)`, `at(arr, index)`, `len(value)`, `keys(obj)` — structural access.
+- `as_str/as_int/as_float/as_bool/as_array/as_map` — typed extraction helpers (often `T?`/optional-style results).
+
+## Examples
 
 ```a
 import json
 
-doc = json.parse("{\"name\": \"Ada\", \"scores\": [1, 2, 3]}")
-print(json.kind(doc))                                  # object
-print(json.as_str((json.get(doc, "name"))!)!)          # Ada
-print(json.as_int((json.at((json.get(doc, "scores"))!, 1))!)!)  # 2
-print(json.stringify(doc))                             # {"name":"Ada","scores":[1,2,3]}
-print(json.pretty([1, 2, 3]))                          # multi-line, two-space indent
+doc = json.parse("{\"name\": \"Ada\", \"scores\": [1, 2, 3], \"active\": true}")
+print(json.kind(doc))
+print(json.has(doc, "name"))
+print(json.as_str((json.get(doc, "name"))!)!)
+print(json.as_int((json.at((json.get(doc, "scores"))!, 1))!)!)
+print(json.stringify(doc))
+print(json.pretty([1, 2, 3]))
+print(json.is_valid("[1, 2"))
 ```
 
-## Members
+## Usage Notes
 
-| Member | Signature | Result |
-| ------ | --------- | ------ |
-| `parse` | `(String)` | `Json`, runtime error on malformed input |
-| `stringify` | `(value)` | compact JSON text for any A value |
-| `pretty` | `(value)` | indented JSON text |
-| `is_valid` | `(String)` | `bool`, no exception |
-| `kind` | `(Json)` | `null`, `bool`, `int`, `float`, `string`, `array`, `object` |
-| `has` | `(Json, String)` | key presence |
-| `get` | `(Json, String)` | `Json?` value for an object key |
-| `at` | `(Json, i64)` | `Json?` value for an array index |
-| `len` | `(Json)` | members of an array or object, characters of a string |
-| `keys` | `(Json)` | object keys in document order |
-| `as_str` / `as_int` / `as_float` / `as_bool` | `(Json)` | `T?`, `None` when the kind differs |
-| `as_array` | `(Json)` | `[Json]?` |
-| `as_map` | `(Json)` | `{String: Json}?` |
+- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may differ by backend path; this module is primarily exercised through interpreter/KGEN execution.
+- Accessor results may be optional-like values; use the project’s established unwrapping patterns (as in existing tests/examples).
 
-`as_int` accepts integral JSON numbers, `as_float` accepts any JSON number, and
-`as_str` also accepts a single-character value. Serializing converts A structs to
-JSON objects, arrays, views, sets and tuples to JSON arrays, `Some(x)`/`Ok(x)` to
-their inner value, and `None` to `null`; a `Result` is written as an object
-with an `ok` flag and its `value`. Closures, allocators and raw pointers cannot be
-serialized and raise a runtime error, as does parsing text that is not a single
-JSON document.
+## Source Files
+
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`

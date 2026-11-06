@@ -1,26 +1,44 @@
-# binary
+# `std.binary`
 
-Compact self-describing serialization for any A value.
+Standard library package `std.binary` for A.
+
+## Status
+
+- **Kind:** Native-backed module (registered in the A toolchain/runtime)
+- **Backend:** Binary encoding/decoding for A values.
+- **Source path:** `stdlib/std/binary/`
+
+## Import
 
 ```a
 import binary
-import json
-
-bytes = binary.encode([1, 2, 3])
-back = binary.decode(bytes)!
-print(json.as_int((json.at(back, 1))!)!)   # 2
-print(binary.decode([200, 1, 2]))          # None
 ```
 
-| Member | Signature | Result |
-| ------ | --------- | ------ |
-| `encode` | `(value)` | `[i64]`, one entry per byte (0-255) |
-| `decode` | `([i64])` | `Json?` — `None` when the bytes are malformed or truncated |
+## What It Provides
 
-Values are stored as tag-length-value records with zigzag variable-length
-integers. Integers, floats, booleans, characters, strings, arrays, maps, sets,
-structs, tuples, optionals and results round-trip exactly. Decoded data
-is surfaced as the opaque `Json` value, so use the `json.*` accessors (see the
-`json` module) to read it back into typed A values. Values with no portable
-representation — closures, allocators, raw pointers and ranges — fail at encode
-time with a runtime error.
+- **Functions:** `encode`, `decode`
+
+## Example
+
+```a
+import binary
+
+# Inspect the available functions/constants in this build.
+# Then call `binary.<member>(...)` using the API overview above.
+```
+
+## Usage Notes
+
+- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
+- API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
+
+## Source Files
+
+- `__init__.a`
+
+## Related Docs / Tests
+
+- Main stdlib index: `stdlib/std/README.md`
+- Extended reference: `docs/standard-library/README.md`
+- Integration tests: `tests/integration/cases/stdlib/`
