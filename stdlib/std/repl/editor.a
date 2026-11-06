@@ -31,8 +31,9 @@ class EdState:
     drawn
     cur_vrow
     kill
+    nosnap
 
-S = EdState([""], 0, 0, ">>> ", "edit", "", -1, [], 0, false, "", 0, 80, 0, 0, "")
+S = EdState([""], 0, 0, ">>> ", "edit", "", -1, [], 0, false, "", 0, 80, 0, 0, "", false)
 
 class DRow:
     w
@@ -50,10 +51,33 @@ fn reset_state(prompt):
     S.kill = ""
     S.drawn = 0
     S.cur_vrow = 0
+    undo_stack = []
     highlight.hl_reset()
 
 fn ed_text():
     return S.lines.join("\n")
+
+# --- Undo (Ctrl-_) -------------------------------------------------------
+# Snapshots of (text, row, col) taken before each buffer mutation, IPython /
+# readline undo style. Capped so long sessions stay bounded.
+undo_stack = []
+MAX_UNDO = 100
+
+fn undo_push():
+    if not S.nosnap:
+        undo_stack.append([ed_text(), S.row, S.col])
+        if len(undo_stack) > MAX_UNDO:
+            undo_stack.remove_at(0)
+
+fn undo_restore():
+    n = len(undo_stack)
+    if n > 0:
+        snap = undo_stack[n - 1]
+        undo_stack.remove_at(n - 1)
+        S.lines = snap[0].split("\n")
+        S.row = snap[1]
+        S.col = snap[2]
+        highlight.hl_reset()
 
 fn ed_line():
     return S.lines[S.row]
@@ -62,6 +86,7 @@ fn ed_set_line(i, s):
     S.lines[i] = s
 
 fn ed_insert(s):
+    undo_push()
     r = S.row
     c = S.col
     ln = S.lines[r]
@@ -69,6 +94,7 @@ fn ed_insert(s):
     S.col = c + len(s)
 
 fn ed_newline():
+    undo_push()
     r = S.row
     c = S.col
     ln = S.lines[r]
@@ -80,6 +106,8 @@ fn ed_newline():
 fn ed_backspace():
     r = S.row
     c = S.col
+    if c > 0 or r > 0:
+        undo_push()
     if c > 0:
         ln = S.lines[r]
         S.lines[r] = ln[0..c - 1] + ln[c..]
@@ -96,6 +124,8 @@ fn ed_delete():
     r = S.row
     c = S.col
     ln = S.lines[r]
+    if c < len(ln) or r + 1 < len(S.lines):
+        undo_push()
     if c < len(ln):
         S.lines[r] = ln[0..c] + ln[c + 1..]
     elif r + 1 < len(S.lines):
@@ -108,12 +138,15 @@ fn ed_kill_to_eol():
     ln = S.lines[r]
     killed = ln[c..]
     if killed != "":
+        undo_push()
         S.kill = killed
         S.lines[r] = ln[0..c]
 
 fn ed_kill_whole():
     r = S.row
     c = S.col
+    if c < len(S.lines[r]) or len(S.lines) > 1:
+        undo_push()
     killed = S.lines[r][c..]
     for i in (r + 1)..len(S.lines):
         killed = killed + "\n" + S.lines[i]
@@ -140,6 +173,7 @@ fn ed_kill_word():
             break
         start = start - 1
     if start < c:
+        undo_push()
         S.kill = ln[start..c]
         S.lines[r] = ln[0..start] + ln[c..]
         S.col = start
@@ -147,6 +181,115 @@ fn ed_kill_word():
 fn ed_yank():
     if S.kill != "":
         ed_insert(S.kill)
+
+# --- Word / case / transpose operations (readline M-* keys) ---------------
+
+fn is_space_ch(c):
+    return c == " " or c == "\t"
+
+# Span [s, e) of the word at/after the cursor on the current line:
+# leading whitespace is skipped, then the run of non-space characters.
+fn word_span_fwd():
+    ln = ed_line()
+    n = len(ln)
+    s = S.col
+    while s < n and is_space_ch(ln[s..s + 1]):
+        s = s + 1
+    e = s
+    while e < n and not is_space_ch(ln[e..e + 1]):
+        e = e + 1
+    return (s, e)
+
+fn word_fwd():
+    (_s, e) = word_span_fwd()
+    S.col = e
+
+fn word_back():
+    ln = ed_line()
+    c = S.col
+    while c > 0 and is_space_ch(ln[c - 1..c]):
+        c = c - 1
+    while c > 0 and not is_space_ch(ln[c - 1..c]):
+        c = c - 1
+    S.col = c
+
+fn kill_word_fwd():
+    c = S.col
+    (_s, e) = word_span_fwd()
+    if e > c:
+        undo_push()
+        ln = ed_line()
+        S.kill = ln[c..e]
+        S.lines[S.row] = ln[0..c] + ln[e..]
+
+fn kill_word_back():
+    ln = ed_line()
+    c = S.col
+    s = c
+    while s > 0 and is_space_ch(ln[s - 1..s]):
+        s = s - 1
+    while s > 0 and not is_space_ch(ln[s - 1..s]):
+        s = s - 1
+    if s < c:
+        undo_push()
+        S.kill = ln[s..c]
+        S.lines[S.row] = ln[0..s] + ln[c..]
+        S.col = s
+
+# M-u / M-l: upcase / downcase the word after the cursor.
+fn case_word(which):
+    (s, e) = word_span_fwd()
+    if e > s:
+        undo_push()
+        ln = ed_line()
+        seg = ln[s..e]
+        if which == "upper":
+            seg = seg.upper()
+        else:
+            seg = seg.lower()
+        S.lines[S.row] = ln[0..s] + seg + ln[e..]
+        S.col = e
+
+# Ctrl-T: transpose the characters around the cursor (readline behavior —
+# at end of line swaps the last two chars, at start swaps the first two).
+fn ed_transpose():
+    r = S.row
+    c = S.col
+    ln = S.lines[r]
+    n = len(ln)
+    if n >= 2:
+        undo_push()
+        if c <= 0:
+            S.lines[r] = ln[1..2] + ln[0..1] + ln[2..]
+            S.col = 1
+        elif c >= n:
+            S.lines[r] = ln[0..n - 2] + ln[n - 1..n] + ln[n - 2..n - 1]
+            S.col = n
+        else:
+            S.lines[r] = ln[0..c - 1] + ln[c..c + 1] + ln[c - 1..c] + ln[c + 1..]
+            S.col = c + 1
+
+# M-.: yank the last argument of the most recent history entry.
+fn ed_yank_last_arg():
+    last = history.history_last()
+    if last != "":
+        n = len(last)
+        i = n
+        while i > 0:
+            ch = last[i - 1..i]
+            if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+                i = i - 1
+            else:
+                break
+        e = i
+        while i > 0:
+            ch = last[i - 1..i]
+            if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+                break
+            i = i - 1
+        arg = last[i..e]
+        if arg != "":
+            ed_insert(arg)
 
 fn ed_move(dr, dc):
     r = S.row
@@ -197,9 +340,9 @@ fn vis_len(s):
     ln = len(s)
     while i < ln:
         c = s[i]
-        if c == '\x1b':
+        if c == "\x1b":
             j = i + 1
-            while j < ln and s[j] != 'm':
+            while j < ln and s[j] != "m":
                 j = j + 1
             i = j + 1
         else:
@@ -345,6 +488,7 @@ fn comp_refresh():
     S.comp_open = len(items) > 0
 
 fn comp_accept(sel):
+    undo_push()
     name = S.comp[sel]
     ln = ed_line()
     c = S.col
@@ -532,6 +676,7 @@ fn ed_search():
             return false
         if k == "\r" or k == "\n":
             if m != "":
+                undo_push()
                 S.lines = m.split("\n")
                 S.row = len(S.lines) - 1
                 S.col = len(S.lines[S.row])
@@ -581,12 +726,15 @@ fn paste_read():
     if len(t) > 0 and t[len(t) - 1..] == "\n":
         t = t[0..len(t) - 1]
     parts = t.split("\n")
+    S.nosnap = true
+    undo_push()
     first = true
     for seg in parts:
         if not first:
             ed_newline()
         ed_insert(seg)
         first = false
+    S.nosnap = false
     S.comp_open = false
 
 # Moves the cursor to the first row below the drawn input area so program
@@ -597,6 +745,33 @@ fn ed_leave_area():
     if down > 0:
         terminal.write("\x1b[" + str(down) + "B")
     terminal.flush()
+
+# History recall shared by Up/Down and PageUp/PageDown: on the first/last
+# buffer row the keys walk history, otherwise they move between lines.
+fn hist_recall_older():
+    if S.row == 0:
+        cur = ed_line()
+        older = history.history_older(cur)
+        if older != "":
+            undo_push()
+            S.lines = older.split("\n")
+            S.row = len(S.lines) - 1
+            S.col = len(S.lines[S.row])
+            highlight.hl_reset()
+    else:
+        ed_move(-1, 0)
+
+fn hist_recall_newer():
+    if S.row == len(S.lines) - 1:
+        newer = history.history_newer()
+        if newer != "":
+            undo_push()
+            S.lines = newer.split("\n")
+            S.row = len(S.lines) - 1
+            S.col = len(S.lines[S.row])
+            highlight.hl_reset()
+    else:
+        ed_move(1, 0)
 
 # Main entry: shows `prompt`, edits until submit/exit/interrupt.
 # Returns (kind, text): 0 = submit, 1 = exit (Ctrl-D/EOF), 2 = interrupt.
@@ -706,30 +881,29 @@ fn read_input(prompt):
             terminal.write("\x1b[2J\x1b[H")
             ed_render()
             continue
-
-        if k == "\x1b[A":  # Up: history or move line up
-            if S.row == 0:
-                cur = ed_line()
-                older = history.history_older(cur)
-                if older != "":
-                    S.lines = older.split("\n")
-                    S.row = len(S.lines) - 1
-                    S.col = len(S.lines[S.row])
-                    highlight.hl_reset()
-            else:
-                ed_move(-1, 0)
+        if k == "\x06":  # Ctrl-F: forward char
+            ed_move(0, 1)
             ed_render()
             continue
-        if k == "\x1b[B":  # Down
-            if S.row == len(S.lines) - 1:
-                newer = history.history_newer()
-                if newer != "":
-                    S.lines = newer.split("\n")
-                    S.row = len(S.lines) - 1
-                    S.col = len(S.lines[S.row])
-                    highlight.hl_reset()
-            else:
-                ed_move(1, 0)
+        if k == "\x02":  # Ctrl-B: backward char
+            ed_move(0, -1)
+            ed_render()
+            continue
+        if k == "\x14":  # Ctrl-T: transpose chars
+            ed_transpose()
+            ed_render()
+            continue
+        if k == "\x1f":  # Ctrl-_: undo
+            undo_restore()
+            ed_render()
+            continue
+
+        if k == "\x1b[A" or k == "\x1b[5~" or k == "\x0f":  # Up / PgUp / Ctrl-P
+            hist_recall_older()
+            ed_render()
+            continue
+        if k == "\x1b[B" or k == "\x1b[6~" or k == "\x0e":  # Down / PgDn / Ctrl-N
+            hist_recall_newer()
             ed_render()
             continue
         if k == "\x1b[C":
@@ -765,6 +939,60 @@ fn read_input(prompt):
                 comp_refresh()
             if S.comp_open and len(S.comp) > 0:
                 S.comp_sel = (S.comp_sel + len(S.comp) - 1) % len(S.comp)
+            ed_render()
+            continue
+        # Ctrl+arrow word/line motion (xterm CSI).
+        if k == "\x1b[1;5C":
+            word_fwd()
+            ed_render()
+            continue
+        if k == "\x1b[1;5D":
+            word_back()
+            ed_render()
+            continue
+        if k == "\x1b[1;5H":
+            ed_home_end("home")
+            ed_render()
+            continue
+        if k == "\x1b[1;5F":
+            ed_home_end("end")
+            ed_render()
+            continue
+        if k == "\x1b[3;5~":  # Ctrl-Delete: kill word forward
+            kill_word_fwd()
+            ed_render()
+            continue
+        # Meta (Alt) keys arrive as ESC + char.
+        if k == "\x1bf":  # Alt-f: forward word
+            word_fwd()
+            ed_render()
+            continue
+        if k == "\x1bb":  # Alt-b: backward word
+            word_back()
+            ed_render()
+            continue
+        if k == "\x1bd":  # Alt-d: kill word forward
+            kill_word_fwd()
+            ed_render()
+            continue
+        if k == "\x1b\x7f":  # Alt-Backspace: kill word backward
+            kill_word_back()
+            ed_render()
+            continue
+        if k == "\x1bu":  # Alt-u: upcase word
+            case_word("upper")
+            ed_render()
+            continue
+        if k == "\x1bl":  # Alt-l: downcase word
+            case_word("lower")
+            ed_render()
+            continue
+        if k == "\x1b\r" or k == "\x1b\n":  # Alt+Enter: force newline
+            ed_newline()
+            ed_render()
+            continue
+        if k == "\x1b.":  # Alt-.: yank last argument of previous input
+            ed_yank_last_arg()
             ed_render()
             continue
         if k == "\x1b":

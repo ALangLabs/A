@@ -167,7 +167,7 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                              {"home", "terminal_home"}},
                             {})},
       {"env", makeSpec({{"get", "env_get"}}, {})},
-      {"repl", makeSpec({{"eval", "repl_eval"}}, {})},
+      {"repl", makeSpec({{"eval", "repl_eval"}, {"quiet", "repl_quiet"}}, {})},
       {"kernel_ops",
        makeSpec({{"fused_add", "kernels_fused_add"},
                  {"fused_sub", "kernels_fused_sub"},

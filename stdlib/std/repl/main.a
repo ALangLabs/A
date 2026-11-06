@@ -2,19 +2,207 @@
 # Run via `a repl` on a terminal; the driver loads this file.
 import terminal
 import repl
+import fs
+import env
+import time
 import "editor.a"
 import "complete.a"
 import "history.a"
 
 fn print_help():
-    print("A interactive shell")
-    print("  exit / quit / Ctrl-D   leave the REPL")
-    print("  Ctrl-C                 interrupt current input")
-    print("  Up/Down                history (or move between lines)")
-    print("  Tab                    complete; lists candidates")
-    print("  Ctrl-R                 reverse-i-search history")
-    print("  Ctrl-A/E/K/U/W/Y       line editing (start/end/kill/yank)")
-    print("  Ctrl-L                 clear screen")
+    print("A interactive shell (IPython-style)")
+    print("  exit / quit / Ctrl-D     leave the REPL")
+    print("  Ctrl-C                   interrupt current input")
+    print("  Up/Down                  history (or move between lines)")
+    print("  PgUp/PgDn                older/newer history")
+    print("  Tab                      complete; lists candidates")
+    print("  Shift-Tab                cycle completions backwards")
+    print("  Ctrl-R                   reverse-i-search history")
+    print("  End/Right-Arrow          accept ghost-text suggestion")
+    print("  Alt+Enter                insert a newline")
+    print("  Alt-f/b, Ctrl-Left/Right move by word")
+    print("  Alt-d, Alt-Backspace     kill word (fwd/back)")
+    print("  Alt-u/l                  upcase/downcase word")
+    print("  Alt-.                   yank last arg of previous input")
+    print("  Ctrl-A/E/K/U/W/Y         line editing (start/end/kill/yank)")
+    print("  Ctrl-F/B                 move by char; Ctrl-T transpose")
+    print("  Ctrl-_                   undo")
+    print("  Ctrl-L                   clear screen")
+    print("  name? / name??           inspect a name")
+    print("  %<cmd>                   line magics — see '%magic'")
+
+fn magic_help():
+    print("Line magics (%<name> [args]):")
+    print("  %help, %magic, %quickref   this list")
+    print("  %history [n]               show the last n history entries")
+    print("  %time <stmt>               execute and print wall time")
+    print("  %pwd                       print the working directory")
+    print("  %ls [path]                 list a directory")
+    print("  %who, %whos                names defined in this session")
+    print("  %env NAME                  print an environment variable")
+    print("  %save FILE                 write session source to FILE")
+    print("  %load FILE, %run FILE      evaluate FILE in this session")
+    print("  %reset                     note: sessions cannot be reset")
+    print("Shell escapes (!cmd) are unavailable: the A REPL has no shell builtin.")
+
+# Strict decimal parse; -1 on anything that is not [+-]?digits.
+fn parse_int(s):
+    if s == "":
+        return -1
+    digits = "0123456789"
+    i = 0
+    neg = false
+    if s[0..1] == "-":
+        neg = true
+        i = 1
+    if i >= len(s):
+        return -1
+    v = 0
+    while i < len(s):
+        c = s[i..i + 1]
+        d = digits.find(c)
+        if d < 0:
+            return -1
+        v = v * 10 + d
+        i = i + 1
+    if neg:
+        return 0 - v
+    return v
+
+# Evaluates `text` on top of the accumulated session source `acc`.
+# The session is replayed with output suppressed (repl.quiet) so re-executed
+# history does not repeat its prints; only the new input's output shows.
+fn eval_src(acc, text):
+    src = "import repl\nrepl.quiet(true)\n" + acc + "repl.quiet(false)\n" + text + "\n"
+    return repl.eval(src)
+
+# Handles a line starting with '%'. Returns the (possibly extended) session
+# source `acc`; every path prints its own output.
+fn run_magic(text, acc):
+    body = text[1..].strip()
+    name = ""
+    arg = ""
+    sp = body.find(" ")
+    if sp >= 0:
+        name = body[0..sp]
+        arg = body[sp + 1..].strip()
+    else:
+        name = body
+    if name == "" or name == "help" or name == "magic" or name == "quickref":
+        magic_help()
+        return acc
+    if name == "history":
+        h = history.history_all()
+        n = len(h)
+        start = 0
+        if arg != "":
+            cnt = parse_int(arg)
+            if cnt < 0:
+                print("usage: %history [n]")
+                return acc
+            if cnt < n:
+                start = n - cnt
+        for i in start..n:
+            print("  " + str(i + 1) + ": " + h[i].replace("\n", "\\n"))
+        return acc
+    if name == "time":
+        if arg == "":
+            print("usage: %time <statement>")
+            return acc
+        t0 = time.now()
+        complete.note_source(arg)
+        rc = eval_src(acc, arg)
+        t1 = time.now()
+        if rc == 0:
+            acc = acc + arg + "\n"
+        print("Wall time: " + str(t1 - t0) + " ms")
+        return acc
+    if name == "pwd":
+        print(fs.current_dir())
+        return acc
+    if name == "cd":
+        print("error: %cd is not supported (fs has no chdir)")
+        return acc
+    if name == "ls":
+        p = arg
+        if p == "":
+            p = "."
+        names = fs.list_dir(p)
+        for nm in names:
+            print(nm)
+        return acc
+    if name == "who" or name == "whos":
+        ns = complete.session_names()
+        if len(ns) == 0:
+            print("(no session-defined names)")
+        else:
+            for nm in ns:
+                print(nm)
+        return acc
+    if name == "env":
+        if arg == "":
+            print("usage: %env NAME")
+            return acc
+        print(arg + "=" + env.get(arg))
+        return acc
+    if name == "save":
+        if arg == "":
+            print("usage: %save FILE")
+            return acc
+        fs.write_file(arg, acc)
+        return acc
+    if name == "load" or name == "run":
+        if arg == "":
+            print("usage: %" + name + " FILE")
+            return acc
+        src = fs.read_file(arg)
+        complete.note_source(src)
+        rc = eval_src(acc, src)
+        if rc == 0:
+            acc = acc + src + "\n"
+        return acc
+    if name == "reset":
+        print("The A REPL session cannot be reset; exit and restart to clear state.")
+        return acc
+    if name == "system" or name == "sx" or name == "capture" or name == "prun" or name == "debug" or name == "pdb":
+        print("error: %" + name + " is not supported by the A REPL.")
+        return acc
+    print("Unknown magic command: %" + name + " — type '%magic' for the list.")
+    return acc
+
+fn query_name_ok(name):
+    if name == "":
+        return false
+    for i in 0..len(name):
+        c = name[i..i + 1]
+        if c == ".":
+            continue
+        if not complete.is_ident_char(c):
+            return false
+    return true
+
+# IPython-style `name?` / `name??` inspection.
+fn run_query(text):
+    deep = false
+    name = text
+    if text.endswith("??"):
+        deep = true
+        name = text[0..len(text) - 2].strip()
+    elif text.endswith("?"):
+        name = text[0..len(text) - 1].strip()
+    if name == "":
+        print_help()
+    elif not query_name_ok(name):
+        print("error: '?' inspection only works on simple names (e.g. 'len?' or 'fs.read_file?').")
+    else:
+        kind = complete.describe(name)
+        print("Name: " + name)
+        if kind == "":
+            print("Type: unknown (not a keyword, builtin, module, or session name)")
+        else:
+            print("Type: " + kind)
+        if deep:
+            print("(?? source view is not available in the A REPL)")
 
 fn repl_main():
     if not terminal.isatty():
@@ -25,8 +213,8 @@ fn repl_main():
     terminal.flush()
     history.history_load()
 
-    print("A REPL 0.0.1 — interactive shell for the A language")
-    print("State persists across inputs; type 'help' for keys, 'exit' to quit.")
+    print("A REPL 0.0.1 — IPython-style interactive shell for the A language")
+    print("Type 'help' for keys and magics, 'exit'/'quit' or Ctrl-D to quit.")
     print("")
 
     counter = 0
@@ -43,20 +231,34 @@ fn repl_main():
             continue
         if text == "exit" or text == "quit":
             break
-        if text == "help" or text == "?":
+        if text == "help":
             print_help()
             continue
         if text == "clear":
             terminal.write("\x1b[2J\x1b[H")
             terminal.flush()
             continue
+
+        # IPython-style non-code lines: shell escapes, % magics, ? queries.
+        # They go to history but do not advance the In [n] counter or acc.
+        t = text.strip()
+        if t.startswith("!") or t.startswith("%") or t.endswith("?"):
+            history.history_add(text)
+            if t.startswith("!"):
+                print("error: '!...' shell escapes are not supported by the A REPL (no shell builtin).")
+            elif t.startswith("%"):
+                acc = run_magic(t, acc)
+            else:
+                run_query(t)
+            print("")
+            continue
+
         counter = counter + 1
         history.history_add(text)
         complete.note_source(text)
-        src = acc + text + "\n"
-        rc = repl.eval(src)
-        if rc != 1:
-            acc = src
+        rc = eval_src(acc, text)
+        if rc == 0:
+            acc = acc + text + "\n"
         if rc == 1:
             # Compile error: the session is untouched; the user retypes.
             print("\x1b[90m(input discarded — fix the error above)\x1b[0m")

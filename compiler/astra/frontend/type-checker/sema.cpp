@@ -4915,6 +4915,10 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
     if (!call.args.empty()) inferArgs();
     return typeInt(64, true);
   }
+  if (name == "repl_quiet") {
+    if (!call.args.empty()) inferArgs();
+    return typeVoid();
+  }
 
   return typeError();
 }

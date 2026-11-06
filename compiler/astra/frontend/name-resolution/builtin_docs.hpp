@@ -515,6 +515,8 @@ inline const StringMap<BuiltinDoc>& builtinDocs() {
       // repl
       {"repl_eval", {"repl_eval", "repl.eval(source) -> i64",
                       "Evaluates A source in the persistent REPL session; 0 ok, 1 compile error, 2 runtime error."}},
+      {"repl_quiet", {"repl_quiet", "repl.quiet(on: bool)",
+                      "Suppresses print/eprint output while set; the REPL uses it to replay session history silently."}},
 
       // LLVM-style intrinsics: bit operations
       {"ctz", {"ctz", "ctz(x) -> i64", "Count of trailing zero bits (64 for 0)."}},

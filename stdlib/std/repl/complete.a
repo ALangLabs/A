@@ -194,6 +194,37 @@ fn candidates(prefix):
     out.sort()
     return out
 
+# Copy of the session-defined names (for %who/%whos).
+fn session_names():
+    out = []
+    for name in user_names:
+        out.append(name)
+    return out
+
+# Short classification of a (possibly dotted) name for `name?` inspection.
+# Returns "" when the name is unknown.
+fn describe(name):
+    dot = name.rfind(".")
+    if dot >= 0:
+        base = name[0..dot]
+        member = name[dot + 1..]
+        pool = module_members.get(base, [])
+        if pool.contains(member):
+            return "member of module " + base
+        return ""
+    if keywords.contains(name):
+        return "keyword"
+    if builtins.contains(name):
+        return "builtin function"
+    if module_names.contains(name):
+        return "module"
+    members = module_members.get(name, [])
+    if len(members) > 0:
+        return "module"
+    if user_names.contains(name):
+        return "session-defined name"
+    return ""
+
 # Common prefix length shared by all candidates (for Tab completion).
 fn common_prefix(items):
     if len(items) == 0:

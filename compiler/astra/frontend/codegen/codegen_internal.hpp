@@ -51,6 +51,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"json_type", 116}, {"json_as_str", 117}, {"json_as_int", 118},
       {"json_as_float", 119}, {"json_as_bool", 120},
       {"json_as_array", 121}, {"json_as_map", 122},
+      {"repl_quiet", 123},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

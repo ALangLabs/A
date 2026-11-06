@@ -3756,6 +3756,17 @@ static aval bi_repl_eval(uint64_t n, aval *argv) {
 }
 #endif
 
+/* repl.quiet(on): while set, print/eprint discard their output. The A REPL
+ * wraps replayed session source in quiet(true)/quiet(false) so re-executed
+ * history does not repeat its side-effect output. */
+static int g_repl_quiet = 0;
+
+static aval bi_repl_quiet(uint64_t n, aval *argv) {
+    want_args("repl_quiet", n, 1, 1);
+    g_repl_quiet = (argv[0] == A_TRUE) ? 1 : 0;
+    return A_NONE;
+}
+
 /* ------------------------------------------------------------------ */
 /* json module: JSON text <-> aval values.                              */
 /* JSON objects map to dicts, arrays to lists, strings to str, numbers  */
@@ -4279,7 +4290,8 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "json_keys", bi_json_keys }, { "json_type", bi_json_kind },
     { "json_as_str", bi_json_as_str }, { "json_as_int", bi_json_as_int },
     { "json_as_float", bi_json_as_float }, { "json_as_bool", bi_json_as_bool },
-    { "json_as_array", bi_json_as_array }, { "json_as_map", bi_json_as_map }
+    { "json_as_array", bi_json_as_array }, { "json_as_map", bi_json_as_map },
+    { "repl_quiet", bi_repl_quiet }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -4323,8 +4335,16 @@ static void printv(FILE *f, uint64_t n, aval *argv) {
     fflush(f);
 }
 
-aval a_printv(uint64_t n, aval *argv) { printv(stdout, n, argv); return A_NONE; }
-aval a_eprintv(uint64_t n, aval *argv) { printv(stderr, n, argv); return A_NONE; }
+aval a_printv(uint64_t n, aval *argv) {
+    if (g_repl_quiet) return A_NONE;
+    printv(stdout, n, argv);
+    return A_NONE;
+}
+aval a_eprintv(uint64_t n, aval *argv) {
+    if (g_repl_quiet) return A_NONE;
+    printv(stderr, n, argv);
+    return A_NONE;
+}
 
 aval a_panic_msg(const char *msg) {
     fprintf(stderr, "error: %s\n", msg ? msg : "");

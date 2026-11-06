@@ -298,11 +298,18 @@ any interpreted program.
 | `repl` | `eval(source) -> i64` — evaluates source in the persistent REPL session (only inside `a repl`; 0 ok, 1 compile error, 2 runtime error, 3 nested eval rejected) |
 
 The REPL UI itself is written in A: `stdlib/std/repl/{main,editor,highlight,complete,history}.a`
-provides `In [n]:` prompts, persistent `~/.a_history`, up/down history,
+provides an IPython-style shell: `In [n]:` prompts, `...:` continuation,
+persistent multiline-safe `~/.a_history`, up/down + PgUp/PgDn history,
 Ctrl-R reverse-i-search, Tab completion (keywords/builtins/modules/user
-names), live syntax highlighting, ghost-text autosuggest, multiline
-bracket/`:` continuation, and kill/yank editing (Ctrl-A/E/K/U/W/Y, Ctrl-L).
-Piped (non-TTY) `a repl` keeps the simple `>>>` line mode.
+names) with a selection menu, live syntax highlighting, ghost-text
+autosuggest, bracketed-paste multiline input, and readline/emacs editing
+(Ctrl-A/E/K/U/W/Y/F/B/T/_, undo, Alt-f/b/d/u/l/./Backspace/Enter,
+Ctrl-Left/Right word motion, Ctrl-L). Non-code lines mimic IPython:
+`name?`/`name??` inspection, `%` line magics (`%help`, `%magic`,
+`%history`, `%time`, `%pwd`, `%ls`, `%who`, `%env`, `%save`, `%load`,
+`%run`, `%reset`), and `!cmd` shell escapes (reported unsupported — no
+shell builtin exists). Piped (non-TTY) `a repl` keeps the simple `>>>`
+line mode.
 
 ## 5. `std/*` package library
 

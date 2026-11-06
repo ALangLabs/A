@@ -12,12 +12,38 @@ state = HistState(-1, "")   # cursor -1 = not navigating
 fn history_path():
     return terminal.home() + "/.a_history"
 
+# Escapes a (possibly multiline) entry for line-based storage, IPython-style:
+# backslashes first, then newlines become the two-character sequence "\n".
+fn hist_escape(s):
+    return s.replace("\\", "\\\\").replace("\n", "\\n")
+
+# Reverses hist_escape on a single stored line.
+fn hist_unescape(s):
+    out = ""
+    i = 0
+    n = len(s)
+    while i < n:
+        c = s[i..i + 1]
+        if c == "\\" and i + 1 < n:
+            d = s[i + 1..i + 2]
+            if d == "n":
+                out = out + "\n"
+            elif d == "\\":
+                out = out + "\\"
+            else:
+                out = out + c + d
+            i = i + 2
+        else:
+            out = out + c
+            i = i + 1
+    return out
+
 fn history_load():
     path = history_path()
     if fs.file_exists(path):
         text = fs.read_file(path)
         for line in text.splitlines():
-            entries.append(line)
+            entries.append(hist_unescape(line))
 
 fn history_reset_nav():
     state.cursor = -1
@@ -29,13 +55,20 @@ fn history_add(line):
         n = len(entries)
         if n == 0 or entries[n - 1] != line:
             entries.append(line)
-            fs.append_file(history_path(), line + "\n")
+            fs.append_file(history_path(), hist_escape(line) + "\n")
 
 fn history_len():
     return len(entries)
 
 fn history_all():
     return entries
+
+# Most recent entry, or "" when history is empty.
+fn history_last():
+    n = len(entries)
+    if n == 0:
+        return ""
+    return entries[n - 1]
 
 # Older entry relative to the end; returns "" when exhausted.
 fn history_older(current):

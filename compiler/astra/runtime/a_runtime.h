@@ -115,6 +115,9 @@ enum {
     A_BI_JSON_GET, A_BI_JSON_AT, A_BI_JSON_LEN, A_BI_JSON_HAS, A_BI_JSON_KEYS,
     A_BI_JSON_TYPE, A_BI_JSON_AS_STR, A_BI_JSON_AS_INT, A_BI_JSON_AS_FLOAT,
     A_BI_JSON_AS_BOOL, A_BI_JSON_AS_ARRAY, A_BI_JSON_AS_MAP,
+    /* repl.quiet: suppress print/eprint output (used to replay session
+       history silently inside repl.eval'd code). */
+    A_BI_REPL_QUIET,
     A_BI_COUNT
 };
 
