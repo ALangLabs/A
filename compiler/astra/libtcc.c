@@ -1292,8 +1292,17 @@ ST_FUNC int tcc_add_support(TCCState *s1, const char *filename)
 #ifdef TCC_TARGET_UNIX
 ST_FUNC int tcc_add_crt(TCCState *s1, const char *filename)
 {
-    return tcc_add_library_internal(s1, "%s/%s",
-        filename, AFF_PRINT_ERROR, s1->crt_paths, s1->nb_crt_paths);
+    int rc = tcc_add_library_internal(s1, "%s/%s",
+        filename, 0, s1->crt_paths, s1->nb_crt_paths);
+    if (rc == FILE_NOT_FOUND) {
+        if (s1->nb_library_paths)
+            rc = tcc_add_library_internal(s1, "%s/%s",
+                filename, AFF_PRINT_ERROR, s1->library_paths, s1->nb_library_paths);
+        else
+            rc = -1;
+        if (rc == FILE_NOT_FOUND) { tcc_error_noabort("file '%s' not found", filename); rc = -1; }
+    }
+    return rc;
 }
 #endif
 

@@ -15,7 +15,7 @@
 namespace a::kgen {
 namespace {
 
-// Where TinyCC's staged runtime lives: A_TCCLIB override, else tcclib/ next to
+// Where the staged runtime lives: A_TCCLIB override, else tcclib/ next to
 // the compiler binary (the layout cmake/libtcc.cmake produces).
 std::string jitLibPath() {
   if (const char* e = std::getenv("A_TCCLIB")) return e;
@@ -69,7 +69,7 @@ int runJitModule(const ModuleGraph& graph, const SemaResult& sema, std::ostream&
     return -1;
   }
 
-  // TinyCC lowers aggregate copies/zero-init to these libc calls.
+  // The native compiler lowers aggregate copies/zero-init to these libc calls.
   tcc_add_symbol(s, "memset", (void*)memset);
   tcc_add_symbol(s, "memcpy", (void*)memcpy);
   tcc_add_symbol(s, "memmove", (void*)memmove);

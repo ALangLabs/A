@@ -1,5 +1,5 @@
-// C99 emitter for the native subset, consumed by the TinyCC JIT (jit.cpp) and
-// by `a build` via gcc. Every A value is an `aval` — a tagged union:
+// C99 emitter for the native subset, consumed by the JIT (jit.cpp) and
+// by `a build` via the builtin native compiler. Every A value is an `aval` — a tagged union:
 //
 //   typedef struct { a_i64 i; double d; int f; } aval;
 //
@@ -78,6 +78,21 @@ class CEmitter {
     out_ << "void *malloc(unsigned long);\n";
     out_ << "void free(void *);\n";
     out_ << "void *memcpy(void *, const void *, unsigned long);\n";
+    out_ << "void *memset(void *, int, unsigned long);\n";
+    out_ << "void *memmove(void *, const void *, unsigned long);\n";
+    out_ << "int memcmp(const void *, const void *, unsigned long);\n";
+    out_ << "double sqrt(double);\n";
+    out_ << "double pow(double, double);\n";
+    out_ << "double fmod(double, double);\n";
+    out_ << "double floor(double);\n";
+    out_ << "double ceil(double);\n";
+    out_ << "double round(double);\n";
+    out_ << "double exp(double);\n";
+    out_ << "double log(double);\n";
+    out_ << "double sin(double);\n";
+    out_ << "double cos(double);\n";
+    out_ << "double tan(double);\n";
+    out_ << "double fabs(double);\n";
     out_ << "void exit(int);\n";
     out_ << "typedef unsigned long size_t;\n";
     out_ << "int snprintf(char *, unsigned long, const char *, ...);\n";
@@ -450,12 +465,7 @@ class CEmitter {
             "  aval r; r.f = 2; r.i = (a_i64)a_new_obj(1, n, 0, b); r.d = 0;\n"
             "  return r;\n"
             "}\n";
-    out_ << "double sqrt(double);\n";
-    out_ << "double pow(double, double);\n";
-    out_ << "double fmod(double, double);\n";
-    static const char* kMath1[] = {
-        "floor", "ceil", "round", "exp", "log", "sin", "cos", "tan", "fabs"};
-    for (const char* n : kMath1) out_ << "double " << n << "(double);\n";
+    // math decls live at the top (before helpers) to avoid implicit-decl conflicts
     out_ << "\n";
 
     for (const auto& n : globalNames_) out_ << "static aval g_" << n << " = {0};\n";

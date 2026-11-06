@@ -31,7 +31,8 @@ add_subdirectory(compiler/stages/object)
 add_subdirectory(compiler/stages/driver)
 add_subdirectory(compiler/stages/cli)
 add_subdirectory(tools/lsp)
-# In-process JIT backend (Goose-style): vendored TinyCC compiles the C
+# In-process JIT backend (Goose-style): the Astra (compiler/astra/)
+# compiles the C
 # emitter's output into memory for `a run`.
 include(cmake/libtcc.cmake)
 # Packaging

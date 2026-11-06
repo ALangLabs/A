@@ -49,8 +49,8 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   // Fast path: native-subset programs compile and run directly
   // the internal engine so `run` keeps full dynamic semantics.
   if(!std::getenv("A_NO_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
-    // Goose-style in-process JIT first: TinyCC compiles the C emission in
-    // ~1ms with no subprocess or linker. Falls through to the gcc cache on
+    // Goose-style in-process JIT first: the builtin compiler emits the C in
+    // ~1ms with no subprocess or linker. Falls through to the TCC cache on
     // any JIT failure (A_NO_JIT=1 skips it entirely).
     if(!std::getenv("A_NO_JIT")){
       int jitRc=kgen::runJitModule(*m.graph,*m.sema,err);

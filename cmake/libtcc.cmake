@@ -1,16 +1,14 @@
-# Builds TinyCC out of the sources vendored under third_party/tinycc (its
-# README.md records the upstream commit), as the compiler's in-process C
-# backend (JIT mode), which every compiler has.
-#
-# TinyCC has its own configure/make, which cannot be reached from here on all
-# three platforms, so what it would have produced is produced here instead:
-# a config.h, the library itself (one translation unit, ONE_SOURCE), the tcc
-# driver, and -- built by that driver, since parts of it are TinyCC assembly --
-# the libtcc1 support archive every program it compiles links against. The
-# archive, the runtime headers and (on Windows) the import definitions are
-# staged into one directory, which is what tcc_set_lib_path() is given.
+# Builds the Astra (compiler/astra/) as the builtin
+# C backend for JIT and native EXE output. It has its own configure/make,
+# which cannot be reached from here on all three platforms, so what it would
+# have produced is produced here instead: a config.h, the library itself
+# (one translation unit, ONE_SOURCE), the driver, and -- built by that
+# driver, since parts of it are assembly -- the support archive every
+# program it compiles links against. The archive, the runtime headers and
+# (on Windows) the import definitions are staged into one directory, which
+# is what tcc_set_lib_path() is given.
 
-set(TCC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/third_party/tinycc")
+set(TCC_SRC "${CMAKE_CURRENT_SOURCE_DIR}/compiler/astra")
 set(TCC_BUILD "${CMAKE_BINARY_DIR}/tcc")
 set(TCC_STAGE "${CMAKE_BINARY_DIR}/tcclib")
 
@@ -19,7 +17,7 @@ if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64|amd64)$" AND CMAKE_SIZEOF_VOID
 elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
     set(tcc_arch arm64)
 else()
-    message(FATAL_ERROR "libtcc: no TinyCC backend for CPU '${CMAKE_SYSTEM_PROCESSOR}'; "
+    message(FATAL_ERROR "libtcc: no native backend for CPU '${CMAKE_SYSTEM_PROCESSOR}'; "
                         "the compiler builds on x86-64 and arm64")
 endif()
 
@@ -35,10 +33,10 @@ elseif(APPLE)
 endif()
 
 # --- config.h ----------------------------------------------------------------
-# CONFIG_TCC_PREDEFS 0 makes TinyCC read include/tccdefs.h from the staged
+# CONFIG_TCC_PREDEFS 0 makes the native compiler read include/tccdefs.h from the staged
 # directory instead of from a string baked in by its own build tools, which are
 # not run here. Bounds checking and backtraces are off: both pull in support
-# objects that need the full Windows SDK headers, which TinyCC does not ship.
+# objects that need the full Windows SDK headers, which the native compiler does not ship.
 
 file(READ "${TCC_SRC}/VERSION" tcc_version)
 string(STRIP "${tcc_version}" tcc_version)
@@ -61,7 +59,7 @@ endif()
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND EXISTS "/sys/fs/selinux/enforce")
     string(APPEND tcc_config "#define CONFIG_SELINUX 1\n")
 endif()
-# Written only when it changes, so reconfiguring does not rebuild TinyCC.
+# Written only when it changes, so reconfiguring does not rebuild the native compiler.
 file(CONFIGURE OUTPUT "${TCC_BUILD}/config.h" CONTENT "${tcc_config}" @ONLY)
 
 # --- the library and the driver ----------------------------------------------
@@ -69,7 +67,7 @@ file(CONFIGURE OUTPUT "${TCC_BUILD}/config.h" CONTENT "${tcc_config}" @ONLY)
 add_library(libtcc STATIC "${TCC_SRC}/libtcc.c")
 target_include_directories(libtcc PRIVATE "${TCC_BUILD}")
 target_include_directories(libtcc SYSTEM PRIVATE "${TCC_SRC}")
-# Expose only the API header: TinyCC's VERSION file shadows the C++ <version>
+# Expose only the API header: the VERSION file shadows the C++ <version>
 # header on case-insensitive filesystems (including the macOS CI runner).
 # Keep this separate from the staged runtime headers, which also shadow the
 # host compiler's standard headers.
@@ -81,8 +79,8 @@ target_compile_definitions(libtcc PRIVATE ${tcc_defines} ONE_SOURCE=1)
 set_target_properties(libtcc PROPERTIES
     C_STANDARD 99 OUTPUT_NAME tcc POSITION_INDEPENDENT_CODE ON)
 
-# The driver exists to build libtcc1.a below: parts of it are TinyCC assembly,
-# which only TinyCC assembles.
+# The driver exists to build libtcc1.a below: parts of it are assembly,
+# which only the native compiler assembles.
 add_executable(tcc_driver "${TCC_SRC}/tcc.c")
 target_include_directories(tcc_driver PRIVATE "${TCC_BUILD}")
 target_compile_definitions(tcc_driver PRIVATE ${tcc_defines} ONE_SOURCE=0)
@@ -108,14 +106,14 @@ if(NOT WIN32)
 endif()
 
 # --- staged runtime directory ------------------------------------------------
-# What tcc_set_lib_path() is pointed at, laid out the way TinyCC's own install
+# What tcc_set_lib_path() is pointed at, laid out the way its own install
 # is: its headers under include/, and the support archive where the target's
 # default library path looks for it (lib/ on Windows, the root elsewhere).
 
 file(COPY "${TCC_SRC}/include/" DESTINATION "${TCC_STAGE}/include")
 if(WIN32)
     set(tcc_libdir "${TCC_STAGE}/lib")
-    # TinyCC's bundled Windows headers and the .def files naming system DLL
+    # Bundled Windows headers and the .def files naming system DLL
     # exports, also used when building its compiler support archive.
     file(COPY "${TCC_SRC}/win32/include/" DESTINATION "${TCC_STAGE}/include")
     file(GLOB tcc_defs "${TCC_SRC}/win32/lib/*.def")
@@ -125,8 +123,8 @@ else()
 endif()
 
 # --- libtcc1 -----------------------------------------------------------------
-# The compiler support routines every TinyCC-compiled program links against.
-# This is TinyCC's lib/Makefile object list for the target, minus the pieces
+# The compiler support routines every compiled program links against.
+# This is the lib/Makefile object list for the target, minus the pieces
 # only a standalone executable or DLL needs (the C runtime startup code, bounds
 # checking, backtraces), none of which an in-memory run reaches.
 
@@ -192,4 +190,4 @@ add_custom_command(OUTPUT "${tcc_libdir}/runmain.o"
 add_custom_target(tcc_runtime ALL
     DEPENDS "${tcc_libdir}/libtcc1.a" "${tcc_libdir}/runmain.o")
 
-message(STATUS "libtcc: TinyCC ${tcc_version} backend for ${tcc_arch}")
+message(STATUS "libtcc: native backend (${tcc_version}) for ${tcc_arch}")

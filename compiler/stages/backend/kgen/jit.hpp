@@ -1,7 +1,7 @@
 #pragma once
 // In-process JIT backend (Goose-style): the C emitter's output is compiled by
-// the vendored TinyCC directly into this process and its main() is called —
-// no subprocess, no linker, ~1ms instead of the ~50ms gcc round-trip.
+// the builtin native compiler directly into this process and its main() is called —
+// no subprocess, no linker, ~1ms instead of the ~50ms TCC-EXE round-trip.
 #include <iosfwd>
 #include <string>
 #include "ast/ast.hpp"

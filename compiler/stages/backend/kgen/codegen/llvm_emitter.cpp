@@ -16,6 +16,7 @@
 #include <sys/wait.h>
 
 #include "name-resolution/native_modules.hpp"
+#include "backend/kgen/native_backend.hpp"
 
 namespace a {
 namespace {
@@ -1388,35 +1389,11 @@ bool emitX86Assembly(const ModuleGraph& graph, const SemaResult& sema, std::ostr
 }
 
 bool buildLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
-                     const std::string& outputPath, std::ostream& err) {
-  // The C emitter is the primary native backend: it handles the full dynamic
-  // subset (tagged aval values) and compiles with a plain C compiler.
-  std::string tmpC = outputPath + ".c";
-  {
-    std::ofstream ofs(tmpC);
-    if (!ofs) {
-      err << "error: failed to open temporary file " << tmpC << "\n";
-      return false;
-    }
-    if (!emitCSource(graph, sema, ofs)) {
-      err << "error: failed to generate C source\n";
-      return false;
-    }
-  }
-
-  std::string cmd = "gcc -O2 -no-pie -x c " + tmpC + " -o " + outputPath + " -lm 2>/tmp/a_cc_err.txt";
-  int ret = std::system(cmd.c_str());
-  if (ret != 0) {
-    std::ifstream ef("/tmp/a_cc_err.txt");
-    std::string line;
-    while (std::getline(ef, line)) err << line << "\n";
-    err << "error: C compilation/linking failed with exit code " << ret << "\n";
-    return false;
-  }
-  std::filesystem::remove("/tmp/a_cc_err.txt");
-  std::filesystem::remove(tmpC);
-
-  return true;
+                      const std::string& outputPath, std::ostream& err) {
+  // The Astra (compiler/astra/) is the ONLY native compiler for A:
+  // A -> emitCSource() (C99 aval ABI) -> in-process native EXE output.
+  // No external gcc/clang/llc subprocess is invoked. See tcc_backend.cpp.
+  return kgen::buildExecutableWithNative(graph, sema, outputPath, err);
 }
 
 bool compileLLVMModule(const ModuleGraph& graph, const SemaResult& sema,
