@@ -1,6 +1,0 @@
-import trace
-
-fn main():
-    print(trace.extract("not-a-traceparent"))
-
-main()

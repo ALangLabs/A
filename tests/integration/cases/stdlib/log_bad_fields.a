@@ -1,6 +1,0 @@
-import log
-
-fn main():
-    log.info("message", 42)
-
-main()

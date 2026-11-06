@@ -334,7 +334,8 @@ class Emitter {
               ev.value = next;
             }
             next = ev.value + 1;
-            ev.globalVar = "__a_ev_" + e->name + "_" + v.name + std::to_string(ev.value);
+            ev.globalVar = "__a_ev_" + e->name + "_" + v.name + "_" +
+                           (ev.value < 0 ? "m" : "") + std::to_string(ev.value < 0 ? -ev.value : ev.value);
             for (const FieldDecl& f : v.fields) ev.payloadFields.push_back(f.name);
             enums_[e->name + "." + v.name] = ev;
           }
@@ -932,7 +933,7 @@ class Emitter {
             out << "int64_t " << cur << " = a_int_full(" << loT << ");\n";
             out << "int64_t " << endv << " = a_int_full(" << hiT << ");\n";
             out << "int64_t " << stepv << " = a_int_full(" << stT << ");\n";
-            out << "if (" << stepv << " == 0) { a_panic_msg(\"range() step must not be zero\"); }\n";
+            out << "if (" << stepv << " == 0) { a_panic_msg(\"range() step must be positive, found 0.\"); }\n";
             out << "aval " << var << ";\n";
             out << "for (; (" << stepv << " > 0 ? " << cur << " < " << endv
                 << " : " << cur << " > " << endv << "); "
@@ -1597,13 +1598,20 @@ class Emitter {
         }
       }
       // Fallback: method name provided by exactly one struct (e.g. generic
-      // or untyped receiver `value.size()`).
+      // or untyped receiver `value.size()`). Never hijack calls on values
+      // whose static type is a known runtime collection/string (dict/list/
+      // set/...): those go through a_method() dispatch.
       {
+        bool isRuntimeValue = ot && ot->kind != TypeKind::Struct &&
+                               ot->kind != TypeKind::Error &&
+                               ot->kind != TypeKind::Var;
         FnInfo* candidate = nullptr;
         int candidates = 0;
-        for (StructInfo* st : structList_) {
-          auto mit = st->methods.find(f.field);
-          if (mit != st->methods.end()) { candidate = mit->second; ++candidates; }
+        if (!isRuntimeValue) {
+          for (StructInfo* st : structList_) {
+            auto mit = st->methods.find(f.field);
+            if (mit != st->methods.end()) { candidate = mit->second; ++candidates; }
+          }
         }
         if (candidates == 1 && candidate) {
           std::string obj = emitExpr(f.object.get(), out);
@@ -1891,7 +1899,442 @@ class Emitter {
   }
 };
 
+// ================= asm backend (A -> .s -> astra) =========================
+// Emits AT&T-syntax x86-64 for the same AST the C emitter handles. Values are
+// aval words in %rax; locals/temps live in rbp-relative slots; runtime calls
+// use the *_slow externs (the header fast paths are C-only). Unsupported
+// constructs fail emission so the pipeline can fall back to emitC.
+
+struct ABinding {
+  BKind kind = BKind::Local;
+  int slot = -1;           // Local/Param: frame slot index
+  std::string sym;         // Global/FnValue/StructCtor/EnumValue: symbol name
+  int builtinId = -1;
+  FnInfo* fn = nullptr;
+  StructInfo* st = nullptr;
+  EnumVariantInfo* en = nullptr;
+  int moduleId = -1;
+};
+
+class AsmEmitter {
+ public:
+  AsmEmitter(const ModuleGraph& graph, const SemaResult& sema)
+      : graph_(graph), sema_(sema) {}
+
+  bool run(std::string& out, std::string& error) {
+    error_ = &error;
+    collectGlobals();
+    buildGlobalScope();
+    for (StructInfo* st : structList_) emitStructCtor(st);
+    for (FnInfo* f : fnList_) {
+      if (!failed_ && !f->isMethod) emitFunction(f);
+      else if (f->isMethod && !failed_) emitFunction(f);
+    }
+    emitMain();
+    if (failed_) return false;
+    out = bss_.str() + rodata_.str() + text_.str();
+    return true;
+  }
+
+ private:
+  const ModuleGraph& graph_;
+  const SemaResult& sema_;
+  std::string* error_ = nullptr;
+  bool failed_ = false;
+  int counter_ = 0;
+  int labelCounter_ = 0;
+  int slotCounter_ = 0;
+  std::ostringstream text_;
+  std::ostringstream rodata_;
+  std::ostringstream bss_;
+
+  std::unordered_map<const FnDecl*, FnInfo*> fns_;
+  std::vector<FnInfo*> fnList_;
+  std::unordered_map<std::string, StructInfo*> structs_;
+  std::vector<StructInfo*> structList_;
+  std::unordered_map<std::string, EnumVariantInfo> enums_;
+  std::vector<std::string> globals_;
+  std::unordered_map<std::string, std::string> topLevelGlobals_;
+
+  std::vector<std::unordered_map<std::string, ABinding>> scopes_;
+  std::vector<std::vector<const Stmt*>> deferStack_;
+  std::vector<int> loopDeferDepth_;
+  bool inFunction_ = false;
+
+  static constexpr uint64_t kTag = 0xFFFF000000000000ULL;
+  static constexpr uint64_t kPayloadMask = 0x0000FFFFFFFFFFFFULL;
+  static constexpr int64_t kIntLim = INT64_C(1) << 46;
+
+  void fail(const std::string& msg) {
+    if (!failed_) {
+      failed_ = true;
+      if (error_) *error_ = "asm backend: " + msg;
+    }
+  }
+  void emit(const std::string& s) {
+    if (s.empty()) return;
+    text_ << s;
+    if (s.back() != '\n') text_ << '\n';
+  }
+  std::string u64s(uint64_t v) {
+    char b[32];
+    std::snprintf(b, sizeof b, "0x%llx", (unsigned long long)v);
+    return b;
+  }
+  std::string slotRef(int i) { return "-" + std::to_string(8 + 8 * i) + "(%rbp)"; }
+  int allocSlot() { return slotCounter_++; }
+  int frameBytes() const { return ((slotCounter_ + 1) * 8 + 15) & ~15; }
+  std::string freshLabel() { return "__La" + std::to_string(labelCounter_++) + ":"; }
+
+  void pushScope() { scopes_.emplace_back(); }
+  void popScope() { scopes_.pop_back(); }
+  ABinding* lookup(const std::string& name) {
+    for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
+      auto f = it->find(name);
+      if (f != it->end()) return &f->second;
+    }
+    return nullptr;
+  }
+  void bindLocal(const std::string& name, int slot) {
+    ABinding b; b.kind = BKind::Local; b.slot = slot;
+    scopes_.back()[name] = b;
+  }
+  void bindSym(const std::string& name, const ABinding& b) { scopes_.back()[name] = b; }
+
+  // ---- value moves ---------------------------------------------------------
+  void movImm(uint64_t v, const char* reg = "%rax") {
+    emit(std::string("mov $") + u64s(v) + ", " + reg);
+  }
+  void storeRax(int slot) { emit("mov %rax, " + slotRef(slot)); }
+  void loadSlot(int slot, const char* reg = "%rax") {
+    emit(std::string("mov ") + slotRef(slot) + ", " + reg);
+  }
+  void evalToSlot(const Expr* e) { emitExpr(e); int s = allocSlot(); storeRax(s); lastEvalSlot_ = s; }
+  int lastEvalSlot_ = -1;
+
+  // Emit `call sym` with args already placed: rdi,rsi,rdx,rcx per SysV.
+  void call2(const char* sym, const Expr* a, const Expr* b) {
+    int sa = allocSlot(), sb = allocSlot();
+    emitExpr(a); storeRax(sa);
+    emitExpr(b); storeRax(sb);
+    loadSlot(sb, "%rsi"); loadSlot(sa, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  void call3(const char* sym, const Expr* a, const Expr* b, const Expr* c) {
+    int sa = allocSlot(), sb = allocSlot(), sc = allocSlot();
+    emitExpr(a); storeRax(sa);
+    emitExpr(b); storeRax(sb);
+    emitExpr(c); storeRax(sc);
+    loadSlot(sc, "%rdx"); loadSlot(sb, "%rsi"); loadSlot(sa, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  void callN(const char* sym, const std::vector<const Expr*>& args) {
+    std::vector<int> slots;
+    for (const Expr* a : args) { int s = allocSlot(); emitExpr(a); storeRax(s); slots.push_back(s); }
+    static const char* regs[] = {"%rdi", "%rsi", "%rdx", "%rcx", "%r8", "%r9"};
+    for (std::size_t i = slots.size(); i-- > 0;) loadSlot(slots[i], regs[i]);
+    emit(std::string("call ") + sym);
+  }
+  // call with mixed expr/immediate args: imm args are moved directly.
+  void callImm2(const char* sym, const Expr* a, uint64_t bImm) {
+    int sa = allocSlot();
+    emitExpr(a); storeRax(sa);
+    loadSlot(sa, "%rdi");
+    movImm(bImm, "%rsi");
+    emit(std::string("call ") + sym);
+  }
+  void callPtr2(const char* sym, const Expr* a, int slotB) {  // b is address of slotB
+    int sa = allocSlot();
+    emitExpr(a); storeRax(sa);
+    loadSlot(sa, "%rdi");
+    emit(std::string("lea ") + slotRef(slotB) + ", %rsi");
+    emit(std::string("call ") + sym);
+  }
+
+  // ---- registration (mirrors Emitter) --------------------------------------
+  void collectGlobals() {
+    int fnId = 0, stId = 0;
+    for (const Module& mod : graph_.modules) {
+      if (!mod.program) continue;
+      for (const StmtPtr& s : mod.program->statements) {
+        if (s->kind == StmtKind::FnDecl) {
+          const FnDecl* fn = static_cast<const FnDecl*>(s.get());
+          FnInfo* info = new FnInfo();
+          info->decl = fn; info->name = fn->name; info->moduleId = mod.id;
+          info->cname = "__a_f" + std::to_string(fnId++);
+          info->globalVar = "__a_gf" + std::to_string(fnId);
+          for (const ComptimeParam& p : fn->comptimeParams) info->paramNames.push_back(p.name);
+          for (const ParamDecl& p : fn->params) info->paramNames.push_back(p.name);
+          fns_[fn] = info; fnList_.push_back(info);
+        } else if (s->kind == StmtKind::StructDecl) {
+          const StructDecl* st = static_cast<const StructDecl*>(s.get());
+          StructInfo* info = new StructInfo();
+          info->decl = st; info->name = st->name; info->moduleId = mod.id;
+          info->ctorCname = "__a_ctor" + std::to_string(stId);
+          info->globalVar = "__a_gs" + std::to_string(stId++);
+          for (const FieldDecl& f : st->fields) info->fieldNames.push_back(f.name);
+          structs_[st->name] = info; structList_.push_back(info);
+          for (const auto& m : st->methods) {
+            FnInfo* mi = new FnInfo();
+            mi->decl = m.get(); mi->name = m->name; mi->moduleId = mod.id;
+            mi->isMethod = true; mi->structName = st->name;
+            mi->cname = "__a_m" + std::to_string(fnId++);
+            mi->globalVar = "__a_gf" + std::to_string(fnId);
+            for (const ComptimeParam& p : m->comptimeParams) mi->paramNames.push_back(p.name);
+            for (const ParamDecl& p : m->params) mi->paramNames.push_back(p.name);
+            fns_[m.get()] = mi; fnList_.push_back(mi);
+            info->methods[m->name] = mi;
+          }
+        } else if (s->kind == StmtKind::EnumDecl) {
+          const EnumDecl* e = static_cast<const EnumDecl*>(s.get());
+          std::int64_t next = 0; int tag = 0;
+          for (const EnumVariant& v : e->variants) {
+            EnumVariantInfo ev;
+            ev.algebraic = e->isAlgebraic(); ev.tag = tag++;
+            ev.value = v.value ? evalConstIntA(v.value.get(), next) : next;
+            next = ev.value + 1;
+            ev.globalVar = "__a_ev_" + e->name + "_" + v.name + "_" +
+                           (ev.value < 0 ? "m" : "") + std::to_string(ev.value < 0 ? -ev.value : ev.value);
+            for (const FieldDecl& f : v.fields) ev.payloadFields.push_back(f.name);
+            enums_[e->name + "." + v.name] = ev;
+          }
+        } else if (s->kind == StmtKind::Let) {
+          const LetStmt* let = static_cast<const LetStmt*>(s.get());
+          std::string cname = "__a_top_" + std::to_string(counter_++);
+          globals_.push_back(cname);
+          topLevelGlobals_[std::to_string(mod.id) + ":" + let->name] = cname;
+        } else if (s->kind == StmtKind::Assign) {
+          const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
+          if (as->target->kind == ExprKind::Ident) {
+            const std::string& nm = static_cast<const IdentExpr*>(as->target.get())->name;
+            std::string key = std::to_string(mod.id) + ":" + nm;
+            if (!topLevelGlobals_.count(key)) {
+              std::string cname = "__a_top_" + std::to_string(counter_++);
+              globals_.push_back(cname);
+              topLevelGlobals_[key] = cname;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  std::int64_t evalConstIntA(const Expr* e, std::int64_t fallback) {
+    if (!e) return fallback;
+    if (e->kind == ExprKind::IntLit) return static_cast<const IntLitExpr*>(e)->value;
+    if (e->kind == ExprKind::Unary) {
+      const UnaryExpr* u = static_cast<const UnaryExpr*>(e);
+      if (u->op == "-") return -evalConstIntA(u->operand.get(), 0);
+    }
+    if (e->kind == ExprKind::Ident) {
+      auto it = enums_.find(static_cast<const IdentExpr*>(e)->name);
+      if (it != enums_.end()) return it->second.value;
+    }
+    return fallback;
+  }
+
+  void buildGlobalScope() {
+    scopes_.clear(); scopes_.emplace_back();
+    auto& g = scopes_.back();
+    for (const Module& mod : graph_.modules) {
+      if (!mod.program) continue;
+      for (const StmtPtr& s : mod.program->statements) {
+        if (s->kind == StmtKind::Let) {
+          const LetStmt* let = static_cast<const LetStmt*>(s.get());
+          auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + let->name);
+          if (it != topLevelGlobals_.end()) {
+            ABinding b; b.kind = BKind::Global; b.sym = it->second; g[let->name] = b;
+          }
+        } else if (s->kind == StmtKind::Assign) {
+          const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
+          if (as->target->kind == ExprKind::Ident) {
+            const std::string& nm = static_cast<const IdentExpr*>(as->target.get())->name;
+            auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + nm);
+            if (it != topLevelGlobals_.end()) {
+              ABinding b; b.kind = BKind::Global; b.sym = it->second; g[nm] = b;
+            }
+          }
+        }
+      }
+    }
+    for (FnInfo* f : fnList_) {
+      if (f->isMethod) continue;
+      ABinding b; b.kind = BKind::FnValue; b.sym = f->globalVar; b.fn = f;
+      if (!g.count(f->name)) g[f->name] = b;
+    }
+    for (StructInfo* st : structList_) {
+      ABinding b; b.kind = BKind::StructCtor; b.sym = st->globalVar; b.st = st;
+      if (!g.count(st->name)) g[st->name] = b;
+    }
+    for (auto& kv : enums_) {
+      ABinding b; b.kind = BKind::EnumValue; b.sym = kv.second.globalVar; b.en = &kv.second;
+      g[kv.first] = b;
+      std::string shortName = kv.first.substr(kv.first.find('.') + 1);
+      if (!g.count(shortName)) g[shortName] = b;
+    }
+    for (const char* nm : {"math","io","fs","strings","collections","core","time",
+                           "json","binary","testing","log","metrics","trace","net",
+                           "http","terminal","env","repl","kernels","unsafe","arena","std"}) {
+      ABinding b; b.kind = BKind::Module; b.moduleId = -1; g[nm] = b;
+    }
+    for (const Module& mod : graph_.modules) {
+      ABinding b; b.kind = BKind::Module; b.moduleId = mod.id;
+      g[mod.name] = b; g[stemOf(mod.path)] = b;
+    }
+  }
+
+  // ---- emission (filled in incrementally; unsupported -> fail -> C fallback)
+  void emitStructCtor(StructInfo* st) {
+    // Slots: 0=argv ptr, 1=dict, 2+2i=key str, 3+2i=field value.
+    int need = 2 + 2 * (int)st->fieldNames.size();
+    slotCounter_ = need;
+    emit("    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
+    emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frameBytes()) + ", %rsp\n");
+    emit("    mov %rdi, " + slotRef(0) + "\n");
+    emit("    call a_dict_new\n    mov %rax, " + slotRef(1) + "\n");
+    for (std::size_t i = 0; i < st->fieldNames.size(); ++i) {
+      int ks = 2 + 2 * (int)i, vs = ks + 1;
+      std::string lbl = "__a_str_" + st->ctorCname + "_" + std::to_string(i);
+      emit("    lea " + lbl + "(%rip), %rdi\n");
+      movImm(st->fieldNames[i].size(), "%rsi");
+      emit("    call a_str_new\n    mov %rax, " + slotRef(ks) + "\n");
+      loadSlot(0, "%rax");
+      emit("    mov " + std::to_string(8 * (i + 1)) + "(%rax), %rax\n    mov %rax, " + slotRef(vs) + "\n");
+      loadSlot(1, "%rdi"); loadSlot(ks, "%rsi"); loadSlot(vs, "%rdx");
+      emit("    call a_dict_set\n");
+      rodata_ << "    .section .rodata\n" << lbl << ":\n    .ascii \"" << cEscape(st->fieldNames[i]) << "\"\n";
+    }
+    loadSlot(1, "%rax");
+    emit("    leave\n    ret\n");
+    slotCounter_ = 0;
+  }
+
+  void emitFunction(FnInfo* f) {
+    // Prototype body into a scratch stream is avoided: emit directly; the
+    // frame size is patched by emitting `sub $0` then fixing is complex, so
+    // we emit body first into text_ is not possible. Instead: two-pass —
+    // emit body into a temporary ostringstream by swapping text_.
+    std::ostringstream saved;
+    saved.swap(text_);
+    std::ostringstream body;
+    body.swap(text_);  // text_ now empty; body holds nothing yet
+    // emit body into text_ (which is the fresh stream)
+    slotCounter_ = 0;
+    scopes_.clear();
+    // keep only global scope: rebuild without fn-local scopes
+    buildGlobalScope();
+    pushScope();
+    int argvSlot = allocSlot();
+    emit("    mov %rdi, " + slotRef(argvSlot) + "\n");
+    for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
+      int ps = allocSlot();
+      loadSlot(argvSlot, "%rax");
+      emit("    mov " + std::to_string(8 * (i + 1)) + "(%rax), %rax\n    mov %rax, " + slotRef(ps) + "\n");
+      ABinding b; b.kind = BKind::Param; b.slot = ps;
+      scopes_.back()[f->paramNames[i]] = b;
+    }
+    bool savedInFn = inFunction_;
+    inFunction_ = true;
+    std::string savedStruct;
+    (void)savedStruct;
+    for (const StmtPtr& s : f->decl->body) emitStmt(s.get());
+    emit("    mov " + u64s(kTag | 0x2) + ", %rax\n    leave\n    ret\n");
+    int frame = frameBytes();
+    // swap back: text_ currently has body; move it out
+    std::ostringstream emitted;
+    emitted.swap(text_);
+    text_.swap(saved);
+    emit("    .text\n    .globl " + f->cname + "\n" + f->cname + ":\n");
+    emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
+    text_ << emitted.str();
+    scopes_.clear();
+    inFunction_ = savedInFn;
+  }
+
+  void emitMain() {
+    std::ostringstream saved;
+    saved.swap(text_);
+    std::ostringstream emitted;
+    emitted.swap(text_);
+    slotCounter_ = 0;
+    scopes_.clear();
+    buildGlobalScope();
+    pushScope();
+    allocSlot();  // slot 0 reserved (unused scratch)
+    emit("    call a_runtime_init\n");
+    for (StructInfo* st : structList_) {
+      emit("    lea " + st->ctorCname + "(%rip), %rdi\n    mov " + u64s(kTag | 0x2) + ", %rsi\n");
+      emit("    lea __a_s_" + st->name + "(%rip), %rdx\n    call a_fnon_new\n");
+      emit("    mov %rax, " + st->globalVar + "(%rip)\n");
+      rodata_ << "    .section .rodata\n__a_s_" << st->name << ":\n    .ascii \"" << cEscape(st->name) << "\"\n";
+    }
+    for (FnInfo* f : fnList_) {
+      if (f->isMethod) continue;
+      std::string lbl = "__a_s_" + f->cname;
+      emit("    lea " + f->cname + "(%rip), %rdi\n    mov " + u64s(kTag | 0x2) + ", %rsi\n");
+      emit("    lea " + lbl + "(%rip), %rdx\n    call a_fnon_new\n");
+      emit("    mov %rax, " + f->globalVar + "(%rip)\n");
+      rodata_ << "    .section .rodata\n" << lbl << ":\n    .ascii \"" << cEscape(f->name) << "\"\n";
+    }
+    for (auto& kv : enums_) {
+      if (kv.second.algebraic) continue;
+      movImm((uint64_t)kv.second.value, "%rdi");
+      emit("    call a_i64n\n    mov %rax, " + kv.second.globalVar + "(%rip)\n");
+    }
+    std::vector<int> order = graph_.order;
+    if (order.empty()) order.push_back(graph_.entry);
+    for (int mid : order) {
+      if (mid < 0 || failed_) continue;
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) continue;
+      if (mod.name == "prelude" || mod.path.find("stdlib/") != std::string::npos ||
+          mod.path.find("/stdlib/") != std::string::npos) continue;
+      for (const StmtPtr& s : mod.program->statements) {
+        if (s->kind == StmtKind::Import) {
+          const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+          std::string alias = !im->alias.empty() ? im->alias : !im->bareName.empty() ? im->bareName : stemOf(im->path);
+          if (im->moduleId >= 0) {
+            ABinding b; b.kind = BKind::Module; b.moduleId = im->moduleId;
+            scopes_.back()[alias] = b;
+          }
+        }
+      }
+      for (const StmtPtr& s : mod.program->statements) emitStmt(s.get());
+    }
+    emit("    xor %eax, %eax\n    leave\n    ret\n");
+    int frame = frameBytes();
+    std::ostringstream body;
+    body.swap(text_);
+    text_.swap(saved);
+    emit("    .text\n    .globl main\nmain:\n");
+    emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
+    text_ << body.str();
+    // .bss for globals
+    for (const std::string& g : globals_) bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .zero 8\n";
+    for (FnInfo* f : fnList_) if (!f->isMethod) bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .zero 8\n";
+    for (StructInfo* st : structList_) bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .zero 8\n";
+    for (auto& kv : enums_) if (!kv.second.algebraic) bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .zero 8\n";
+    scopes_.clear();
+  }
+
+  // ---- statements / expressions: implemented next -------------------------
+  void emitStmt(const Stmt* s) {
+    (void)s;
+    fail("statement emission not yet implemented");
+  }
+  void emitExpr(const Expr* e) {
+    (void)e;
+    fail("expression emission not yet implemented");
+  }
+};
+
 }  // namespace
+
+bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
+             std::string& error) {
+  AsmEmitter emitter(graph, sema);
+  return emitter.run(out, error);
+}
 
 bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
            std::string& error, bool testMode) {

@@ -1,2 +1,0 @@
-import net
-print(net.poll([], 100))

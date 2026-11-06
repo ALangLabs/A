@@ -1,7 +1,0 @@
-ok test_chain_map
-ok test_defaultdict
-ok test_ordered_dict
-ok test_user_dict
-ok test_user_list
-
-5 passed, 0 failed

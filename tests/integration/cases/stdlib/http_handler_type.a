@@ -1,2 +1,0 @@
-# Dynamic: handler return shape checked at runtime by http module, not sema check
-print("ok")

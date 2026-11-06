@@ -1,6 +1,0 @@
-import trace
-
-fn main():
-    trace.end(999)
-
-main()

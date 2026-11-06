@@ -1,5 +1,0 @@
-from core import panic
-
-fn main():
-    panic("boom")
-main()

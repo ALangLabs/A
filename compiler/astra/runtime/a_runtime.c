@@ -81,7 +81,7 @@ static void panicf(const char *fmt, ...) {
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
-    exit(1);
+    exit(2);
 }
 
 static void *xmalloc(size_t n) {
@@ -279,6 +279,39 @@ static const char *str_data(aval v, uint64_t *len) {
     return s->data;
 }
 
+/* UTF-8 helpers: strings are indexed by code point, not byte. */
+static int u8_len(unsigned char c) {
+    if ((c & 0x80) == 0) return 1;
+    if ((c & 0xE0) == 0xC0) return 2;
+    if ((c & 0xF0) == 0xE0) return 3;
+    if ((c & 0xF8) == 0xF0) return 4;
+    return 1;
+}
+static uint64_t u8_count(const char *p, uint64_t n) {
+    uint64_t c = 0;
+    uint64_t i = 0;
+    while (i < n) {
+        int l = u8_len((unsigned char)p[i]);
+        if (i + (uint64_t)l > n) l = 1;
+        i += (uint64_t)l;
+        ++c;
+    }
+    return c;
+}
+/* Map code-point index to byte offset; returns n for out-of-range (caller
+   clamps the same way slice_bound does for lists). */
+static uint64_t cp_to_byte(const char *p, uint64_t n, int64_t cp) {
+    uint64_t c = 0;
+    uint64_t i = 0;
+    while (i < n && c < (uint64_t)cp) {
+        int l = u8_len((unsigned char)p[i]);
+        if (i + (uint64_t)l > n) l = 1;
+        i += (uint64_t)l;
+        ++c;
+    }
+    return i;
+}
+
 static int str_eq(aval a, aval b) {
     uint64_t la, lb;
     const char *pa = str_data(a, &la), *pb = str_data(b, &lb);
@@ -468,6 +501,17 @@ static void format_double_buf(Buf *b, double d) {
     for (int prec = 1; prec <= 17; ++prec) {
         snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
         if (strtod(tmp, NULL) == d) break;
+    }
+    /* Avoid scientific notation for ordinary magnitudes (Python-style);
+       expand to plain decimal that still round-trips. */
+    if (strchr(tmp, 'e') || strchr(tmp, 'E')) {
+        double ad = d < 0.0 ? -d : d;
+        if (ad >= 1e-4 && ad < 1e16) {
+            for (int prec = 1; prec <= 25; ++prec) {
+                snprintf(tmp, sizeof(tmp), "%.*f", prec, d);
+                if (strtod(tmp, NULL) == d) break;
+            }
+        }
     }
     buf_adds(b, tmp);
     if (strchr(tmp, '.') == NULL && strchr(tmp, 'e') == NULL &&
@@ -706,7 +750,10 @@ aval a_float(aval v) {
 
 aval a_len(aval v) {
     switch (kind_of(v)) {
-        case K_STR: return mkint_full(((AStr *)obj_of(v))->h.len);
+        case K_STR: {
+            AStr *s = (AStr *)obj_of(v);
+            return mkint_full(u8_count(s->data, s->h.len));
+        }
         case K_LIST:
         case K_TUPLE:
         case K_SET:
@@ -890,11 +937,11 @@ static aval arith_int_double(aval l, aval r, char op) {
         case '-': x = a - b; break;
         case '*': x = a * b; break;
         case '/':
-            if (b == 0.0) panicf("Division by zero.");
+            if (b == 0.0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
             x = a / b;
             break;
         case '%': {
-            if (b == 0.0) panicf("Remainder by zero.");
+            if (b == 0.0) panicf("Remainder by zero.\n  = help: Check the divisor before dividing.");
             double m = fmod(a, b);
             if (m != 0.0 && ((m > 0.0) != (b > 0.0))) m += b;
             x = m;
@@ -919,11 +966,11 @@ static aval arith_int_int(aval l, aval r, char op) {
             if (imul_of(a, b, &res)) return mkdouble((double)a * (double)b);
             return mkint_full(res);
         case '/':
-            if (b == 0) panicf("Division by zero.");
+            if (b == 0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
             if (a == INT64_MIN && b == -1) return mkdouble(9223372036854775808.0);
             return mkint_full(a / b);
         case '%':
-            if (b == 0) panicf("Remainder by zero.");
+            if (b == 0) panicf("Remainder by zero.\n  = help: Check the divisor before dividing.");
             if (b == -1) return mkint_full(0);
             return mkint_full(a % b);
         case '^':
@@ -1235,7 +1282,7 @@ aval a_range_new(aval lo, aval hi, aval step) {
     int64_t a = expect_int64(lo, "range() argument"),
             b = expect_int64(hi, "range() argument"),
             c = expect_int64(step, "range() step");
-    if (c == 0) panicf("range() step must not be zero");
+    if (c == 0) panicf("range() step must be positive, found 0.");
     ARange *r = (ARange *)xmalloc(sizeof(ARange));
     r->h.type = T_RANGE;
     r->h.len = 3;
@@ -1260,8 +1307,12 @@ aval a_getitem(aval obj, aval idx) {
     switch (kind_of(obj)) {
         case K_STR: {
             AStr *s = (AStr *)obj_of(obj);
-            int64_t i = normalize_index(expect_int64(idx, "string index"), s->h.len);
-            return a_str_new(s->data + i, 1);
+            int64_t total = (int64_t)u8_count(s->data, s->h.len);
+            int64_t i = normalize_index(expect_int64(idx, "string index"), (uint64_t)total);
+            uint64_t boff = cp_to_byte(s->data, s->h.len, i);
+            int l = u8_len((unsigned char)s->data[boff]);
+            if (boff + (uint64_t)l > s->h.len) l = 1;
+            return a_str_new(s->data + boff, (uint64_t)l);
         }
         case K_LIST:
         case K_TUPLE: {
@@ -1272,7 +1323,13 @@ aval a_getitem(aval obj, aval idx) {
         case K_DICT: {
             ADict *d = (ADict *)obj_of(obj);
             int64_t i = dict_find(d, idx);
-            if (i < 0) panicf("key not found");
+            if (i < 0) {
+                uint64_t kl = 0;
+                const char *kp = kind_of(idx) == K_STR ? str_data(idx, &kl) : NULL;
+                if (kp)
+                    panicf("Key %s is not in the map.", (char *)memcpy((char[256]){0}, kp, kl < 255 ? kl : 255));
+                panicf("key not found");
+            }
             return d->pairs[i].v;
         }
         default:
@@ -1302,7 +1359,7 @@ aval a_setitem(aval obj, aval idx, aval val) {
 
 static int64_t slice_step(aval v) {
     int64_t s = expect_int64(v, "slice step");
-    if (s == 0) panicf("slice step cannot be zero");
+    if (s == 0) panicf("The slice step must be positive, found 0.");
     return s;
 }
 
@@ -1321,7 +1378,9 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
     if (k != K_STR && k != K_LIST && k != K_TUPLE)
         panicf("object of type '%s' is not sliceable", type_name_cstr(obj));
     AObj *o = obj_of(obj);
-    uint64_t len = o->type == T_STR ? ((AStr *)o)->h.len : ((AArr *)o)->h.len;
+    uint64_t len = o->type == T_STR
+        ? u8_count(((AStr *)o)->data, ((AStr *)o)->h.len)
+        : ((AArr *)o)->h.len;
     int64_t n = (int64_t)len;
     int64_t st = a_is_none(step) ? 1 : slice_step(step);
     int64_t start, stop;
@@ -1338,7 +1397,10 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         Buf b;
         buf_init(&b);
         for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
-            buf_addc(&b, s->data[i]);
+            uint64_t boff = cp_to_byte(s->data, s->h.len, i);
+            int l = u8_len((unsigned char)s->data[boff]);
+            if (boff + (uint64_t)l > s->h.len) l = 1;
+            if (boff < s->h.len) buf_addn(&b, s->data + boff, (size_t)l);
             if (st > 0) { if (i > INT64_MAX - st) break; i += st; }
             else { if (i < INT64_MIN - st) break; i += st; }
         }
@@ -1411,7 +1473,7 @@ aval a_iter_next(aval it, aval *out) {
         d = (ADict *)so;
         len = d->h.len;
     } else if (so->type == T_STR) {
-        len = ((AStr *)so)->h.len;
+        len = u8_count(((AStr *)so)->data, ((AStr *)so)->h.len);
     } else {
         AArr *a = (AArr *)so;
         len = a->h.len;
@@ -1420,7 +1482,13 @@ aval a_iter_next(aval it, aval *out) {
     if (iter->idx >= len) return (aval)0;
     uint64_t i = iter->idx++;
     if (d) *out = d->pairs[i].k;
-    else if (so->type == T_STR) *out = a_str_new(((AStr *)so)->data + i, 1);
+    else if (so->type == T_STR) {
+        AStr *s = (AStr *)so;
+        uint64_t boff = cp_to_byte(s->data, s->h.len, (int64_t)i);
+        int l = u8_len((unsigned char)s->data[boff]);
+        if (boff + (uint64_t)l > s->h.len) l = 1;
+        *out = a_str_new(s->data + boff, (uint64_t)l);
+    }
     else *out = items[i];
     return (aval)1;
 }
@@ -1533,7 +1601,7 @@ aval a_call(aval fn, uint64_t n, aval *argv) {
 }
 
 aval a_unwrap(aval v) {
-    if (a_is_none(v)) panicf("Cannot unwrap None with '!'");
+    if (a_is_none(v)) panicf("Cannot unwrap None with '!'.");
     if (is_result(v)) {
         if (result_ok(v)) return result_value(v);
         panicf("called '!' on Err(...)");
@@ -1686,16 +1754,8 @@ static aval str_replace(aval v, aval oldv, aval newv, int64_t count) {
     const char *sp = s->data;
     Buf b;
     buf_init(&b);
+    if (on == 0) panicf("The 'replace' target must not be empty.");
     if (count < 0) count = INT64_MAX;
-    if (on == 0) {
-        int64_t limit = count;
-        if (limit > (int64_t)sn + 1) limit = (int64_t)sn + 1;
-        for (uint64_t i = 0; i <= sn; ++i) {
-            if (limit-- > 0) buf_addn(&b, np, (size_t)nn);
-            if (i < sn) buf_addc(&b, sp[i]);
-        }
-        return buf_take(&b);
-    }
     uint64_t pos = 0, last = 0;
     int64_t done = 0;
     while (done < count && pos + on <= sn) {
@@ -1790,7 +1850,7 @@ static aval seq_index(aval v, aval item, int64_t start, int64_t stop) {
     if (hi > (int64_t)n) hi = (int64_t)n;
     for (int64_t i = lo; i < hi; ++i)
         if (values_equal(a->items[i], item)) return mkint_full(i);
-    panicf("value is not in list");
+    panicf("Value is not in the list.");
     return A_NONE;
 }
 
@@ -1830,7 +1890,7 @@ aval a_getattr(aval obj, const char *name) {
 
 static aval list_pop(aval v, int64_t idx, int has_idx) {
     AArr *a = (AArr *)obj_of(v);
-    if (a->h.len == 0) panicf("pop from empty list");
+    if (a->h.len == 0) panicf("Cannot pop from an empty array.");
     int64_t i = has_idx ? normalize_index(idx, a->h.len) : (int64_t)a->h.len - 1;
     aval r = a->items[i];
     memmove(a->items + i, a->items + i + 1,
@@ -1980,13 +2040,13 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
                     if ((r < 0 && (!strcmp(name, "index") || !strcmp(name, "rindex"))) ||
                         (r >= 0 && en < st)) r = -1;
                     if (r < 0 && (!strcmp(name, "index") || !strcmp(name, "rindex")))
-                        panicf("substring not found");
+                        panicf("Substring not found.");
                     return mkint_full(r);
                 }
             }
             int64_t r = str_find(obj, argv[0], st, !strcmp(name, "rindex") || !strcmp(name, "rfind"));
             if (r < 0 && (!strcmp(name, "index") || !strcmp(name, "rindex")))
-                panicf("substring not found");
+                panicf("Substring not found.");
             return mkint_full(r);
         }
         if (!strcmp(name, "count")) {
@@ -2145,7 +2205,7 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
                     return A_NONE;
                 }
             }
-            panicf("list.remove(x): x not in list");
+            panicf("Value is not in the list.");
             return A_NONE;
         }
         if (!strcmp(name, "pop")) {
@@ -2416,11 +2476,8 @@ static aval bi_trunc(uint64_t n, aval *argv) { want_args("trunc", n, 1, 1); retu
 static aval bi_round(uint64_t n, aval *argv) {
     want_args("round", n, 1, 1);
     double x = math_arg(argv[0], "round");
-    double f = floor(x);
-    double diff = x - f;
-    double r = f;
-    if (diff > 0.5) r = f + 1.0;
-    else if (diff == 0.5 && ((int64_t)f & 1)) r = f + 1.0;
+    /* Round half away from zero (Python round() is banker's, spec wants away). */
+    double r = x >= 0.0 ? floor(x + 0.5) : ceil(x - 0.5);
     return mkdouble(r);
 }
 
@@ -2617,7 +2674,7 @@ static aval bi_input(uint64_t n, aval *argv) {
     }
     fflush(stdout);
     char *buf = (char *)xmalloc(4096);
-    if (!fgets(buf, 4096, stdin)) { free(buf); return A_NONE; }
+    if (!fgets(buf, 4096, stdin)) { free(buf); panicf("Input ended before a line could be read."); }
     size_t len = strlen(buf);
     if (len && buf[len - 1] == '\n') buf[--len] = '\0';
     if (len && buf[len - 1] == '\r') buf[--len] = '\0';
@@ -2986,7 +3043,7 @@ aval a_eprintv(uint64_t n, aval *argv) { printv(stderr, n, argv); return A_NONE;
 
 aval a_panic_msg(const char *msg) {
     fprintf(stderr, "error: %s\n", msg ? msg : "");
-    exit(1);
+    exit(2);
     return A_NONE;
 }
 

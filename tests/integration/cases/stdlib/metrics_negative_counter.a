@@ -1,6 +1,0 @@
-import metrics
-
-fn main():
-    metrics.counter("downloads", -1)
-
-main()

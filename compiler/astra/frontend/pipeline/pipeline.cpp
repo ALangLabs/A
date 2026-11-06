@@ -134,13 +134,16 @@ bool findRuntime(const std::string& astra, std::string& runtimeC, std::string& r
   return false;
 }
 
-// Stages emitted C source to a temp .c file; returns "" on failure.
-std::string stageC(const std::string& source, std::ostream& err) {
-  std::string p = tempPath("gen", ".c");
+// Stages emitted source to a temp file with the given extension.
+std::string stageSrc(const std::string& source, const char* ext, std::ostream& err) {
+  std::string p = tempPath("gen", ext);
   std::ofstream f(p, std::ios::binary | std::ios::trunc);
-  if (!f) { err << "error: cannot write temp C source '" << p << "'\n"; return ""; }
+  if (!f) { err << "error: cannot write temp source '" << p << "'\n"; return ""; }
   f << source;
   return p;
+}
+std::string stageC(const std::string& source, std::ostream& err) {
+  return stageSrc(source, ".c", err);
 }
 
 // Compiles emitted C (plus the runtime) with astra into outPath.
@@ -206,6 +209,24 @@ int ccBuildC(const std::string& cPath, const std::string& outPath, std::ostream&
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
                   bool testMode = false) {
   (void)in; (void)out;
+  if (!testMode) {
+    // Preferred path: emit assembly and let astra assemble+link it —
+    // A -> .s -> machine code with no C intermediate. Falls through to the
+    // C emitter for constructs the asm backend does not cover yet.
+    std::string sSource, sError;
+    if (emitAsm(*m.graph, *m.sema, sSource, sError)) {
+      std::string sPath = stageSrc(sSource, ".s", err);
+      if (sPath.empty()) return kCErr;
+      std::string bin = tempPath("bin");
+      int rc = astraBuildC(sPath, bin, err);
+      std::error_code ec;
+      std::filesystem::remove(sPath, ec);
+      if (rc != 0) { std::filesystem::remove(bin, ec); return kCErr; }
+      rc = runBinary(bin);
+      std::filesystem::remove(bin, ec);
+      return rc < 0 ? kCErr : rc;
+    }
+  }
   std::string cSource, codegenError;
   if (!emitC(*m.graph, *m.sema, cSource, codegenError, testMode)) {
     err << "error: code generation failed: " << codegenError << "\n";
@@ -250,6 +271,13 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
+  std::string sSource, sError;
+  if(emitAsm(*m.graph,*m.sema,sSource,sError)){
+    std::string sPath=stageSrc(sSource,".s",err); if(sPath.empty()) return kCErr;
+    int rc=astraBuildC(sPath,outputPath,err);
+    std::error_code ec; std::filesystem::remove(sPath,ec);
+    return rc;
+  }
   std::string cSource, codegenError;
   if(!emitC(*m.graph,*m.sema,cSource,codegenError)){ err<<"error: code generation failed: "<<codegenError<<"\n"; return kCErr; }
   std::string cPath=stageC(cSource,err); if(cPath.empty()) return kCErr;

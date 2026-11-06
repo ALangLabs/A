@@ -1,8 +1,0 @@
-import net
-
-fn main():
-    socket = net.udp_socket()
-    net.close(socket)
-    net.close(socket)
-
-main()

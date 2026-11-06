@@ -1,6 +1,0 @@
-import json
-
-fn main():
-    print(json.parse("[1, 2"))
-
-main()

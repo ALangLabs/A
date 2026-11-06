@@ -1,6 +1,0 @@
-import binary
-
-fn main():
-    print(binary.decode([200, 1, 2]))
-
-main()

@@ -1,6 +1,0 @@
-import metrics
-
-fn main():
-    metrics.counter("bad", 1, "only")
-
-main()

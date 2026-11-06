@@ -1,2 +1,0 @@
-import json
-print(json.keys(json.parse("[1, 2]")))
