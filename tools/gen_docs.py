@@ -6,7 +6,7 @@ Like Python's ``inspect.getdoc`` + ``pydoc`` + Sphinx `module_docs.py`
 doc comments immediately before ``fn``/``class``/``enum``/``trait``
 declarations, and emits:
 
-* ``compiler/stages/name-resolution/builtin_docs.hpp`` (replaces the
+* ``compiler/astra/frontend/name-resolution/builtin_docs.hpp`` (replaces the
   hardcoded table — the .a files become the single source of truth)
 * ``docs/standard-library/auto/*.md`` (rendered docs, `a doc` style)
 * ``docs/standard-library/auto.json`` (machine-readable, for LSP/hover)

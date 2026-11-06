@@ -2,6 +2,9 @@
 # cmake/libtcc.cmake (libtcc + the `astra` driver + staged tcclib/); this file
 # covers the C++ pieces that live alongside it.
 
+# C++ frontend (lex/parse/sema/IR/pipeline), formerly compiler/stages/.
+add_subdirectory(frontend)
+
 # Python interop, relocated from the retired KGEN backend. It dlopens
 # libpython at runtime (uv/venv/system discovery), so we only need headers at
 # build time — never link libpython itself. Prefer the python on PATH
@@ -12,7 +15,7 @@ add_library(a_python_interop STATIC
   python/python_loader.cpp
 )
 target_link_libraries(a_python_interop PUBLIC a_project_options a_runtime)
-target_include_directories(a_python_interop PRIVATE ${CMAKE_SOURCE_DIR}/compiler)
+target_include_directories(a_python_interop PRIVATE ${CMAKE_SOURCE_DIR}/compiler ${CMAKE_SOURCE_DIR}/compiler/astra/frontend)
 
 if(NOT DEFINED Python3_EXECUTABLE)
   find_program(A_PATH_PYTHON NAMES python3 python)

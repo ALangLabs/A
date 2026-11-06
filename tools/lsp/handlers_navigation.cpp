@@ -78,7 +78,7 @@ std::vector<std::pair<std::string, Span>> LanguageServer::collectReferences(
 }
 
 // Source-tree root of the A repo (the directory containing
-// compiler/stages/...), found by walking up from the document. Builtin
+// compiler/astra/frontend/...), found by walking up from the document. Builtin
 // definitions live in the compiler sources, so go-to-definition needs
 // this to locate `builtin_docs.hpp` / `method_signatures.hpp`.
 std::string LanguageServer::sourceTreeRoot(const std::string& filePath) {

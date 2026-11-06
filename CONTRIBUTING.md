@@ -86,7 +86,7 @@ A/
 - **Pull requests**: one behavior per PR, description covers *why*; link
   issues. The PR template lists the checks — formatter/doc-generator or LSP
   behaviour changes should extend the golden cases or `smoke_test.py`.
-- **Versioning**: `CMakeLists.txt`, `compiler/stages/driver/version.hpp`,
+- **Versioning**: `CMakeLists.txt`, `compiler/astra/frontend/driver/version.hpp`,
   `tools/lsp/server.hpp` (`kServerVersion`) and
   `tools/vscode-a/package.json` must agree; CI fails if they drift.
 - **Documentation**: new stdlib members need a row in

@@ -1,6 +1,6 @@
 #
 # Loaded before every program by the module loader
-# (see `compiler/stages/name-resolution/module_loader.cpp`); users access
+# (see `compiler/astra/frontend/name-resolution/module_loader.cpp`); users access
 # it via `import prelude`. Everything declared here is namespaced under
 # `prelude.*`, so no global name clashes. Native modules (`math`, `io`,
 # `fs`, `strings`, `collections`, `core`, `time`, `json`, `binary`,

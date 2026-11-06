@@ -17,7 +17,7 @@ namespace a::lsp {
 
 using jsonlite::Value;
 
-// Matches the lexer keyword set (compiler/stages/lexer/token.hpp Kw*
+// Matches the lexer keyword set (compiler/astra/frontend/lexer/token.hpp Kw*
 // tokens) so semantic tokens color exactly the real keywords.
 inline constexpr const char* kKeywords[] = {
     "fn", "if", "elif", "else", "while", "do", "for", "in", "loop",

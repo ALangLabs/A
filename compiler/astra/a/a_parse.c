@@ -1,4 +1,4 @@
-/* A -> AST parser. Recursive descent mirroring compiler/stages/parser.
+/* A -> AST parser. Recursive descent mirroring compiler/astra/frontend/parser.
  * Token stream comes from a_lex (AT_NL/AT_INDENT/AT_DEDENT significant). */
 #include "a_internal.h"
 #include <stdarg.h>

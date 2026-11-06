@@ -118,6 +118,11 @@ endforeach()
 # does not also emit its own.
 foreach(t IN ITEMS libtcc tcc_driver)
     target_compile_options(${t} PRIVATE $<IF:$<BOOL:${MSVC}>,/W0,-w>)
+    # The C backend is the hot path (A -> machine code for every run/build);
+    # keep it at -O3 even in non-Release configs so `a run` stays C-fast.
+    if(NOT MSVC)
+        target_compile_options(${t} PRIVATE -O3)
+    endif()
 endforeach()
 if(NOT WIN32)
     target_link_libraries(libtcc PUBLIC ${CMAKE_DL_LIBS} m)

@@ -52,7 +52,7 @@ const STDLIB = {
 const KEYWORDS = ['fn','if','elif','else','while','for','in','loop','break','continue','return','defer','class','metaclass','enum','trait','type','import','from','as','match','and','or','not','true','false','None','self','pass','comptime','impl','where','do'];
 const BUILTINS = ['print','eprint','input','flush','len','str','int','float','bool','range','map','filter','reduce','sum','any','all','min','max','abs','pow','sqrt','round','floor','ceil','sorted','reversed','enumerate','zip','open','type','isinstance','assert','panic'];
 
-// Curated builtin signatures mirroring compiler/stages/name-resolution/
+// Curated builtin signatures mirroring compiler/astra/frontend/name-resolution/
 // builtin_docs.hpp (the authoritative table read by a-lsp). Used by the
 // fallback hover when a-lsp is unavailable.
 const BUILTIN_SIGS = {

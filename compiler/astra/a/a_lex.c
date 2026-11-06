@@ -2,7 +2,7 @@
 #include <ctype.h>
 
 /* Lexer for A source. Single pass over m->src[0..m->len); fills m->toks.
- * Mirrors compiler/stages/lexer (Python-style significant newlines/indent,
+ * Mirrors compiler/astra/frontend/lexer (Python-style significant newlines/indent,
  * spaces-only indentation, # comments, longest-match operators). */
 
 static const struct { const char *s; int k; } akw[] = {

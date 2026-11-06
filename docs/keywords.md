@@ -2,7 +2,7 @@
 
 Keywords in this list are *reserved words* in A: they can never be used as
 identifiers. The authoritative list is the lexer
-(`compiler/stages/lexer/token.hpp`, the `Kw*` tokens); the type checker,
+(`compiler/astra/frontend/lexer/token.hpp`, the `Kw*` tokens); the type checker,
 the language server, and this list are kept in sync from it.
 
 | Keyword | Kind | Role |

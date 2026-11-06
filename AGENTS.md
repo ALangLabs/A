@@ -22,16 +22,16 @@ Useful targeted checks:
 - LSP smoke test directly: `python3 tools/lsp/smoke_test.py build/a-lsp`.
 - Examples sanity: `for f in examples/*/*.a; do ./build/a run "$f" >/dev/null || echo "FAIL $f"; done` (pick specific categories when faster).
 
-CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ctest, checks version consistency across `CMakeLists.txt`, `compiler/stages/driver/version.hpp`, `tools/lsp/server.cpp` (`kServerVersion`), and `tools/vscode-a/package.json`, and runs an ASan/UBSan integration pass.
+CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ctest, checks version consistency across `CMakeLists.txt`, `compiler/astra/frontend/driver/version.hpp`, `tools/lsp/server.cpp` (`kServerVersion`), and `tools/vscode-a/package.json`, and runs an ASan/UBSan integration pass.
 
 ## Project layout (high level)
-- `compiler/` — toolchain sources (`a.hpp` umbrella; `stages/*` modules such as lexer, parser, ast, diagnostics, name-resolution, type-checker, ownership, ir, optimization, backend, tooling, pipeline, object, driver, cli).
+- `compiler/astra/frontend/` — C++ frontend modules (`a.hpp` umbrella; `diagnostics`, `lexer`, `ast`, `parser`, `name-resolution`, `type-checker`, `ownership`, `ir`, `optimization`, `tooling`, `pipeline`, `driver`, `cli`). The C Astra backend (TinyCC fork + `a/*.c`) lives alongside in `compiler/astra/`.
 - `runtime/` — runtime values, memory, strings, collections, IO.
 - `stdlib/` — stdlib docs/notes and A-file modules (native execution is delegated to the Astra backend (`compiler/astra/`); the A-subset it supports is still growing — confirm via docs/tests when changing behavior).
 - `kernels/` — A compute kernels.
 - `tools/lsp/` — `a-lsp` (stdio LSP) and smoke test; `tools/vscode-a/` — VS Code extension.
 - `tests/` — integration, IR, and tooling tests; `examples/` — runnable programs; `docs/` — spec/CLI/compiler/stdlib docs.
-- `third_party/tinycc/` — vendored TinyCC used by the in-process JIT backend.
+- `compiler/astra/` — Astra backend: vendored TinyCC fork in the root + the C A-frontend in `a/` (A -> machine code for `a run`/`a build`) and the C++ frontend in `frontend/` (lex/parse/sema/IR for `a check`/`a fmt`/`a doc`/`a emit-ir`, LSP).
 
 ## Coding and change conventions
 - C++20 in `namespace a`; keep headers next to implementations; follow the existing stage/module structure. Keep warnings clean — CI treats warnings as errors.

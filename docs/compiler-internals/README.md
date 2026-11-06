@@ -1,6 +1,6 @@
 # Compiler Internals (A v2)
 
-This document summarizes the current implementation architecture. For exact behavior, consult source under `compiler/stages/` and `CMakeLists.txt`.
+This document summarizes the current implementation architecture. For exact behavior, consult source under `compiler/astra/frontend/` and `CMakeLists.txt`.
 
 ## High-level pipeline
 

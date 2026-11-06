@@ -4,7 +4,7 @@
 
 These methods live on primitive values and are available on any value of
 the right type, without importing a module. They come from
-`compiler/stages/type-checker/method_signatures.hpp` — the exact table the
+`compiler/astra/frontend/type-checker/method_signatures.hpp` — the exact table the
 type checker uses, so completions, hover, and this reference always agree.
 
 ## TOC

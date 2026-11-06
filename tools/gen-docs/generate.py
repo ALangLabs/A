@@ -5,9 +5,9 @@ The markdown is produced from the compiler's doc tables — the same source
 the type checker and the language server read — so the reference can never
 drift from the implementation:
 
-* `compiler/stages/name-resolution/builtin_docs.hpp`   (builtin_docs.cpp
+* `compiler/astra/frontend/name-resolution/builtin_docs.hpp`   (builtin_docs.cpp
   dump tool prints them as JSON)
-* `compiler/stages/type-checker/method_signatures.hpp` (primitive methods)
+* `compiler/astra/frontend/type-checker/method_signatures.hpp` (primitive methods)
 
 Outputs (overwritten in place, marked with `GENERATED`):
 * `docs/builtins.md`
@@ -51,7 +51,7 @@ def build_dump(binary: Path) -> None:
         os.environ.get("CXX", "g++"),
         "-std=c++20",
         "-O2",
-        "-I", str(ROOT / "compiler/stages"),
+        "-I", str(ROOT / "compiler/astra/frontend"),
         "-I", str(ROOT / "runtime"),
         "-o", str(binary),
         str(DUMP_CPP),
@@ -152,7 +152,7 @@ def render_methods(data: dict) -> str:
         GENERATED_NOTE,
         "These methods live on primitive values and are available on any value of\n"
         "the right type, without importing a module. They come from\n"
-        "`compiler/stages/type-checker/method_signatures.hpp` — the exact table the\n"
+        "`compiler/astra/frontend/type-checker/method_signatures.hpp` — the exact table the\n"
         "type checker uses, so completions, hover, and this reference always agree.\n",
         "## TOC\n",
     ]

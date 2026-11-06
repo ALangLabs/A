@@ -2,7 +2,7 @@
 #
 # IMPORTANT: this is a **Python-compatibility vocabulary layer**, not A's
 # tokenizer. A's real lexer lives in the compiler
-# (compiler/stages/lexer/lexer.cpp, `Tok` enum in token.hpp); it produces
+# (compiler/astra/frontend/lexer/lexer.cpp, `Tok` enum in token.hpp); it produces
 # language tokens (keywords, identifiers, literals, punctuation), not the
 # Python token-type numbering exported here. Use these constants when
 # writing tools that consume Python `tokenize` output or port Python

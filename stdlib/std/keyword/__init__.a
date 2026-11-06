@@ -4,7 +4,7 @@
 # `softkwlist` (soft keywords), `iskeyword`, `issoftkeyword`. This port
 # keeps the same API shape but the *primary* lists describe **A's**
 # keywords (see docs/language-spec/README.md §2.3 and the lexer keyword
-# table in compiler/stages/lexer/lexer.cpp). Python's own lists are kept
+# table in compiler/astra/frontend/lexer/lexer.cpp). Python's own lists are kept
 # under `python_kwlist` / `python_softkwlist` for compatibility tooling,
 # with `ispykeyword` / `ispysoftkeyword` predicates.
 #

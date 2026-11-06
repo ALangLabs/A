@@ -2,10 +2,10 @@
 
 This reference documents the current A standard library surface as implemented by:
 
-- `compiler/stages/name-resolution/native_modules.hpp` (native module namespaces)
-- `compiler/stages/name-resolution/builtin_docs.hpp` (builtin docs/signatures used by tooling)
-- `compiler/stages/type-checker/sema.cpp` (builtin recognition and type behavior)
-- `compiler/stages/type-checker/method_signatures.hpp` (array/map/set/string method surfaces)
+- `compiler/astra/frontend/name-resolution/native_modules.hpp` (native module namespaces)
+- `compiler/astra/frontend/name-resolution/builtin_docs.hpp` (builtin docs/signatures used by tooling)
+- `compiler/astra/frontend/type-checker/sema.cpp` (builtin recognition and type behavior)
+- `compiler/astra/frontend/type-checker/method_signatures.hpp` (array/map/set/string method surfaces)
 - `stdlib/prelude.a` and `stdlib/std/*`
 - integration tests in `tests/integration/cases/`
 
@@ -107,7 +107,7 @@ Highlights:
 
 ## 3. Collection and primitive method API
 
-Method surfaces are defined in `compiler/stages/type-checker/method_signatures.hpp` and used by the type checker/LSP.
+Method surfaces are defined in `compiler/astra/frontend/type-checker/method_signatures.hpp` and used by the type checker/LSP.
 
 Full reference (signatures and descriptions for every method, generated from
 those tables):

@@ -317,7 +317,7 @@ a fmt -w --indent 2 app.a   # choose indentation width
 ```
 
 Formatting is idempotent, and a file with lexer/parser errors is never
-rewritten. (Formatter lives in `compiler/stages/tooling/`, shared by `a fmt`
+rewritten. (Formatter lives in `compiler/astra/frontend/tooling/`, shared by `a fmt`
 and the LSP.)
 
 ### Documentation generator: `a doc`
@@ -339,7 +339,7 @@ a doc --json geometry.a             # machine-readable API model
 
 Functions, classes, enums, type aliases, fields, methods, variants,
 constants, and variables are included. (Docgen lives in
-`compiler/stages/tooling/`.)
+`compiler/astra/frontend/tooling/`.)
 
 ---
 

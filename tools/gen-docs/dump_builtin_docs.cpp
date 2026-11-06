@@ -5,7 +5,7 @@
 // Usage: dump_builtin_docs (JSON path or stdout when omitted)
 //
 // Build:
-//   g++ -std=c++20 -I compiler/stages -I runtime \
+//   g++ -std=c++20 -I compiler/astra/frontend -I runtime \
 //       tools/gen-docs/dump_builtin_docs.cpp -o dump_builtin_docs
 #include <algorithm>
 #include <fstream>

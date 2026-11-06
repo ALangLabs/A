@@ -19,7 +19,7 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   `memory`, `simd`, `traits`, `comptime`, `gpu`, `test`, `repl`.
   Python modules colliding with those names get a `py` prefix package
   (e.g. `stdlib/std/pytime/`) or are skipped — check
-  `compiler/stages/name-resolution/native_modules.hpp` first.
+  `compiler/astra/frontend/name-resolution/native_modules.hpp` first.
 - `enum`, `type`, `match`, `loop`, `defer`, `pass`, `self`, `in`, `as`,
   `from`, `do`, `class`, `None`, `true`, `false` are **keywords** — never use
   them as identifiers. Python `None` -> `None`, `True/False` -> `true/false`.

@@ -241,8 +241,8 @@ core.assert(time.now() >= start, "time did not advance")
 - **Per-package docs (detailed):** `stdlib/std/<package>/README.md`
 - **Implementation source:** `stdlib/std/<package>/__init__.a` and sibling `.a` files
 - **Extended language/toolchain stdlib reference:** `docs/standard-library/README.md`
-- **Native module registry (toolchain):** `compiler/stages/name-resolution/native_modules.hpp`
-- **Builtin/LSP docs (toolchain):** `compiler/stages/name-resolution/builtin_docs.hpp`
+- **Native module registry (toolchain):** `compiler/astra/frontend/name-resolution/native_modules.hpp`
+- **Builtin/LSP docs (toolchain):** `compiler/astra/frontend/name-resolution/builtin_docs.hpp`
 - **Behavioral tests:** `tests/integration/cases/stdlib/`
 
 ---
