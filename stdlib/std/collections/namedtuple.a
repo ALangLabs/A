@@ -29,6 +29,7 @@ struct NamedTuple:
         if name in self._values:
             return self._values[name]
         core.panic("namedtuple '" + self._typename + "' has no field '" + name + "'")
+        return None
 
     ## field_or(name, default) -> value or default when absent.
     fn field_or(self, name, default):
@@ -49,6 +50,7 @@ struct NamedTuple:
             idx = idx + n
         if idx < 0 or idx >= n:
             core.panic("namedtuple '" + self._typename + "' index out of range")
+            return None
         return self._values[self._fields[idx]]
 
     ## fields() -> copy of the field-name list, in definition order.
@@ -96,6 +98,7 @@ struct NamedTuple:
                 return i
             i = i + 1
         core.panic("value not in namedtuple '" + self._typename + "'")
+        return -1
 
     ## eq(other) -> structural equality (Python `==` on tuples).
     ## A `==` on structs compares identity, so namedtuples compare via this.

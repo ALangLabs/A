@@ -30,13 +30,12 @@ struct Deque<T>:
     ## _enforce_maxlen(side) -> drop elements from the opposite end when
     ## over maxlen. side is "left" or "right" (which end grew).
     fn _enforce_maxlen(self, side):
-        if self.maxlen < 0:
-            return
-        while self._len() > self.maxlen:
-            if side == "left":
-                self._pop_right()
-            else:
-                self._pop_left()
+        if self.maxlen >= 0:
+            while self._len() > self.maxlen:
+                if side == "left":
+                    self._pop_right()
+                else:
+                    self._pop_left()
 
     fn _pop_left(self) -> T:
         if len(self.left) > 0:
@@ -101,22 +100,20 @@ struct Deque<T>:
     ## rotates left (Python `rotate`). O(n).
     fn rotate(self, n):
         total = self._len()
-        if total == 0:
-            return
-        step = n % total
-        if step < 0:
-            step = step + total
-        if step == 0:
-            return
-        xs = self.to_list()
-        # right rotation by `step`: last `step` elements move to front.
-        tail = xs[total - step..]
-        head = xs[0..total - step]
-        self.clear()
-        for x in tail:
-            self.append(x)
-        for x in head:
-            self.append(x)
+        if total > 0:
+            step = n % total
+            if step < 0:
+                step = step + total
+            if step != 0:
+                xs = self.to_list()
+                # right rotation by `step`: last `step` elements move to front.
+                tail = xs[total - step..]
+                head = xs[0..total - step]
+                self.clear()
+                for x in tail:
+                    self.append(x)
+                for x in head:
+                    self.append(x)
 
     ## clear() -> remove all elements (Python `clear`).
     fn clear(self):
@@ -154,6 +151,7 @@ struct Deque<T>:
                 return i
             i = i + 1
         core.panic("value not in deque")
+        return -1
 
     ## index_from(x, start) -> index of first occurrence at or after
     ## `start` (Python `index(x[, start[, stop]])`; `stop` unsupported).
@@ -167,6 +165,7 @@ struct Deque<T>:
                 return i
             i = i + 1
         core.panic("value not in deque")
+        return -1
 
     ## remove(x) -> remove the first occurrence of x; runtime error when
     ## absent (Python `remove` raises ValueError).
@@ -245,8 +244,10 @@ struct Deque<T>:
             j = j + 1
         return out
 
-## deque() -> empty unbounded deque (Python `deque()`).
-fn deque() -> Deque<i64>:
+## deque() -> empty unbounded deque (Python `deque()`). The element type
+## is inferred from later use; for a typed empty deque prefer
+## `deque_of`/`deque_bounded` on a typed list.
+fn deque():
     return Deque([], [], 0, -1)
 
 ## deque_of(xs) -> deque from a list (Python `deque(iterable)`).

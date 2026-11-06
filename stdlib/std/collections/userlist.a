@@ -34,7 +34,7 @@ struct UserList<T>:
     fn append(self, v):
         self.data.append(v)
 
-    fn extend(self, xs):
+    fn extend(self, xs: [T]):
         self.data.extend(xs)
 
     fn insert(self, i, v):

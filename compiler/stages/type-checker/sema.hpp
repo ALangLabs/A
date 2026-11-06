@@ -54,6 +54,14 @@ struct EnumInfo {
   }
 };
 
+// A declared variable's (possibly inferred) type, for LSP hover/inlay hints
+// the way ty/pyrefly show inferred types (e.g. `x: i32` on `x = 1`).
+struct VarTypeInfo {
+  std::string name;
+  Span span;
+  TypePtr type;
+};
+
 struct SemaResult {
   StringMap<const FnDecl*> functions;  // qualified names
   StringMap<const StructDecl*> structs;  // qualified names
@@ -63,6 +71,12 @@ struct SemaResult {
   std::unordered_map<const StructDecl*, int> structModule;
   std::unordered_map<const FnDecl*, std::vector<TypePtr>> fnParamTypes;
   std::unordered_map<const FnDecl*, TypePtr> fnReturnTypes;
+  // All declared variables (locals, params, loop vars) with their inferred
+  // types. Types are shared (Var-linked) so they reflect final inference.
+  std::vector<VarTypeInfo> variables;
+  // Per-expression inferred types, keyed by AST node (mirrors
+  // Expr::inferredType for editors that walk the AST).
+  std::unordered_map<const Expr*, TypePtr> exprTypes;
 };
 
 class Sema {
@@ -238,6 +252,18 @@ class Sema {
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);
 
+  // flow narrowing (ty/pyrefly style): `if x != None:` refines `x: T?` to
+  // `x: T` in the then-branch; `if x == None:` does the opposite in the else.
+  struct NarrowRestore {
+    VarSym* sym = nullptr;
+    TypePtr saved;
+  };
+  // Collect (varName, isNonNone) facts from `cond` assuming it evaluates to
+  // `truthy`. Handles `x != None`, `x == None`, `not (...)`, `and`/`or`.
+  std::vector<std::pair<std::string, bool>> narrowingFacts(Expr& cond, bool truthy);
+  std::vector<NarrowRestore> applyNarrowing(Expr& cond, bool truthy);
+  void restoreNarrowing(std::vector<NarrowRestore>& restores);
+
   // helpers
   void requireBool(TypePtr type, Span span, const std::string& what);
   void requireInteger(TypePtr type, Span span, const std::string& what);
@@ -278,6 +304,7 @@ class Sema {
   std::vector<VarInfo> typeVariables_;
   std::vector<DeclaredVarInfo> declaredVariables_;
   std::vector<std::pair<const FnDecl*, TypePtr>> checkedFunctions_;
+  std::unordered_map<const Expr*, TypePtr> exprTypes_;
 
   int nextVarId_ = 1;
   int loopDepth_ = 0;

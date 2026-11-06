@@ -1,0 +1,14 @@
+struct Point:
+    x: i32
+
+fn width(p: Point?) -> i32:
+    if p != None:
+        return p.x
+    return 0
+
+fn is_some(p: Point?) -> bool:
+    return p != None
+
+print(width(Point(42)))
+print(is_some(None))
+print(is_some(Point(1)))

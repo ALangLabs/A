@@ -37,6 +37,7 @@ struct ChainMap:
             if k in m:
                 return m[k]
         core.panic("ChainMap has no key '" + str(k) + "'")
+        return None
 
     ## set(k, v) -> write into the FIRST map only (Python `cm[k] = v`).
     fn set(self, k, v):
@@ -98,6 +99,7 @@ struct ChainMap:
             if k in m:
                 return m.pop(k)
         core.panic("ChainMap has no key '" + str(k) + "'")
+        return None
 
     ## popitem() -> remove and return an arbitrary (key, value) pair from
     ## the first map (Python `cm.popitem()`); runtime error when the first

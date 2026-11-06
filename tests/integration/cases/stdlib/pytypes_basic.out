@@ -1,0 +1,26 @@
+NoneType
+bool
+int
+float
+str
+list
+set
+dict
+tuple
+Point
+list
+NoneType
+function
+function
+module
+ellipsis
+NotImplementedType
+generator
+mappingproxy
+namespace(name='Ada', age=36, tags=['math', 'code'])
+Ada
+fallback
+true false
+["name", "age", "tags"]
+3
+false

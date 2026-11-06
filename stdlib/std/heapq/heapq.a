@@ -1,0 +1,342 @@
+# heapq — port of CPython 3.14 Lib/heapq.py (pure-Python implementation).
+#
+# Heaps are arrays for which a[k] <= a[2*k+1] and a[k] <= a[2*k+2] for
+# all k, counting elements from 0. a[0] is always the smallest element.
+#
+# Semantic mapping notes (see docs/standard-library/python-porting.md):
+#  - Python has no exceptions here, but empty-heap heappop/heapreplace
+#    surface as runtime errors via arr.pop()/heap[0] on an empty array.
+#  - merge() returns a materialized [T] instead of a generator.
+#  - A has no default arguments or *args, so keyed variants are exposed as
+#    separate *_key functions and merge() takes an array of sorted arrays
+#    instead of *iterables.
+#  - Internal sift helpers take an `lt` comparator `fn(a, b) -> bool` where
+#    lt(a, b) means "a should be popped before b" (min-heap: a < b).
+
+fn _asc(a, b):
+    return a < b
+
+fn _desc(a, b):
+    return a > b
+
+# 'heap' is a heap at all indices >= startpos, except possibly for pos.
+# pos is the index of a leaf with a possibly out-of-order value.
+fn _siftdown(heap, startpos, pos, lt):
+    newitem = heap[pos]
+    while pos > startpos:
+        parentpos = (pos - 1) >> 1
+        parent = heap[parentpos]
+        if lt(newitem, parent):
+            heap[pos] = parent
+            pos = parentpos
+        else:
+            break
+    heap[pos] = newitem
+
+# The child indices of heap index pos are already heaps; restore the heap
+# invariant at pos by bubbling the higher-priority child up, then sifting
+# the oddball originally at pos into place.
+fn _siftup(heap, pos, lt):
+    endpos = len(heap)
+    startpos = pos
+    newitem = heap[pos]
+    childpos = 2 * pos + 1
+    while childpos < endpos:
+        rightpos = childpos + 1
+        if rightpos < endpos and not lt(heap[childpos], heap[rightpos]):
+            childpos = rightpos
+        heap[pos] = heap[childpos]
+        pos = childpos
+        childpos = 2 * pos + 1
+    heap[pos] = newitem
+    _siftdown(heap, startpos, pos, lt)
+
+fn _heappush_c(heap, item, lt):
+    heap.append(item)
+    _siftdown(heap, 0, len(heap) - 1, lt)
+
+fn _heappop_c(heap, lt):
+    lastelt = heap.pop()
+    if len(heap) > 0:
+        returnitem = heap[0]
+        heap[0] = lastelt
+        _siftup(heap, 0, lt)
+        return returnitem
+    return lastelt
+
+fn _heapreplace_c(heap, item, lt):
+    returnitem = heap[0]
+    heap[0] = item
+    _siftup(heap, 0, lt)
+    return returnitem
+
+# --- public min-heap API (heap[0] is the smallest item) ---
+
+fn heappush(heap, item):
+    """Push item onto heap, maintaining the heap invariant."""
+    _heappush_c(heap, item, _asc)
+
+fn heappop(heap):
+    """Pop the smallest item off the heap, maintaining the heap invariant."""
+    return _heappop_c(heap, _asc)
+
+fn heapreplace(heap, item):
+    """Pop and return the current smallest value, and add the new item.
+
+    More efficient than heappop() followed by heappush(). The returned
+    value may be larger than item; typical use is a conditional replace:
+        if item > heap[0]:
+            item = heapreplace(heap, item)
+    """
+    return _heapreplace_c(heap, item, _asc)
+
+fn heappushpop(heap, item):
+    """Fast version of a heappush followed by a heappop."""
+    if len(heap) > 0 and heap[0] < item:
+        tmp = heap[0]
+        heap[0] = item
+        _siftup(heap, 0, _asc)
+        return tmp
+    return item
+
+fn heapify(x):
+    """Transform list into a heap, in-place, in O(len(x)) time."""
+    n = len(x)
+    i = n / 2 - 1
+    while i >= 0:
+        _siftup(x, i, _asc)
+        i -= 1
+
+# --- public max-heap API (heap[0] is the largest item) ---
+
+fn heappush_max(heap, item):
+    """Maxheap version of a heappush."""
+    _heappush_c(heap, item, _desc)
+
+fn heappop_max(heap):
+    """Maxheap version of a heappop."""
+    return _heappop_c(heap, _desc)
+
+fn heapreplace_max(heap, item):
+    """Maxheap version of a heappop followed by a heappush."""
+    return _heapreplace_c(heap, item, _desc)
+
+fn heappushpop_max(heap, item):
+    """Maxheap fast version of a heappush followed by a heappop."""
+    if len(heap) > 0 and item < heap[0]:
+        tmp = heap[0]
+        heap[0] = item
+        _siftup(heap, 0, _desc)
+        return tmp
+    return item
+
+fn heapify_max(x):
+    """Transform list into a maxheap, in-place, in O(len(x)) time."""
+    n = len(x)
+    i = n / 2 - 1
+    while i >= 0:
+        _siftup(x, i, _desc)
+        i -= 1
+
+# Backwards-compatible aliases mirroring CPython's _heappush_max etc.
+fn _heappush_max(heap, item):
+    heappush_max(heap, item)
+
+fn _heappop_max(heap):
+    return heappop_max(heap)
+
+fn _heapreplace_max(heap, item):
+    return heapreplace_max(heap, item)
+
+fn _heappushpop_max(heap, item):
+    return heappushpop_max(heap, item)
+
+fn _heapify_max(x):
+    heapify_max(x)
+
+fn _heapify(x):
+    heapify(x)
+
+# --- nlargest / nsmallest ---
+
+fn nsmallest(n, xs):
+    """Find the n smallest elements in xs, sorted ascending.
+
+    Equivalent to Python's sorted(iterable)[:n]."""
+    if n <= 0:
+        return []
+    heap = []
+    for x in xs:
+        if len(heap) < n:
+            heappush_max(heap, x)
+        elif x < heap[0]:
+            heapreplace_max(heap, x)
+    heap.sort()
+    return heap
+
+fn nlargest(n, xs):
+    """Find the n largest elements in xs, sorted descending.
+
+    Equivalent to Python's sorted(iterable, reverse=True)[:n]."""
+    if n <= 0:
+        return []
+    heap = []
+    for x in xs:
+        if len(heap) < n:
+            heappush(heap, x)
+        elif heap[0] < x:
+            heapreplace(heap, x)
+    heap.sort()
+    heap.reverse()
+    return heap
+
+# Decorated entry for keyed nsmallest/nlargest. `seq` is the insertion
+# sequence number, playing the role of CPython's `order` tiebreaker so
+# that equal keys keep input order.
+class _KEntry:
+    k
+    seq
+    v
+
+fn _klt_min(a, b):
+    # pops-first order for a min-heap over (k, seq)
+    if a.k < b.k:
+        return true
+    if b.k < a.k:
+        return false
+    return a.seq < b.seq
+
+fn _klt_max(a, b):
+    # pops-first order for a max-heap over (k, seq)
+    if a.k > b.k:
+        return true
+    if b.k > a.k:
+        return false
+    return a.seq > b.seq
+
+fn _klt_min_late(a, b):
+    # pops-first order for a min-heap over (k, -seq): smaller k first,
+    # ties broken by *larger* seq first (mirrors CPython's negative order)
+    if a.k < b.k:
+        return true
+    if b.k < a.k:
+        return false
+    return a.seq > b.seq
+
+fn nsmallest_key(n, xs, key):
+    """nsmallest with a key function: sorted(xs, key=key)[:n]."""
+    if n <= 0:
+        return []
+    heap = []
+    seq = 0
+    for x in xs:
+        k = key(x)
+        if len(heap) < n:
+            _heappush_c(heap, _KEntry(k, seq, x), _klt_max)
+            seq += 1
+        elif k < heap[0].k:
+            _heapreplace_c(heap, _KEntry(k, seq, x), _klt_max)
+            seq += 1
+    # heap top is the largest (k, seq); popping yields descending order,
+    # reversing gives ascending (k, seq) == sorted(xs, key=key)[:n].
+    out = []
+    while len(heap) > 0:
+        out.append(_heappop_c(heap, _klt_max).v)
+    out.reverse()
+    return out
+
+fn nlargest_key(n, xs, key):
+    """nlargest with a key function: sorted(xs, key=key, reverse=True)[:n]."""
+    if n <= 0:
+        return []
+    heap = []
+    seq = 0
+    for x in xs:
+        k = key(x)
+        if len(heap) < n:
+            _heappush_c(heap, _KEntry(k, seq, x), _klt_min_late)
+            seq += 1
+        elif heap[0].k < k:
+            _heapreplace_c(heap, _KEntry(k, seq, x), _klt_min_late)
+            seq += 1
+    # popping the min-heap yields ascending k (ties: later seq first);
+    # reversing yields descending k with earlier-seen items first on ties.
+    out = []
+    while len(heap) > 0:
+        out.append(_heappop_c(heap, _klt_min_late).v)
+    out.reverse()
+    return out
+
+# --- merge ---
+
+# Identity key used by the unkeyed merge variants.
+fn _ident(x):
+    return x
+
+# Heap entry for k-way merge: current head of one input stream.
+class _MEntry:
+    k      # sort key (the value itself, or key(value))
+    v      # the value to emit
+    order  # input index * direction (unique per input; tiebreaker)
+    src    # input index into `iterables`
+    pos    # position of v within iterables[src]
+
+fn _mlt_min(a, b):
+    if a.k < b.k:
+        return true
+    if b.k < a.k:
+        return false
+    return a.order < b.order
+
+fn _mlt_max(a, b):
+    if a.k > b.k:
+        return true
+    if b.k > a.k:
+        return false
+    return a.order > b.order
+
+fn _merge_impl(iterables, kf, reverse):
+    dir = 1
+    lt = _mlt_min
+    if reverse:
+        dir = -1
+        lt = _mlt_max
+    heap = []
+    i = 0
+    n = len(iterables)
+    while i < n:
+        xs = iterables[i]
+        if len(xs) > 0:
+            v = xs[0]
+            _heappush_c(heap, _MEntry(kf(v), v, i * dir, i, 0), lt)
+        i += 1
+    out = []
+    while len(heap) > 0:
+        e = _heappop_c(heap, lt)
+        out.append(e.v)
+        xs = iterables[e.src]
+        p = e.pos + 1
+        if p < len(xs):
+            v = xs[p]
+            _heappush_c(heap, _MEntry(kf(v), v, e.order, e.src, p), lt)
+    return out
+
+fn merge(iterables):
+    """Merge multiple sorted arrays into a single sorted array.
+
+    `iterables` is an array of arrays, each sorted ascending. Ties are
+    broken by input order, matching CPython's merge(*iterables).
+    Returns a materialized list (CPython returns a generator)."""
+    return _merge_impl(iterables, _ident, false)
+
+fn merge_key(iterables, key):
+    """merge() with a key function applied to each element."""
+    return _merge_impl(iterables, key, false)
+
+fn merge_reverse(iterables):
+    """merge() for inputs sorted descending; output is descending."""
+    return _merge_impl(iterables, _ident, true)
+
+fn merge_key_reverse(iterables, key):
+    """merge_key() for inputs sorted descending; output is descending."""
+    return _merge_impl(iterables, key, true)

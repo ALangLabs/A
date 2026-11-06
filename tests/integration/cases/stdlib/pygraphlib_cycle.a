@@ -1,0 +1,9 @@
+# pygraphlib_cycle — prepare()/static_order() panic on cyclic graphs.
+import graphlib
+
+ts = graphlib.TopologicalSorter_from({
+    "a": ["b"],
+    "b": ["c"],
+    "c": ["a"],
+})
+ts.prepare()

@@ -1228,6 +1228,11 @@ SemaResult Sema::analyze() {
   result.structModule = structModules_;
   result.fnParamTypes = fnParamTypes_;
   result.fnReturnTypes = fnReturnTypes_;
+  for (const DeclaredVarInfo& info : declaredVariables_) {
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+  }
+  // Mirror Expr::inferredType into the result map for LSP clients.
+  result.exprTypes = exprTypes_;
   return result;
 }
 
@@ -1637,18 +1642,114 @@ void Sema::checkDestructure(DestructureStmt& stmt) {
   }
 }
 
+std::vector<std::pair<std::string, bool>> Sema::narrowingFacts(Expr& cond, bool truthy) {
+  std::vector<std::pair<std::string, bool>> facts;
+  auto isNoneExpr = [](Expr* e) -> bool {
+    if (!e) return false;
+    if (auto* id = dynamic_cast<IdentExpr*>(e)) return id->name == "None";
+    return false;
+  };
+  if (auto* unary = dynamic_cast<UnaryExpr*>(&cond)) {
+    if ((unary->op == "not" || unary->op == "!") && unary->operand) {
+      return narrowingFacts(*unary->operand, !truthy);
+    }
+    return facts;
+  }
+  if (auto* bin = dynamic_cast<BinaryExpr*>(&cond)) {
+    if (bin->op == "and") {
+      if (truthy) {
+        facts = narrowingFacts(*bin->lhs, true);
+        auto more = narrowingFacts(*bin->rhs, true);
+        facts.insert(facts.end(), more.begin(), more.end());
+      }
+      // `a and b` false: neither operand is known, no facts.
+      return facts;
+    }
+    if (bin->op == "or") {
+      if (!truthy) {
+        facts = narrowingFacts(*bin->lhs, false);
+        auto more = narrowingFacts(*bin->rhs, false);
+        facts.insert(facts.end(), more.begin(), more.end());
+      }
+      return facts;
+    }
+    if (bin->op == "==" || bin->op == "!=") {
+      std::string varName;
+      if (auto* lhs = dynamic_cast<IdentExpr*>(bin->lhs.get())) {
+        if (isNoneExpr(bin->rhs.get())) varName = lhs->name;
+      } else if (auto* rhs = dynamic_cast<IdentExpr*>(bin->rhs.get())) {
+        if (isNoneExpr(bin->lhs.get())) varName = rhs->name;
+      }
+      if (!varName.empty()) {
+        bool nonNone = (bin->op == "!=") == truthy;
+        facts.emplace_back(varName, nonNone);
+      }
+    }
+  }
+  return facts;
+}
+
+std::vector<Sema::NarrowRestore> Sema::applyNarrowing(Expr& cond, bool truthy) {
+  std::vector<NarrowRestore> restores;
+  for (auto& [name, nonNone] : narrowingFacts(cond, truthy)) {
+    VarSym* sym = lookupVar(name);
+    if (!sym) continue;
+    // Avoid double-narrowing the same symbol in one condition.
+    bool already = false;
+    for (auto& r : restores) if (r.sym == sym) { already = true; break; }
+    if (already) continue;
+    TypePtr resolved = resolveType(sym->type);
+    if (!nonNone) continue;  // only refine the non-None branch (T? -> T)
+    if (resolved && resolved->kind == TypeKind::Optional && resolved->elem) {
+      restores.push_back(NarrowRestore{sym, sym->type});
+      sym->type = resolved->elem;
+    }
+  }
+  return restores;
+}
+
+void Sema::restoreNarrowing(std::vector<NarrowRestore>& restores) {
+  for (auto& r : restores) {
+    if (r.sym) r.sym->type = r.saved;
+  }
+  restores.clear();
+}
+
 void Sema::checkIf(IfStmt& stmt) {
-  for (auto& branch : stmt.branches) {
+  bool prevBranchAlwaysReturns = false;
+  for (std::size_t i = 0; i < stmt.branches.size(); ++i) {
+    auto& branch = stmt.branches[i];
     TypePtr condType = inferExpr(*branch.cond);
     requireBool(condType, branch.cond->span, "The 'if' condition");
+    bool isLastBranch = (i + 1 == stmt.branches.size());
+    if (!prevBranchAlwaysReturns && isLastBranch && stmt.elseBody.empty() &&
+        narrowingFacts(*branch.cond, true).empty()) {
+      // No-op: most branches have no narrowing; fall through.
+    }
+    // Elif: previous branches were false, so their negated facts apply.
+    std::vector<NarrowRestore> outerRestores;
+    for (std::size_t j = 0; j < i; ++j) {
+      auto nested = applyNarrowing(*stmt.branches[j].cond, false);
+      outerRestores.insert(outerRestores.end(), nested.begin(), nested.end());
+    }
+    auto restores = applyNarrowing(*branch.cond, true);
     pushScope();
     checkStatements(branch.body);
     popScope();
+    restoreNarrowing(restores);
+    restoreNarrowing(outerRestores);
+    if (!branch.body.empty() && terminatesFlow(*branch.body.back())) prevBranchAlwaysReturns = true;
   }
   if (!stmt.elseBody.empty()) {
+    std::vector<NarrowRestore> outerRestores;
+    for (auto& branch : stmt.branches) {
+      auto nested = applyNarrowing(*branch.cond, false);
+      outerRestores.insert(outerRestores.end(), nested.begin(), nested.end());
+    }
     pushScope();
     checkStatements(stmt.elseBody);
     popScope();
+    restoreNarrowing(outerRestores);
   }
 }
 
@@ -1766,6 +1867,7 @@ void Sema::checkDefer(DeferStmt& stmt) {
 TypePtr Sema::inferExpr(Expr& expr) {
   TypePtr type = inferExprImpl(expr);
   expr.inferredType = resolveType(type);
+  exprTypes_[&expr] = type;
   return type;
 }
 
@@ -1906,7 +2008,7 @@ TypePtr Sema::inferIdent(IdentExpr& expr) {
                 "Construct it: " + expr.name + "(...).");
     return typeError();
   }
-  sink_.error(expr.span, "Undefined name '" + expr.name + "'.",
+  sink_.errorWithCode(expr.span, "E0001", "Undefined name '" + expr.name + "'.",
               "Declare it by assigning a value, e.g. " + expr.name + " = 0.");
   return typeError();
 }
@@ -2020,7 +2122,11 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
   const std::string& op = expr.op;
 
   TypePtr lhs = inferExpr(*expr.lhs);
+  // `x != None and x.field ...`: narrow Optional for the RHS (ty/pyrefly flow).
+  std::vector<NarrowRestore> narrowed;
+  if (op == "and") narrowed = applyNarrowing(*expr.lhs, true);
   TypePtr rhs = inferExpr(*expr.rhs);
+  restoreNarrowing(narrowed);
 
   if (op == "and" || op == "or") {
     requireBool(lhs, expr.lhs->span, "The left operand of '" + op + "'");
@@ -2125,18 +2231,10 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
           sink_.error(expr.opSpan, "Optionals can only be compared with '==' and '!='.");
           return typeError();
         }
-        TypePtr element = resolveType(type->elem);
-        bool comparable = element->kind == TypeKind::Optional || element->kind == TypeKind::Var ||
-                          element->kind == TypeKind::Int || element->kind == TypeKind::Float ||
-                          element->kind == TypeKind::String || element->kind == TypeKind::Char ||
-                          element->kind == TypeKind::Bool;
-        if (!comparable) {
-          sink_.error(expr.opSpan,
-                      "Values of type '" + typeName(type) + "' cannot be compared with '" + op +
-                          "'. Optionals can be compared only when their element is a "
-                          "primitive, String, char, bool, or another optional.");
-          return typeError();
-        }
+        // `x == None` / `x != None` is valid for any Optional (ty/pyrefly
+        // allow `is not None` on any type). Other payload comparisons stay
+        // dynamic at runtime.
+        (void)type;
         return typeBool();
       }
       case TypeKind::Bool:

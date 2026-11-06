@@ -306,10 +306,99 @@ def main() -> int:
         if "fn add(a: i32, b: i32)" not in signature["signatures"][0]["label"]:
             fail(f"signature help did not use the declared signature: {signature}")
 
+        # prepareRename / declaration at the call site (before any edit shifts it).
+        prep = client.request(
+            "textDocument/prepareRename",
+            {"textDocument": {"uri": uri}, "position": {"line": call_line, "character": call_column}},
+        )["result"]
+        if not prep or "start" not in prep:
+            fail(f"prepareRename unexpected: {prep}")
+
+        decl = client.request(
+            "textDocument/declaration",
+            {"textDocument": {"uri": uri}, "position": {"line": call_line, "character": call_column}},
+        )["result"]
+        if not decl or decl["range"]["start"]["line"] != expected_line:
+            fail(f"declaration navigation unexpected: {decl}")
+
+        # Incremental sync: a ranged edit is applied without a full resend.
+        total_line, total_col = position_of("total=add")
+        client.notify(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": 2},
+                "contentChanges": [
+                    {
+                        "range": {
+                            "start": {"line": total_line, "character": total_col + 5},
+                            "end": {"line": total_line, "character": total_col + 5},
+                        },
+                        "text": " ",
+                    }
+                ],
+            },
+        )
+        # Re-requesting a definition proves the server survived the edit.
+        client.request(
+            "textDocument/definition",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": call_line, "character": call_column},
+            },
+        )
+
+        # New capabilities: semantic tokens, inlay hints, code actions,
+        # prepareRename, selection ranges, declaration navigation.
+        init2 = client  # noqa
+        tokens = client.request(
+            "textDocument/semanticTokens/full", {"textDocument": {"uri": uri}}
+        )["result"]["data"]
+        if len(tokens) == 0 or len(tokens) % 5 != 0:
+            fail(f"semantic tokens malformed: {tokens[:20]}")
+
+        hints = client.request(
+            "textDocument/inlayHint",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": len(lines), "character": 0},
+                },
+            },
+        )["result"]
+        if not any(": i32" in hint["label"] for hint in hints):
+            fail(f"inlay hints missing inferred i32: {hints}")
+
+        sel = client.request(
+            "textDocument/selectionRange",
+            {
+                "textDocument": {"uri": uri},
+                "positions": [{"line": call_line, "character": call_column}],
+            },
+        )["result"]
+        if not sel or "ranges" not in sel[0]:
+            fail(f"selectionRange unexpected: {sel}")
+
+        actions = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": call_line, "character": call_column},
+                    "end": {"line": call_line, "character": call_column},
+                },
+                "context": {},
+            },
+        )["result"]
+        if actions is None:
+            fail("codeAction returned null")
+
         client.stop()
         print(
             "OK: diagnostics, definition, hover, symbols, completion, formatting, "
-            "rename, highlights, folding, module/string completion, signature help"
+            "rename, highlights, folding, module/string completion, signature help, "
+            "incremental sync, semantic tokens, inlay hints, prepareRename, "
+            "declaration, selectionRange, code actions"
         )
 
     return 0

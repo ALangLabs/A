@@ -1,0 +1,6 @@
+ok test_basic_ops
+ok test_count_index_remove
+ok test_extend_and_maxlen
+ok test_rotate_and_reverse
+
+4 passed, 0 failed

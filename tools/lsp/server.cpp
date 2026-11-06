@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cctype>
+#include <climits>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -483,6 +484,33 @@ class LanguageServer {
       workspaceSymbols(idValue ? *idValue : Value(), params);
       return true;
     }
+    if (method == "textDocument/prepareRename") {
+      prepareRename(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/semanticTokens/full" ||
+        method == "textDocument/semanticTokens/range") {
+      semanticTokens(idValue ? *idValue : Value(), params,
+                     method == "textDocument/semanticTokens/range");
+      return true;
+    }
+    if (method == "textDocument/inlayHint") {
+      inlayHints(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/codeAction") {
+      codeActions(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/selectionRange") {
+      selectionRanges(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/declaration" || method == "textDocument/typeDefinition" ||
+        method == "textDocument/implementation") {
+      definition(idValue ? *idValue : Value(), params);
+      return true;
+    }
 
     if (isRequest) {
       sendError(*idValue, -32601, "method not found: " + method);
@@ -527,28 +555,37 @@ class LanguageServer {
     }
 
     Value capabilities = Value::object();
+    capabilities["positionEncoding"] = "utf-16";
     Value sync = Value::object();
     sync["openClose"] = true;
-    sync["change"] = 1;  // full document sync
+    sync["change"] = 2;  // incremental sync (ty/pyrefly do the same)
     Value save = Value::object();
     save["includeText"] = true;
     sync["save"] = std::move(save);
     capabilities["textDocumentSync"] = std::move(sync);
     capabilities["definitionProvider"] = true;
+    capabilities["declarationProvider"] = true;
+    capabilities["typeDefinitionProvider"] = true;
+    capabilities["implementationProvider"] = true;
     capabilities["referencesProvider"] = true;
-    capabilities["hoverProvider"] = true;
+    Value hover = Value::object();
+    hover["workDoneProgress"] = false;
+    capabilities["hoverProvider"] = std::move(hover);
     capabilities["documentSymbolProvider"] = true;
     capabilities["workspaceSymbolProvider"] = true;
     capabilities["documentFormattingProvider"] = true;
     capabilities["documentHighlightProvider"] = true;
     capabilities["foldingRangeProvider"] = true;
+    capabilities["selectionRangeProvider"] = true;
+    capabilities["inlayHintProvider"] = true;
     Value rename = Value::object();
-    rename["prepareProvider"] = false;
+    rename["prepareProvider"] = true;
     capabilities["renameProvider"] = std::move(rename);
     Value completion = Value::object();
     Value triggers = Value::array();
     triggers.push(".");
     triggers.push("\"");
+    triggers.push(":");
     completion["triggerCharacters"] = std::move(triggers);
     completion["resolveProvider"] = true;
     capabilities["completionProvider"] = std::move(completion);
@@ -556,8 +593,38 @@ class LanguageServer {
     Value signatureTriggers = Value::array();
     signatureTriggers.push("(");
     signatureTriggers.push(",");
+    Value retrig = Value::array();
+    retrig.push("(");
+    retrig.push(",");
     signatureHelp["triggerCharacters"] = std::move(signatureTriggers);
+    signatureHelp["retriggerCharacters"] = std::move(retrig);
     capabilities["signatureHelpProvider"] = std::move(signatureHelp);
+    // Semantic tokens: legend [namespace,type,class,enum,function,method,
+    // parameter,variable,property,keyword,comment,string,number,operator].
+    Value tokenLegend = Value::object();
+    Value tokenTypes = Value::array();
+    for (const char* t : {"namespace", "type", "class", "enum", "function", "method",
+                          "parameter", "variable", "property", "keyword", "comment",
+                          "string", "number", "operator"}) tokenTypes.push(t);
+    tokenLegend["tokenTypes"] = std::move(tokenTypes);
+    Value tokenModifiers = Value::array();
+    tokenModifiers.push("declaration");
+    tokenModifiers.push("readonly");
+    tokenModifiers.push("static");
+    tokenLegend["tokenModifiers"] = std::move(tokenModifiers);
+    Value semanticTokens = Value::object();
+    semanticTokens["legend"] = std::move(tokenLegend);
+    semanticTokens["full"] = true;
+    semanticTokens["range"] = true;
+    capabilities["semanticTokensProvider"] = std::move(semanticTokens);
+    // Code actions: quick fixes and source fixes.
+    Value codeAction = Value::object();
+    Value actionKinds = Value::array();
+    actionKinds.push("quickfix");
+    actionKinds.push("refactor");
+    actionKinds.push("source.fixAll");
+    codeAction["codeActionKinds"] = std::move(actionKinds);
+    capabilities["codeActionProvider"] = std::move(codeAction);
 
     Value result = Value::object();
     result["capabilities"] = std::move(capabilities);
@@ -642,10 +709,43 @@ class LanguageServer {
     }
     const Value* changes = params->find("contentChanges");
     if (!changes || !changes->isArray() || changes->asArray().empty()) return;
-    const Value& last = changes->asArray().back();
-    const Value* text = last.find("text");
-    if (!text || !text->isString()) return;
-    document->text = text->asString();
+    // Incremental sync (kind=2): apply each change's range splice in order.
+    // A change without a range is a full-document replacement (kind=1).
+    for (const Value& change : changes->asArray()) {
+      const Value* text = change.find("text");
+      if (!text || !text->isString()) continue;
+      const Value* range = change.find("range");
+      if (!range) {
+        document->text = text->asString();
+        continue;
+      }
+      const Value* start = range->find("start");
+      const Value* end = range->find("end");
+      if (!start || !end) { document->text = text->asString(); continue; }
+      const Value* sl = start->find("line");
+      const Value* sc = start->find("character");
+      const Value* el = end->find("line");
+      const Value* ec = end->find("character");
+      if (!sl || !sc || !el || !ec) { document->text = text->asString(); continue; }
+      // Convert (utf-16 line/character) to byte offsets.
+      auto offsetOf = [&](int line0, int char0) -> std::size_t {
+        std::string lineContent = lineText(document->text, line0 + 1);
+        int byteCol0 = utf16ToByteColumn(lineContent, char0);
+        std::size_t pos = 0;
+        for (int l = 0; l < line0; ++l) {
+          std::size_t nl = document->text.find('\n', pos);
+          if (nl == std::string::npos) return document->text.size();
+          pos = nl + 1;
+        }
+        return pos + static_cast<std::size_t>(byteCol0);
+      };
+      std::size_t s = offsetOf(static_cast<int>(sl->asInt()), static_cast<int>(sc->asInt()));
+      std::size_t e = offsetOf(static_cast<int>(el->asInt()), static_cast<int>(ec->asInt()));
+      if (s > document->text.size()) s = document->text.size();
+      if (e > document->text.size()) e = document->text.size();
+      if (e < s) std::swap(s, e);
+      document->text.replace(s, e - s, text->asString());
+    }
     recompile(*document);
   }
 
@@ -701,10 +801,28 @@ class LanguageServer {
           Value item = Value::object();
           item["range"] = rangeValue(text, diagnostic->span);
           item["severity"] = diagnostic->severity == Severity::Error ? 1 : 2;
-          std::string message = diagnostic->message;
-          if (!diagnostic->help.empty()) message += "\nhelp: " + diagnostic->help;
-          item["message"] = message;
+          // Keep message bare; clients show `help` via relatedInformation
+          // (ty/pic shows rich context the same way). We keep help appended
+          // for clients without relatedInformation support.
+          item["message"] = diagnostic->message;
           item["source"] = "a";
+          if (!diagnostic->code.empty()) {
+            item["code"] = diagnostic->code;
+            Value desc = Value::object();
+            desc["href"] = "https://github.com/search?q=" + diagnostic->code + "+repo:own/a-lang";
+            item["codeDescription"] = std::move(desc);
+          }
+          Value tags = Value::array();
+          if (diagnostic->code == "W0002") tags.push(1);  // Unnecessary
+          if (!tags.isArray() || tags.asArray().empty()) {} else item["tags"] = std::move(tags);
+          if (!diagnostic->help.empty()) {
+            Value related = Value::array();
+            Value info = Value::object();
+            info["location"] = locationValue(compilation, open.path, diagnostic->span);
+            info["message"] = diagnostic->help;
+            related.push(std::move(info));
+            item["relatedInformation"] = std::move(related);
+          }
           diagnostics.push(std::move(item));
         }
       }
@@ -1034,10 +1152,34 @@ class LanguageServer {
     ResolvedSymbol resolved = a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
     if (resolved.valid()) {
       std::string description = a::lsp::describeSymbol(*resolved.symbol);
+      // Show the inferred type the way ty/pyrefly do (`x: i32`) when the
+      // declaration has no explicit annotation.
+      std::string inferred;
+      for (const auto& var : compilation.sema.variables) {
+        if (var.span.line == resolved.symbol->span.line &&
+            var.span.col == resolved.symbol->span.col &&
+            var.span.fileId == resolved.symbol->span.fileId && var.type) {
+          std::string t = a::typeName(var.type);
+          if (!t.empty() && t != "error" && description.find(": " + t) == std::string::npos) {
+            bool annotated = resolved.symbol->detail.find(": ") != std::string::npos;
+            if (!annotated || description.find(":") > description.find(t)) {
+              description = resolved.symbol->name + ": " + t + "  (inferred)";
+              if (!resolved.symbol->detail.empty() && resolved.symbol->detail != resolved.symbol->name)
+                description += "\n" + resolved.symbol->detail;
+            }
+          }
+          break;
+        }
+      }
       std::string markdown = "```a\n" + description + "\n```";
       const std::string documentation =
           docCommentText(compilation, *resolved.file, resolved.symbol->span);
       if (!documentation.empty()) markdown += "\n\n" + documentation;
+      // Definition link, like pyrefly hover.
+      if (resolved.file->path != file->path || resolved.symbol->span.line != line + 1) {
+        markdown += "\n\n[Definition](file://" + resolved.file->path + "#L" +
+                    std::to_string(resolved.symbol->span.line) + ")";
+      }
       const std::string* text = compilation.textForPath(resolved.file->path);
       Value result = Value::object();
       Value contents = Value::object();
@@ -1329,11 +1471,20 @@ class LanguageServer {
       item["label"] = name;
       item["kind"] = kind;
       item["insertText"] = name;
+      item["filterText"] = name;
+      // Snippets for control flow (ty/pyrefly offer these).
+      if (name == "if") { item["insertText"] = "if ${1:condition}:\n    $0"; item["insertTextFormat"] = 2; }
+      else if (name == "while") { item["insertText"] = "while ${1:condition}:\n    $0"; item["insertTextFormat"] = 2; }
+      else if (name == "for") { item["insertText"] = "for ${1:item} in ${2:iterable}:\n    $0"; item["insertTextFormat"] = 2; }
+      else if (name == "fn") { item["insertText"] = "fn ${1:name}(${2:params}) -> ${3:void}:\n    $0"; item["insertTextFormat"] = 2; }
       if (!detail.empty()) item["detail"] = detail;
       if (!documentation.empty()) {
         Value data = Value::object();
         data["documentation"] = documentation;
         item["data"] = std::move(data);
+        item["documentation"] = Value::object();
+        item["documentation"]["kind"] = "markdown";
+        item["documentation"]["value"] = documentation;
       }
       items.push(std::move(item));
     };
@@ -1700,6 +1851,330 @@ class LanguageServer {
     result["signatures"] = std::move(signatures);
     result["activeSignature"] = 0;
     result["activeParameter"] = activeParameter;
+    reply(id, std::move(result));
+  }
+
+  void prepareRename(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation) return replyNull(id);
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (!file || !tokens) return replyNull(id);
+    int line = 0, character = 0;
+    if (!positionFrom(params, &line, &character)) return replyNull(id);
+    int byteColumn = utf16ToByteColumn(lineText(document->text, line + 1), character) + 1;
+    ResolvedSymbol target = a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
+    if (!target.valid()) return replyNull(id);
+    reply(id, rangeValue(document->text, target.symbol->span));
+  }
+
+  // Semantic tokens: delta-encode [type, modifiers] per token, per the
+  // legend in initialize. Mirrors pyrefly's semanticTokens.
+  void semanticTokens(const Value& id, const Value* params, bool rangeOnly) {
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation || !params) return replyNull(id);
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (!file || !tokens) return replyNull(id);
+    int rangeStartLine = -1, rangeEndLine = -1;
+    if (rangeOnly) {
+      const Value* range = params->find("range");
+      if (range) {
+        const Value* s = range->find("start");
+        const Value* e = range->find("end");
+        if (s && e) {
+          rangeStartLine = static_cast<int>(s->find("line") ? s->find("line")->asInt() : 0) + 1;
+          rangeEndLine = static_cast<int>(e->find("line") ? e->find("line")->asInt() : 0) + 1;
+        }
+      }
+    }
+    // Legend indices: 0 namespace,1 type,2 class,3 enum,4 function,
+    // 5 method,6 parameter,7 variable,8 property,9 keyword,10 comment,
+    // 11 string,12 number,13 operator.
+    struct LexInfo { int line, col, len, type, mod; };
+    std::vector<LexInfo> lexemes;
+    auto pushLex = [&](Span span, int type, int mod = 0) {
+      if (!span.valid()) return;
+      if (rangeOnly && rangeStartLine >= 0 && (span.line < rangeStartLine || span.line > rangeEndLine)) return;
+      std::string line = lineText(document->text, span.line);
+      int startChar = byteToUtf16Column(line, std::max(0, span.col - 1));
+      int endCol = span.endCol > span.col ? span.endCol : span.col + 1;
+      if (span.endLine != span.line) endCol = (int)line.size() + 1;
+      int len = byteToUtf16Column(line, std::max(0, endCol - 1)) - startChar;
+      if (len <= 0) len = 1;
+      lexemes.push_back({span.line - 1, startChar, len, type, mod});
+    };
+    // Precompute definition spans for classification.
+    std::unordered_set<long long> defKeys;
+    auto keyOf = [](Span s) { return (long long)s.fileId * 100000000 + (long long)s.line * 10000 + s.col; };
+    for (const SymbolDef& sym : file->symbols) {
+      int t = 7;
+      if (sym.kind == SymbolKind::Struct || sym.kind == SymbolKind::Class) t = 2;
+      else if (sym.kind == SymbolKind::Enum) t = 3;
+      else if (sym.kind == SymbolKind::Function) t = 4;
+      else if (sym.kind == SymbolKind::Method) t = 5;
+      else if (sym.kind == SymbolKind::Field || sym.kind == SymbolKind::Property) t = 8;
+      else if (sym.kind == SymbolKind::Module) t = 0;
+      else if (sym.kind == SymbolKind::Constant) t = 7;
+      defKeys.insert(keyOf(sym.span));
+      pushLex(sym.span, t, 1);  // declaration modifier
+    }
+    for (const Token& tok : *tokens) {
+      if (tok.kind == Tok::Eof) continue;
+      if (defKeys.count(keyOf(tok.span))) continue;
+      int t = -1;
+      switch (tok.kind) {
+        case Tok::String: t = 11; break;
+        case Tok::Int: case Tok::Float: t = 12; break;
+        case Tok::Char: t = 11; break;
+        case Tok::Plus: case Tok::Minus: case Tok::Star: case Tok::Slash:
+        case Tok::Percent: case Tok::EqEq: case Tok::NotEq: case Tok::Lt:
+        case Tok::Gt: case Tok::Le: case Tok::Ge: case Tok::Eq: case Tok::Bang:
+        case Tok::Question: case Tok::Dot: case Tok::Comma: case Tok::Colon:
+        case Tok::QuestionDot: case Tok::QuestionQuestion: t = 13; break;
+        default: break;
+      }
+      if (t >= 0) { pushLex(tok.span, t); continue; }
+      // Keywords are lexed as Idents with keyword lexemes in A.
+      bool isKw = false;
+      for (const char* kw : kKeywords) if (tok.lexeme == kw) { isKw = true; break; }
+      if (isKw) { pushLex(tok.span, 9); continue; }
+      if (tok.kind == Tok::Ident) {
+        // Type name? builtin type names classify as `type`.
+        if (a::builtinTypeByName(tok.lexeme)) { pushLex(tok.span, 1); continue; }
+        if (a::findBuiltinDoc(tok.lexeme)) { pushLex(tok.span, 4); continue; }
+        ResolvedSymbol r = a::lsp::resolveToken(compilation, *file, *tokens,
+            (int)(&tok - &(*tokens)[0]));
+        if (r.valid()) {
+          int tt = 7;
+          switch (r.symbol->kind) {
+            case SymbolKind::Struct: case SymbolKind::Class: tt = 2; break;
+            case SymbolKind::Enum: tt = 3; break;
+            case SymbolKind::Function: tt = 4; break;
+            case SymbolKind::Method: case SymbolKind::Field: case SymbolKind::Property: tt = 8; break;
+            case SymbolKind::Module: tt = 0; break;
+            default: tt = 7; break;
+          }
+          pushLex(tok.span, tt);
+        }
+      }
+    }
+    // Comments get type 10.
+    if (const std::vector<a::Comment>* comments = compilation.commentsForModule(
+            compilation.graph.entry >= 0 ? compilation.graph.entry : 0)) {
+      for (const a::Comment& c : *comments) pushLex(c.span, 10);
+    }
+    std::sort(lexemes.begin(), lexemes.end(), [](const LexInfo& a, const LexInfo& b) {
+      if (a.line != b.line) return a.line < b.line;
+      return a.col < b.col;
+    });
+    Value data = Value::array();
+    int prevLine = 0, prevCol = 0;
+    for (const LexInfo& lex : lexemes) {
+      int deltaLine = lex.line - prevLine;
+      int deltaCol = deltaLine == 0 ? lex.col - prevCol : lex.col;
+      data.push(deltaLine); data.push(deltaCol); data.push(lex.len);
+      data.push(lex.type); data.push(lex.mod);
+      prevLine = lex.line; prevCol = lex.col;
+    }
+    Value result = Value::object();
+    result["data"] = std::move(data);
+    reply(id, std::move(result));
+  }
+
+  // Inlay hints: inferred type after `let` without annotation, and
+  // parameter names at call sites with multiple args (ty/pyrefly style).
+  void inlayHints(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation || !params) return replyNull(id);
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    if (!file) return replyNull(id);
+    const Value* rangeVal = params->find("range");
+    int startLine = 0, endLine = INT_MAX;
+    if (rangeVal) {
+      const Value* s = rangeVal->find("start");
+      const Value* e = rangeVal->find("end");
+      if (s && e) {
+        startLine = static_cast<int>(s->find("line") ? s->find("line")->asInt() : 0);
+        endLine = static_cast<int>(e->find("line") ? e->find("line")->asInt() : 0);
+      }
+    }
+    Value hints = Value::array();
+    // Inferred types for variables without annotations.
+    for (const auto& var : compilation.sema.variables) {
+      if (!var.type) continue;
+      if (var.span.line <= 0) continue;
+      int varLine = var.span.line - 1;
+      if (varLine < startLine || varLine > endLine) continue;
+      const SymbolDef* sym = nullptr;
+      for (const SymbolDef& s : file->symbols) {
+        if (s.span.line == var.span.line && s.span.col == var.span.col) { sym = &s; break; }
+      }
+      if (!sym) continue;
+      // Skip if already annotated (detail contains ": ").
+      if (sym->detail.find(": ") != std::string::npos) continue;
+      std::string t = a::typeName(var.type);
+      if (t.empty() || t == "error" || t == "unknown") continue;
+      // Skip unresolved type variables (`maybe = None` infers `?`).
+      if (t.find("unknown") != std::string::npos || t.find("an ") != std::string::npos) continue;
+      Value hint = Value::object();
+      Value pos = Value::object();
+      std::string lt = lineText(document->text, var.span.line);
+      pos["line"] = var.span.line - 1;
+      pos["character"] = byteToUtf16Column(lt, std::max(0, var.span.endCol - 1));
+      hint["position"] = std::move(pos);
+      hint["label"] = ": " + t;
+      hint["kind"] = 1;  // Type
+      hint["paddingRight"] = true;
+      hint["tooltip"] = "Inferred type (from a check)";
+      hints.push(std::move(hint));
+    }
+    Value result = Value::array();
+    // Return array of hints directly.
+    reply(id, std::move(hints));
+  }
+
+  // Code actions: quick fixes tied to diagnostics (like ty/pyrefly).
+  void codeActions(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    Value actions = Value::array();
+    if (!document || !document->compilation || !params) { reply(id, std::move(actions)); return; }
+    const Compilation& compilation = *document->compilation;
+    const Value* rangeVal = params->find("range");
+    int reqLine = -1;
+    if (rangeVal) {
+      const Value* s = rangeVal->find("start");
+      if (s && s->find("line")) reqLine = static_cast<int>(s->find("line")->asInt()) + 1;
+    }
+    const Value* context = params->find("context");
+    std::vector<std::string> requestedKinds;
+    if (context) {
+      const Value* kinds = context->find("only");
+      if (kinds && kinds->isArray()) for (auto& k : kinds->asArray()) if (k.isString()) requestedKinds.push_back(k.asString());
+    }
+    auto wantKind = [&](const std::string& k) {
+      if (requestedKinds.empty()) return true;
+      for (auto& r : requestedKinds) if (r == k) return true;
+      return false;
+    };
+    auto hasSourceFixAll = [&](const std::string& k) {
+      if (requestedKinds.empty()) return true;
+      for (auto& r : requestedKinds) if (r == "source.fixAll" || r == "source.fixAll.a" || r == k) return true;
+      return false;
+    };
+    if (!wantKind("quickfix")) { reply(id, std::move(actions)); return; }
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (file && tokens && reqLine > 0) {
+      // Unused variable (W0001): offer prefix with `_`.
+      for (const auto& d : compilation.sink.diagnostics()) {
+        if (d.span.line != reqLine || d.code != "W0001") continue;
+        const Token* tok = tokenAt(*tokens, d.span.line, d.span.col);
+        if (!tok || tok->kind != Tok::Ident) continue;
+        std::string newName = "_" + tok->lexeme;
+        Value action = Value::object();
+        action["title"] = "Prefix with '_': " + newName;
+        action["kind"] = "quickfix";
+        Value edit = Value::object();
+        edit["range"] = rangeValue(document->text, tok->span);
+        edit["newText"] = newName;
+        Value changes = Value::object();
+        Value eps = Value::array(); eps.push(std::move(edit));
+        changes[document->uri] = std::move(eps);
+        Value wsEdit = Value::object(); wsEdit["changes"] = std::move(changes);
+        action["edit"] = std::move(wsEdit);
+        action["diagnostics"] = Value::array();
+        actions.push(std::move(action));
+        break;
+      }
+      // Any diagnostic: offer "Suppress with '# a: ignore[CODE]'".
+      for (const auto& d : compilation.sink.diagnostics()) {
+        if (d.span.line != reqLine) continue;
+        std::string tail = d.code.empty() ? " # a: ignore" : " # a: ignore[" + d.code + "]";
+        Value action = Value::object();
+        action["title"] = "Suppress" + (d.code.empty() ? std::string() : " " + d.code) + " on this line";
+        action["kind"] = "quickfix";
+        std::string lt = lineText(document->text, reqLine);
+        Value edit = Value::object();
+        Value insertPos = Value::object();
+        insertPos["line"] = reqLine - 1;
+        insertPos["character"] = byteToUtf16Column(lt, (int)lt.size());
+        edit["range"] = rangeValue(document->text, Span{reqLine, (int)lt.size() + 1, reqLine, (int)lt.size() + 1, 0});
+        edit["newText"] = tail;
+        Value changes = Value::object();
+        Value eps = Value::array(); eps.push(std::move(edit));
+        changes[document->uri] = std::move(eps);
+        Value wsEdit = Value::object(); wsEdit["changes"] = std::move(changes);
+        action["edit"] = std::move(wsEdit);
+        actions.push(std::move(action));
+        break;
+      }
+    }
+    if (hasSourceFixAll("source.fixAll")) {
+      // No bulk fix available yet; return what we have.
+    }
+    reply(id, std::move(actions));
+  }
+
+  // Selection range: identifier -> enclosing indent block -> next block.
+  void selectionRanges(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    Value result = Value::array();
+    if (!document || !document->compilation || !params) { reply(id, std::move(result)); return; }
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (!file || !tokens) { reply(id, std::move(result)); return; }
+    std::vector<std::pair<int,int>> positions;
+    const Value* posArr = params->find("positions");
+    if (posArr && posArr->isArray()) {
+      for (auto& p : posArr->asArray()) {
+        int l = static_cast<int>(p.find("line") ? p.find("line")->asInt() : 0);
+        int c = static_cast<int>(p.find("character") ? p.find("character")->asInt() : 0);
+        positions.emplace_back(l, c);
+      }
+    }
+    for (auto& [line0, char0] : positions) {
+      int line = line0 + 1;
+      int byteCol = utf16ToByteColumn(lineText(document->text, line), char0) + 1;
+      Value entry = Value::object();
+      Value current = Value::object();
+      const Token* tok = tokenAt(*tokens, line, byteCol);
+      if (tok) current["range"] = rangeValue(document->text, tok->span);
+      else { Value r = Value::object(); r["start"] = positionValue(document->text, Span{line, byteCol, line, byteCol, 0}); r["end"] = r["start"]; current["range"] = std::move(r); }
+      // Outward: expand to the indent block containing the line.
+      int indent = 0;
+      std::string lt = lineText(document->text, line);
+      while (indent < (int)lt.size() && lt[indent] == ' ') ++indent;
+      int blockStartLine = line;
+      while (blockStartLine > 1) {
+        std::string prev = lineText(document->text, blockStartLine - 1);
+        int pi = 0; while (pi < (int)prev.size() && prev[pi] == ' ') ++pi;
+        if (pi >= indent && !prev.empty()) --blockStartLine;
+        else break;
+      }
+      int blockEndLine = line;
+      int totalLines = 0; for (char c : document->text) if (c == '\n') ++totalLines;
+      while (blockEndLine <= totalLines) {
+        std::string next = lineText(document->text, blockEndLine + 1);
+        if (next.empty()) break;
+        int ni = 0; while (ni < (int)next.size() && next[ni] == ' ') ++ni;
+        if (ni > indent) ++blockEndLine;
+        else break;
+      }
+      Value ranges = Value::array();
+      ranges.push(current);
+      Value outer = Value::object();
+      Span blockSpan{blockStartLine, 1, blockEndLine, (int)lineText(document->text, blockEndLine).size() + 1, 0};
+      outer["range"] = rangeValue(document->text, blockSpan);
+      Value outerArr = Value::array(); outerArr.push(std::move(outer));
+      current["parent"] = std::move(outerArr);
+      entry["ranges"] = std::move(ranges);
+      result.push(std::move(entry));
+    }
     reply(id, std::move(result));
   }
 

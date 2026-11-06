@@ -1,0 +1,43 @@
+# pprint: pformat/pprint/saferepr/isreadable/isrecursive + PrettyPrinter.
+import pprint
+from pprint import PrettyPrinter
+import json
+
+# Heterogeneous data via Json (A container literals are homogeneous).
+doc = json.parse("\{\"name\": \"Ada\", \"scores\": [1, 2, 3], \"meta\": \{\"lang\": \"A\", \"ok\": true\}\}")
+
+print(pprint.pformat(doc))
+print("---")
+print(pprint.pformat([1, 2, 3]))
+print(pprint.pformat("hi"))
+print(pprint.pformat(None))
+print(pprint.pformat(true))
+print(pprint.pformat(3.5))
+print(pprint.saferepr(doc))
+print(pprint.isreadable(doc))
+print(pprint.isrecursive(doc))
+
+# pprint writes to stdout.
+pprint.pprint(doc)
+print("---")
+
+# Sets and tuples.
+print(pprint.pformat({3, 1, 2}))
+print(pprint.pformat((1, "x")))
+print(pprint.pformat(()))
+
+# Narrow width forces multi-line layout.
+narrow = PrettyPrinter(1, 30, 0, false, true, false, true, true)
+print(narrow.pformat(doc))
+print("---")
+
+# Depth limit.
+shallow = PrettyPrinter(1, 80, 1, false, true, false, true, true)
+print(shallow.pformat(doc))
+
+# Cyclic list -> recursion marker, isrecursive true.
+cyc = []
+cyc.append(cyc)
+print(pprint.saferepr(cyc))
+print(pprint.isrecursive(cyc))
+print(pprint.isreadable(cyc))

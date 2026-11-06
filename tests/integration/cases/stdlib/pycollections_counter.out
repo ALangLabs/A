@@ -1,0 +1,6 @@
+ok test_arithmetic
+ok test_elements_and_most_common
+ok test_subtract_and_inc_dec
+ok test_update_and_counts
+
+4 passed, 0 failed

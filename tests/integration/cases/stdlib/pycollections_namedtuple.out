@@ -1,0 +1,5 @@
+ok test_namedtuple_asdict_replace_eq
+ok test_namedtuple_basic
+ok test_namedtuple_make_map
+
+3 passed, 0 failed

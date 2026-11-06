@@ -19,6 +19,7 @@ struct OrderedDict:
         if k in self.data:
             return self.data[k]
         core.panic("OrderedDict has no key '" + str(k) + "'")
+        return None
 
     fn get(self, k):
         return self.data.get(k)
@@ -51,10 +52,9 @@ struct OrderedDict:
         ks = self.data.keys()
         if len(ks) == 0:
             core.panic("popitem from empty OrderedDict")
+        k = ks[0]
         if last:
             k = ks[len(ks) - 1]
-        else:
-            k = ks[0]
         v = self.data[k]
         self.data.pop(k)
         return (k, v)
@@ -75,6 +75,11 @@ struct OrderedDict:
             for other in self.data.keys():
                 rebuilt[other] = self.data[other]
             self.data = rebuilt
+
+    ## move_to_front(k) -> move an existing key to the front
+    ## (Python `move_to_end(k, last=False)`).
+    fn move_to_front(self, k):
+        self.move_to_end(k, false)
 
     fn keys(self):
         return self.data.keys()

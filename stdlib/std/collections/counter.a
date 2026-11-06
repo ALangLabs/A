@@ -15,8 +15,8 @@ fn _merge_by_count(left, right):
     i = 0
     j = 0
     while i < len(left) and j < len(right):
-        (lk, lv) = left[i]
-        (rk, rv) = right[j]
+        (_, lv) = left[i]
+        (_, rv) = right[j]
         if lv >= rv:
             out.append(left[i])
             i = i + 1
@@ -56,16 +56,17 @@ struct Counter:
 
     ## update(src) -> add counts. `src` is an array (each element counts
     ## once, Python iterable form) or a map (values are added as counts,
-    ## Python mapping form). For another Counter pass `other.counts` or
-    ## use `update_counter`.
+    ## Python mapping form; counts must be integers). For another Counter
+    ## pass `other.counts` or use `update_counter`.
     fn update(self, src):
         kind = json.kind(src)
         if kind == "array":
-            for x in src:
+            for x in json.as_array(src)!:
                 self._bump(x, 1)
         elif kind == "object":
-            for k in src:
-                self._bump(k, src[k])
+            m = json.as_map(src)!
+            for k in m:
+                self._bump(k, json.as_int(m[k])!)
         else:
             core.panic("Counter.update expects an array or map")
 
@@ -79,11 +80,12 @@ struct Counter:
     fn subtract(self, src):
         kind = json.kind(src)
         if kind == "array":
-            for x in src:
+            for x in json.as_array(src)!:
                 self._bump(x, -1)
         elif kind == "object":
-            for k in src:
-                self._bump(k, -src[k])
+            m = json.as_map(src)!
+            for k in m:
+                self._bump(k, -json.as_int(m[k])!)
         else:
             core.panic("Counter.subtract expects an array or map")
 

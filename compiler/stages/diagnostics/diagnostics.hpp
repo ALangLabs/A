@@ -35,9 +35,21 @@ class DiagnosticSink {
   const SourceFile* file(FileId id) const;
 
   void error(Span span, std::string message, std::string help = {});
+  // Errors may also carry a stable code, like ty/pyrefly: E0001 undefined
+  // name, E0002 type mismatch, E0003 missing return, E0004 bad call,
+  // E0005 bad member, E0006 duplicate declaration, E0007 control flow.
+  void errorWithCode(Span span, std::string code, std::string message, std::string help = {});
   // Warnings carry a stable code (for example "W0001") so tooling and
   // documentation can refer to them unambiguously.
   void warning(Span span, std::string code, std::string message, std::string help = {});
+
+  // Suppression comments, like ty (`# ty: ignore`) and pyrefly
+  // (`# pyrefly: ignore`): a trailing `# a: ignore`, `# type: ignore`,
+  // `# ty: ignore`, or `# pyrefly: ignore` on a line suppresses diagnostics
+  // whose span starts on that line. An optional `[CODE]` filters by code,
+  // e.g. `# a: ignore[W0001]`.
+  bool isSuppressed(Span span, const std::string& code = {}) const;
+  bool isSuppressed(Span span, Severity severity, const std::string& code) const;
 
   bool hasErrors() const { return errors_ > 0; }
   int errorCount() const { return errors_; }

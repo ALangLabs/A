@@ -84,5 +84,5 @@ struct DefaultDict<T>:
 ## defaultdict(factory) -> empty DefaultDict.
 ## `factory` is a zero-argument function returning the default value,
 ## e.g. `defaultdict(fn() -> i64 => 0)` or `defaultdict(fn() -> [i64] => [])`.
-fn defaultdict(factory):
+fn defaultdict<T>(factory: fn() -> T) -> DefaultDict<T>:
     return DefaultDict(factory, {})

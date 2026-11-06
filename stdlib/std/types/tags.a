@@ -56,18 +56,19 @@ fn type_tag(x) -> str:
     if kind == "string":
         return "str"
     if kind == "array":
-        if json.as_array(x) != None:
+        # Container optionals can't be None-compared; sentinel probe.
+        if json.kind(json.as_array(x) ?? "NONE") != "string":
             return "list"
         # Native set or tuple: `str` renders them '{...}' / '(...)'.
         s = str(x)
-        if s.startswith("{"):
+        if s.startswith("\{"):
             return "set"
         if s.startswith("("):
             return "tuple"
         return "unknown"
     if kind == "object":
         s = str(x)
-        if s.startswith("{"):
+        if s.startswith("\{"):
             return "dict"
         # Struct instance: str renders 'Name(field=...)'.
         i = s.find("(")

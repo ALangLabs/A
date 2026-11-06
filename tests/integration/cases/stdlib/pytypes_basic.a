@@ -1,0 +1,43 @@
+# types: type_tag vocabulary + SimpleNamespace.
+import types
+
+print(types.type_tag(None))
+print(types.type_tag(true))
+print(types.type_tag(42))
+print(types.type_tag(3.5))
+print(types.type_tag("hi"))
+print(types.type_tag([1, 2]))
+print(types.type_tag({1, 2}))
+print(types.type_tag({"a": 1}))
+print(types.type_tag((1, 2)))
+
+struct Point:
+    x
+    y
+
+print(types.type_tag(Point(1, 2)))
+print(types.type_name([1]))
+
+# Type-tag constants are strings (no runtime type objects in A).
+print(types.NoneType)
+print(types.FunctionType)
+print(types.LambdaType)
+print(types.ModuleType)
+print(types.EllipsisType)
+print(types.NotImplementedType)
+print(types.GeneratorType)
+print(types.MappingProxyType)
+
+# SimpleNamespace: attribute bag over a dynamic map.
+ns = types.simple_namespace()
+ns.set("name", "Ada")
+ns.set("age", 36)
+ns.set("tags", ["math", "code"])
+print(ns.repr())
+print(ns.get("name"))
+print(ns.get_or("missing", "fallback"))
+print(ns.has("age"), ns.has("nope"))
+print(ns.keys())
+print(ns.len())
+ns.remove("age")
+print(ns.has("age"))

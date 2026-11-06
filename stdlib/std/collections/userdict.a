@@ -18,6 +18,7 @@ struct UserDict:
         if k in self.data:
             return self.data[k]
         core.panic("UserDict has no key '" + str(k) + "'")
+        return None
 
     ## get(k) -> value or None when absent (Python `ud.get(k)`).
     fn get(self, k):

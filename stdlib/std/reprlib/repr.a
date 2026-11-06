@@ -32,13 +32,25 @@ fn _slice(s, start, end):
         i = i + 1
     return out
 
-## _floordiv(a, b) -> floor(a / b) for b > 0 (A `/` truncates toward zero
-## for ints? it floors for positives; adjust negatives to match Python).
+## _floordiv(a, b) -> floor(a / b) for b > 0.
 fn _floordiv(a, b):
     q = a / b
     if a < 0 and a % b != 0:
         q = q - 1
     return q
+
+## _max(a, b) -> larger of two ints.
+fn _max(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    return b
+
+## _is_container_opt(v) -> true when a `json.as_array`/`as_map` probe
+## result is Some. Container optionals (`[Json]?`, `map<String,Json>?`)
+## cannot be compared to None in A, so we probe with a string sentinel
+## and check the runtime kind instead.
+fn _is_container_opt(v):
+    return json.kind(v) != "string"
 
 ## _py_str_repr(s) -> Python-style repr of a string (single quotes,
 ## escapes for backslash, the quote char, \n, \t, \r). Non-ASCII and other
@@ -66,11 +78,11 @@ fn _py_str_repr(s):
     return out
 
 ## _seq_kind(x) -> "set" | "tuple" | "other" for kind=="array" values that
-## are not plain lists (json.as_array returned None). Uses the `str`
-## prefix ('{' for sets, '(' for tuples) — cheap and avoids `binary.encode`.
+## are not plain lists. Uses the `str` prefix ('{' for sets, '(' for
+## tuples) — cheap and avoids `binary.encode`.
 fn _seq_kind(x):
     s = str(x)
-    if s.startswith("{"):
+    if s.startswith("\{"):
         return "set"
     if s.startswith("("):
         return "tuple"
@@ -80,15 +92,10 @@ fn _seq_kind(x):
 ## binary codec (sets/tuples cannot be iterated/indexed uniformly in A).
 fn _items(x):
     d = binary.decode(binary.encode(x))
-    if d == None:
+    probe = d ?? "NONE"
+    if json.kind(probe) == "string":
         return []
     return (json.as_array(d!) ?? [])
-
-## _max(a, b) -> larger of two ints.
-fn _max(a: i64, b: i64) -> i64:
-    if a > b:
-        return a
-    return b
 
 ## _middle_truncate(s, limit, fill) -> s with its middle replaced by `fill`
 ## when len(s) > limit (CPython repr_str/repr_int/repr_instance pattern).
@@ -132,33 +139,36 @@ struct Repr:
     fn repr1(self, x, level):
         kind = json.kind(x)
         if kind == "string":
-            return self.repr_str(x, level)
+            st = (json.as_str(x))!
+            return self.repr_str(st, level)
         if kind == "number":
             if json.as_int(x) != None:
                 return self.repr_int(x, level)
             return self.repr_instance(x, level)
         if kind == "bool":
-            if x:
+            b = (json.as_bool(x))!
+            if b:
                 return self.repr_instance("True", level)
             return self.repr_instance("False", level)
         if kind == "array":
-            if json.as_array(x) != None:
+            if _is_container_opt(json.as_array(x) ?? "NONE"):
                 return self.repr_list(x, level)
             t = _seq_kind(x)
             if t == "set":
                 return self.repr_set(x, level)
-            if t == "tuple":
-                return self.repr_tuple(x, level)
+            # Tuples cannot be decomposed in A (un-iterable, and the binary
+            # codec round-trips them to an opaque TupleValue), so they fall
+            # back to str() via repr_instance — documented deviation.
             return self.repr_instance(x, level)
         if kind == "object":
-            if json.as_map(x) != None:
+            if _is_container_opt(json.as_map(x) ?? "NONE"):
                 return self.repr_dict(x, level)
             return self.repr_instance(x, level)
         # null, unknown (ranges, closures, results): repr_instance fallback.
         return self.repr_instance(x, level)
 
     ## _join(self, pieces, level) -> CPython Repr._join (indent-aware).
-    fn _join(self, pieces, level):
+    fn _join(self, pieces: [String], level):
         if len(pieces) == 0:
             return ""
         if self.indent < 0:
@@ -175,7 +185,7 @@ struct Repr:
 
     ## _repr_iterable(self, elems, level, left, right, maxiter, trail)
     ## -> '[left]e1, e2, ...[right]' with fillvalue past maxiter.
-    ## elems are [Json]; trail is the extra ')' for 1-tuples.
+    ## elems are [Json]; trail is the extra ',' for 1-tuples.
     fn _repr_iterable(self, elems, level, left, right, maxiter: i64, trail):
         n = len(elems)
         if level <= 0 and n > 0:
@@ -197,12 +207,11 @@ struct Repr:
             r = trail + right
         return left + s + r
 
-    ## repr_tuple(self, x, level) -> '(a, b)' / '(a,)' (elements via codec).
-    fn repr_tuple(self, x, level):
-        elems = _items(x)
-        if len(elems) == 0:
-            return "()"
-        return self._repr_iterable(elems, level, "(", ")", self.maxtuple, ",")
+    ## repr_tuple is not provided: A tuples cannot be iterated or indexed,
+    ## and `binary.decode` round-trips them to an opaque TupleValue, so
+    ## tuple elements are unreachable. Tuples render via repr_instance
+    ## (str()), matching CPython's '(a, b)' shape but without recursion
+    ## into elements — documented deviation.
 
     ## repr_list(self, x, level) -> '[a, b]' (elements are [Json]).
     fn repr_list(self, x, level):
@@ -211,10 +220,10 @@ struct Repr:
 
     ## repr_set(self, x, level) -> '{a, b}' / 'set()' (elements via codec).
     fn repr_set(self, x, level):
-        if len(x) == 0:
-            return "set()"
         elems = _items(x)
-        return self._repr_iterable(elems, level, "{", "}", self.maxset, "")
+        if len(elems) == 0:
+            return "set()"
+        return self._repr_iterable(elems, level, "\{", "\}", self.maxset, "")
 
     ## repr_dict(self, x, level) -> '{k: v, ...}' over as_map keys.
     fn repr_dict(self, x, level):
@@ -224,9 +233,9 @@ struct Repr:
             ks.append(k)
         n = len(ks)
         if n == 0:
-            return "{}"
+            return "\{\}"
         if level <= 0:
-            return "{" + self.fillvalue + "}"
+            return "\{" + self.fillvalue + "\}"
         newlevel = level - 1
         pieces = []
         i = 0
@@ -239,11 +248,12 @@ struct Repr:
             i = i + 1
         if n > self.maxdict:
             pieces.append(self.fillvalue)
-        return "{" + self._join(pieces, level) + "}"
+        return "\{" + self._join(pieces, level) + "\}"
 
-    ## repr_str(self, x, level) -> quoted, maxstring-truncated repr.
-    fn repr_str(self, x, level):
-        cs = x.chars()
+    ## repr_str(self, s, level) -> quoted, maxstring-truncated repr.
+    ## `s` is a plain String (extracted via json.as_str by repr1).
+    fn repr_str(self, s, level):
+        cs = s.chars()
         take = self.maxstring
         if len(cs) < take:
             take = len(cs)
@@ -252,8 +262,8 @@ struct Repr:
         while i < take:
             head = head + str(cs[i])
             i = i + 1
-        s = _py_str_repr(head)
-        if len(s) > self.maxstring:
+        out = _py_str_repr(head)
+        if len(out) > self.maxstring:
             # CPython: repr(x[:i] + x[-j:]) with fillvalue spliced inside.
             i2 = _max(0, _floordiv(self.maxstring - 3, 2))
             j2 = _max(0, self.maxstring - 3 - i2)
@@ -278,8 +288,8 @@ struct Repr:
             if right_start < i2:
                 right_start = i2
             right = _slice(mid, right_start, m)
-            s = left + self.fillvalue + right
-        return s
+            out = left + self.fillvalue + right
+        return out
 
     ## repr_int(self, x, level) -> digits, maxlong-truncated.
     fn repr_int(self, x, level):

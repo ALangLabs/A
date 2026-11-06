@@ -60,15 +60,62 @@ const SourceFile* DiagnosticSink::file(FileId id) const {
 }
 
 void DiagnosticSink::error(Span span, std::string message, std::string help) {
+  errorWithCode(span, "", std::move(message), std::move(help));
+}
+
+void DiagnosticSink::errorWithCode(Span span, std::string code, std::string message, std::string help) {
+  if (isSuppressed(span, Severity::Error, code)) return;
   diagnostics_.push_back(
-      Diagnostic{Severity::Error, {}, span, std::move(message), std::move(help)});
+      Diagnostic{Severity::Error, std::move(code), span, std::move(message), std::move(help)});
   ++errors_;
 }
 
 void DiagnosticSink::warning(Span span, std::string code, std::string message,
                              std::string help) {
+  if (isSuppressed(span, Severity::Warning, code)) return;
   diagnostics_.push_back(
       Diagnostic{Severity::Warning, std::move(code), span, std::move(message), std::move(help)});
+}
+
+bool DiagnosticSink::isSuppressed(Span span, const std::string& code) const {
+  return isSuppressed(span, Severity::Error, code);
+}
+
+bool DiagnosticSink::isSuppressed(Span span, Severity, const std::string& code) const {
+  if (!span.valid()) return false;
+  const SourceFile* source = file(span.fileId);
+  if (!source) return false;
+  std::string line = source->lineText(span.line);
+  std::size_t hash = line.find('#');
+  if (hash == std::string::npos) return false;
+  std::string comment = line.substr(hash);
+  const char* markers[] = {"# a: ignore", "# type: ignore", "# ty: ignore",
+                           "# pyrefly: ignore", "# mypy: ignore"};
+  bool matched = false;
+  for (const char* m : markers) {
+    if (comment.find(m) != std::string::npos) { matched = true; break; }
+  }
+  if (!matched) return false;
+  // Optional `[CODE]` filter: `# a: ignore[W0001]`.
+  std::size_t open = comment.find('[');
+  if (open != std::string::npos) {
+    std::size_t close = comment.find(']', open);
+    if (close != std::string::npos) {
+      std::string filter = comment.substr(open + 1, close - open - 1);
+      // Multiple codes separated by commas/spaces.
+      std::size_t start = 0;
+      while (start < filter.size()) {
+        std::size_t comma = filter.find_first_of(", ", start);
+        std::string one = filter.substr(start, comma == std::string::npos ? comma : comma - start);
+        if (!one.empty() && one == code) return true;
+        if (!one.empty() && code.empty()) return true;
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+      }
+      return false;
+    }
+  }
+  return true;
 }
 
 void DiagnosticSink::flush(std::ostream& os, bool useColor) {

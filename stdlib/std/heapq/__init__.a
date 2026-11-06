@@ -1,0 +1,7 @@
+# std.heapq package — port of CPython 3.14 Lib/heapq.py.
+from "heapq.a" import heappush, heappop, heapify, heapreplace, heappushpop
+from "heapq.a" import heappush_max, heappop_max, heapify_max, heapreplace_max, heappushpop_max
+from "heapq.a" import nlargest, nsmallest, nlargest_key, nsmallest_key
+from "heapq.a" import merge, merge_key, merge_reverse, merge_key_reverse
+from "heapq.a" import _heappush_max, _heappop_max, _heapreplace_max
+from "heapq.a" import _heappushpop_max, _heapify_max, _heapify
