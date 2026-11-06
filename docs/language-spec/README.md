@@ -227,18 +227,25 @@ A is dynamically executed, but supports optional type syntax/annotations.
 
 ### 4.1 Built-in / named types
 
-Common built-in type names recognized by the type system include:
+The simple type names — the ones to reach for in everyday code:
 
 ```text
-bool char String str void
-int float
+int float str bool char void
+```
+
+`int` is a 64-bit signed integer, `float` a 64-bit float, `str`/`String` the
+string type, `bool` a boolean, `char` a single character, and `void` the
+absence of a value. `str` and `String` are interchangeable.
+
+For code that needs an exact width (binary formats, FFI, SIMD lanes), the
+fixed-width types are also available:
+
+```text
 i8 i16 i32 i64
 u8 u16 u32 u64
 f32 f64
 Allocator Json Pointer
 ```
-
-`int`/`float` map to 64-bit numeric types in the type system. `String` and `str` map to the string type.
 
 ### 4.2 Composite type syntax
 

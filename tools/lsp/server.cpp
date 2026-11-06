@@ -1691,17 +1691,6 @@ class LanguageServer {
     // statement (or as a member receiver, `utils.helper()`) opens the module.
     // `from m import n` resolves to the member when it can be found.
     const Token* token = tokenAt(*tokens, line + 1, byteColumn);
-    log("def fallback line=" + std::to_string(line) + " char=" + std::to_string(character) +
-        " tok=" + (token ? token->lexeme : std::string("<null>")) +
-        " imports=" + std::to_string(file->imports.size()));
-    for (const auto& d : file->imports) {
-      log("  def alias=" + d.alias + " member=" + d.member + " whole=" +
-          std::to_string(d.wholeModule ? 1 : 0) + " moduleId=" + std::to_string(d.moduleId) +
-          " span=[" + std::to_string(d.span.line) + ":" + std::to_string(d.span.col) + "-" +
-          std::to_string(d.span.endCol) + "] moduleSpan=[" +
-          std::to_string(d.moduleSpan.line) + ":" + std::to_string(d.moduleSpan.col) + "-" +
-          std::to_string(d.moduleSpan.endCol) + "] byteCol=" + std::to_string(byteColumn));
-    }
     if (token && token->kind == Tok::Ident) {
       auto importModulePath = [&](const a::lsp::ImportDef& def) -> const std::string* {
         if (def.moduleId < 0 ||
