@@ -1868,6 +1868,106 @@ class LanguageServer {
     reply(id, std::move(result));
   }
 
+  // Source-tree root of the A repo (the directory containing
+  // compiler/stages/...), found by walking up from the document. Builtin
+  // definitions live in the compiler sources, so go-to-definition needs
+  // this to locate `builtin_docs.hpp` / `method_signatures.hpp`.
+  std::string sourceTreeRoot(const std::string& filePath) {
+    fs::path dir = fs::path(filePath).parent_path();
+    for (int depth = 0; depth < 12 && !dir.empty(); ++depth) {
+      std::error_code ec;
+      if (fs::is_regular_file(dir / "compiler" / "stages" / "name-resolution" /
+                                  "builtin_docs.hpp", ec)) {
+        return dir.string();
+      }
+      dir = dir.parent_path();
+    }
+    return {};
+  }
+
+  std::string readSourceFile(const std::string& path) {
+    std::ifstream input(path, std::ios::binary);
+    return input ? std::string(std::istreambuf_iterator<char>(input),
+                               std::istreambuf_iterator<char>())
+                 : "";
+  }
+
+  // A location at the entry line `{"<name>",` in a compiler doc table.
+  static Value lineLocation(const std::string& path, int oneBasedLine) {
+    Value location = Value::object();
+    location["uri"] = pathToUri(path);
+    Value range = Value::object();
+    Value start = Value::object();
+    start["line"] = oneBasedLine - 1;
+    start["character"] = 0;
+    Value end = Value::object();
+    end["line"] = oneBasedLine - 1;
+    end["character"] = 1;
+    range["start"] = std::move(start);
+    range["end"] = std::move(end);
+    location["range"] = std::move(range);
+    return location;
+  }
+
+  // First `{"<name>",` entry line of `text`; 0 when absent.
+  static int docEntryLine(const std::string& text, const std::string& name) {
+    const std::string needle = "{\"" + name + "\",";
+    std::size_t pos = 0;
+    int line = 1;
+    while (pos < text.size()) {
+      std::size_t end = text.find('\n', pos);
+      const std::string raw =
+          text.substr(pos, end == std::string::npos ? std::string::npos : end - pos);
+      const std::string trimmed = trimLine(raw);
+      if (trimmed.rfind(needle, 0) == 0) return line;
+      if (end == std::string::npos) break;
+      pos = end + 1;
+      ++line;
+    }
+    return 0;
+  }
+
+  // Go-to-definition target for a builtin (e.g. `ic`): the `builtin_docs.hpp`
+  // entry, like Python's typeshed lookup. Empty Value when not found.
+  Value builtinDocLocation(const std::string& documentPath, const std::string& builtinName) {
+    const std::string root = sourceTreeRoot(documentPath);
+    if (root.empty() || !a::findBuiltinDoc(builtinName)) return Value();
+    const std::string header = (fs::path(root) / "compiler" / "stages" /
+                                "name-resolution" / "builtin_docs.hpp").string();
+    const std::string text = readSourceFile(header);
+    const int line = docEntryLine(text, builtinName);
+    return line > 0 ? lineLocation(header, line) : Value();
+  }
+
+  // Go-to-definition target for a primitive method (e.g. `words.strip()`):
+  // the `method_signatures.hpp` entry inside the receiver type's table.
+  Value methodDocLocation(const std::string& documentPath, const std::string& typeName,
+                          const std::string& methodName) {
+    const std::vector<a::MethodSig>* table = methodTableForType(typeName);
+    if (!table || !findMethodSig(*table, methodName)) return Value();
+    const char* tableFn = nullptr;
+    if (table == &a::arrayMethods()) tableFn = "arrayMethods";
+    else if (table == &a::mapMethods()) tableFn = "mapMethods";
+    else if (table == &a::setMethods()) tableFn = "setMethods";
+    else if (table == &a::stringMethods()) tableFn = "stringMethods";
+    if (!tableFn) return Value();
+    const std::string root = sourceTreeRoot(documentPath);
+    if (root.empty()) return Value();
+    const std::string header = (fs::path(root) / "compiler" / "stages" /
+                                "type-checker" / "method_signatures.hpp").string();
+    const std::string text = readSourceFile(header);
+    const std::size_t tablePos = text.find(std::string(tableFn) + "()");
+    if (tablePos == std::string::npos) return Value();
+    const std::string section = text.substr(tablePos);
+    const int line = docEntryLine(section, methodName);
+    if (line <= 0) return Value();
+    int lineOffset = 0;
+    for (std::size_t pos = 0; pos < tablePos; ++pos) {
+      if (text[pos] == '\n') ++lineOffset;
+    }
+    return lineLocation(header, line + lineOffset);
+  }
+
   void definition(const Value& id, const Value* params) {
     Document* document = documentFrom(params);
     if (!document || !document->compilation) return replyNull(id);
@@ -1938,6 +2038,47 @@ class LanguageServer {
         if (!def.wholeModule || def.alias != token->lexeme) continue;
         const std::string* path = importModulePath(def);
         if (path && jumpToModule(def, *path)) return;
+      }
+      // Ctrl+click on a builtin (like Python's typeshed lookup): bare
+      // builtins (ic, print, ...) and native module members (json.parse)
+      // land on the `builtin_docs.hpp` doc entry; primitive methods
+      // (words.strip()) land on the `method_signatures.hpp` entry.
+      const int index = tokenIndexAt(*tokens, line + 1, byteColumn);
+      if (index >= 2 && token->kind == Tok::Ident) {
+        const Token& dot = (*tokens)[static_cast<std::size_t>(index - 1)];
+        const Token& baseToken = (*tokens)[static_cast<std::size_t>(index - 2)];
+        if ((dot.kind == Tok::Dot || dot.kind == Tok::QuestionDot) &&
+            baseToken.kind == Tok::Ident) {
+          const std::string moduleName = nativeModuleForAlias(*file, baseToken.lexeme);
+          if (!moduleName.empty()) {
+            const std::string* builtinName = a::nativeFunction(moduleName, token->lexeme);
+            if (!builtinName) builtinName = a::nativeConstant(moduleName, token->lexeme);
+            if (builtinName) {
+              Value location = builtinDocLocation(document->path, *builtinName);
+              if (!location.isNull()) {
+                reply(id, std::move(location));
+                return;
+              }
+            }
+          }
+          ResolvedSymbol base =
+              a::lsp::resolveToken(compilation, *file, *tokens, index - 2);
+          if (base.valid()) {
+            Value location =
+                methodDocLocation(document->path, base.symbol->typeName, token->lexeme);
+            if (!location.isNull()) {
+              reply(id, std::move(location));
+              return;
+            }
+          }
+        }
+      }
+      if (token->kind == Tok::Ident) {
+        Value location = builtinDocLocation(document->path, token->lexeme);
+        if (!location.isNull()) {
+          reply(id, std::move(location));
+          return;
+        }
       }
     }
     return replyNull(id);
