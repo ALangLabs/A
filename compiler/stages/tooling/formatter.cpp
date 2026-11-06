@@ -265,7 +265,45 @@ class Formatter {
     }
   }
 
+  // Emits a docstring recorded on a declaration (`"""..."""` statement inside
+  // a type body). The stored text is the raw literal content, so it is written
+  // back verbatim between triple-quote delimiters.
+  void emitDocstring(const std::string& doc, int level) {
+    if (doc.empty()) return;
+    // Trailing whitespace (including the indentation before the closing
+    // quotes) is dropped so repeated formatting stays stable.
+    std::string text = doc;
+    while (!text.empty() &&
+           (text.back() == ' ' || text.back() == '\t' || text.back() == '\r' ||
+            text.back() == '\n')) {
+      text.pop_back();
+    }
+    if (text.empty()) return;
+    if (text.find("\"\"\"") != std::string::npos) {
+      // A `"""` sequence cannot appear inside a triple-quoted literal; only a
+      // single-line doc can be re-emitted safely as an escaped string.
+      if (text.find('\n') == std::string::npos) {
+        std::string escaped;
+        for (char c : text) {
+          if (c == '"' || c == '\\') escaped += '\\';
+          escaped += c;
+        }
+        output_ += indentText(level) + "\"" + escaped + "\"\n";
+      }
+      return;
+    }
+    if (text.find('\n') == std::string::npos) {
+      output_ += indentText(level) + "\"\"\"" + text + "\"\"\"\n";
+      return;
+    }
+    output_ += indentText(level) + "\"\"\"\n";
+    output_ += text;
+    output_ += '\n';
+    output_ += indentText(level) + "\"\"\"\n";
+  }
+
   void emitFunction(const FnDecl& decl, int level, int nextLine, int& lastLine) {
+    emitDocstring(decl.doc, level);
     std::string header = signatureText(decl) + ":";
     emitHeader(header, level, decl.span, lastLine);
     lastLine = emitStatements(decl.body, level + 1, nextLine, decl.span.line);
@@ -318,6 +356,7 @@ class Formatter {
     if (!parents.empty()) header += "(" + parents + ")";
     header += ":";
     emitHeader(header, level, decl.span, lastLine);
+    emitDocstring(decl.doc, level + 1);
 
     struct Member {
       const FieldDecl* field = nullptr;
@@ -351,6 +390,7 @@ class Formatter {
         // ("Expected a type name, found end of line").
         std::string fieldText = member.field->name;
         if (member.field->type) fieldText += ": " + typeText(member.field->type.get());
+        emitDocstring(member.field->doc, level + 1);
         output_ += indentText(level + 1) + fieldText + '\n';
         lastLine = member.field->span.endLine;
         attachTrailing(member.field->span, lastLine);
@@ -363,6 +403,7 @@ class Formatter {
 
   void emitEnum(const EnumDecl& decl, int level, int nextLine, int& lastLine) {
     emitHeader("enum " + decl.name + ":", level, decl.span, lastLine);
+    emitDocstring(decl.doc, level + 1);
     if (decl.variants.empty()) {
       output_ += indentText(level + 1) + "pass\n";
       return;
@@ -374,6 +415,7 @@ class Formatter {
       ensureGap(variant.span.line, lastLine);
       std::string text = variant.name;
       if (variant.value) text += " = " + exprText(*variant.value, 0, level + 1);
+      emitDocstring(variant.doc, level + 1);
       output_ += indentText(level + 1) + text + '\n';
       lastLine = variant.value ? variant.value->span.endLine : variant.span.endLine;
       attachTrailing(variant.span, lastLine);
@@ -401,6 +443,7 @@ class Formatter {
     }
     header += ":";
     emitHeader(header, level, decl.span, lastLine);
+    emitDocstring(decl.doc, level + 1);
 
     if (decl.methods.empty()) {
       output_ += indentText(level + 1) + "pass\n";
@@ -414,6 +457,7 @@ class Formatter {
       ensureGap(sig.span.line, lastLine);
       std::string text = "fn " + sig.name + paramsText(sig.params);
       if (sig.returnType) text += " -> " + typeText(sig.returnType.get());
+      emitDocstring(sig.doc, level + 1);
       output_ += indentText(level + 1) + text + '\n';
       lastLine = sig.span.endLine;
       attachTrailing(sig.span, lastLine);

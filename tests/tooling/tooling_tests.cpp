@@ -131,11 +131,60 @@ PI: f64 = 3.14159
   check(json.back() == '\n', "json output is newline terminated");
 }
 
+void testDocgenDocstrings() {
+  const std::string source = R"(
+"""
+Module docstring.
+"""
+
+"""Docstring above subtract."""
+fn subtract(a: i32, b: i32) -> i32:
+    """Body docstring wins over the one above."""
+    return a - b
+
+"""
+A point in 2D space.
+"""
+class Point:
+    """The canonical 2D point."""
+    """Horizontal position."""
+    x: i32
+    """
+    Squared distance from the origin.
+    """
+    fn length_squared(self) -> i32:
+        return self.x * self.x + self.y * self.y
+)";
+
+  a::DiagnosticSink sink;
+  a::tooling::DocOptions options;
+  options.sourceName = "docstrings.a";
+  a::tooling::DocResult result = a::tooling::extractDocs(source, sink, options);
+  check(result.ok, "doc generator accepts docstrings");
+  check(result.module.doc == "Module docstring.", "module docstring is rendered");
+  check(result.module.items.size() == 2, "doc generator indexes docstring-documented decls");
+
+  const std::string markdown = a::tooling::renderMarkdown(result.module);
+  check(markdown.find("Body docstring wins over the one above.") != std::string::npos,
+        "function body docstring is rendered");
+  check(markdown.find("Docstring above subtract.") == std::string::npos,
+        "body docstring takes precedence over the one above");
+  check(markdown.find("The canonical 2D point.") != std::string::npos,
+        "class body docstring is rendered");
+  check(markdown.find("A point in 2D space.") == std::string::npos,
+        "body docstring takes precedence over the one above");
+  check(markdown.find("Horizontal position.") != std::string::npos,
+        "field docstring is rendered");
+  check(markdown.find("Squared distance from the origin.") != std::string::npos,
+        "method docstring is rendered");
+}
+
 }  // namespace
 
 int main() {
   testFormatter();
   testDocgen();
+  testDocgenDocstrings();
   if (failures == 0) {
     std::cout << "tooling tests passed\n";
     return 0;

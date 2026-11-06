@@ -1,0 +1,40 @@
+"""
+Module docstring for the docstrings case.
+"""
+
+"""Docstring above add."""
+fn add(a: i32, b: i32) -> i32:
+    """Body docstring for add."""
+    return a + b
+
+"""
+A documented point.
+"""
+class Point:
+    """The canonical 2D point."""
+    """Horizontal position."""
+    x
+    """Vertical position."""
+    y
+
+    """Squared distance from the origin."""
+    fn length_squared(self) -> i32:
+        return self.x * self.x + self.y * self.y
+
+"""
+A small enum.
+"""
+enum Color:
+    """The enum's own doc."""
+    """The color red."""
+    Red
+    """The color green."""
+    Green
+
+"""Docstring above the constant."""
+ANSWER: i32 = 42
+
+p = Point(3, 4)
+print(add(1, 2))
+print(p.length_squared())
+print(ANSWER)

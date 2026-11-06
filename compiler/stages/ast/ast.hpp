@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "lexer/span.hpp"
@@ -555,12 +556,17 @@ struct FnDecl : Stmt {
   Span whereSpan;
   std::vector<StmtPtr> body;
   int moduleId = -1;  // module owning the function, filled in by Sema
+  // Docstring attached from a string-literal statement inside an enclosing
+  // type/impl body (methods only). Top-level and body docstrings are recovered
+  // from the statement stream instead.
+  std::string doc;
 };
 
 struct FieldDecl {
   std::string name;
   Span span;
   TypeExprPtr type;
+  std::string doc;  // docstring from a preceding string-literal statement
 };
 
 struct StructDecl : Stmt {
@@ -573,6 +579,7 @@ struct StructDecl : Stmt {
   std::vector<FieldDecl> fields;
   std::vector<std::unique_ptr<FnDecl>> methods;
   bool isClass = false;
+  std::string doc;  // docstring: first string-literal statement in the body
 };
 
 struct EnumVariant {
@@ -580,6 +587,7 @@ struct EnumVariant {
   Span span;
   ExprPtr value;  // may be null (auto-incremented from the previous variant)
   std::vector<FieldDecl> fields;  // non-empty for payload (algebraic) variants
+  std::string doc;  // docstring from a preceding string-literal statement
 };
 
 struct EnumDecl : Stmt {
@@ -588,6 +596,7 @@ struct EnumDecl : Stmt {
   Span nameSpan;
   std::vector<std::string> typeParams;  // generic type parameters
   std::vector<EnumVariant> variants;
+  std::string doc;  // docstring: first string-literal statement in the body
 
   bool isAlgebraic() const {
     if (!typeParams.empty()) return true;
@@ -604,6 +613,7 @@ struct TraitSig {
   Span span;
   std::vector<ParamDecl> params;
   TypeExprPtr returnType;  // may be null
+  std::string doc;  // docstring from a preceding string-literal statement
 };
 
 // `trait Equatable:` declares a set of method signatures. A struct opts in with
@@ -617,6 +627,7 @@ struct TraitDecl : Stmt {
   std::vector<TraitSig> methods;
   std::vector<std::string> parents;       // trait inheritance: trait B(A)
   std::vector<std::string> whereClause;   // `trait C where A` constraints
+  std::string doc;  // docstring: first string-literal statement in the body
 };
 
 // `impl Trait for Type:` (optionally with a body of methods). The body is
@@ -641,5 +652,27 @@ struct TypeAliasDecl : Stmt {
 struct Program {
   std::vector<StmtPtr> statements;
 };
+
+// If `expr` is a plain string literal (no interpolation parts), writes its
+// decoded text to `out` and returns true. Docstrings are recognized through
+// this so interpolated strings never count as documentation.
+inline bool plainStringText(const ExprPtr& expr, std::string& out) {
+  if (!expr || expr->kind != ExprKind::StringLit) return false;
+  const auto& str = static_cast<const StringLitExpr&>(*expr);
+  std::string text;
+  for (const StringPart& part : str.parts) {
+    if (part.isExpr) return false;
+    text += part.text;
+  }
+  out = std::move(text);
+  return true;
+}
+
+// If `stmt` is a bare string-literal expression statement (a docstring),
+// writes its text to `out` and returns true.
+inline bool docstringText(const Stmt& stmt, std::string& out) {
+  if (stmt.kind != StmtKind::Expr) return false;
+  return plainStringText(static_cast<const ExprStmt&>(stmt).expr, out);
+}
 
 }  // namespace a

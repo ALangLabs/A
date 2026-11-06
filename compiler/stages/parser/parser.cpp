@@ -172,6 +172,14 @@ std::vector<StmtPtr> Parser::parseSuite() {
   return body;
 }
 
+void Parser::parseDocstringStatement(std::string& text) {
+  ExprPtr expr = parseExpression();
+  if (!plainStringText(expr, text)) {
+    fail(expr ? expr->span : cur().span, "Expected a string literal docstring.");
+  }
+  expectNewline();
+}
+
 StmtPtr Parser::parseFnDecl() {
   Span start = cur().span;
   expect(Tok::KwFn, "'fn'");
@@ -324,6 +332,9 @@ StmtPtr Parser::parseStructDecl() {
   expectNewline();
   expect(Tok::Indent, "an indented body");
 
+  std::string pendingDoc;
+  bool pendingDocSet = false;
+  bool typeDocSet = false;
   while (!check(Tok::Dedent) && !check(Tok::Eof)) {
     if (match(Tok::Newline)) continue;
     if (check(Tok::KwPass)) {
@@ -331,8 +342,26 @@ StmtPtr Parser::parseStructDecl() {
       expectNewline();
       continue;
     }
+    if (check(Tok::String)) {
+      // Python-style docstring inside struct / class body
+      std::string doc;
+      parseDocstringStatement(doc);
+      if (!typeDocSet && decl->fields.empty() && decl->methods.empty()) {
+        decl->doc = std::move(doc);
+        typeDocSet = true;
+      } else {
+        pendingDoc = std::move(doc);
+        pendingDocSet = true;
+      }
+      continue;
+    }
     if (check(Tok::KwFn)) {
       auto method = parseFnDecl();
+      if (pendingDocSet) {
+        static_cast<FnDecl*>(method.get())->doc = std::move(pendingDoc);
+        pendingDoc.clear();
+        pendingDocSet = false;
+      }
       decl->methods.push_back(std::unique_ptr<FnDecl>(static_cast<FnDecl*>(method.release())));
       continue;
     }
@@ -341,6 +370,11 @@ StmtPtr Parser::parseStructDecl() {
     field.name = fieldTok.lexeme;
     field.span = fieldTok.span;
     if (match(Tok::Colon)) field.type = parseTypeExpr();
+    if (pendingDocSet) {
+      field.doc = std::move(pendingDoc);
+      pendingDoc.clear();
+      pendingDocSet = false;
+    }
     expectNewline();
     decl->fields.push_back(std::move(field));
   }
@@ -404,6 +438,9 @@ StmtPtr Parser::parseTraitDecl() {
   expect(Tok::Colon, "':' after the trait name");
   expectNewline();
   expect(Tok::Indent, "an indented body");
+  std::string pendingDoc;
+  bool pendingDocSet = false;
+  bool typeDocSet = false;
   while (!check(Tok::Dedent) && !check(Tok::Eof)) {
     if (match(Tok::Newline)) continue;
     if (check(Tok::KwPass)) {
@@ -411,11 +448,28 @@ StmtPtr Parser::parseTraitDecl() {
       expectNewline();
       continue;
     }
+    if (check(Tok::String)) {
+      std::string doc;
+      parseDocstringStatement(doc);
+      if (!typeDocSet && decl->methods.empty()) {
+        decl->doc = std::move(doc);
+        typeDocSet = true;
+      } else {
+        pendingDoc = std::move(doc);
+        pendingDocSet = true;
+      }
+      continue;
+    }
     expect(Tok::KwFn, "a trait method signature");
     const Token& methodTok = expect(Tok::Ident, "a method name");
     TraitSig sig;
     sig.name = methodTok.lexeme;
     sig.span = methodTok.span;
+    if (pendingDocSet) {
+      sig.doc = std::move(pendingDoc);
+      pendingDoc.clear();
+      pendingDocSet = false;
+    }
     expect(Tok::LParen, "'(' after the method name");
     if (!check(Tok::RParen)) {
       while (true) {
@@ -454,6 +508,8 @@ StmtPtr Parser::parseImplDecl() {
   if (match(Tok::Colon)) {
     expectNewline();
     expect(Tok::Indent, "an indented body");
+    std::string pendingDoc;
+    bool pendingDocSet = false;
     while (!check(Tok::Dedent) && !check(Tok::Eof)) {
       if (match(Tok::Newline)) continue;
       if (check(Tok::KwPass)) {
@@ -461,8 +517,20 @@ StmtPtr Parser::parseImplDecl() {
         expectNewline();
         continue;
       }
+      if (check(Tok::String)) {
+        std::string doc;
+        parseDocstringStatement(doc);
+        pendingDoc = std::move(doc);
+        pendingDocSet = true;
+        continue;
+      }
       if (check(Tok::KwFn)) {
         auto method = parseFnDecl();
+        if (pendingDocSet) {
+          static_cast<FnDecl*>(method.get())->doc = std::move(pendingDoc);
+          pendingDoc.clear();
+          pendingDocSet = false;
+        }
         decl->methods.push_back(std::unique_ptr<FnDecl>(static_cast<FnDecl*>(method.release())));
         continue;
       }
@@ -498,8 +566,23 @@ StmtPtr Parser::parseImplDecl() {
   expect(Tok::Colon, "':' after the enum name");
   expectNewline();
   expect(Tok::Indent, "an indented enum body");
+  std::string pendingDoc;
+  bool pendingDocSet = false;
+  bool typeDocSet = false;
   while (!check(Tok::Dedent) && !check(Tok::Eof)) {
     if (match(Tok::Newline)) continue;
+    if (check(Tok::String)) {
+      std::string doc;
+      parseDocstringStatement(doc);
+      if (!typeDocSet && decl->variants.empty()) {
+        decl->doc = std::move(doc);
+        typeDocSet = true;
+      } else {
+        pendingDoc = std::move(doc);
+        pendingDocSet = true;
+      }
+      continue;
+    }
     // 'None' is a keyword, but the prelude's Option declares a variant with
     // that name; allow it in this one position.
     Token variantTok;
@@ -511,6 +594,11 @@ StmtPtr Parser::parseImplDecl() {
     EnumVariant variant;
     variant.name = variantTok.lexeme;
     variant.span = variantTok.span;
+    if (pendingDocSet) {
+      variant.doc = std::move(pendingDoc);
+      pendingDoc.clear();
+      pendingDocSet = false;
+    }
     if (match(Tok::LParen)) {
       if (!check(Tok::RParen)) {
         while (true) {

@@ -57,8 +57,9 @@ struct DocOptions {
   std::string sourceName;  // name shown in the generated header
 };
 
-// Parses A source and extracts documentation from `##` comments attached to
-// declarations. Diagnostics go through `sink`; `ok` is false on parse errors.
+// Parses A source and extracts documentation from `##` doc comments and
+// `"""..."""` docstrings attached to declarations. Diagnostics go through
+// `sink`; `ok` is false on parse errors.
 struct DocResult {
   bool ok = false;
   DocModule module;

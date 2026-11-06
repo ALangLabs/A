@@ -60,6 +60,11 @@ class Parser {
   StmtPtr parseTypedDeclaration();
   StmtPtr parseSimpleStatement();
 
+  // Parses a string-literal statement inside a struct/trait/enum/impl body as
+  // a docstring, storing its text in `text`. Fails when the expression is not
+  // a plain (non-interpolated) string literal.
+  void parseDocstringStatement(std::string& text);
+
   std::vector<StmtPtr> parseSuite();
   void expectNewline();
 

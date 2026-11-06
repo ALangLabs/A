@@ -26,6 +26,14 @@ This document describes the syntax and semantics implemented by the A compiler i
 
 `##` comments are recognized as doc comments by the lexer/tooling.
 
+Python-style docstrings are also supported: a bare string literal (typically
+triple-quoted) documents the module when it is the first statement, a function
+when it is the first statement of its body or sits directly above the `fn`,
+and a type/trait/enum or member when it appears inside the body — the first
+string-literal statement documents the type itself, later ones document the
+member that follows. `a doc` and `a-lsp` hover pick these up; `##` comments
+take precedence when both are present.
+
 ### 2.2 Identifiers
 
 Identifiers start with a letter or `_`, followed by letters, digits, or `_`.
@@ -104,7 +112,7 @@ raw text"""
 ```
 
 - Normal strings support escapes and interpolation.
-- Triple-quoted strings (`"""..."""`) are treated as raw strings (content captured as-is; interpolation/escape decoding behavior follows parser implementation for raw strings).
+- Triple-quoted strings (`"""..."""`) are treated as raw strings (content captured as-is; interpolation/escape decoding behavior follows parser implementation for raw strings). In statement position they double as docstrings (see [Comments](#21-comments)).
 - Interpolation uses `{expr}` inside normal strings.
 
 Supported escapes (lexer/parser support includes):

@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <initializer_list>
 #include <map>
 #include <sstream>
 #include <utility>
@@ -54,6 +55,54 @@ std::string trimText(std::string text) {
   return text.substr(begin, end - begin);
 }
 
+// Python inspect.cleandoc equivalent: drops leading/trailing blank lines,
+// strips the first line's indentation, and removes the common indentation
+// shared by the remaining lines.
+std::string cleanDocstring(const std::string& raw) {
+  std::vector<std::string> lines;
+  {
+    std::istringstream in(raw);
+    std::string line;
+    while (std::getline(in, line)) lines.push_back(line);
+  }
+  auto blank = [](const std::string& l) { return trimText(l).empty(); };
+  std::size_t begin = 0;
+  std::size_t end = lines.size();
+  while (begin < end && blank(lines[begin])) ++begin;
+  while (end > begin && blank(lines[end - 1])) --end;
+  if (begin >= end) return {};
+
+  std::string first = lines[begin];
+  const std::size_t fb = first.find_first_not_of(" \t");
+  first = fb == std::string::npos ? "" : first.substr(fb);
+
+  std::size_t minIndent = std::string::npos;
+  for (std::size_t i = begin + 1; i < end; ++i) {
+    if (blank(lines[i])) continue;
+    const std::size_t nb = lines[i].find_first_not_of(" \t");
+    if (nb != std::string::npos && (minIndent == std::string::npos || nb < minIndent)) {
+      minIndent = nb;
+    }
+  }
+
+  std::string result = first;
+  for (std::size_t i = begin + 1; i < end; ++i) {
+    std::string l = lines[i];
+    if (minIndent != std::string::npos && l.size() >= minIndent) l = l.substr(minIndent);
+    result += "\n" + l;
+  }
+  return trimText(result);
+}
+
+// Python-style docstring: a bare string-literal statement at the top of a
+// function body.
+std::string fnBodyDocstring(const FnDecl& decl) {
+  if (decl.body.empty()) return {};
+  std::string text;
+  if (!docstringText(*decl.body.front(), text)) return {};
+  return text;
+}
+
 using DocMap = std::map<int, std::string>;
 
 DocMap extractDocMap(const std::vector<Comment>& comments) {
@@ -85,12 +134,27 @@ const std::string& docFor(const DocMap& docs, const Span& span) {
   return it == docs.end() ? empty : it->second;
 }
 
-DocItem functionItem(const FnDecl& decl, const DocMap& docs) {
+// `##` doc comments win over docstrings, matching the language server. The
+// docstring candidates are tried in order (body docstring, attached docstring,
+// docstring above the declaration).
+std::string pickDoc(const DocMap& docs, const Span& span,
+                    std::initializer_list<std::string> docstrings) {
+  const std::string& hashDoc = docFor(docs, span);
+  if (!hashDoc.empty()) return hashDoc;
+  for (const std::string& candidate : docstrings) {
+    const std::string cleaned = cleanDocstring(candidate);
+    if (!cleaned.empty()) return cleaned;
+  }
+  return {};
+}
+
+DocItem functionItem(const FnDecl& decl, const DocMap& docs,
+                     const std::string& aboveDoc = {}) {
   DocItem item;
   item.kind = DocItem::Kind::Function;
   item.name = decl.name;
   item.signature = signatureText(decl);
-  item.doc = docFor(docs, decl.span);
+  item.doc = pickDoc(docs, decl.span, {fnBodyDocstring(decl), decl.doc, aboveDoc});
   item.returnType = typeText(decl.returnType.get());
   for (const ParamDecl& param : decl.params) {
     DocParameter documented;
@@ -113,7 +177,8 @@ std::string structSignature(const StructDecl& decl, const std::string& keyword) 
   return text;
 }
 
-DocItem structItem(const StructDecl& decl, const DocMap& docs, const SourceText& source) {
+DocItem structItem(const StructDecl& decl, const DocMap& docs, const SourceText& source,
+                   const std::string& aboveDoc = {}) {
   DocItem item;
   const std::string keyword = declarationKeyword(source, decl.span, decl.nameSpan);
   if (keyword == "struct") {
@@ -126,14 +191,14 @@ DocItem structItem(const StructDecl& decl, const DocMap& docs, const SourceText&
   item.name = decl.name;
   item.signature = structSignature(decl, keyword.empty() ? (decl.isClass ? "class" : "struct")
                                                          : keyword);
-  item.doc = docFor(docs, decl.span);
+  item.doc = pickDoc(docs, decl.span, {decl.doc, aboveDoc});
 
   for (const FieldDecl& field : decl.fields) {
     DocMember member;
     member.name = field.name;
     member.type = typeText(field.type.get());
     member.signature = field.name + ": " + member.type;
-    member.doc = docFor(docs, field.span);
+    member.doc = pickDoc(docs, field.span, {field.doc});
     item.fields.push_back(std::move(member));
   }
   for (const auto& method : decl.methods) {
@@ -143,23 +208,25 @@ DocItem structItem(const StructDecl& decl, const DocMap& docs, const SourceText&
   return item;
 }
 
-DocItem enumItem(const EnumDecl& decl, const DocMap& docs) {
+DocItem enumItem(const EnumDecl& decl, const DocMap& docs,
+                 const std::string& aboveDoc = {}) {
   DocItem item;
   item.kind = DocItem::Kind::Enum;
   item.name = decl.name;
   item.signature = "enum " + decl.name;
-  item.doc = docFor(docs, decl.span);
+  item.doc = pickDoc(docs, decl.span, {decl.doc, aboveDoc});
   for (const EnumVariant& variant : decl.variants) {
     DocMember member;
     member.name = variant.name;
     member.signature = variant.name;
-    member.doc = docFor(docs, variant.span);
+    member.doc = pickDoc(docs, variant.span, {variant.doc});
     item.variants.push_back(std::move(member));
   }
   return item;
 }
 
-DocItem traitItem(const TraitDecl& decl, const DocMap& docs) {
+DocItem traitItem(const TraitDecl& decl, const DocMap& docs,
+                  const std::string& aboveDoc = {}) {
   DocItem item;
   item.kind = DocItem::Kind::Trait;
   item.name = decl.name;
@@ -173,7 +240,7 @@ DocItem traitItem(const TraitDecl& decl, const DocMap& docs) {
     signature += ")";
   }
   item.signature = signature;
-  item.doc = docFor(docs, decl.span);
+  item.doc = pickDoc(docs, decl.span, {decl.doc, aboveDoc});
 
   for (const TraitSig& sig : decl.methods) {
     DocItem method;
@@ -181,7 +248,7 @@ DocItem traitItem(const TraitDecl& decl, const DocMap& docs) {
     method.name = sig.name;
     method.signature = "fn " + sig.name + paramsText(sig.params);
     if (sig.returnType) method.signature += " -> " + typeText(sig.returnType.get());
-    method.doc = docFor(docs, sig.span);
+    method.doc = pickDoc(docs, sig.span, {sig.doc});
     method.returnType = typeText(sig.returnType.get());
     for (const ParamDecl& param : sig.params) {
       DocParameter documented;
@@ -195,7 +262,7 @@ DocItem traitItem(const TraitDecl& decl, const DocMap& docs) {
 }
 
 DocItem letItem(const LetStmt& decl, const DocMap& docs, const SourceText& source,
-                bool topLevel) {
+                bool topLevel, const std::string& aboveDoc = {}) {
   DocItem item;
   const std::string keyword = declarationKeyword(source, decl.span, decl.nameSpan);
   item.name = decl.name;
@@ -208,7 +275,7 @@ DocItem letItem(const LetStmt& decl, const DocMap& docs, const SourceText& sourc
   signature = decl.name;
   if (decl.type) signature += ": " + typeText(decl.type.get());
   item.signature = signature;
-  item.doc = docFor(docs, decl.span);
+  item.doc = pickDoc(docs, decl.span, {aboveDoc});
   item.returnType = typeText(decl.type.get());
   return item;
 }
@@ -371,23 +438,46 @@ DocResult extractDocs(const std::string& source, DiagnosticSink& sink,
     }
   }
 
+  // Python-style docstrings: a leading string-literal statement documents the
+  // module, and one directly above a declaration documents that declaration.
+  std::string moduleDocstring;
+  std::string pendingDoc;
+  bool pendingDocSet = false;
+  bool firstStatement = true;
+
   for (const auto& statement : program->statements) {
     if (!statement) continue;
+    std::string docstring;
+    if (docstringText(*statement, docstring)) {
+      if (firstStatement) {
+        moduleDocstring = std::move(docstring);
+      } else {
+        pendingDoc = std::move(docstring);
+        pendingDocSet = true;
+      }
+      firstStatement = false;
+      continue;
+    }
+    firstStatement = false;
+    const std::string aboveDoc = pendingDocSet ? pendingDoc : "";
+    pendingDocSet = false;
+    pendingDoc.clear();
     switch (statement->kind) {
       case StmtKind::FnDecl:
         result.module.items.push_back(
-            functionItem(static_cast<const FnDecl&>(*statement), docs));
+            functionItem(static_cast<const FnDecl&>(*statement), docs, aboveDoc));
         break;
       case StmtKind::StructDecl:
-        result.module.items.push_back(
-            structItem(static_cast<const StructDecl&>(*statement), docs, sourceView));
+        result.module.items.push_back(structItem(
+            static_cast<const StructDecl&>(*statement), docs, sourceView, aboveDoc));
         break;
       case StmtKind::EnumDecl:
-        result.module.items.push_back(enumItem(static_cast<const EnumDecl&>(*statement), docs));
+        result.module.items.push_back(
+            enumItem(static_cast<const EnumDecl&>(*statement), docs, aboveDoc));
         break;
       case StmtKind::TraitDecl:
         result.module.items.push_back(
-            traitItem(static_cast<const TraitDecl&>(*statement), docs));
+            traitItem(static_cast<const TraitDecl&>(*statement), docs, aboveDoc));
         break;
       case StmtKind::TypeAlias: {
         const auto& alias = static_cast<const TypeAliasDecl&>(*statement);
@@ -395,13 +485,13 @@ DocResult extractDocs(const std::string& source, DiagnosticSink& sink,
         item.kind = DocItem::Kind::TypeAlias;
         item.name = alias.name;
         item.signature = "type " + alias.name + " = " + typeText(alias.type.get());
-        item.doc = docFor(docs, alias.span);
+        item.doc = pickDoc(docs, alias.span, {aboveDoc});
         result.module.items.push_back(std::move(item));
         break;
       }
       case StmtKind::Let:
-        result.module.items.push_back(
-            letItem(static_cast<const LetStmt&>(*statement), docs, sourceView, true));
+        result.module.items.push_back(letItem(
+            static_cast<const LetStmt&>(*statement), docs, sourceView, true, aboveDoc));
         break;
       case StmtKind::Expr: {
         const auto& expr = static_cast<const ExprStmt&>(*statement);
@@ -413,6 +503,8 @@ DocResult extractDocs(const std::string& source, DiagnosticSink& sink,
         break;
     }
   }
+
+  if (result.module.doc.empty()) result.module.doc = cleanDocstring(moduleDocstring);
 
   result.ok = true;
   return result;

@@ -14,7 +14,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-SOURCE = """import json
+SOURCE = '''import json
 
 ## A two-dimensional point.
 struct Point:
@@ -49,7 +49,16 @@ fn add3(a: i32, b: i32, c: i32) -> i32:
     return a + b + c
 
 total = add3(1, 2, 3)
+
 """
+Greets someone warmly.
+"""
+fn greet(name: str) -> str:
+    """Returns a friendly greeting."""
+    return "hi " + name
+
+greeting = greet("world")
+'''
 
 
 class Client:
@@ -194,6 +203,19 @@ def main() -> int:
             fail("hover did not describe the add function")
         if "Adds two numbers." not in hover_text:
             fail("hover did not include the declaration's doc comment")
+
+        greet_call_line = next(i for i, line in enumerate(lines) if 'greet("world")' in line)
+        greet_column = lines[greet_call_line].index('greet("')
+        hover = client.request(
+            "textDocument/hover",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": greet_call_line, "character": greet_column},
+            },
+        )
+        greet_hover = hover["result"]["contents"]["value"]
+        if "Returns a friendly greeting." not in greet_hover:
+            fail("hover did not include the function's docstring")
 
         symbols = client.request(
             "textDocument/documentSymbol", {"textDocument": {"uri": uri}}

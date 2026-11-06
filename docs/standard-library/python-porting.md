@@ -109,7 +109,8 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
 ## Style
 
 - Match existing stdlib: snake_case fns, CamelCase types, `fn name(args):`
-  (return annotations optional), doc comments `##`, 4-space indent, spaces only.
+  (return annotations optional), doc comments `##` or `"""` docstrings,
+  4-space indent, spaces only.
 - Every ported module gets a `README.md` noting: source CPython file(s), API
   coverage vs Python (what's missing and why), and semantic deviations
   (exceptions -> panic/Result, iterators -> lists, etc.).
