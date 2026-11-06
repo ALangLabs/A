@@ -50,6 +50,7 @@ class Client:
             env=environment,
         )
         self.next_id = 1
+        self.buffered: list[dict] = []
 
     def send(self, message: dict) -> None:
         body = json.dumps(message).encode("utf-8")
@@ -81,11 +82,18 @@ class Client:
             message = self.receive()
             if message.get("id") == request_id and "method" not in message:
                 return message
+            # Async diagnostics may land mid-request (ty/pyrefly do the same);
+            # buffer them for wait_notification instead of dropping them.
+            if "method" in message:
+                self.buffered.append(message)
 
     def notify(self, method: str, params: dict) -> None:
         self.send({"jsonrpc": "2.0", "method": method, "params": params})
 
     def wait_notification(self, method: str) -> dict:
+        for index, buffered in enumerate(self.buffered):
+            if buffered.get("method") == method:
+                return self.buffered.pop(index)
         while True:
             message = self.receive()
             if message.get("method") == method:
@@ -393,12 +401,38 @@ def main() -> int:
         if actions is None:
             fail("codeAction returned null")
 
+        # Async checking: didChange only enqueues (200ms debounce); a later
+        # publishDiagnostics proves the worker ran without blocking requests.
+        # Two rapid edits must coalesce (latest wins) instead of checking twice.
+        client.notify(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": 3},
+                "contentChanges": [{"text": SOURCE + "\n"}],
+            },
+        )
+        client.notify(
+            "textDocument/didChange",
+            {
+                "textDocument": {"uri": uri, "version": 4},
+                "contentChanges": [{"text": SOURCE}],
+            },
+        )
+        # Requests answer immediately even while the worker is debouncing.
+        client.request(
+            "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+        )
+        async_diag = client.wait_notification("textDocument/publishDiagnostics")
+        if async_diag["params"]["diagnostics"]:
+            fail(f"async diagnostics unexpected: {async_diag['params']['diagnostics']}")
+
         client.stop()
         print(
             "OK: diagnostics, definition, hover, symbols, completion, formatting, "
             "rename, highlights, folding, module/string completion, signature help, "
-            "incremental sync, semantic tokens, inlay hints, prepareRename, "
-            "declaration, selectionRange, code actions"
+            "incremental sync, async checking (debounced, latest-wins), semantic "
+            "tokens, inlay hints, prepareRename, declaration, selectionRange, "
+            "code actions"
         )
 
     return 0

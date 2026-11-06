@@ -138,6 +138,7 @@ against the compiler (2026-10-29).
 ## 13. CLI Toolchain
 
 - [x] `a check` — compilation checks without producing executable (Plan §16)
+- [x] Async type checking — `Sema::analyzeParallel` (worker pool) + `Sema::analyzeAsync` (future), `a check --parallel` / `-j N`, thread-safe diagnostics, and an LSP background worker with 200 ms debounce (diagnostics publish asynchronously; `didClose` cancels)
 - [x] `a fmt` — source code formatter (Plan §16)
 - [x] `a doc` — documentation generator (Plan §16)
 - [x] `a test` — test runner for `fn test_*()` (Plan §16)

@@ -252,10 +252,11 @@ bool Sema::occursIn(TypePtr var, TypePtr type) {
 
 // Shared Type-var objects are mutated by unify/bindVar from parallel module
 // workers. Serialise those mutations; diagnostics are already locked.
-static std::mutex gVarMutex;
+// Recursive because unify() calls bindVar() and vice versa.
+static std::recursive_mutex gVarMutex;
 
 bool Sema::bindVar(TypePtr var, TypePtr type) {
-  std::lock_guard<std::mutex> lock(gVarMutex);
+  std::lock_guard<std::recursive_mutex> lock(gVarMutex);
   TypePtr resolved = resolveType(type);
   if (!resolved) return true;
   if (resolved->kind == TypeKind::Var) return unify(var, resolved);
@@ -284,7 +285,7 @@ bool Sema::bindVar(TypePtr var, TypePtr type) {
 }
 
 bool Sema::unify(TypePtr a, TypePtr b) {
-  std::lock_guard<std::mutex> lock(gVarMutex);
+  std::lock_guard<std::recursive_mutex> lock(gVarMutex);
   a = resolveType(a);
   b = resolveType(b);
   if (!a || !b) return true;
@@ -369,7 +370,7 @@ bool Sema::unify(TypePtr a, TypePtr b) {
 }
 
 bool Sema::constrainVar(TypePtr var, Constraint constraint) {
-  std::lock_guard<std::mutex> lock(gVarMutex);
+  std::lock_guard<std::recursive_mutex> lock(gVarMutex);
   TypePtr resolved = resolveType(var);
   if (!resolved) return false;
   if (resolved->kind == TypeKind::Var) {
@@ -5445,7 +5446,7 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
 }
 
 void Sema::checkTypeVariables() {
-  std::lock_guard<std::mutex> lock(gVarMutex);
+  std::lock_guard<std::recursive_mutex> lock(gVarMutex);
   for (auto& info : typeVariables_) {
     TypePtr resolved = resolveType(info.var);
     if (!resolved || resolved->kind != TypeKind::Var) continue;

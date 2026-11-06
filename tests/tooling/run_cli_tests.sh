@@ -114,4 +114,49 @@ grep -q "FAILED test_bad:" "$WORK_DIR/test.out"
 grep -q "ok test_ok" "$WORK_DIR/test.out"
 grep -q "1 passed, 1 failed" "$WORK_DIR/test.out"
 
-echo "OK: fmt, doc, check, and test CLI"
+# Async/parallel checking: --parallel must agree with serial on diagnostics,
+# exit code, and program output.
+PARALLEL="$WORK_DIR/parallel.a"
+cat >"$PARALLEL" <<'EOF'
+fn add(a: i32, b: i32) -> i32:
+    return a + b
+
+print(add(2, 3))
+EOF
+"$A_BIN" check "$PARALLEL"
+"$A_BIN" check --parallel "$PARALLEL"
+"$A_BIN" check --jobs=4 "$PARALLEL"
+"$A_BIN" check -j4 "$PARALLEL"
+"$A_BIN" run --parallel "$PARALLEL" >"$WORK_DIR/parallel.out"
+grep -q "^5$" "$WORK_DIR/parallel.out"
+
+BROKEN2="$WORK_DIR/broken2.a"
+printf 'x = undefined_name\n' >"$BROKEN2"
+if "$A_BIN" check --parallel "$BROKEN2" >/dev/null 2>"$WORK_DIR/serial.err"; then
+  echo "error: parallel check accepted undefined name" >&2
+  exit 1
+fi
+if "$A_BIN" check "$BROKEN2" >/dev/null 2>&1; then
+  echo "error: serial check accepted undefined name" >&2
+  exit 1
+fi
+grep -q "E0001" "$WORK_DIR/serial.err"
+
+# Multi-module programs exercise analyzeParallel's worker pool; serial and
+# parallel runs must agree.
+mkdir -p "$WORK_DIR/multi/lib"
+cat >"$WORK_DIR/multi/lib/mathx.a" <<'EOF'
+fn add(a, b):
+    return a + b
+EOF
+cat >"$WORK_DIR/multi/main.a" <<'EOF'
+import "lib/mathx.a"
+print(mathx.add(2, 3))
+EOF
+"$A_BIN" check "$WORK_DIR/multi/main.a"
+"$A_BIN" check --parallel "$WORK_DIR/multi/main.a"
+"$A_BIN" check -j4 "$WORK_DIR/multi/main.a"
+"$A_BIN" run --parallel "$WORK_DIR/multi/main.a" >"$WORK_DIR/multi.out"
+grep -q "^5$" "$WORK_DIR/multi.out"
+
+echo "OK: fmt, doc, check (incl. parallel/async), and test CLI"
