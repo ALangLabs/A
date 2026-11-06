@@ -341,6 +341,7 @@ static inline aval a_shr(aval l, aval r) {
 
 /* objects */
 aval a_str_new(const char *p, uint64_t len);
+aval a_char_new(const char *p, uint64_t len);
 aval a_str_concat(aval l, aval r);
 aval a_str_join(uint64_t n, aval *items);       /* join with "" */
 aval a_str_joinsep(aval sep, uint64_t n, aval *items);

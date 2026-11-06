@@ -36,7 +36,7 @@ typedef struct AObj {
 
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
-    T_FNON, T_ENV, T_RESULT, T_INT64
+    T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW
 };
 
 typedef struct { AObj h; char data[]; } AStr;
@@ -55,6 +55,7 @@ typedef struct {
 typedef struct { AObj h; uint64_t n; aval slots[]; } AEnv;
 typedef struct { AObj h; uint32_t ok; uint32_t is_option; aval value; } AResult;
 typedef struct { AObj h; int64_t v; } AInt64;
+typedef struct { AObj h; aval parent; int64_t off; int64_t len; int is_tuple; } AView;
 typedef struct {
     AObj h;
     aval src;
@@ -67,8 +68,13 @@ typedef struct {
 
 enum {
     K_NONE, K_BOOL, K_INT, K_FLOAT, K_STR, K_LIST, K_TUPLE, K_DICT,
-    K_SET, K_RANGE, K_ITER, K_FNON, K_ENV, K_RESULT, K_OTHER
+    K_SET, K_RANGE, K_ITER, K_FNON, K_ENV, K_RESULT, K_OTHER, K_CHAR, K_VIEW
 };
+
+static AArr *view_root(aval v, int64_t *off);
+static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple);
+static aval list_from_vec(const aval *p, uint64_t n, int tuple);
+static void sort_arr(aval *a, uint64_t n);
 
 /* ------------------------------------------------------------------ */
 /* small utilities                                                     */
@@ -257,7 +263,7 @@ static aval buf_take(Buf *b) {
 
 static AStr *str_of(aval v, const char *what) {
     AObj *o = obj_of(v);
-    if (!o || o->type != T_STR)
+    if (!o || (o->type != T_STR && o->type != T_CHAR))
         panicf("%s must be str, not '%s'", what, type_name_cstr(v));
     return (AStr *)o;
 }
@@ -266,6 +272,17 @@ aval a_str_new(const char *p, uint64_t len) {
     if (len && !p) panicf("null string data");
     AStr *s = (AStr *)xmalloc(sizeof(AStr) + (size_t)len + 1);
     s->h.type = T_STR;
+    s->h.len = (uint32_t)len;
+    s->h.cap = len + 1;
+    if (len) memcpy(s->data, p, (size_t)len);
+    s->data[len] = '\0';
+    return mkobj(&s->h);
+}
+
+aval a_char_new(const char *p, uint64_t len) {
+    if (len && !p) panicf("null string data");
+    AStr *s = (AStr *)xmalloc(sizeof(AStr) + (size_t)len + 1);
+    s->h.type = T_CHAR;
     s->h.len = (uint32_t)len;
     s->h.cap = len + 1;
     if (len) memcpy(s->data, p, (size_t)len);
@@ -337,20 +354,21 @@ static const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn
 static int64_t str_find(aval hay, aval needle, int64_t start, int reverse) {
     uint64_t hn, nn;
     const char *h = str_data(hay, &hn), *n = str_data(needle, &nn);
+    uint64_t total_cp = u8_count(h, hn);
     int64_t st = start;
-    if (st < 0) st += (int64_t)hn;
+    if (st < 0) st += (int64_t)total_cp;
     if (st < 0) st = 0;
-    if ((uint64_t)st > hn) return -1;
-    if (nn == 0) return st <= (int64_t)hn ? st : -1;
-    if ((uint64_t)st + nn > hn) return -1;
+    if (st > (int64_t)total_cp) return -1;
+    if (nn == 0) return st;
+    uint64_t st_byte = cp_to_byte(h, hn, st);
     if (!reverse) {
         size_t pos = 0;
-        const char *p = find_bytes(h, (size_t)hn, n, (size_t)nn, (size_t)st, &pos);
-        return p ? (int64_t)pos : -1;
+        const char *p = find_bytes(h, (size_t)hn, n, (size_t)nn, st_byte, &pos);
+        if (!p) return -1;
+        return (int64_t)u8_count(h, pos);
     }
-    /* reverse: scan candidate end positions from the back */
-    for (int64_t i = (int64_t)hn - (int64_t)nn; i >= st; --i) {
-        if (memcmp(h + i, n, (size_t)nn) == 0) return i;
+    for (int64_t i = (int64_t)hn - (int64_t)nn; i >= (int64_t)st_byte; --i) {
+        if (memcmp(h + i, n, (size_t)nn) == 0) return (int64_t)u8_count(h, (uint64_t)i);
     }
     return -1;
 }
@@ -457,6 +475,8 @@ static int kind_of(aval v) {
         case T_FNON: return K_FNON;
         case T_ENV: return K_ENV;
         case T_RESULT: return K_RESULT;
+        case T_CHAR: return K_CHAR;
+        case T_VIEW: return K_VIEW;
         default: return K_OTHER;
     }
 }
@@ -477,6 +497,8 @@ static const char *type_name_cstr(aval v) {
         case K_FNON: return "function";
         case K_ENV: return "environment";
         case K_RESULT: return "result";
+        case K_CHAR: return "char";
+        case K_VIEW: return "view";
         default: return "object";
     }
 }
@@ -546,6 +568,25 @@ static void format_into(Buf *b, aval v, int quote) {
             const char *p = str_data(v, &n);
             if (quote) format_quoted(b, p, (size_t)n);
             else buf_addn(b, p, (size_t)n);
+            return;
+        }
+        case K_CHAR: {
+            /* Chars display unquoted even inside containers (docs:
+               s.chars() yields char values, distinct from strings). */
+            uint64_t n;
+            const char *p = str_data(v, &n);
+            buf_addn(b, p, (size_t)n);
+            return;
+        }
+        case K_VIEW: {
+            AView *vw = (AView *)obj_of(v);
+            AArr *a = (AArr *)obj_of(vw->parent);
+            buf_addc(b, vw->is_tuple ? '(' : '[');
+            for (int64_t i = 0; i < vw->len; ++i) {
+                if (i) buf_adds(b, ", ");
+                format_into(b, a->items[(size_t)(vw->off + i)], 1);
+            }
+            buf_addc(b, vw->is_tuple ? ')' : ']');
             return;
         }
         case K_LIST:
@@ -638,6 +679,8 @@ static int truthy(aval v) {
         case K_INT: return int_val_full(v) != 0;
         case K_FLOAT: return a_double_val(v) != 0.0;
         case K_STR: return ((AStr *)obj_of(v))->h.len != 0;
+        case K_CHAR: return ((AStr *)obj_of(v))->h.len != 0;
+        case K_VIEW: return ((AView *)obj_of(v))->len != 0;
         case K_LIST:
         case K_TUPLE:
         case K_SET:
@@ -754,6 +797,11 @@ aval a_len(aval v) {
             AStr *s = (AStr *)obj_of(v);
             return mkint_full(u8_count(s->data, s->h.len));
         }
+        case K_CHAR: {
+            AStr *s = (AStr *)obj_of(v);
+            return mkint_full(u8_count(s->data, s->h.len));
+        }
+        case K_VIEW: return mkint_full(((AView *)obj_of(v))->len);
         case K_LIST:
         case K_TUPLE:
         case K_SET:
@@ -791,10 +839,27 @@ static int values_equal(aval a, aval b) {
         return num_to_double(a) == num_to_double(b);
     }
     if (a == b) return 1;
+    /* Views compare as the underlying slice (view == list if elements match). */
+    if (ka == K_VIEW || kb == K_VIEW) {
+        if (ka != K_VIEW && ka != K_LIST && ka != K_TUPLE) return 0;
+        if (kb != K_VIEW && kb != K_LIST && kb != K_TUPLE) return 0;
+        int64_t la = ka == K_VIEW ? ((AView *)obj_of(a))->len : (int64_t)((AArr *)obj_of(a))->h.len;
+        int64_t lb = kb == K_VIEW ? ((AView *)obj_of(b))->len : (int64_t)((AArr *)obj_of(b))->h.len;
+        if (la != lb) return 0;
+        for (int64_t i = 0; i < la; ++i) {
+            aval xa = ka == K_VIEW ? ((AArr *)obj_of(((AView *)obj_of(a))->parent))->items[(size_t)(((AView *)obj_of(a))->off + i)]
+                                   : ((AArr *)obj_of(a))->items[(size_t)i];
+            aval xb = kb == K_VIEW ? ((AArr *)obj_of(((AView *)obj_of(b))->parent))->items[(size_t)(((AView *)obj_of(b))->off + i)]
+                                   : ((AArr *)obj_of(b))->items[(size_t)i];
+            if (!values_equal(xa, xb)) return 0;
+        }
+        return 1;
+    }
     if (ka != kb) return 0;
     switch (ka) {
         case K_BOOL: return 0;
         case K_STR: return str_eq(a, b);
+        case K_CHAR: return str_eq(a, b);
         case K_LIST:
         case K_TUPLE: {
             AArr *x = (AArr *)obj_of(a), *y = (AArr *)obj_of(b);
@@ -1314,6 +1379,17 @@ aval a_getitem(aval obj, aval idx) {
             if (boff + (uint64_t)l > s->h.len) l = 1;
             return a_str_new(s->data + boff, (uint64_t)l);
         }
+        case K_VIEW: {
+            AView *vw = (AView *)obj_of(obj);
+            int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)vw->len);
+            int64_t base;
+            AArr *root = view_root(obj, &base);
+            return root->items[(size_t)(base + i)];
+        }
+        case K_CHAR: {
+            panicf("object of type 'char' is not subscriptable");
+            return A_NONE;
+        }
         case K_LIST:
         case K_TUPLE: {
             AArr *a = (AArr *)obj_of(obj);
@@ -1340,6 +1416,14 @@ aval a_getitem(aval obj, aval idx) {
 
 aval a_setitem(aval obj, aval idx, aval val) {
     switch (kind_of(obj)) {
+        case K_VIEW: {
+            AView *vw = (AView *)obj_of(obj);
+            int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)vw->len);
+            int64_t base;
+            AArr *root = view_root(obj, &base);
+            root->items[(size_t)(base + i)] = val;
+            return val;
+        }
         case K_LIST: {
             AArr *a = (AArr *)obj_of(obj);
             int64_t i = normalize_index(expect_int64(idx, "index"), a->h.len);
@@ -1357,6 +1441,30 @@ aval a_setitem(aval obj, aval idx, aval val) {
     }
 }
 
+static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
+    AView *vw = (AView *)xmalloc(sizeof(AView));
+    vw->h.type = T_VIEW;
+    vw->h.len = (uint32_t)len;
+    vw->h.cap = 0;
+    vw->parent = parent;
+    vw->off = off;
+    vw->len = len;
+    vw->is_tuple = is_tuple;
+    return mkobj(&vw->h);
+}
+/* Resolve a view (or direct list) to root AArr + absolute offset. */
+static AArr *view_root(aval v, int64_t *off) {
+    AObj *o = obj_of(v);
+    if (o && o->type == T_VIEW) {
+        AView *vw = (AView *)o;
+        int64_t base = 0;
+        AArr *root = view_root(vw->parent, &base);
+        *off = base + vw->off;
+        return root;
+    }
+    *off = 0;
+    return (AArr *)o;
+}
 static int64_t slice_step(aval v) {
     int64_t s = expect_int64(v, "slice step");
     if (s == 0) panicf("The slice step must be positive, found 0.");
@@ -1375,12 +1483,16 @@ static int64_t slice_bound(aval v, int64_t n, int64_t lower, int64_t upper,
 
 aval a_slice(aval obj, aval lo, aval hi, aval step) {
     int k = kind_of(obj);
-    if (k != K_STR && k != K_LIST && k != K_TUPLE)
+    if (k != K_STR && k != K_LIST && k != K_TUPLE && k != K_VIEW)
         panicf("object of type '%s' is not sliceable", type_name_cstr(obj));
     AObj *o = obj_of(obj);
-    uint64_t len = o->type == T_STR
-        ? u8_count(((AStr *)o)->data, ((AStr *)o)->h.len)
-        : ((AArr *)o)->h.len;
+    uint64_t len;
+    if (o->type == T_STR)
+        len = u8_count(((AStr *)o)->data, ((AStr *)o)->h.len);
+    else if (o->type == T_VIEW)
+        len = (uint64_t)((AView *)o)->len;
+    else
+        len = ((AArr *)o)->h.len;
     int64_t n = (int64_t)len;
     int64_t st = a_is_none(step) ? 1 : slice_step(step);
     int64_t start, stop;
@@ -1406,6 +1518,44 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         }
         return buf_take(&b);
     }
+    /* Lists/tuples/views: contiguous step (1 or -1? only 1) returns a view
+       that aliases the parent; stepped copies return a fresh list. */
+    if (st == 1 && o->type != T_STR) {
+        int64_t cnt = stop - start;
+        if (cnt < 0) cnt = 0;
+        if (o->type == T_VIEW) {
+            int64_t base;
+            AArr *root = view_root(obj, &base);
+            (void)root;
+            int64_t rootBase = 0;
+            AArr *flat = view_root(obj, &rootBase);
+            aval flatAval = obj;
+            /* flatten: parent is the root array object */
+            int64_t dummy = 0;
+            AObj *rootObj = (AObj *)view_root(obj, &dummy);
+            /* rootObj points at root AArr; recover its aval via parent chain */
+            /* Simpler: keep obj as parent but offset relative to obj */
+            AView *vw = (AView *)o;
+            (void)flat; (void)flatAval;
+            return view_new(vw->parent, vw->off + start, cnt, vw->is_tuple);
+        }
+        (void)v;
+        return view_new(obj, start, cnt, o->type == T_TUPLE ? 1 : 0);
+    }
+    if (o->type == T_VIEW) {
+        AView *vw = (AView *)o;
+        int64_t base;
+        AArr *root = view_root(obj, &base);
+        (void)vw;
+        for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
+            avec_push(&v, root->items[(size_t)(base + i)]);
+            if (st > 0) { if (i > INT64_MAX - st) break; i += st; }
+            else { if (i < INT64_MIN - st) break; i += st; }
+        }
+        aval r = list_from_vec(v.p, v.len, 0);
+        free(v.p);
+        return r;
+    }
     AArr *a = (AArr *)o;
     for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
         avec_push(&v, a->items[i]);
@@ -1426,6 +1576,7 @@ aval a_iter_new(aval v) {
     it->idx = 0;
     it->cur = it->end = it->step = 0;
     switch (kind_of(v)) {
+        case K_VIEW:
         case K_LIST:
         case K_TUPLE:
         case K_SET:
@@ -1469,10 +1620,15 @@ aval a_iter_next(aval it, aval *out) {
     uint64_t len;
     aval *items = NULL;
     ADict *d = NULL;
+    AView *vw_src = NULL;
+    int64_t vw_base = 0;
     if (so->type == T_DICT) {
         d = (ADict *)so;
         len = d->h.len;
-    } else if (so->type == T_STR) {
+    } else if (so->type == T_VIEW) {
+        vw_src = (AView *)so;
+        len = (uint64_t)vw_src->len;
+    } else if (so->type == T_STR || so->type == T_CHAR) {
         len = u8_count(((AStr *)so)->data, ((AStr *)so)->h.len);
     } else {
         AArr *a = (AArr *)so;
@@ -1482,12 +1638,16 @@ aval a_iter_next(aval it, aval *out) {
     if (iter->idx >= len) return (aval)0;
     uint64_t i = iter->idx++;
     if (d) *out = d->pairs[i].k;
-    else if (so->type == T_STR) {
+    else if (vw_src) {
+        AArr *root = view_root(src, &vw_base);
+        *out = root->items[(size_t)(vw_base + (int64_t)i)];
+    }
+    else if (so->type == T_STR || so->type == T_CHAR) {
         AStr *s = (AStr *)so;
         uint64_t boff = cp_to_byte(s->data, s->h.len, (int64_t)i);
         int l = u8_len((unsigned char)s->data[boff]);
         if (boff + (uint64_t)l > s->h.len) l = 1;
-        *out = a_str_new(s->data + boff, (uint64_t)l);
+        *out = a_char_new(s->data + boff, (uint64_t)l);
     }
     else *out = items[i];
     return (aval)1;
@@ -1638,7 +1798,7 @@ static aval method_no_method(aval obj, const char *name) {
 }
 
 static aval str_case_map(aval v, int mode) {
-    /* mode: 0 lower, 1 upper, 2 capitalize, 3 title */
+    /* mode: 0 lower, 1 upper, 2 capitalize, 3 title, 4 swapcase */
     AStr *s = (AStr *)obj_of(v);
     AStr *r = (AStr *)xmalloc(sizeof(AStr) + (size_t)s->h.len + 1);
     r->h.type = T_STR;
@@ -1651,6 +1811,7 @@ static aval str_case_map(aval v, int mode) {
         if (mode == 0) o = (unsigned char)tolower(c);
         else if (mode == 1) o = (unsigned char)toupper(c);
         else if (mode == 2) o = (unsigned char)(i == 0 ? toupper(c) : tolower(c));
+        else if (mode == 4) o = (unsigned char)(isupper(c) ? tolower(c) : islower(c) ? toupper(c) : c);
         else {
             if (isalpha(c)) o = (unsigned char)(prev_alpha ? tolower(c) : toupper(c));
             else o = c;
@@ -1821,9 +1982,9 @@ static aval str_affix(aval v, int64_t width, aval fillv, int mode) {
     uint64_t pad = (uint64_t)width - n;
     Buf b;
     buf_init(&b);
-    uint64_t left = pad, right = 0;
-    if (mode == 1) { left = 0; right = pad; }
-    else if (mode == 2) { left = pad / 2; right = pad - left; }
+    uint64_t left = 0, right = pad;
+    if (mode == 1) { left = pad; right = 0; }
+    else if (mode == 2) { left = (pad + 1) / 2; right = pad - left; }
     else if (mode == 3) {
         /* zfill: sign first, then zeros */
         uint64_t i = 0;
@@ -1978,9 +2139,36 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
         if (!strcmp(name, "lower")) { want_args(name, n, 0, 0); return str_case_map(obj, 0); }
         if (!strcmp(name, "capitalize")) { want_args(name, n, 0, 0); return str_case_map(obj, 2); }
         if (!strcmp(name, "title")) { want_args(name, n, 0, 0); return str_case_map(obj, 3); }
-        if (!strcmp(name, "strip")) { want_args(name, n, 0, 0); return str_strip_impl(obj, 1, 1); }
-        if (!strcmp(name, "lstrip")) { want_args(name, n, 0, 0); return str_strip_impl(obj, 1, 0); }
-        if (!strcmp(name, "rstrip")) { want_args(name, n, 0, 0); return str_strip_impl(obj, 0, 1); }
+        if (!strcmp(name, "casefold")) { want_args(name, n, 0, 0); return str_case_map(obj, 0); }
+        if (!strcmp(name, "swapcase")) { want_args(name, n, 0, 0); return str_case_map(obj, 4); }
+        if (!strcmp(name, "strip") || !strcmp(name, "lstrip") || !strcmp(name, "rstrip")) {
+            int left = name[0] != 'r';
+            int right = strcmp(name, "lstrip") != 0;
+            if (n == 0) return str_strip_impl(obj, left, right);
+            want_args(name, n, 1, 1);
+            /* Strip chars arg: trim those bytes (ASCII set). */
+            uint64_t cn;
+            const char *cp = str_data(argv[0], &cn);
+            uint32_t a = 0, b = s->h.len;
+            int inSet = 0;
+            if (left) {
+                while (a < b) {
+                    inSet = 0;
+                    for (uint64_t q = 0; q < cn; ++q) if (s->data[a] == cp[q]) { inSet = 1; break; }
+                    if (!inSet) break;
+                    ++a;
+                }
+            }
+            if (right) {
+                while (b > a) {
+                    inSet = 0;
+                    for (uint64_t q = 0; q < cn; ++q) if (s->data[b - 1] == cp[q]) { inSet = 1; break; }
+                    if (!inSet) break;
+                    --b;
+                }
+            }
+            return a_str_new(s->data + a, (uint64_t)(b - a));
+        }
         if (!strcmp(name, "split") || !strcmp(name, "rsplit")) {
             want_args(name, n, 0, 2);
             aval sep = n >= 1 ? argv[0] : A_NONE;
@@ -1996,7 +2184,7 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             aval tmp = collect_iterable(argv[0]);
             AArr *a = (AArr *)obj_of(tmp);
             for (uint64_t i = 0; i < a->h.len; ++i)
-                if (kind_of(a->items[i]) != K_STR)
+                if (kind_of(a->items[i]) != K_STR && kind_of(a->items[i]) != K_CHAR)
                     panicf("sequence item %llu: expected str instance, %s found",
                            (unsigned long long)i, type_name_cstr(a->items[i]));
             aval r = a_str_joinsep(obj, a->h.len, a->items);
@@ -2075,6 +2263,114 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
         if (!strcmp(name, "islower")) { want_args(name, n, 0, 0); return bool_aval(str_pred(obj, 4)); }
         if (!strcmp(name, "isupper")) { want_args(name, n, 0, 0); return bool_aval(str_pred(obj, 5)); }
         if (!strcmp(name, "istitle")) { want_args(name, n, 0, 0); return bool_aval(str_pred(obj, 6)); }
+        if (!strcmp(name, "isascii")) {
+            want_args(name, n, 0, 0);
+            for (uint64_t q = 0; q < s->h.len; ++q) if ((unsigned char)s->data[q] >= 128) return A_FALSE;
+            return A_TRUE;
+        }
+        if (!strcmp(name, "isdecimal") || !strcmp(name, "isnumeric")) {
+            want_args(name, n, 0, 0);
+            if (!s->h.len) return A_FALSE;
+            for (uint64_t q = 0; q < s->h.len; ++q) if (!isdigit((unsigned char)s->data[q])) return A_FALSE;
+            return A_TRUE;
+        }
+        if (!strcmp(name, "isidentifier")) {
+            want_args(name, n, 0, 0);
+            if (!s->h.len) return A_FALSE;
+            if (!isalpha((unsigned char)s->data[0]) && s->data[0] != '_') return A_FALSE;
+            for (uint64_t q = 1; q < s->h.len; ++q)
+                if (!isalnum((unsigned char)s->data[q]) && s->data[q] != '_') return A_FALSE;
+            return A_TRUE;
+        }
+        if (!strcmp(name, "isprintable")) {
+            want_args(name, n, 0, 0);
+            if (!s->h.len) return A_TRUE;
+            for (uint64_t q = 0; q < s->h.len; ++q) if (!isprint((unsigned char)s->data[q])) return A_FALSE;
+            return A_TRUE;
+        }
+        if (!strcmp(name, "expandtabs")) {
+            want_args(name, n, 0, 1);
+            int64_t tab = n == 1 ? expect_int64(argv[0], "tabsize") : 8;
+            if (tab <= 0) tab = 8;
+            Buf b;
+            buf_init(&b);
+            int64_t col = 0;
+            for (uint64_t q = 0; q < s->h.len; ++q) {
+                char c = s->data[q];
+                if (c == '\t') {
+                    int64_t spaces = tab - (col % tab);
+                    for (int64_t k = 0; k < spaces; ++k) buf_addc(&b, ' ');
+                    col += spaces;
+                } else if (c == '\n' || c == '\r') {
+                    buf_addc(&b, c);
+                    col = 0;
+                } else {
+                    buf_addc(&b, c);
+                    ++col;
+                }
+            }
+            return buf_take(&b);
+        }
+        if (!strcmp(name, "removeprefix") || !strcmp(name, "removesuffix")) {
+            want_args(name, n, 1, 1);
+            uint64_t pn;
+            const char *pp = str_data(argv[0], &pn);
+            if (!strcmp(name, "removeprefix")) {
+                if (s->h.len >= pn && !memcmp(s->data, pp, (size_t)pn))
+                    return a_str_new(s->data + pn, s->h.len - pn);
+                return obj;
+            }
+            if (s->h.len >= pn && !memcmp(s->data + s->h.len - pn, pp, (size_t)pn))
+                return a_str_new(s->data, s->h.len - pn);
+            return obj;
+        }
+        if (!strcmp(name, "partition") || !strcmp(name, "rpartition")) {
+            want_args(name, n, 1, 1);
+            int rev = !strcmp(name, "rpartition");
+            int64_t r = str_find(obj, argv[0], 0, rev);
+            aval head, sep, tail;
+            if (r < 0) {
+                if (rev) head = obj, tail = a_str_new("", 0);
+                else head = obj, tail = a_str_new("", 0);
+                sep = a_str_new("", 0);
+                /* Python: not found -> (original, '', '') */
+                head = obj;
+            } else {
+                uint64_t pn;
+                str_data(argv[0], &pn);
+                head = a_str_new(s->data, (uint64_t)r);
+                sep = a_str_new(s->data + r, pn);
+                tail = a_str_new(s->data + r + pn, s->h.len - (uint64_t)r - pn);
+            }
+            aval items[3] = { head, sep, tail };
+            return a_tuple_new(3, items);
+        }
+        if (!strcmp(name, "splitlines")) {
+            want_args(name, n, 0, 1);
+            int keep = n == 1 && truthy(argv[0]);
+            aval lst = a_list_new(0, NULL);
+            uint64_t start = 0;
+            uint64_t i = 0;
+            while (i < s->h.len) {
+                char c = s->data[i];
+                if (c == '\n' || c == '\r') {
+                    uint64_t br_end = i + 1;
+                    if (c == '\r' && br_end < s->h.len && s->data[br_end] == '\n') br_end++;
+                    uint64_t end = keep ? br_end : i;
+                    a_list_push(lst, a_str_new(s->data + start, end - start));
+                    i = br_end;
+                    start = br_end;
+                } else {
+                    ++i;
+                }
+            }
+            if (start < s->h.len)
+                a_list_push(lst, a_str_new(s->data + start, s->h.len - start));
+            else if (start == s->h.len && s->h.len == 0) {
+                /* empty string -> [] */
+            }
+            return lst;
+        }
         if (!strcmp(name, "zfill") || !strcmp(name, "center") || !strcmp(name, "ljust") || !strcmp(name, "rjust")) {
             want_args(name, n, 1, 2);
             int64_t w = expect_int64(argv[0], "width");
@@ -2095,7 +2391,7 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
                 else if ((c & 0xF8) == 0xF0) i += 4;
                 else i += 1;
                 if (i > s->h.len) i = s->h.len;
-                a_list_push(lst, a_str_new(s->data + start, i - start));
+                a_list_push(lst, a_char_new(s->data + start, i - start));
             }
             return lst;
         }
@@ -2109,7 +2405,7 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
         }
         if (!strcmp(name, "contains")) {
             want_args(name, n, 1, 1);
-            if (kind_of(argv[0]) != K_STR) return a_bool(0);
+            if (kind_of(argv[0]) != K_STR && kind_of(argv[0]) != K_CHAR) return a_bool(0);
             AStr *hay = (AStr *)obj_of(obj);
             AStr *needle = (AStr *)obj_of(argv[0]);
             if (needle->h.len == 0) return a_bool(1);
@@ -2225,6 +2521,74 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
                 aval t = a->items[i]; a->items[i] = a->items[j]; a->items[j] = t;
             }
             return A_NONE;
+        }
+        return method_no_method(obj, name);
+    }
+
+    if (k == K_VIEW) {
+        AView *vw = (AView *)obj_of(obj);
+        int64_t base;
+        AArr *root = view_root(obj, &base);
+        if (!strcmp(name, "append")) {
+            panicf("Cannot 'append' a view.");
+        }
+        if (!strcmp(name, "pop")) {
+            panicf("Cannot 'pop' a view.");
+        }
+        if (!strcmp(name, "reverse")) {
+            want_args(name, n, 0, 0);
+            for (int64_t i = 0; i < vw->len / 2; ++i) {
+                int64_t j = vw->len - 1 - i;
+                aval t = root->items[(size_t)(base + i)];
+                root->items[(size_t)(base + i)] = root->items[(size_t)(base + j)];
+                root->items[(size_t)(base + j)] = t;
+            }
+            return A_NONE;
+        }
+        if (!strcmp(name, "sort")) {
+            want_args(name, n, 0, 0);
+            aval *ptr = root->items + (size_t)base;
+            sort_arr(ptr, (uint64_t)vw->len);
+            return A_NONE;
+        }
+        if (!strcmp(name, "count")) {
+            want_args(name, n, 1, 1);
+            int64_t c = 0;
+            for (int64_t i = 0; i < vw->len; ++i)
+                if (values_equal(root->items[(size_t)(base + i)], argv[0])) ++c;
+            return mkint_full(c);
+        }
+        if (!strcmp(name, "index")) {
+            want_args(name, n, 1, 1);
+            for (int64_t i = 0; i < vw->len; ++i)
+                if (values_equal(root->items[(size_t)(base + i)], argv[0]))
+                    return mkint_full(i);
+            panicf("Value is not in the list.");
+            return A_NONE;
+        }
+        if (!strcmp(name, "contains")) {
+            want_args(name, n, 1, 1);
+            for (int64_t i = 0; i < vw->len; ++i)
+                if (values_equal(root->items[(size_t)(base + i)], argv[0]))
+                    return A_TRUE;
+            return A_FALSE;
+        }
+        if (!strcmp(name, "first")) {
+            want_args(name, n, 0, 0);
+            if (!vw->len) return A_NONE;
+            return a_some_new(root->items[(size_t)base]);
+        }
+        if (!strcmp(name, "last")) {
+            want_args(name, n, 0, 0);
+            if (!vw->len) return A_NONE;
+            return a_some_new(root->items[(size_t)(base + vw->len - 1)]);
+        }
+        if (!strcmp(name, "copy")) {
+            want_args(name, n, 0, 0);
+            return list_from_vec(root->items + (size_t)base, (uint64_t)vw->len, vw->is_tuple);
+        }
+        if (!strcmp(name, "clear")) {
+            panicf("Cannot 'clear' a view.");
         }
         return method_no_method(obj, name);
     }
@@ -2427,7 +2791,13 @@ static aval bi_sum(uint64_t n, aval *argv) {
     return acc;
 }
 
-static aval bi_pow(uint64_t n, aval *argv) { want_args("pow", n, 2, 2); return a_pow(argv[0], argv[1]); }
+static aval bi_pow(uint64_t n, aval *argv) {
+    /* pow() is -> f64 per docs; the ** operator stays int for int base. */
+    want_args("pow", n, 2, 2);
+    aval r = a_pow(argv[0], argv[1]);
+    if (is_int_val(r)) return mkdouble((double)int_val_full(r));
+    return r;
+}
 
 #define BI_MATH1(fname, expr) \
     static aval fname(uint64_t n, aval *argv) { \

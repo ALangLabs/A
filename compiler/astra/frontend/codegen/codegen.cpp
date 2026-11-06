@@ -1110,7 +1110,7 @@ class Emitter {
       case ExprKind::CharLit: {
         auto& x = static_cast<const CharLitExpr&>(*e);
         std::string u = utf8Encode(x.value);
-        return "a_str_new(\"" + cEscape(u) + "\", " + std::to_string(u.size()) + ")";
+        return "a_char_new(\"" + cEscape(u) + "\", " + std::to_string(u.size()) + ")";
       }
       case ExprKind::StringLit: {
         auto& x = static_cast<const StringLitExpr&>(*e);
