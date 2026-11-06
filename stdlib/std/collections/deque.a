@@ -34,6 +34,7 @@ struct Deque<T>:
             while self._len() > self.maxlen:
                 if side == "left":
                     self._pop_right()
+
                 else:
                     self._pop_left()
 

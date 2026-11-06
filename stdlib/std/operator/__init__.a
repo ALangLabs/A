@@ -1,0 +1,251 @@
+# std.operator — port of CPython Lib/operator.py (pure-Python implementation).
+#
+# A has no special-method protocol, no `is` identity operator, no `getattr`,
+# no `callable`, no exceptions, and no default/variadic parameters. See
+# README.md for the full coverage matrix and deviations.
+#
+# Implementation note: the type checker infers `Json` for any value passed to
+# `json.kind`/`comptime.type_tag`, which then forbids every other operation on
+# that value. Runtime dispatch is therefore done with total probes instead:
+#   _is_string(x)  <=>  (x + "") == x        (only strings survive + "")
+#   _is_number(x)  <=>  (x + 0) == x         (only numbers survive + 0)
+# `None` cannot be compared inside function bodies (native backend limitation),
+# so it is detected via str(x) == "None" with an is_str guard.
+import math
+import core
+
+# -- probes ------------------------------------------------------------------
+
+fn _is_string(x):
+    return (x + "") == x
+
+fn _is_number(x):
+    return (x + 0) == x
+
+fn _is_int_value(x):
+    # Integral floats print with a '.' ("3.0"); ints never do. Large floats in
+    # exponent form ("1e+20") can be misdetected — harmless for floordiv.
+    return _is_number(x) and not ("." in str(x))
+
+fn _is_none(x):
+    # str(None) == "None"; the is_str guard excludes the string "None" itself.
+    return str(x) == "None" and not _is_string(x)
+
+# -- comparisons --------------------------------------------------------------
+
+fn lt(a, b):
+    return a < b
+
+fn le(a, b):
+    return a <= b
+
+fn eq(a, b):
+    return a == b
+
+fn ne(a, b):
+    return a != b
+
+fn ge(a, b):
+    return a >= b
+
+fn gt(a, b):
+    return a > b
+
+# -- logical -------------------------------------------------------------------
+
+fn truth(x):
+    # Python-style truthiness for bool/None/number/string/array/map/set.
+    # Structs and function values have no len/+ probe and raise a runtime
+    # error here (Python would return True) — documented deviation.
+    if _is_none(x):
+        return false
+    if x == true:
+        return true
+    if x == false:
+        return false
+    if _is_number(x):
+        return x != 0
+    return len(x) > 0
+
+fn not_(a):
+    return not truth(a)
+
+# A has no `is` identity operator; approximated by equality (see README).
+fn is_(a, b):
+    return a == b
+
+fn is_not(a, b):
+    return a != b
+
+fn is_none(a):
+    return _is_none(a)
+
+fn is_not_none(a):
+    return not _is_none(a)
+
+# -- math / bitwise ------------------------------------------------------------
+
+fn abs(a):
+    return math.abs(a)
+
+fn add(a, b):
+    return a + b
+
+fn and_(a, b):
+    return a & b
+
+fn floordiv(a, b):
+    # Python `a // b` floors toward -inf; A's `/` truncates toward zero.
+    if _is_int_value(a) and _is_int_value(b):
+        q = a / b
+        r = a % b
+        if r != 0 and ((r < 0) != (b < 0)):
+            q = q - 1
+        return q
+    return math.floor(a / b)
+
+fn index(a):
+    # Approximation of a.__index__(): integral numbers only.
+    if not _is_number(a):
+        core.panic("operator.index: argument is not an integer")
+    i = int(a)
+    if float(i) != float(a):
+        core.panic("operator.index: argument is not an integer")
+    return i
+
+fn inv(a):
+    return ~a
+
+fn invert(a):
+    return inv(a)
+
+fn lshift(a, b):
+    return a << b
+
+fn mod(a, b):
+    # Python `a % b` takes the sign of the divisor; A's `%` keeps the
+    # dividend's sign, so adjust when the remainder and divisor differ.
+    r = a % b
+    if r != 0 and ((r < 0) != (b < 0)):
+        r = r + b
+    return r
+
+fn mul(a, b):
+    return a * b
+
+fn neg(a):
+    return -a
+
+fn or_(a, b):
+    return a | b
+
+fn pos(a):
+    # A has no unary plus operator; +a is the identity for numbers.
+    return a
+
+fn pow(a, b):
+    # Two-argument form only (Python's mod= third argument is unsupported).
+    return a ** b
+
+fn rshift(a, b):
+    return a >> b
+
+fn sub(a, b):
+    return a - b
+
+fn truediv(a, b):
+    # Python `/` is always true division; A's `/` truncates for int/int.
+    return float(a) / float(b)
+
+fn xor(a, b):
+    return a ^ b
+
+# -- sequence operations ---------------------------------------------------------
+
+fn concat(a, b):
+    # Python `a + b` for sequences. Strings use `+`; arrays (and other
+    # iterables) are copied element-wise into a fresh array.
+    if _is_string(a):
+        if _is_string(b):
+            return a + b
+        core.panic("operator.concat: mismatched operand types")
+    if _is_string(b):
+        core.panic("operator.concat: mismatched operand types")
+    out = []
+    for v in a:
+        out.append(v)
+    for v in b:
+        out.append(v)
+    return out
+
+fn contains(a, b):
+    # Same as `b in a` (note reversed operands, like CPython).
+    return b in a
+
+fn countOf(a, b):
+    # Elements equal to `b`. For strings, `.count` has substring semantics
+    # (CPython counts single characters — see README).
+    if _is_string(a):
+        return a.count(b)
+    n = 0
+    for v in a:
+        if v == b:
+            n = n + 1
+    return n
+
+fn delitem(a, b):
+    # `del a[b]`: pop by index for arrays, by key for maps.
+    a.pop(b)
+
+fn getitem(a, b):
+    return a[b]
+
+fn indexOf(a, b):
+    # First index of `b` in `a`; panics like CPython's ValueError.
+    if _is_string(a):
+        return a.index(b)
+    i = 0
+    for v in a:
+        if v == b:
+            return i
+        i = i + 1
+    core.panic("operator.indexOf: value not in sequence")
+
+fn setitem(a, b, c):
+    a[b] = c
+
+fn length_hint(obj):
+    # CPython's length_hint(obj, default=0); A has no default arguments, so
+    # this takes only `obj` and returns len(obj). Non-sized objects raise a
+    # runtime error instead of returning the default (documented deviation).
+    return len(obj)
+
+# -- generalized lookup objects ---------------------------------------------------
+
+fn itemgetter(item):
+    # Returns a callable fetching `item` from its operand (CPython parity).
+    return fn(obj) => obj[item]
+
+fn itemgetter_all(items):
+    # Multi-index variant of itemgetter; CPython returns a tuple, A an array.
+    return fn(obj) => [obj[i] for i in items]
+
+fn repeat_seq(a, n):
+    # Sequence repetition `a * n` (CPython has no operator.repeat; `*` is mul).
+    if _is_string(a):
+        out = ""
+        i = 0
+        while i < n:
+            out = out + a
+            i = i + 1
+        return out
+    out = []
+    i = 0
+    while i < n:
+        for v in a:
+            out.append(v)
+        i = i + 1
+    return out
+
+fn repeat(a, n):
+    return repeat_seq(a, n)

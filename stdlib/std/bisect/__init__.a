@@ -1,0 +1,79 @@
+# std.bisect — port of CPython Lib/bisect.py (pure-Python implementation;
+# CPython's `_bisect` C accelerator only changes speed, not semantics).
+#
+# A has no default parameters, so CPython's `lo=0, hi=len(a)` defaults are
+# split into 2-argument convenience functions and `*_range` functions that
+# take explicit bounds. The `key=` parameter is unsupported (see README).
+import core
+
+fn _check_lo(lo):
+    if lo < 0:
+        core.panic("bisect: lo must be non-negative")
+
+# -- search ---------------------------------------------------------------------
+
+fn bisect_left_range(a, x, lo, hi) -> i64:
+    "Index where `x` inserts into sorted `a` before existing equal entries."
+    _check_lo(lo)
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if a[mid] < x:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+fn bisect_left(a, x) -> i64:
+    "Same as bisect_left_range(a, x, 0, len(a))."
+    return bisect_left_range(a, x, 0, len(a))
+
+fn bisect_right_range(a, x, lo, hi) -> i64:
+    "Index where `x` inserts into sorted `a` after existing equal entries."
+    _check_lo(lo)
+    while lo < hi:
+        mid = (lo + hi) / 2
+        if x < a[mid]:
+            hi = mid
+        else:
+            lo = mid + 1
+    return lo
+
+fn bisect_right(a, x) -> i64:
+    "Same as bisect_right_range(a, x, 0, len(a))."
+    return bisect_right_range(a, x, 0, len(a))
+
+# -- insertion --------------------------------------------------------------------
+
+fn insort_left_range(a, x, lo, hi):
+    "Insert `x` into sorted list `a` before existing equal entries; mutates `a`."
+    _check_lo(lo)
+    pos = bisect_left_range(a, x, lo, hi)
+    a.insert(pos, x)
+
+fn insort_left(a, x):
+    "Same as insort_left_range(a, x, 0, len(a)); mutates `a`."
+    insort_left_range(a, x, 0, len(a))
+
+fn insort_right_range(a, x, lo, hi):
+    "Insert `x` into sorted list `a` after existing equal entries; mutates `a`."
+    _check_lo(lo)
+    pos = bisect_right_range(a, x, lo, hi)
+    a.insert(pos, x)
+
+fn insort_right(a, x):
+    "Same as insort_right_range(a, x, 0, len(a)); mutates `a`."
+    insort_right_range(a, x, 0, len(a))
+
+# -- aliases (CPython: bisect = bisect_right, insort = insort_right) ----------------
+
+fn bisect(a, x) -> i64:
+    return bisect_right(a, x)
+
+fn bisect_range(a, x, lo, hi) -> i64:
+    return bisect_right_range(a, x, lo, hi)
+
+fn insort(a, x):
+    insort_right(a, x)
+
+fn insort_range(a, x, lo, hi):
+    insort_right_range(a, x, lo, hi)

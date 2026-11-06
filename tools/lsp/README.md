@@ -8,8 +8,8 @@ It reuses the compiler front end (`lexer`, `parser`, `module loader`, and
 
 | LSP method | Behaviour |
 | ---------- | --------- |
-| `textDocument/didOpen`, `didChange`, `didSave`, `didClose` | incremental document sync (kind 2), with full-document fallback |
-| `textDocument/publishDiagnostics` | lex, parse, and type-check diagnostics with stable codes (`E0001`…), `codeDescription`, tags, and `relatedInformation` (help text). Suppressed by trailing `# a: ignore` / `# type: ignore` / `# ty: ignore` / `# pyrefly: ignore`, optionally with `[CODE]` |
+| `textDocument/didOpen`, `didChange`, `didSave`, `didClose` | incremental sync (kind 2) + **async type checking**: edits only snapshot text and enqueue a background job (200 ms debounce, latest-wins, stale jobs cancelled). Diagnostics publish from a worker thread without blocking requests; `didClose` cancels pending work |
+| `textDocument/publishDiagnostics` | lex, parse, and type-check diagnostics with stable codes (`E0001`…), `codeDescription`, tags, and `relatedInformation` (help text), delivered asynchronously. Suppressed by trailing `# a: ignore` / `# type: ignore` / `# ty: ignore` / `# pyrefly: ignore`, optionally with `[CODE]` |
 | `textDocument/definition`, `declaration`, `typeDefinition`, `implementation` | variables, parameters, functions, structs, fields, methods, enum variants, imported modules |
 | `textDocument/references` | all uses of the symbol under the cursor, including imported modules |
 | `textDocument/hover` | declaration signature/type, inferred type (`x: i32  (inferred)`) for unannotated variables, definition link, and attached `##` documentation |
@@ -26,8 +26,13 @@ It reuses the compiler front end (`lexer`, `parser`, `module loader`, and
 | `textDocument/signatureHelp` | declared signatures for functions, builtins, native modules, and primitive methods, with active parameter |
 | `workspace/symbol` | top-level symbols in open A documents |
 
-The server is single-threaded, speaks JSON-RPC over stdin/stdout, and has no
-third-party dependencies.
+Protocol handling runs on the main thread (JSON-RPC over stdin/stdout) while
+type checking runs on a background worker (async, debounced), with stdout
+guarded so replies and `publishDiagnostics` never interleave. Requests that
+need the symbol index call `ensureCompiled()` — they reuse the latest
+background result or compile on demand when a fresh edit is still
+debouncing. Multi-module documents are checked in parallel (`Sema::analyzeParallel`,
+worker pool; unify serialised so results match the serial checker).
 
 ## Build
 
@@ -63,12 +68,17 @@ Set `A_LSP_LOG=1` to write lifecycle messages to stderr.
 - `server.cpp` — stdio JSON-RPC loop and LSP request handlers.
 - `smoke_test.py` — end-to-end protocol smoke test.
 
+## CLI parallel checking
+
+`a check --parallel` (or `-j N` / `--jobs=N`, `A_JOBS=N`) checks modules in
+parallel on a worker pool. Diagnostics and exit codes are identical to the
+serial checker; ordering of messages may differ for multi-module programs.
+
 ## Limitations
 
-- Documents are reanalysed on every change (incremental sync is used, but
-  analysis is still whole-document). This is fast for normal A files, but
-  very large files may benefit from delay/debounce in the editor; the VS
-  Code extension debounces changes for 250 ms.
+- Documents are reanalysed in the background (incremental sync is used, but
+  analysis is still whole-document per edit). The server debounces edits for
+  200 ms so typing does not thrash the checker.
 - Type narrowing is limited to `Optional` None checks (`x != None` refines
   `x: T?` to `x: T` in the then-branch); full control-flow reachability and
   speculative-type materialisation from ty/pyrefly are not implemented.

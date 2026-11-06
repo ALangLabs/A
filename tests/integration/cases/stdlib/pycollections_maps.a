@@ -50,10 +50,10 @@ fn test_chain_map():
     m2 = {"b": 20, "c": 30}
     cm = ChainMap([m1, m2])
     assert_eq(cm.get("a"), 1)
-    assert_eq(cm.get("b"), 2)   # first map wins
+    assert_eq(cm.get("b"), 2)  # first map wins
     assert_eq(cm.get("c"), 30)
     assert_eq(cm.get("zz"), None)
-    cm.set("b", 99)             # writes to first map only
+    cm.set("b", 99)  # writes to first map only
     assert_eq(m1["b"], 99)
     assert_eq(m2["b"], 20)
     assert(cm.keys() == ["a", "b", "c"])

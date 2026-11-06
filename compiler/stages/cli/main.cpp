@@ -39,6 +39,8 @@ void printUsage(std::ostream& os) {
      << "  --check          exit nonzero if file needs formatting (fmt)\n"
      << "  --indent <n>     indentation width (fmt, default 4)\n"
      << "  --json           structured JSON (doc, check)\n"
+     << "  --parallel       check modules in parallel (async type checking; same diagnostics)\n"
+     << "  -j <n>, --jobs <n>  parallel jobs (default: serial; -j 0 = all cores)\n"
      << "  --opt            run optimization passes (ir)\n"
      << "  --emit-llvm      emit LLVM IR (.ll) instead of executable (build)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
@@ -70,6 +72,7 @@ struct Options {
   bool jsonOutput = false;
   bool optimize = false;
   int indentWidth = 4;
+  int jobs = 1;
 };
 
 bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
@@ -83,6 +86,18 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
     else if (arg == "--json") options.jsonOutput = true;
     else if (arg == "--opt") options.optimize = true;
+    else if (arg == "--parallel") options.jobs = 0;
+    else if (arg == "--jobs" || arg == "-j") {
+      if (i + 1 >= argc) { err << "error: '--jobs' requires a number\n"; return false; }
+      try { options.jobs = std::stoi(argv[++i]); } catch (...) { err << "error: invalid jobs value\n"; return false; }
+      if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
+    } else if (arg.rfind("--jobs=", 0) == 0 || arg.rfind("-j=", 0) == 0) {
+      try { options.jobs = std::stoi(arg.substr(arg.find('=') + 1)); } catch (...) { err << "error: invalid jobs value\n"; return false; }
+      if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
+    } else if (arg.rfind("-j", 0) == 0 && arg.size() > 2) {
+      try { options.jobs = std::stoi(arg.substr(2)); } catch (...) { err << "error: invalid jobs value\n"; return false; }
+      if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
+    }
     else if (arg == "--backend") {
       // Accepted for compatibility; A v2 uses a single LLVM-oriented backend.
       if (i + 1 >= argc) { err << "error: '--backend' requires a name\n"; return false; }
@@ -167,6 +182,10 @@ int main(int argc, char** argv) {
   config.useColor = options.useColor;
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
   config.backend = "llvm"; // single backend (Mojo-style LLVM pipeline)
+  config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count
+  if (const char* env = std::getenv("A_JOBS")) {
+    try { if (options.jobs == 1) config.jobs = std::stoi(env); } catch (...) {}
+  }
   config.modulePaths = options.modulePaths;
   config.stdlibRoot = options.stdlibRoot;
   if (options.command == "run") {

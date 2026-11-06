@@ -824,7 +824,13 @@ std::unique_ptr<Compilation> analyzeDocument(const std::string& path, const std:
 
   if (!compilation->sink.hasErrors()) {
     Sema sema(compilation->graph, compilation->sink);
-    compilation->sema = sema.analyze();
+    // Multi-module projects (and the async background worker) benefit from
+    // parallel body checking; single-file edits stay serial.
+    if (compilation->graph.modules.size() > 1) {
+      compilation->sema = sema.analyzeParallel(0);
+    } else {
+      compilation->sema = sema.analyze();
+    }
     compilation->analyzed = !compilation->sink.hasErrors();
   }
 

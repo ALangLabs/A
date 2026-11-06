@@ -69,6 +69,7 @@ struct OrderedDict:
         self.data.pop(k)
         if last:
             self.data[k] = v
+
         else:
             rebuilt = {}
             rebuilt[k] = v

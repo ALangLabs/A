@@ -1,15 +1,19 @@
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <climits>
+#include <condition_variable>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -290,6 +294,7 @@ struct Document {
   std::string path;
   std::string text;
   int version = 0;
+  int compiledVersion = -1;
   std::unique_ptr<Compilation> compilation;
 };
 
@@ -298,6 +303,7 @@ class LanguageServer {
   LanguageServer() = default;
 
   int run() {
+    startWorker();
     std::string body;
     while (readMessage(std::cin, body)) {
       std::string error;
@@ -308,6 +314,7 @@ class LanguageServer {
       }
       if (!handle(message)) break;
     }
+    stopWorker();
     return shutdownReceived_ ? 0 : 1;
   }
 
@@ -387,8 +394,9 @@ class LanguageServer {
     return static_cast<std::size_t>(input.gcount()) == contentLength;
   }
 
-  static void writeMessage(const Value& message) {
+  void writeMessage(const Value& message) {
     std::string body = message.dump();
+    std::lock_guard<std::mutex> lock(outMutex_);
     std::cout << "Content-Length: " << body.size() << "\r\n\r\n";
     std::cout.write(body.data(), static_cast<std::streamsize>(body.size()));
     std::cout.flush();
@@ -434,6 +442,25 @@ class LanguageServer {
     }
     if (method == "$/setTrace" || method == "$/cancelRequest" || method == "workspace/didChangeWatchedFiles") {
       return true;
+    }
+
+    // Async checking: notifications enqueue background compiles (200ms
+    // debounce); requests that need the index synchronously bring the
+    // document up to date on demand (stale = just-edited, worker pending).
+    static const std::unordered_set<std::string> kNeedsCompilation = {
+        "textDocument/definition", "textDocument/hover", "textDocument/completion",
+        "textDocument/signatureHelp", "textDocument/references", "textDocument/documentSymbol",
+        "textDocument/formatting", "textDocument/rename", "textDocument/documentHighlight",
+        "textDocument/foldingRange", "textDocument/prepareRename",
+        "textDocument/semanticTokens/full", "textDocument/semanticTokens/range",
+        "textDocument/inlayHint", "textDocument/codeAction", "textDocument/selectionRange",
+        "textDocument/declaration", "textDocument/typeDefinition",
+        "textDocument/implementation",
+    };
+    if (kNeedsCompilation.count(method)) {
+      if (Document* document = documentFrom(params)) ensureCompiled(document);
+    } else if (method == "workspace/symbol") {
+      for (auto& entry : documents_) ensureCompiled(&entry.second);
     }
 
     if (method == "textDocument/definition") {
@@ -647,7 +674,148 @@ class LanguageServer {
     if (const Value* stdlib = aSettings->find("stdlibRoot"); stdlib && stdlib->isString()) {
       stdlibRoot_ = stdlib->asString();
     }
-    for (auto& entry : documents_) recompile(entry.second);
+    for (auto& entry : documents_) enqueueCompile(entry.second);
+  }
+
+  // ---- background (async) type checking ---------------------------------
+  // didOpen/didChange only snapshot text and enqueue; a worker thread runs
+  // analyzeDocument (Sema) and publishes diagnostics. Requests that need a
+  // compilation call ensureCompiled() first, which synchronously fills any
+  // staleness left by the debounce (like ty/pyrefly: async diagnostics,
+  // request-time analysis for completeness).
+  struct OpenDocSnapshot {
+    std::string uri;
+    std::string path;
+    int version = 0;
+    std::string text;
+  };
+  struct CompileJob {
+    std::string uri;
+    std::string path;
+    std::string text;
+    int version = 0;
+    uint64_t generation = 0;
+    std::vector<std::string> modulePaths;
+    std::string stdlibRoot;
+    std::vector<OpenDocSnapshot> open;
+  };
+
+  static constexpr int kDebounceMs = 200;
+
+  void startWorker() {
+    if (worker_.joinable()) return;
+    worker_ = std::thread([this] { workerLoop(); });
+  }
+
+  void stopWorker() {
+    {
+      std::lock_guard<std::mutex> lock(jobMutex_);
+      stop_ = true;
+    }
+    jobCv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+  }
+
+  void enqueueCompile(Document& document) {
+    CompileJob job;
+    job.uri = document.uri;
+    job.path = document.path;
+    job.text = document.text;
+    job.version = document.version;
+    job.modulePaths = modulePaths_;
+    job.stdlibRoot = stdlibRoot_;
+    for (const auto& entry : documents_) {
+      job.open.push_back(OpenDocSnapshot{entry.second.uri, entry.second.path,
+                                         entry.second.version, entry.second.text});
+    }
+    {
+      std::lock_guard<std::mutex> lock(jobMutex_);
+      job.generation = ++generation_;
+      pendingJob_ = std::move(job);
+    }
+    jobCv_.notify_all();
+  }
+
+  void workerLoop() {
+    while (!stop_) {
+      CompileJob job;
+      {
+        std::unique_lock<std::mutex> lock(jobMutex_);
+        if (!jobCv_.wait_for(lock, std::chrono::milliseconds(kDebounceMs),
+                             [&] { return stop_ || pendingJob_.has_value(); })) {
+          continue;  // debounce settled with nothing pending
+        }
+        if (stop_ && !pendingJob_.has_value()) return;
+        if (!pendingJob_.has_value()) continue;
+        job = std::move(*pendingJob_);
+        pendingJob_.reset();
+      }
+      auto compilation = a::lsp::analyzeDocument(job.path, job.text, job.modulePaths,
+                                                  job.stdlibRoot);
+      {
+        std::lock_guard<std::mutex> lock(jobMutex_);
+        if (job.generation != generation_) continue;  // stale; a newer edit won
+      }
+      // Publish diagnostics for every open doc (mirrors publishDiagnosticsFor
+      // but from snapshots so the worker never touches Document state).
+      std::map<std::string, std::vector<const Diagnostic*>> byPath;
+      for (const Diagnostic& diagnostic : compilation->sink.diagnostics()) {
+        if (!diagnostic.span.valid()) continue;
+        const a::SourceFile* source = compilation->sink.file(diagnostic.span.fileId);
+        if (!source) continue;
+        byPath[canonicalPath(source->path())].push_back(&diagnostic);
+      }
+      for (const OpenDocSnapshot& open : job.open) {
+        Value params = Value::object();
+        params["uri"] = open.uri;
+        if (open.version > 0) params["version"] = open.version;
+        Value diagnostics = Value::array();
+        auto found = byPath.find(canonicalPath(open.path));
+        if (found != byPath.end()) {
+          for (const Diagnostic* diagnostic : found->second) {
+            const a::SourceFile* source = compilation->sink.file(diagnostic->span.fileId);
+            const std::string& text = source ? source->text() : open.text;
+            Value item = Value::object();
+            item["range"] = rangeValue(text, diagnostic->span);
+            item["severity"] = diagnostic->severity == Severity::Error ? 1 : 2;
+            item["message"] = diagnostic->message;
+            item["source"] = "a";
+            if (!diagnostic->code.empty()) {
+              item["code"] = diagnostic->code;
+              Value desc = Value::object();
+              desc["href"] = "https://github.com/search?q=" + diagnostic->code + "+repo:own/a-lang";
+              item["codeDescription"] = std::move(desc);
+            }
+            Value tags = Value::array();
+            if (diagnostic->code == "W0002") tags.push(1);
+            if (!tags.isArray() || tags.asArray().empty()) {} else item["tags"] = std::move(tags);
+            if (!diagnostic->help.empty()) {
+              Value related = Value::array();
+              Value info = Value::object();
+              info["location"] = locationValue(*compilation, open.path, diagnostic->span);
+              info["message"] = diagnostic->help;
+              related.push(std::move(info));
+              item["relatedInformation"] = std::move(related);
+            }
+            diagnostics.push(std::move(item));
+          }
+        }
+        params["diagnostics"] = std::move(diagnostics);
+        notify("textDocument/publishDiagnostics", std::move(params));
+      }
+      log("compiled " + job.path + " (async, errors: " +
+          std::to_string(compilation->sink.errorCount()) + ")");
+    }
+  }
+
+  // Synchronously bring Document.compilation up to date on demand. Worker
+  // results are diagnostics-only; request handlers need the full index.
+  void ensureCompiled(Document* document) {
+    if (!document) return;
+    if (document->compilation && document->compiledVersion == document->version) return;
+    document->compilation = a::lsp::analyzeDocument(document->path, document->text,
+                                                     modulePaths_, stdlibRoot_);
+    document->compiledVersion = document->version;
   }
 
   Document* documentFor(const std::string& uri) {
@@ -695,7 +863,7 @@ class LanguageServer {
     log("open " + document.path);
     Document& stored = documents_[document.uri];
     stored = std::move(document);
-    recompile(stored);
+    enqueueCompile(stored);
   }
 
   void didChange(const Value* params) {
@@ -746,7 +914,7 @@ class LanguageServer {
       if (e < s) std::swap(s, e);
       document->text.replace(s, e - s, text->asString());
     }
-    recompile(*document);
+    enqueueCompile(*document);
   }
 
   void didSave(const Value* params) {
@@ -756,20 +924,28 @@ class LanguageServer {
       const Value* text = params->find("text");
       if (text && text->isString()) document->text = text->asString();
     }
-    recompile(*document);
+    enqueueCompile(*document);
   }
 
   void didClose(const Value* params) {
     Document* document = documentFrom(params);
     if (!document) return;
+    {
+      std::lock_guard<std::mutex> lock(jobMutex_);
+      ++generation_;  // cancel any pending compile for this document
+      pendingJob_.reset();
+    }
     publishDiagnostics(*document, {});
     documents_.erase(document->uri);
   }
 
+  // Legacy synchronous path (no async publish). Handlers now use
+  // ensureCompiled() which reuses the worker's debounce instead.
   void recompile(Document& document) {
     document.compilation = a::lsp::analyzeDocument(document.path, document.text, modulePaths_,
                                                     stdlibRoot_);
-    log("compiled " + document.path + " (errors: " +
+    document.compiledVersion = document.version;
+    log("compiled " + document.path + " (sync, errors: " +
         std::to_string(document.compilation ? document.compilation->sink.errorCount() : 0) + ")");
     publishDiagnosticsFor(document);
   }
@@ -2182,6 +2358,15 @@ class LanguageServer {
   std::vector<std::string> modulePaths_;
   std::string stdlibRoot_;
   bool shutdownReceived_ = false;
+
+  // Async-checking worker state (debounced, latest-wins).
+  std::mutex outMutex_;
+  std::mutex jobMutex_;
+  std::condition_variable jobCv_;
+  std::optional<CompileJob> pendingJob_;
+  uint64_t generation_ = 0;
+  bool stop_ = false;
+  std::thread worker_;
 };
 
 }  // namespace

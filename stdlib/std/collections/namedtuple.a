@@ -123,7 +123,9 @@ struct NamedTupleSpec:
 
     fn make(self, values):
         if len(values) != len(self._fields):
-            core.panic("namedtuple '" + self._typename + "' expects " + str(len(self._fields)) + " values, got " + str(len(values)))
+            core.panic(
+                "namedtuple '" + self._typename + "' expects " + str(len(self._fields)) + " values, got " + str(len(values)),
+            )
         nt = NamedTuple(self._typename, self._fields.copy(), {})
         i = 0
         while i < len(self._fields):

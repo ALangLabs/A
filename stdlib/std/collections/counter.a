@@ -20,6 +20,7 @@ fn _merge_by_count(left, right):
         if lv >= rv:
             out.append(left[i])
             i = i + 1
+
         else:
             out.append(right[j])
             j = j + 1
@@ -67,6 +68,7 @@ struct Counter:
             m = json.as_map(src)!
             for k in m:
                 self._bump(k, json.as_int(m[k])!)
+
         else:
             core.panic("Counter.update expects an array or map")
 
@@ -86,6 +88,7 @@ struct Counter:
             m = json.as_map(src)!
             for k in m:
                 self._bump(k, -json.as_int(m[k])!)
+
         else:
             core.panic("Counter.subtract expects an array or map")
 
