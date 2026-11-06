@@ -1,6 +1,6 @@
-# std.functools.reduce (CPython functools.reduce port).
+# std.functools.reduce (Python functools.reduce port).
 #
-# CPython: `reduce(function, iterable[, initializer])` — with no initializer
+# Python: `reduce(function, iterable[, initializer])` — with no initializer
 # the first element seeds the accumulator and an empty iterable raises
 # TypeError. A's builtin `reduce` has the different order
 # `reduce(array, init, fn)`; these wrappers restore the Python argument
@@ -9,7 +9,7 @@
 import core
 
 ## reduce(function, xs) -> fold `xs` left-to-right with `function(acc, x)`,
-## seeded by the first element. Panics on an empty `xs` (CPython raises
+## seeded by the first element. Panics on an empty `xs` (Python raises
 ## TypeError).
 fn reduce(function, xs):
     if len(xs) == 0:

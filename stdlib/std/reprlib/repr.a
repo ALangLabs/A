@@ -1,13 +1,13 @@
-# std.reprlib.repr — CPython `reprlib` port (part 1: Repr class + repr).
+# std.reprlib.repr — Python `reprlib` port (part 1: Repr class + repr).
 #
-# CPython `reprlib` re-implements `repr()` with size limits (maxlevel,
+# Python `reprlib` re-implements `repr()` with size limits (maxlevel,
 # maxstring, maxlist, ...) so huge/cyclic structures print compactly.
 #
 # Port notes (see README.md for the full deviation list):
 #   * Dispatch is by runtime tag (`json.kind` + `json.as_array`/`as_map`
 #     probes + `str` prefix for sets/tuples) instead of `type(x)` +
 #     `getattr(self, 'repr_' + typename)`.
-#   * Dict/set iteration order is insertion/storage order; CPython's
+#   * Dict/set iteration order is insertion/storage order; Python's
 #     `_possibly_sorted` ordering is NOT replicated (A has no safe
 #     heterogeneous sort).
 #   * Tuples and sets are decomposed through the `binary` codec
@@ -15,7 +15,7 @@
 #     and sets would need a second code path; elements surface as `Json`.
 #     Nested tuples/sets inside them degrade to lists.
 #   * `Repr.indent` accepts a non-negative int (spaces per level) or -1
-#     for CPython's `None`; string indents are not supported.
+#     for Python's `None`; string indents are not supported.
 #   * `maxfrozenset`/`maxdeque`/`maxarray` fields exist for signature
 #     parity; A has no frozenset/deque/array.array equivalents.
 import json
@@ -98,7 +98,7 @@ fn _items(x):
     return (json.as_array(d!) ?? [])
 
 ## _middle_truncate(s, limit, fill) -> s with its middle replaced by `fill`
-## when len(s) > limit (CPython repr_str/repr_int/repr_instance pattern).
+## when len(s) > limit (Python repr_str/repr_int/repr_instance pattern).
 fn _middle_truncate(s, limit: i64, fill):
     if len(s) <= limit:
         return s
@@ -110,12 +110,12 @@ fn _middle_truncate(s, limit: i64, fill):
     tail = _slice(s, tail_start, n)
     return head + fill + tail
 
-## Repr — repr with limits (CPython `reprlib.Repr`).
+## Repr — repr with limits (Python `reprlib.Repr`).
 ##
-## Field order matches the CPython __init__ signature (positional):
+## Field order matches the Python __init__ signature (positional):
 ##   maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
 ##   maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent
-## `indent < 0` means CPython `indent=None`.
+## `indent < 0` means Python `indent=None`.
 struct Repr:
     maxlevel: i64
     maxtuple: i64
@@ -167,7 +167,7 @@ struct Repr:
         # null, unknown (ranges, closures, results): repr_instance fallback.
         return self.repr_instance(x, level)
 
-    ## _join(self, pieces, level) -> CPython Repr._join (indent-aware).
+    ## _join(self, pieces, level) -> Python Repr._join (indent-aware).
     fn _join(self, pieces: [String], level):
         if len(pieces) == 0:
             return ""
@@ -210,7 +210,7 @@ struct Repr:
     ## repr_tuple is not provided: A tuples cannot be iterated or indexed,
     ## and `binary.decode` round-trips them to an opaque TupleValue, so
     ## tuple elements are unreachable. Tuples render via repr_instance
-    ## (str()), matching CPython's '(a, b)' shape but without recursion
+    ## (str()), matching Python's '(a, b)' shape but without recursion
     ## into elements — documented deviation.
 
     ## repr_list(self, x, level) -> '[a, b]' (elements are [Json]).
@@ -264,7 +264,7 @@ struct Repr:
             i = i + 1
         out = _py_str_repr(head)
         if len(out) > self.maxstring:
-            # CPython: repr(x[:i] + x[-j:]) with fillvalue spliced inside.
+            # Python: repr(x[:i] + x[-j:]) with fillvalue spliced inside.
             i2 = _max(0, _floordiv(self.maxstring - 3, 2))
             j2 = _max(0, self.maxstring - 3 - i2)
             n = len(cs)
@@ -299,11 +299,11 @@ struct Repr:
     fn repr_instance(self, x, level):
         return _middle_truncate(str(x), self.maxother, self.fillvalue)
 
-## aRepr — shared default Repr (CPython `reprlib.aRepr`).
+## aRepr — shared default Repr (Python `reprlib.aRepr`).
 ## Field order: maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
 ## maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent.
 aRepr = Repr(6, 6, 6, 5, 4, 6, 6, 6, 30, 40, 30, "...", -1)
 
-## repr(x) -> limited repr using the shared aRepr (CPython `reprlib.repr`).
+## repr(x) -> limited repr using the shared aRepr (Python `reprlib.repr`).
 fn repr(x):
     return aRepr.repr(x)

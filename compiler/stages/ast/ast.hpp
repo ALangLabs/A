@@ -109,7 +109,7 @@ enum class BinOp : std::uint8_t {
 // Statically resolved builtin identity. `Sema` marks each call site whose
 // callee is not shadowed by a variable, so the interpreter can dispatch a
 // builtin without re-scanning name strings on every call (the same idea as
-// CPython's specialized call opcodes).
+// specialized call opcodes in dynamic-language interpreters).
 enum class BuiltinId : std::uint8_t {
   None,
   Print,
@@ -475,7 +475,7 @@ struct ImportStmt : Stmt {
   std::string path;        // quoted path, empty for native/bare/python imports
   std::string alias;       // explicit alias, or empty
   std::string bareName;    // identifier for bare imports
-  std::string pythonModule;  // CPython module path for `python:<package>`
+  std::string pythonModule;  // Python module path for `python:<package>`
   bool quoted = false;
   bool nativeModule = false;  // resolved to a built-in native module
   bool pythonModuleImport = false;

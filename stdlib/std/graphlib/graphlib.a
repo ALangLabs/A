@@ -1,4 +1,4 @@
-# graphlib — port of CPython 3.14 Lib/graphlib.py.
+# graphlib — port of Python 3.14 Lib/graphlib.py.
 #
 # TopologicalSorter: functionality to topologically sort a graph of
 # hashable nodes.
@@ -6,7 +6,7 @@
 # Semantic mapping notes (see docs/standard-library/python-porting.md):
 #  - Python raises ValueError/CycleError; here contract violations are
 #    runtime errors via panic() (the sorter's state is unusable after a
-#    cyclic prepare(), unlike CPython where get_ready() still works).
+#    cyclic prepare(), unlike Python where get_ready() still works).
 #  - get_ready() returns a tuple in Python; here a materialized [T].
 #  - static_order() returns a generator in Python; here a [T] list.
 #  - __bool__ has no A equivalent; use is_active().
@@ -17,7 +17,7 @@
 #    TopologicalSorter_from(graph) where graph is a {node: [predecessors]}
 #    map (the A analog of Python's dict-of-iterables).
 #
-# Node status values stored in _NodeInfo.npredecessors (CPython uses
+# Node status values stored in _NodeInfo.npredecessors (Python uses
 # _NODE_OUT = -1 and _NODE_DONE = -2).
 
 _NODE_OUT = -1
@@ -64,7 +64,7 @@ class TopologicalSorter:
     fn prepare(self):
         """Mark the graph as finished and check for cycles.
 
-        Panics if a cycle exists (CPython raises CycleError) or if nodes
+        Panics if a cycle exists (Python raises CycleError) or if nodes
         have already been passed out via get_ready()."""
         if self.npassedout > 0:
             panic("cannot prepare() after starting sort")
@@ -75,7 +75,7 @@ class TopologicalSorter:
                 if info.npredecessors == 0:
                     self.ready_nodes.append(node)
             self.prepared = true
-        # ready_nodes is set before the cycle check on purpose: in CPython
+        # ready_nodes is set before the cycle check on purpose: in Python
         # a caught CycleError still lets the user drain get_ready(). Here a
         # cycle is a hard runtime error instead.
         cycle = self._find_cycle()
@@ -99,7 +99,7 @@ class TopologicalSorter:
         return result
 
     fn is_active(self):
-        """True if more progress can be made (CPython __bool__ equivalent)."""
+        """True if more progress can be made (Python __bool__ equivalent)."""
         if not self.prepared:
             panic("prepare() must be called first")
         return self.nfinished < self.npassedout or len(self.ready_nodes) > 0
@@ -137,7 +137,7 @@ class TopologicalSorter:
         self.done([node])
 
     fn _find_cycle(self):
-        # Iterative DFS mirroring CPython's _find_cycle. Returns the cycle
+        # Iterative DFS mirroring Python's _find_cycle. Returns the cycle
         # as an array of nodes (first == last), or [] if acyclic.
         n2i = self.node2info
         stack = []
@@ -188,7 +188,7 @@ class TopologicalSorter:
         """Return all nodes in topological order as an array.
 
         Panics if the graph contains a cycle. The particular order may
-        depend on insertion order, as in CPython."""
+        depend on insertion order, as in Python."""
         self.prepare()
         out = []
         while self.is_active():

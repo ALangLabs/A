@@ -1,4 +1,4 @@
-# heapq — port of CPython 3.14 Lib/heapq.py (pure-Python implementation).
+# heapq — port of Python 3.14 Lib/heapq.py (pure-Python implementation).
 #
 # Heaps are arrays for which a[k] <= a[2*k+1] and a[k] <= a[2*k+2] for
 # all k, counting elements from 0. a[0] is always the smallest element.
@@ -137,7 +137,7 @@ fn heapify_max(x):
         _siftup(x, i, _desc)
         i -= 1
 
-# Backwards-compatible aliases mirroring CPython's _heappush_max etc.
+# Backwards-compatible aliases mirroring Python's _heappush_max etc.
 fn _heappush_max(heap, item):
     heappush_max(heap, item)
 
@@ -190,7 +190,7 @@ fn nlargest(n, xs):
     return heap
 
 # Decorated entry for keyed nsmallest/nlargest. `seq` is the insertion
-# sequence number, playing the role of CPython's `order` tiebreaker so
+# sequence number, playing the role of Python's `order` tiebreaker so
 # that equal keys keep input order.
 class _KEntry:
     k
@@ -214,7 +214,7 @@ fn _klt_max(a, b):
 
 fn _klt_min_late(a, b):
     # pops-first order for a min-heap over (k, -seq): smaller k first,
-    # ties broken by *larger* seq first (mirrors CPython's negative order)
+    # ties broken by *larger* seq first (mirrors Python's negative order)
     if a.k < b.k:
         return true
     if b.k < a.k:
@@ -323,8 +323,8 @@ fn merge(iterables):
     """Merge multiple sorted arrays into a single sorted array.
 
     `iterables` is an array of arrays, each sorted ascending. Ties are
-    broken by input order, matching CPython's merge(*iterables).
-    Returns a materialized list (CPython returns a generator)."""
+    broken by input order, matching Python's merge(*iterables).
+    Returns a materialized list (Python returns a generator)."""
     return _merge_impl(iterables, _ident, false)
 
 fn merge_key(iterables, key):

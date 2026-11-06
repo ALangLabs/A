@@ -1,12 +1,12 @@
 # std.functools sort helpers (cmp_to_key analogue).
 #
-# CPython's `cmp_to_key(cmp)` wraps a three-way comparator so `sorted()` can
+# Python's `cmp_to_key(cmp)` wraps a three-way comparator so `sorted()` can
 # use it; A's `.sort()` takes no comparator and there is no `sorted()`
 # builtin, so the port exposes `sort_by(xs, cmp)` directly: a stable
-# merge-sort returning a NEW sorted array (CPython `sorted` semantics).
+# merge-sort returning a NEW sorted array (Python `sorted` semantics).
 #
 # `cmp(a, b)` must return a negative number, zero, or a positive number,
-# exactly like CPython's `cmp` parameter to `cmp_to_key`.
+# exactly like Python's `cmp` parameter to `cmp_to_key`.
 
 fn _merge(left, right, cmp):
     out = []

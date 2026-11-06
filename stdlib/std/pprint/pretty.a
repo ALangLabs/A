@@ -1,18 +1,18 @@
-# std.pprint.pretty — CPython `pprint` port (part 1: PrettyPrinter engine).
+# std.pprint.pretty — Python `pprint` port (part 1: PrettyPrinter engine).
 #
-# CPython `pprint` pretty-prints Python objects to a stream with width/
+# Python `pprint` pretty-prints Python objects to a stream with width/
 # depth/indent controls. This port reproduces the core algorithm:
 #
 #   * `_safe_repr(object, context, maxlevels, level)` -> (text, readable,
 #     recursive) triple, powering `saferepr`/`isreadable`/`isrecursive`.
 #   * `_format`/`_format_items`/`_format_dict_items` — the width-aware
-#     line-breaking writer, ported from CPython 3.14 `pprint.py`.
+#     line-breaking writer, ported from Python 3.14 `pprint.py`.
 #
 # Port notes (see README.md):
 #   * Output goes to stdout (`pprint`) or a returned string (`pformat`);
 #     there is no `stream=` parameter.
 #   * Recursion detection uses a `{object: true}` context map. A hashes
-#     arrays/maps/sets/structs/Json by identity, matching CPython's
+#     arrays/maps/sets/structs/Json by identity, matching Python's
 #     `id(object)` keys. `_recursion` markers omit the id (A has none).
 #   * Dispatch is by `json.kind` + `json.as_array`/`as_map` probes +
 #     `str` prefix for sets/tuples, instead of `type(object).__repr__`.
@@ -23,9 +23,9 @@
 #     elements surface as `Json` and nested tuples/sets degrade to lists.
 #   * Dict keys are emitted in insertion order; `sort_dicts` sorts only when
 #     every key is a string (A cannot safely sort heterogeneous keys —
-#     CPython falls back to unsorted via `_safe_key` anyway).
+#     Python falls back to unsorted via `_safe_key` anyway).
 #   * Strings that exceed the width are wrapped in parentheses with chunks
-#     on continuation lines — an approximation of CPython's word-based
+#     on continuation lines — an approximation of Python's word-based
 #     `_pprint_str` (no regex engine in A).
 #   * `underscore_numbers` is honored for ints; `compact` is honored.
 import json
@@ -169,19 +169,19 @@ fn _recursion_name(x):
         return "dict"
     return "object"
 
-## _recursion(x) -> '<Recursion on TYPE>' (CPython includes id=...; A has no
+## _recursion(x) -> '<Recursion on TYPE>' (Python includes id=...; A has no
 ## stable object id, so the id is omitted — documented deviation).
 fn _recursion(x):
     return "<Recursion on " + _recursion_name(x) + ">"
 
 ## SafeRepr — (text, readable, recursive) triple from _safe_repr
-## (CPython returns a plain tuple; A tuples cannot be indexed).
+## (Python returns a plain tuple; A tuples cannot be indexed).
 struct SafeRepr:
     text: str
     readable: bool
     recursive: bool
 
-## Buf — mutable string sink for _format (CPython writes to a stream).
+## Buf — mutable string sink for _format (Python writes to a stream).
 struct Buf:
     parts: [String]
 
@@ -191,15 +191,15 @@ struct Buf:
     fn text(self):
         return "".join(self.parts)
 
-## PrettyPrinter — configurable pretty-printer (CPython
+## PrettyPrinter — configurable pretty-printer (Python
 ## `pprint.PrettyPrinter`).
 ##
 ## Constructor field order (positional, no defaults in A):
 ##   indent, width, depth, compact, sort_dicts, underscore_numbers
-## `_readable`/`_recursive` are internal flags (CPython uses instance
+## `_readable`/`_recursive` are internal flags (Python uses instance
 ## attributes set during formatting; they must be initialized by the
 ## constructor).
-## `depth <= 0` means unlimited (CPython `depth=None`; note CPython also
+## `depth <= 0` means unlimited (Python `depth=None`; note Python also
 ## treats depth=0 as unlimited since 0 is falsy).
 ## There is no `stream` field: `pprint` writes to stdout, `pformat`
 ## returns the string.
@@ -225,18 +225,18 @@ struct PrettyPrinter:
         self._format(object, buf, 0, 0, {}, 0)
         return buf.text()
 
-    ## isrecursive(self, object) -> bool (CPython PrettyPrinter.isrecursive).
+    ## isrecursive(self, object) -> bool (Python PrettyPrinter.isrecursive).
     fn isrecursive(self, object):
         r = self._safe_repr(object, {}, 0, 0)
         return r.recursive
 
-    ## isreadable(self, object) -> bool (CPython PrettyPrinter.isreadable).
+    ## isreadable(self, object) -> bool (Python PrettyPrinter.isreadable).
     fn isreadable(self, object):
         r = self._safe_repr(object, {}, 0, 0)
         return r.readable and not r.recursive
 
     ## _format(self, object, buf, indent, allowance, context, level)
-    ## -> width-aware writer (port of CPython PrettyPrinter._format).
+    ## -> width-aware writer (port of Python PrettyPrinter._format).
     fn _format(self, object, buf, indent, allowance, context, level):
         if object in context:
             buf.put(_recursion(object))
@@ -332,10 +332,10 @@ struct PrettyPrinter:
     ## _pprint_tuple is not provided: A tuples cannot be iterated or
     ## indexed (binary.decode round-trips them to an opaque TupleValue),
     ## so tuples render via their one-line str() repr — documented
-    ## deviation from CPython's element-wise tuple formatting.
+    ## deviation from Python's element-wise tuple formatting.
 
     ## _pprint_str(self, object, buf, indent, allowance, context, level)
-    ## -> over-width string wrapping (approximation of CPython's
+    ## -> over-width string wrapping (approximation of Python's
     ## word-based chunking; chunks are split on character boundaries).
     fn _pprint_str(self, object, buf, indent, allowance, context, level):
         st = (json.as_str(object))!
@@ -374,7 +374,7 @@ struct PrettyPrinter:
         return None
 
     ## _format_items(self, elems, buf, indent, allowance, context, level)
-    ## -> port of CPython PrettyPrinter._format_items (compact/width logic).
+    ## -> port of Python PrettyPrinter._format_items (compact/width logic).
     fn _format_items(self, elems, buf, indent, allowance, context, level):
         indent = indent + self.indent
         if self.indent > 1:
@@ -414,7 +414,7 @@ struct PrettyPrinter:
             i = i + 1
 
     ## _repr(self, object, context, level) -> SafeRepr on a context copy
-    ## (CPython: self.format(object, context.copy(), self._depth, level)).
+    ## (Python: self.format(object, context.copy(), self._depth, level)).
     fn _repr(self, object, context, level):
         r = self._safe_repr(object, context.copy(), self.depth, level)
         if not r.readable:
@@ -424,7 +424,7 @@ struct PrettyPrinter:
         return r
 
     ## _safe_repr(self, object, context, maxlevels, level) -> SafeRepr
-    ## (port of CPython PrettyPrinter._safe_repr).
+    ## (port of Python PrettyPrinter._safe_repr).
     fn _safe_repr(self, object, context, maxlevels, level):
         kind = json.kind(object)
 
@@ -541,41 +541,41 @@ struct PrettyPrinter:
         return SafeRepr(rep, len(rep) > 0 and not rep.startswith("<"), false)
 
 # ---------------------------------------------------------------------------
-# Module-level convenience API (CPython pprint.pprint/pformat/saferepr/...).
+# Module-level convenience API (Python pprint.pprint/pformat/saferepr/...).
 # A has no default arguments, so the full parameter set is only reachable
-# through PrettyPrinter; these wrappers use CPython's defaults:
+# through PrettyPrinter; these wrappers use Python's defaults:
 # indent=1, width=80, depth=None(0), compact=false, sort_dicts=true,
-# underscore_numbers=false. `pp` uses sort_dicts=false like CPython.
+# underscore_numbers=false. `pp` uses sort_dicts=false like Python.
 # ---------------------------------------------------------------------------
 
-## _default_printer(sort_dicts) -> PrettyPrinter with CPython defaults.
+## _default_printer(sort_dicts) -> PrettyPrinter with Python defaults.
 fn _default_printer(sort_dicts):
     return PrettyPrinter(1, 80, 0, false, sort_dicts, false, true, true)
 
-## pprint(object) -> pretty-print to stdout (CPython pprint.pprint).
+## pprint(object) -> pretty-print to stdout (Python pprint.pprint).
 fn pprint(object):
     _default_printer(true).pprint(object)
 
-## pformat(object) -> pretty-printed string (CPython pprint.pformat).
+## pformat(object) -> pretty-printed string (Python pprint.pformat).
 fn pformat(object):
     return _default_printer(true).pformat(object)
 
 ## saferepr(object) -> repr string that handles recursive structures
-## (CPython pprint.saferepr; unlimited depth, one line).
+## (Python pprint.saferepr; unlimited depth, one line).
 fn saferepr(object):
     p = _default_printer(true)
     return p._safe_repr(object, {}, 0, 0).text
 
-## isreadable(object) -> bool (CPython pprint.isreadable).
+## isreadable(object) -> bool (Python pprint.isreadable).
 fn isreadable(object):
     p = _default_printer(true)
     return p.isreadable(object)
 
-## isrecursive(object) -> bool (CPython pprint.isrecursive).
+## isrecursive(object) -> bool (Python pprint.isrecursive).
 fn isrecursive(object):
     p = _default_printer(true)
     return p.isrecursive(object)
 
-## pp(object) -> pprint with sort_dicts=false (CPython pprint.pp).
+## pp(object) -> pprint with sort_dicts=false (Python pprint.pp).
 fn pp(object):
     _default_printer(false).pprint(object)

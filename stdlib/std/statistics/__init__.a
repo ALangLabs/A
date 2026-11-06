@@ -1,0 +1,145 @@
+# std.statistics — port of Python Lib/statistics.py (pure-A subset).
+#
+# Implements common descriptive statistics over numeric arrays.
+# Python's rich type coercions (Decimal/Fraction), weighted variants,
+# NormalDist, and advanced functions are omitted where not practical.
+#
+# Deviations from Python:
+#   * Functions take plain A lists/arrays of numbers (ints/floats).
+#   * On invalid input (empty data, insufficient points), functions
+#     `panic` with a message (A has no StatisticsError exceptions).
+#   * `fmean` ignores weights (not supported in this subset).
+#   * `median_grouped`, `multimode`, `quantiles`, covariance/correlation,
+#     linear regression are not implemented.
+
+import math
+import core
+
+fn _check_nonempty(data, name):
+    if len(data) < 1:
+        core.panic(name + " requires at least one data point")
+
+fn _to_float(x):
+    return float(x)
+
+fn mean(data):
+    "Arithmetic mean of data."
+    _check_nonempty(data, "mean")
+    total = 0.0
+    for x in data:
+        total = total + _to_float(x)
+    return total / float(len(data))
+
+fn fmean(data):
+    "Arithmetic mean as float (weights not supported)."
+    _check_nonempty(data, "fmean")
+    total = 0.0
+    for x in data:
+        total = total + _to_float(x)
+    return total / float(len(data))
+
+fn _sorted_copy(data):
+    xs = []
+    for x in data:
+        xs.append(x)
+    xs.sort()
+    return xs
+
+fn median(data):
+    "Median (middle value) of numeric data."
+    _check_nonempty(data, "median")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    mid = n / 2
+    if n % 2 == 1:
+        return _to_float(xs[mid])
+    return (_to_float(xs[mid - 1]) + _to_float(xs[mid])) / 2.0
+
+fn median_low(data):
+    "Low median of data."
+    _check_nonempty(data, "median_low")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    if n % 2 == 1:
+        return _to_float(xs[n / 2])
+    return _to_float(xs[n / 2 - 1])
+
+fn median_high(data):
+    "High median of data."
+    _check_nonempty(data, "median_high")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    return _to_float(xs[n / 2])
+
+fn mode(data):
+    "Most common data point (first among ties for highest count)."
+    _check_nonempty(data, "mode")
+    counts = {}
+    order = []
+    for x in data:
+        k = str(x)
+        if counts.contains(k):
+            counts[k] = counts[k] + 1
+        else:
+            counts[k] = 1
+            order.append(x)
+    best = None
+    best_count = -1
+    for x in order:
+        c = counts[str(x)]
+        if c > best_count:
+            best_count = c
+            best = x
+    return best
+
+fn _variance(data, mu, ddof):
+    n = len(data)
+    if n - ddof < 1:
+        core.panic("variance requires at least two data points")
+    ss = 0.0
+    for x in data:
+        d = _to_float(x) - mu
+        ss = ss + d * d
+    return ss / float(n - ddof)
+
+fn pvariance(data):
+    "Population variance of data."
+    _check_nonempty(data, "pvariance")
+    mu = mean(data)
+    return _variance(data, mu, 0)
+
+fn variance(data):
+    "Sample variance of data (ddof=1)."
+    _check_nonempty(data, "variance")
+    mu = mean(data)
+    return _variance(data, mu, 1)
+
+fn pstdev(data):
+    "Population standard deviation of data."
+    return math.sqrt(pvariance(data))
+
+fn stdev(data):
+    "Sample standard deviation of data."
+    return math.sqrt(variance(data))
+
+fn geometric_mean(data):
+    "Geometric mean of positive numeric data."
+    _check_nonempty(data, "geometric_mean")
+    log_sum = 0.0
+    for x in data:
+        v = _to_float(x)
+        if v <= 0.0:
+            core.panic("geometric_mean requires positive data points")
+        log_sum = log_sum + math.log(v)
+    return math.exp(log_sum / float(len(data)))
+
+fn harmonic_mean(data):
+    "Harmonic mean of positive numeric data."
+    _check_nonempty(data, "harmonic_mean")
+    denom = 0.0
+    for x in data:
+        v = _to_float(x)
+        if v <= 0.0:
+            core.panic("harmonic_mean requires positive data points")
+        denom = denom + 1.0 / v
+    return float(len(data)) / denom

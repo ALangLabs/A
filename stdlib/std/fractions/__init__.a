@@ -1,4 +1,4 @@
-# std.fractions — port of CPython 3.14 Lib/fractions.py (Fraction class).
+# std.fractions — port of Python 3.14 Lib/fractions.py (Fraction class).
 #
 # Exact rational arithmetic: numerator/denominator kept normalised
 # (denominator > 0, gcd-reduced). Python raises exceptions; here contract
@@ -33,7 +33,7 @@ fn _pow2i(n: i64) -> i64:
         i = i + 1
     return r
 
-## Fraction: exact rational n/d (fields public like CPython's ._numerator).
+## Fraction: exact rational n/d (fields public like Python's ._numerator).
 struct Fraction:
     n
     d

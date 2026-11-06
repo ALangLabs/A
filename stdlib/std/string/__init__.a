@@ -1,0 +1,93 @@
+# std.string — port of CPython Lib/string.py (constants + selected helpers).
+#
+# Pure-A subset. Provides ASCII character classification constants and
+# `capwords`. `Formatter`/`Template` are not ported.
+#
+# Deviations from CPython:
+#   * `capwords(s, sep)` takes exactly 2 args (A has no default params).
+#     Pass `None` for `sep` to get whitespace splitting/collapsing behavior.
+#   * Only ASCII constants are provided.
+
+whitespace = " \t\n\r"
+ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
+ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ascii_letters = ascii_lowercase + ascii_uppercase
+digits = "0123456789"
+hexdigits = "0123456789abcdefABCDEF"
+octdigits = "01234567"
+# Punctuation without backtick/brace interpolation issues; close to CPython.
+punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_~"
+printable = digits + ascii_letters + punctuation + whitespace
+
+fn _is_space_char(ch):
+    return whitespace.contains(ch)
+
+fn _capitalize_word(w):
+    if len(w) == 0:
+        return w
+    chars = []
+    for c in w:
+        chars.append(str(c))
+    first = chars[0].upper()
+    rest = ""
+    i = 1
+    while i < len(chars):
+        rest = rest + chars[i].lower()
+        i = i + 1
+    return first + rest
+
+fn _split_whitespace_runs(s):
+    out = []
+    cur = ""
+    for c in str(s):
+        ch = str(c)
+        if _is_space_char(ch):
+            if len(cur) > 0:
+                out.append(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+    if len(cur) > 0:
+        out.append(cur)
+    return out
+
+fn _split_on_sep(s, sep):
+    if sep == "":
+        return [s]
+    out = []
+    cur = ""
+    i = 0
+    seplen = len(sep)
+    src = str(s)
+    while i < len(src):
+        j = 0
+        match = true
+        while j < seplen and (i + j) < len(src):
+            if src[i + j] != sep[j]:
+                match = false
+                break
+            j = j + 1
+        if match and j == seplen:
+            out.append(cur)
+            cur = ""
+            i = i + seplen
+        else:
+            cur = cur + str(src[i])
+            i = i + 1
+    out.append(cur)
+    return out
+
+fn capwords(s, sep):
+    "Capitalize words using split/capitalize/join. Pass None for whitespace behavior."
+    words = []
+    join_sep = " "
+    if sep == None:
+        words = _split_whitespace_runs(str(s))
+        join_sep = " "
+    else:
+        join_sep = str(sep)
+        words = _split_on_sep(str(s), join_sep)
+    caps = []
+    for w in words:
+        caps.append(_capitalize_word(w))
+    return join_sep.join(caps)

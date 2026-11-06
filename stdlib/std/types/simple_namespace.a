@@ -1,4 +1,4 @@
-# std.types.simple_namespace — CPython `types.SimpleNamespace` port.
+# std.types.simple_namespace — Python `types.SimpleNamespace` port.
 #
 # Python: `types.SimpleNamespace(**kwargs)` gives an object with arbitrary
 # attributes (`ns.a`, `ns.b = 1`), `vars(ns)`, equality by __dict__, and a
@@ -15,7 +15,7 @@
 #   * No `**kwargs` constructor — start empty via `simple_namespace()` or
 #     pass a map to `SimpleNamespace(data)`.
 #   * Equality (`==`) is not provided; compare `.data` maps if needed.
-#   * `repr`/`str` render `namespace(k=v, ...)` like CPython; values are
+#   * `repr`/`str` render `namespace(k=v, ...)` like Python; values are
 #     formatted with `pprint.saferepr` (full one-line repr).
 import pprint
 
@@ -56,14 +56,14 @@ struct SimpleNamespace:
     fn len(self):
         return len(self.data)
 
-    ## repr(self) -> 'namespace(k=v, ...)' (CPython SimpleNamespace.__repr__).
+    ## repr(self) -> 'namespace(k=v, ...)' (Python SimpleNamespace.__repr__).
     fn repr(self):
         parts = []
         for k in self.data:
             parts.append(k + "=" + pprint.saferepr(self.data[k]))
         return "namespace(" + ", ".join(parts) + ")"
 
-    ## str(self) -> same as repr (CPython str(ns) == repr(ns)).
+    ## str(self) -> same as repr (Python str(ns) == repr(ns)).
     fn str(self):
         return self.repr()
 

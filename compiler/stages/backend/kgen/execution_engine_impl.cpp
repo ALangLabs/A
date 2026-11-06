@@ -2253,7 +2253,7 @@ python::PyBinOp toPythonBinOp(BinOp op) {
 }
 
 Value KGENExecutionEngine::applyBinary(BinOp op, const Value& lhs, const Value& rhs, Span span) {
-  // Any operator touching a Python object is evaluated by CPython itself.
+  // Any operator touching a Python object is evaluated by Python itself.
   if (python::isPythonValue(lhs) || python::isPythonValue(rhs)) {
 #ifdef A_HAVE_PYTHON
     return python::binaryOp(toPythonBinOp(op), lhs, rhs, span);

@@ -1,5 +1,5 @@
 #pragma once
-// Redirects every CPython entry point used in this translation unit through
+// Redirects every Python C API entry point used in this translation unit through
 // g_pySymbols, which python_loader.cpp fills via dlopen/dlsym. Include this
 // AFTER Python.h (i.e. after python_interop.hpp). Only python_interop.cpp
 // should include it — other TUs must see the real declarations.

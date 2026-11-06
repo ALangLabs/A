@@ -22,6 +22,4 @@ __pycache__/
 *.pyc
 dist/
 *.vsix
-ref.md
-# Vendored reference sources (large; local study copy)
-third_party/mojo-ref/Mojo_lib/
+.vscode/

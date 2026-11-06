@@ -1,6 +1,6 @@
-# std.functools.singledispatch (simplified CPython port).
+# std.functools.singledispatch (simplified Python port).
 #
-# CPython's `singledispatch(func)` inspects the type annotation of the first
+# Python's `singledispatch(func)` inspects the type annotation of the first
 # parameter and registers per-type implementations, dispatching on the runtime
 # type of the first argument (with ABC/subclass/MRO resolution via
 # `functools._find_impl`).
@@ -11,12 +11,12 @@
 # which cannot be imported because `comptime` is a keyword):
 # "null", "bool", "int", "float", "string", "array", "object", ...
 #
-# Deviations vs CPython:
+# Deviations vs Python:
 #   * `@singledispatch` decorator + `@d.register` decorators ->
 #     `d = singledispatch(default_fn)` then `d.register("int", fn)`.
 #   * register by type/ABC -> register by explicit tag string only.
 #   * `d.dispatch(cls)` takes a tag string, not a type object.
-#   * `d.register` returns the registered function (like CPython) for manual
+#   * `d.register` returns the registered function (like Python) for manual
 #     chaining; decorator usage is impossible in A.
 #   * no subclass/MRO fallback: an unregistered tag uses the default registered.
 #   * calling the dispatcher -> `d.call(args)` (array form, `_apply` limit

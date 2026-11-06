@@ -1,12 +1,12 @@
-# std.functools.partial (CPython functools.partial port).
+# std.functools.partial (Python functools.partial port).
 #
-# CPython: `partial(func, /, *args, **keywords)` returns a callable that
+# Python: `partial(func, /, *args, **keywords)` returns a callable that
 # prepends `args`/`keywords` to every call. A has no `*args`, no callable
 # objects (`__call__` is not dispatched), and named arguments are only
 # supported for `import python:` interop objects, so this port is
 # positional-only and returns a `Partial` record invoked via `.call(args)`.
 #
-# Deviations vs CPython:
+# Deviations vs Python:
 #   * `p(*more)`            -> `p.call(more)` where `more` is an array.
 #   * keyword binding       -> not supported (A named args are interop-only).
 #   * `p.func` / `p.args`   -> `.func` / `.bound` fields (`.keywords` absent).

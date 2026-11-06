@@ -1,5 +1,5 @@
-# std.pprint package (CPython `pprint` port).
+# std.pprint package (Python `pprint` port).
 #
-# Pure-A subset of CPython 3.14 `Lib/pprint.py`. See README.md for the
+# Pure-A subset of Python 3.14 `Lib/pprint.py`. See README.md for the
 # coverage matrix and semantic deviations.
 from "pretty.a" import PrettyPrinter, SafeRepr, Buf, pprint, pformat, saferepr, isreadable, isrecursive, pp

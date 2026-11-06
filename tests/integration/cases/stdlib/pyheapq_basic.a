@@ -1,4 +1,4 @@
-# Golden test: std.heapq (port of CPython Lib/heapq.py).
+# Golden test: std.heapq (port of Python Lib/heapq.py).
 import heapq
 
 # --- basic min-heap push/pop ---

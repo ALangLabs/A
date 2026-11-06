@@ -1,6 +1,6 @@
-# std.types.tags — runtime type-tag vocabulary (CPython `types` port, part 1).
+# std.types.tags — runtime type-tag vocabulary (Python `types` port, part 1).
 #
-# CPython's `types` module exposes runtime *type objects* (`type(x)` results)
+# Python's `types` module exposes runtime *type objects* (`type(x)` results)
 # used with `isinstance`/`issubclass`. A has no runtime type objects and no
 # `isinstance`, so this port provides the honest equivalent: `type_tag(x)`
 # returns a Python-style type name as a string, and the module-level constants
@@ -8,7 +8,7 @@
 # (functions, modules, frames, ...). They are vocabulary for comparisons and
 # documentation, not usable with `isinstance` (which does not exist).
 #
-# Deviations vs CPython (see README.md):
+# Deviations vs Python (see README.md):
 #   * `type(x)` -> `type_tag(x) -> String`; there is no type object to
 #     instantiate, subclass, or pass to `isinstance`.
 #   * Optional values (`Some(x)`) report the tag of their inner value because
@@ -32,7 +32,7 @@ fn _slice(s, start, end):
 
 ## type_tag(x) -> Python-style type name for any A value.
 ##
-## Mapping (CPython `type(x).__name__` analog):
+## Mapping (Python `type(x).__name__` analog):
 ##   None            -> "NoneType"
 ##   bool            -> "bool"
 ##   int / float     -> "int" / "float"
@@ -82,7 +82,7 @@ fn type_name(x) -> str:
     return type_tag(x)
 
 # ---------------------------------------------------------------------------
-# Type-tag constants. In CPython these are classes (type objects); here they
+# Type-tag constants. In Python these are classes (type objects); here they
 # are the string tags a ported module would compare `type_tag(x)` against.
 # A cannot currently *produce* values of most of these kinds, but the
 # vocabulary is kept for parity with `types.__all__`-style imports.

@@ -1,0 +1,38 @@
+# std.copy — port of CPython Lib/copy.py (adapted to A's runtime model).
+#
+# Deviations from CPython:
+#   * `copy(x)` returns a shallow copy for lists and dicts; scalars
+#     returned as-is.
+#   * `deepcopy(x)` recursively copies nested lists/dicts. It does not
+#     implement cycle detection or user-defined hooks.
+#   * `Error`/`replace` are not provided.
+
+import json
+
+fn copy(x):
+    "Shallow copy for common containers; scalars returned as-is."
+    if json.kind(x) == "array":
+        out = []
+        for v in x:
+            out.append(v)
+        return out
+    if json.kind(x) == "object":
+        outm = {}
+        for k in x:
+            outm[k] = x[k]
+        return outm
+    return x
+
+fn deepcopy(x):
+    "Deep copy for nested lists/dicts (no cycle detection/hooks)."
+    if json.kind(x) == "array":
+        out = []
+        for v in x:
+            out.append(deepcopy(v))
+        return out
+    if json.kind(x) == "object":
+        outm = {}
+        for k in x:
+            outm[deepcopy(k)] = deepcopy(x[k])
+        return outm
+    return x

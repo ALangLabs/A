@@ -1,4 +1,4 @@
-# shlex — port of CPython 3.14 Lib/shlex.py.
+# shlex — port of Python 3.14 Lib/shlex.py.
 #
 # A lexical analyzer class for simple shell-like syntaxes.
 #
@@ -159,7 +159,7 @@ class Shlex:
         return raw
 
     ## read_token(self) -> scan the next raw token (String, or None at EOF
-    ## in posix mode). Ported line-for-line from CPython shlex.read_token.
+    ## in posix mode). Ported line-for-line from Python shlex.read_token.
     fn read_token(self):
         quoted = false
         escapedstate = " "
@@ -287,7 +287,7 @@ class Shlex:
         return "\"" + str(self.infile) + "\", line " + str(self.lineno) + ": "
 
     ## read_line(self) -> consume and return the rest of the current
-    ## input line (convenience addition; CPython shlex has no read_line).
+    ## input line (convenience addition; Python shlex has no read_line).
     fn read_line(self):
         return self._read_line()
 

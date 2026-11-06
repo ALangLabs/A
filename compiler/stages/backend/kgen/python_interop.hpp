@@ -22,8 +22,8 @@ bool equals(const Value& lhs, const Value& rhs);
 bool isPythonValue(const Value& v);
 std::string repr(const Value& v);
 
-// Operators that involve at least one Python object are evaluated by CPython
-// itself (PyNumber_*/PyObject_RichCompareBool/PySequence_Contains), so things
+// Operators that involve at least one Python object are evaluated through the
+// Python C API (PyNumber_*/PyObject_RichCompareBool/PySequence_Contains), so things
 // like `np_array * 2` or `x in torch_tensor` just work.
 enum class PyBinOp {
   Add, Sub, Mul, Div, Mod, Pow,

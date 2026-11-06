@@ -17,7 +17,7 @@ fn main():
     print(token.tok_name[token.N_TOKENS])
     print(token.tok_name[token.NT_OFFSET])
 
-    # predicates (snake_case + CPython UPPERCASE aliases)
+    # predicates (snake_case + UPPERCASE aliases)
     print(token.isterminal(token.NAME), token.isterminal(token.NT_OFFSET))
     print(token.isnonterminal(token.NT_OFFSET), token.isnonterminal(token.NAME))
     print(token.iseof(token.ENDMARKER), token.iseof(token.NAME))

@@ -181,7 +181,7 @@ int main(int argc, char** argv) {
   config.checkOnly = options.command == "check";
   config.useColor = options.useColor;
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
-  config.backend = "llvm"; // single backend (Mojo-style LLVM pipeline)
+  config.backend = "llvm"; // single backend (LLVM pipeline)
   config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count
   if (const char* env = std::getenv("A_JOBS")) {
     try { if (options.jobs == 1) config.jobs = std::stoi(env); } catch (...) {}

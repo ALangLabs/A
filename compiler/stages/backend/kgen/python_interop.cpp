@@ -26,7 +26,7 @@ namespace {
 
 #ifdef A_HAVE_PYTHON
 
-// Every entry point holds the GIL while touching the CPython API. The engine
+// Every entry point holds the GIL while touching the Python C API. The engine
 // is single-threaded today, but PyGILState also keeps this correct if A ever
 // runs Python calls off the main thread.
 struct GilGuard {
@@ -94,7 +94,7 @@ std::string utf8FromPyUnicode(PyObject* obj) {
   return data ? std::string(data, static_cast<std::size_t>(size)) : std::string();
 }
 
-// Converts a CPython object into an A value. Immutable scalars and the
+// Converts a Python object into an A value. Immutable scalars and the
 // builtin containers map onto native A values; everything else (modules,
 // functions, class instances, ...) stays a PythonObject so attribute access
 // and calls keep working through the C API.
@@ -276,7 +276,7 @@ bool ensureInitialized(const std::string& moduleHint) {
   static bool inited = false;
   if (inited) return true;
   if (!detail::ensurePythonLoaded(moduleHint)) return false;
-  // Point CPython's getpath at the real install prefix so it finds its
+  // Point Python's getpath at the real install prefix so it finds its
   // stdlib/platstdlib (and lib-dynload) instead of warning about
   // <exec_prefix>. Restored immediately after init.
   const std::string& home = detail::pythonRuntimeInfo().pythonHome;

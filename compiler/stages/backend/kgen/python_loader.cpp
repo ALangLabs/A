@@ -157,7 +157,7 @@ void addVenvExe(std::vector<std::string>& out, const char* dir) {
   }
 }
 
-// uv-managed CPython installs live under ~/.local/share/uv/python/*/bin.
+// uv-managed Python installs live under ~/.local/share/uv/python/*/bin.
 void addUvPythons(std::vector<std::string>& out) {
   const char* overrideDir = std::getenv("UV_PYTHON_INSTALL_DIR");
   fs::path root = overrideDir && *overrideDir
@@ -178,7 +178,7 @@ void addUvPythons(std::vector<std::string>& out) {
       if (f.is_regular_file(ec)) found.push_back(f.path());
     }
   }
-  // Prefer newer interpreters: parse "cpython-X.Y..." from the install dir.
+  // Prefer newer interpreters: parse the X.Y version from the install dir name.
   auto versionKey = [](const fs::path& p) {
     std::string dir = p.parent_path().parent_path().filename().string();
     int major = 0, minor = 0;
@@ -429,7 +429,7 @@ bool ensurePythonLoaded(const std::string&) { return false; }
 }  // namespace a::python::detail
 
 #ifdef A_HAVE_PYTHON
-// Forwarders for CPython entry points that header-defined inline helpers
+// Forwarders for Python entry points that header-defined inline helpers
 // (e.g. PyObject_TypeCheck) call by their real symbol names — those calls are
 // bound when Python.h is parsed, before python_shim.hpp's macros exist, so
 // they need a real definition that forwards into the dlopened libpython.

@@ -1,14 +1,14 @@
-# std.token — port of CPython 3.14 Lib/token.py (constants module).
+# std.token — port of Python 3.14 Lib/token.py (constants module).
 #
 # IMPORTANT: this is a **Python-compatibility vocabulary layer**, not A's
 # tokenizer. A's real lexer lives in the compiler
 # (compiler/stages/lexer/lexer.cpp, `Tok` enum in token.hpp); it produces
 # language tokens (keywords, identifiers, literals, punctuation), not the
-# CPython token-type numbering exported here. Use these constants when
-# writing tools that consume CPython `tokenize` output or port Python
+# Python token-type numbering exported here. Use these constants when
+# writing tools that consume Python `tokenize` output or port Python
 # parser code; use `a`'s own compiler internals for A source analysis.
 #
-# Coverage vs CPython 3.14 token.py:
+# Coverage vs Python 3.14 token.py:
 #   * All token-type constants (ENDMARKER..N_TOKENS, NT_OFFSET): present,
 #     same names and integer values.
 #   * `tok_name` (int -> name map): present, built from `_token_names`.
@@ -16,17 +16,17 @@
 #     present.
 #   * `ISTERMINAL` / `ISNONTERMINAL` / `ISEOF`: present as lowercase
 #     `isterminal` / `isnonterminal` / `iseof` plus UPPERCASE aliases for
-#     CPython call-site compatibility.
+#     Python call-site compatibility.
 #
 # Deviations:
-#   * CPython's `tok_name` is built from `globals()` and also contains
+#   * Python's `tok_name` is built from `globals()` and also contains
 #     entries for every int constant; here it is built explicitly from
 #     `_token_names` (values 0..69) plus `NT_OFFSET` (256) — same result.
 #   * `tok_name[x]` for an unknown `x` is a missing-key error in A maps
-#     (CPython raises KeyError — same failure mode).
+#     (Python raises KeyError — same failure mode).
 #   * No `__all__`.
 
-# -- token-type constants (CPython Lib/token.py, verbatim values) --------------
+# -- token-type constants (Python Lib/token.py, verbatim values) --------------
 
 ENDMARKER = 0
 NAME = 1
@@ -103,7 +103,7 @@ N_TOKENS = 69
 NT_OFFSET = 256
 
 # -- tok_name ------------------------------------------------------------------
-# CPython builds tok_name from globals(); the token-type values 0..69 are
+# Python builds tok_name from globals(); the token-type values 0..69 are
 # contiguous so the names live in a plain array indexed by value.
 
 _token_names = [
@@ -128,7 +128,7 @@ for i in 0..len(_token_names):
 tok_name[NT_OFFSET] = "NT_OFFSET"
 
 # -- exact token types ----------------------------------------------------------
-# CPython: EXACT_TOKEN_TYPES — mapping of exact-match token strings to
+# Python: EXACT_TOKEN_TYPES — mapping of exact-match token strings to
 # their token-type constants (used by `tokenize` for single/double-char
 # operators and delimiters).
 
@@ -183,7 +183,7 @@ exact_token_types = {
     "~": TILDE,
 }
 
-# `EXACT_TOKEN_TYPES` alias matching the CPython spelling.
+# `EXACT_TOKEN_TYPES` alias matching the Python spelling.
 EXACT_TOKEN_TYPES = exact_token_types
 
 # -- predicates -----------------------------------------------------------------
@@ -200,7 +200,7 @@ fn iseof(x):
     "True if token-type `x` is ENDMARKER."
     return x == ENDMARKER
 
-# CPython-style UPPERCASE aliases.
+# Python-style UPPERCASE aliases.
 fn ISTERMINAL(x):
     return isterminal(x)
 

@@ -24,7 +24,7 @@ fn main():
     print(keyword.ispysoftkeyword("case"))
     print(keyword.ispysoftkeyword("fn"))
 
-    # soft keywords (Python's list, kept under the CPython name)
+    # soft keywords (Python's list, kept under the Python name)
     print(keyword.issoftkeyword("match"))
     print(keyword.issoftkeyword("type"))
     print(keyword.issoftkeyword("_"))

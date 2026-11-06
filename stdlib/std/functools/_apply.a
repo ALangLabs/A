@@ -8,7 +8,7 @@
 # type per helper (calling one helper with several arities fails type-check).
 #
 # Supported arity: 0..8 call arguments / cache-key arguments. Larger arities
-# are a runtime error (documented deviation from CPython, which is unbounded).
+# are a runtime error (documented deviation from Python, which is unbounded).
 import core
 
 fn _call0(f):

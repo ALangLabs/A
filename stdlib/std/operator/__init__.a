@@ -1,4 +1,4 @@
-# std.operator — port of CPython Lib/operator.py (pure-Python implementation).
+# std.operator — port of Python Lib/operator.py (pure-Python implementation).
 #
 # A has no special-method protocol, no `is` identity operator, no `getattr`,
 # no `callable`, no exceptions, and no default/variadic parameters. See
@@ -165,13 +165,13 @@ fn concat(a, b):
     return out
 
 fn contains(a, b):
-    # Same as `b in a` (note reversed operands, like CPython).
+    # Same as `b in a` (note reversed operands, like Python).
     return b in a
 
 fn countOf(a, b):
     # Elements equal to `b`. `v == b` covers ordinary values; the str()
     # fallback lets string iteration (which yields chars) match string
-    # elements — closer to CPython's per-character count than .count's
+    # elements — closer to Python's per-character count than .count's
     # substring semantics (see README deviations).
     n = 0
     for v in a:
@@ -187,7 +187,7 @@ fn getitem(a, b):
     return a[b]
 
 fn indexOf(a, b):
-    # First index of `b` in `a`; panics like CPython's ValueError. The str()
+    # First index of `b` in `a`; panics like Python's ValueError. The str()
     # fallback handles string iteration (chars) like countOf.
     i = 0
     for v in a:
@@ -201,7 +201,7 @@ fn setitem(a, b, c):
     a[b] = c
 
 fn length_hint(obj):
-    # CPython's length_hint(obj, default=0); A has no default arguments, so
+    # Python's length_hint(obj, default=0); A has no default arguments, so
     # this takes only `obj` and returns len(obj). Non-sized objects raise a
     # runtime error instead of returning the default (documented deviation).
     return len(obj)
@@ -209,15 +209,15 @@ fn length_hint(obj):
 # -- generalized lookup objects ----------------------------------------------------
 
 fn itemgetter(item):
-    # Returns a callable fetching `item` from its operand (CPython parity).
+    # Returns a callable fetching `item` from its operand (Python parity).
     return fn(obj) => obj[item]
 
 fn itemgetter_all(items):
-    # Multi-index variant of itemgetter; CPython returns a tuple, A an array.
+    # Multi-index variant of itemgetter; Python returns a tuple, A an array.
     return fn(obj) => [obj[i] for i in items]
 
 fn repeat_seq(a, n):
-    # Sequence repetition `a * n` (CPython has no operator.repeat; `*` is
+    # Sequence repetition `a * n` (Python has no operator.repeat; `*` is
     # spelled mul there). Strings repeat via concatenation, other iterables
     # are copied element-wise `n` times into a fresh array.
     if (a + "") == a:

@@ -60,7 +60,7 @@ using ModulePtr = std::shared_ptr<ModuleObj>;
 struct NativeFunction;
 using NativeFunctionPtr = std::shared_ptr<NativeFunction>;
 
-// Opaque handle to an object owned by an embedded runtime (currently CPython,
+// Opaque handle to an object owned by an embedded runtime (currently Python,
 // created by backend/kgen/python_interop.cpp). The runtime never sees the
 // concrete type: `release` is installed by the backend that created the
 // handle and is invoked from the destructor, so Python objects stay alive

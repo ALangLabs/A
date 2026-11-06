@@ -1,7 +1,7 @@
-# std.bisect — port of CPython Lib/bisect.py (pure-Python implementation;
-# CPython's `_bisect` C accelerator only changes speed, not semantics).
+# std.bisect — port of Python Lib/bisect.py (pure-Python implementation;
+# Python's `_bisect` C accelerator only changes speed, not semantics).
 #
-# A has no default parameters, so CPython's `lo=0, hi=len(a)` defaults are
+# A has no default parameters, so Python's `lo=0, hi=len(a)` defaults are
 # split into 2-argument convenience functions and `*_range` functions that
 # take explicit bounds. The `key=` parameter is unsupported (see README).
 import core
@@ -64,7 +64,7 @@ fn insort_right(a, x):
     "Same as insort_right_range(a, x, 0, len(a)); mutates `a`."
     insort_right_range(a, x, 0, len(a))
 
-# -- aliases (CPython: bisect = bisect_right, insort = insort_right) ----------------
+# -- aliases (Python: bisect = bisect_right, insort = insort_right) ----------------
 
 fn bisect(a, x) -> i64:
     return bisect_right(a, x)

@@ -1,4 +1,4 @@
-# std.html.entities — generated from CPython 3.14 html.entities.html5.
+# std.html.entities — generated from Python 3.14 html.entities.html5.
 # DO NOT EDIT BY HAND; regenerate from /usr/lib/python3.14/html/entities.py.
 
 fn html5() -> {String:String}:

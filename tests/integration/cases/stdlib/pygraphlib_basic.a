@@ -1,5 +1,5 @@
 # pygraphlib_basic — golden test for std.graphlib
-# (port of CPython 3.14 Lib/graphlib.py).
+# (port of Python 3.14 Lib/graphlib.py).
 import graphlib
 
 # --- TopologicalSorter_from: dict-of-predecessors constructor ---

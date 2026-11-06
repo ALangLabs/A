@@ -1,6 +1,6 @@
 # std.collections.namedtuple — Python `collections.namedtuple` port.
 #
-# CPython's `namedtuple(typename, field_names)` dynamically synthesizes a new
+# Python's `namedtuple(typename, field_names)` dynamically synthesizes a new
 # class. A has no runtime type synthesis and functions cannot be declared
 # inside functions, so the closest A-idiomatic equivalent is:
 #

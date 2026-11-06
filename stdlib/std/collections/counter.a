@@ -9,7 +9,7 @@ import core
 import json
 
 ## Stable merge sort of (key, count) tuples by count descending.
-## Ties keep insertion order, matching CPython's most_common ordering.
+## Ties keep insertion order, matching Python's most_common ordering.
 fn _merge_by_count(left, right):
     out = []
     i = 0

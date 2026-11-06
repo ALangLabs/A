@@ -1,17 +1,17 @@
-# std.html — port of CPython 3.14 Lib/html/__init__.py.
+# std.html — port of Python 3.14 Lib/html/__init__.py.
 #
 # escape() / unescape() ports. The full html5 entity table lives in
-# entities.a (generated from CPython's html.entities.html5).
+# entities.a (generated from Python's html.entities.html5).
 #
-# Deviations vs CPython: entity scanning works on codepoint arrays; legacy
+# Deviations vs Python: entity scanning works on codepoint arrays; legacy
 # entities without ';' are replaced only when the exact prefix key exists
-# in the html5 table (same rule CPython uses); numeric character references
+# in the html5 table (same rule Python uses); numeric character references
 # are handled by unescape_num below.
 from "entities.a" import html5
 import bytes
 import core
 
-## escape(s, quote) -> HTML-escaped string (CPython html.escape parity):
+## escape(s, quote) -> HTML-escaped string (Python html.escape parity):
 ## & -> &amp;, < -> &lt;, > -> &gt;, and with quote=true also
 ## " -> &quot; and ' -> &#x27;.
 fn escape(s: String, quote: bool):
@@ -66,7 +66,7 @@ fn _digits_value(cs, base):
         v = v * base + d
     return v
 
-## unescape(s) -> string with HTML entities replaced (CPython html.unescape
+## unescape(s) -> string with HTML entities replaced (Python html.unescape
 ## parity for named, legacy-semicolonless, decimal and hex references).
 fn unescape(s: String):
     cs = s.chars()

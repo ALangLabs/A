@@ -24,3 +24,8 @@ This directory mirrors the layout of [Mojo's `stdlib/std/`](https://github.com/m
 - **Prelude** is auto-loaded (`stdlib/prelude.a` / `stdlib/std/prelude/prelude.a`) so core vocabulary is available without explicit imports, mirroring Mojo's `std/prelude`.
 - **Native modules** remain the performance/capability foundation (I/O, net, JSON, tracing, etc.). Self-hosted `.a` packages wrap and compose them.
 - **A semantics are currently Python-style dynamic** (plain mutable assignment, optional annotations, dynamic arithmetic). The layout is Mojo-inspired, but typing/ownership semantics follow current A behavior unless explicitly evolved.
+
+| `string/` | A | ASCII string constants and `capwords` (CPython `string` subset). |
+| `textwrap/` | A | Text wrapping/filling, `dedent`, `indent`, `shorten` (CPython `textwrap` subset). |
+| `statistics/` | A | Descriptive statistics (`mean`, `median`, `variance`, `stdev`, etc.; CPython `statistics` subset). |
+| `copy/` | A | `copy`/`deepcopy` helpers for lists/dicts (CPython `copy` adapted subset). |

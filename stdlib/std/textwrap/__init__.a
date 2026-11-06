@@ -1,0 +1,208 @@
+# std.textwrap — port of Python Lib/textwrap.py (pure-A subset).
+#
+# Implements practical wrapping/filling plus dedent/indent/shorten.
+# Python's regex-heavy word splitting and sentence-end fixing are not
+# fully replicated; this uses simple whitespace chunking.
+#
+# Deviations from Python:
+#   * No `TextWrapper` class / `re`-based splitting; functions take
+#     explicit parameters (A has no default params).
+#   * `wrap(text, width)`, `fill(text, width)`, `shorten(text, width, placeholder)`.
+#   * Hyphen-aware breaking, sentence-end fixing, max_lines, tabsize
+#     options are limited/omitted.
+
+fn _substr(s, start, end):
+    out = ""
+    i = start
+    src = str(s)
+    while i < end and i < len(src):
+        out = out + str(src[i])
+        i = i + 1
+    return out
+
+fn _split_words_ws(text):
+    out = []
+    cur = ""
+    for c in str(text):
+        ch = str(c)
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            if len(cur) > 0:
+                out.append(cur)
+                cur = ""
+        else:
+            cur = cur + ch
+    if len(cur) > 0:
+        out.append(cur)
+    return out
+
+fn wrap(text, width):
+    "Wrap text to width columns (simple whitespace wrapping). Returns list of lines."
+    wlimit = int(width)
+    if wlimit < 1:
+        wlimit = 1
+    words = _split_words_ws(text)
+    lines = []
+    line = ""
+    for w in words:
+        if len(line) == 0:
+            line = w
+        elif len(line) + 1 + len(w) <= wlimit:
+            line = line + " " + w
+        else:
+            lines.append(line)
+            if len(w) > wlimit:
+                rest = str(w)
+                while len(rest) > wlimit:
+                    lines.append(_substr(rest, 0, wlimit))
+                    rest = _substr(rest, wlimit, len(rest))
+                line = rest
+            else:
+                line = w
+    if len(line) > 0:
+        lines.append(line)
+    return lines
+
+fn fill(text, width):
+    "Wrap text and join lines with newlines."
+    return "\n".join(wrap(text, width))
+
+fn _split_on_nl_keep(s):
+    out = []
+    cur = ""
+    i = 0
+    src = str(s)
+    while i < len(src):
+        ch = str(src[i])
+        cur = cur + ch
+        if ch == "\n":
+            out.append(cur)
+            cur = ""
+        i = i + 1
+    if len(cur) > 0:
+        out.append(cur)
+    return out
+
+fn _strip_nl(s):
+    src = str(s)
+    if src.endswith("\r\n"):
+        return _substr(src, 0, len(src) - 2)
+    if src.endswith("\n") or src.endswith("\r"):
+        return _substr(src, 0, len(src) - 1)
+    return src
+
+fn _nl_of(s):
+    src = str(s)
+    if src.endswith("\r\n"):
+        return "\r\n"
+    if src.endswith("\n"):
+        return "\n"
+    if src.endswith("\r"):
+        return "\r"
+    return ""
+
+fn _leading_ws(s):
+    out = ""
+    for c in str(s):
+        ch = str(c)
+        if ch == " " or ch == "\t":
+            out = out + ch
+        else:
+            break
+    return out
+
+fn _lstrip_ws(s):
+    i = 0
+    src = str(s)
+    while i < len(src):
+        ch = str(src[i])
+        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
+            i = i + 1
+        else:
+            break
+    return _substr(src, i, len(src))
+
+fn _common_prefix(a, b):
+    out = ""
+    i = 0
+    sa = str(a)
+    sb = str(b)
+    while i < len(sa) and i < len(sb):
+        if sa[i] == sb[i]:
+            out = out + str(sa[i])
+            i = i + 1
+        else:
+            break
+    return out
+
+fn dedent(text):
+    "Remove common leading whitespace from all non-empty lines."
+    s = str(text)
+    raw_lines = _split_on_nl_keep(s)
+    margin = None
+    for ln in raw_lines:
+        content = _strip_nl(ln)
+        if len(_lstrip_ws(content)) == 0:
+            continue
+        lead = _leading_ws(content)
+        if margin == None:
+            margin = lead
+        else:
+            margin = _common_prefix(margin, lead)
+    if margin == None or margin == "":
+        return s
+    out = ""
+    for ln in raw_lines:
+        content = _strip_nl(ln)
+        nl = _nl_of(ln)
+        if content.startswith(margin):
+            out = out + _substr(content, len(margin), len(content)) + nl
+        else:
+            out = out + ln
+    return out
+
+fn indent(text, prefix):
+    "Add prefix to the beginning of selected non-empty lines."
+    s = str(text)
+    p = str(prefix)
+    lines = _split_on_nl_keep(s)
+    out = ""
+    for ln in lines:
+        content = _strip_nl(ln)
+        nl = _nl_of(ln)
+        if len(content.strip()) > 0:
+            out = out + p + content + nl
+        else:
+            out = out + ln
+    return out
+
+fn shorten(text, width, placeholder):
+    "Collapse whitespace, truncate to width, appending placeholder if truncated."
+    s = str(text)
+    ph = str(placeholder)
+    wlimit = int(width)
+    words = _split_words_ws(s)
+    if len(words) == 0:
+        return ""
+    line = ""
+    for w in words:
+        candidate = str(w)
+        if len(line) > 0:
+            candidate = line + " " + str(w)
+        if len(candidate) <= wlimit:
+            line = candidate
+        else:
+            if len(line) == 0:
+                allowed = wlimit - len(ph)
+                if allowed < 0:
+                    allowed = 0
+                return _substr(str(w), 0, allowed) + ph
+            result = line
+            if len(result) + len(ph) <= wlimit:
+                result = result + ph
+            else:
+                cut = wlimit - len(ph)
+                if cut < 0:
+                    cut = 0
+                result = _substr(result, 0, cut) + ph
+            return result
+    return line

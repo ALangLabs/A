@@ -2123,7 +2123,7 @@ TypePtr Sema::inferIdent(IdentExpr& expr) {
   }
   if (auto alias = moduleAliases_.find(expr.name); alias != moduleAliases_.end()) {
     if (alias->second.python) {
-      // CPython modules are fully dynamic: members are resolved at runtime.
+      // Python modules are fully dynamic: members are resolved at runtime.
       auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
     }
     return alias->second.native ? typeNativeModule(alias->second.nativeName)

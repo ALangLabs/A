@@ -14,15 +14,15 @@ struct BuiltinDoc {
   const char* name;
   const char* signature;
   const char* documentation;
-  // CPython-style doctest example (`>>>` lines), rendered as "Example" in
-  // hover like CPython's pydoc docstrings. Empty when not provided.
+  // Doctest example (`>>>` lines), rendered as "Example" in hover like
+  // pydoc docstrings. Empty when not provided.
   const char* example = nullptr;
   const char* seeAlso = nullptr;
 };
 
 inline const StringMap<BuiltinDoc>& builtinDocs() {
   static const StringMap<BuiltinDoc> docs = {
-      // math (CPython-style: signature + docstring + doctest example)
+      // math (signature + docstring + doctest example)
       {"sqrt", {"sqrt", "sqrt(x) -> f64", "Square root of x.",
                 ">>> import math\n>>> math.sqrt(16)\n4.0",
                 "floor, ceil, round"}},
