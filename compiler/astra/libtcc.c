@@ -56,7 +56,6 @@
 #else
 #error unknown target
 #endif
-#include "a/a_compiler.c"
 #ifdef TCC_TARGET_PE
 #include "tccpe.c"
 #endif
@@ -822,37 +821,8 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
             file->fd = fd;
         }
 
-        if (filetype & AFF_TYPE_A) {
-            /* A language: direct A->machine code (no C, no preprocessor). */
-            const char *asrc = NULL;
-            int alen = 0;
-            char *atmp = NULL;
-            if (fd == -1) {
-                asrc = (const char *)file->buffer;
-                alen = (int)(file->buf_end - file->buffer);
-            } else {
-                atmp = tcc_load_text(fd);
-                asrc = atmp;
-                alen = atmp ? (int)strlen(atmp) : 0;
-            }
-            tccpp_new(s1);
-            tccgen_init(s1);
-            /* Compile the A runtime BEFORE opening this file's symbol range:
-               a_ensure_runtime() does its own balanced tccelf_begin/end_file,
-               so its symbols are merged on their own. Running it inside
-               tcc_compile_a() would nest it in the middle of our range and
-               tccelf_end_file() would remap the runtime's symbols as if they
-               belonged to the A file, leaving every reference unresolved. */
-            a_ensure_runtime(s1);
-            tccelf_begin_file(s1);
-            tcc_compile_a(s1, fd == -1 ? "<string>" : str, asrc ? asrc : "", alen);
-            tccelf_end_file(s1);
-            tccgen_finish(s1);
-            preprocess_end(s1);
-            if (atmp) tcc_free(atmp);
-        } else {
-            preprocess_start(s1, filetype);
-            tccgen_init(s1);
+        preprocess_start(s1, filetype);
+        tccgen_init(s1);
 
             if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
                 tcc_preprocess(s1);
@@ -867,7 +837,6 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
             }
             tccgen_finish(s1);
             preprocess_end(s1);
-        }
     }
     s1->error_set_jmp_enabled = 0;
     tcc_exit_state(s1);
@@ -1246,7 +1215,10 @@ static int guess_filetype(const char *filename)
                         is_archive = 1;
                     fclose(f);
                 }
-                filetype = is_archive ? AFF_TYPE_BIN : AFF_TYPE_A;
+                /* .a files are A source; they are compiled via the C++
+                   frontend (compiler/astra/frontend/codegen), which emits C
+                   for astra. A bare .a here is not a C input. */
+                filetype = AFF_TYPE_BIN;
             }
             else if (!PATHCMP(ext, "c")
                      || !PATHCMP(ext, "h")

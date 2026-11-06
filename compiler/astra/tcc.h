@@ -1744,7 +1744,6 @@ ST_FUNC int tcc_load_coff(TCCState * s1, int fd);
 ST_FUNC void asm_instr(void);
 ST_FUNC void asm_global_instr(void);
 ST_FUNC int tcc_assemble(TCCState *s1, int do_preprocess);
-ST_FUNC int tcc_compile_a(TCCState *s1, const char *filename, const char *buf, int len);
 #ifdef CONFIG_TCC_ASM
 ST_FUNC int find_constraint(ASMOperand *operands, int nb_operands, const char *name, const char **pp);
 ST_FUNC Sym* get_asm_sym(int name, Sym *csym);

@@ -53,7 +53,7 @@ typedef struct {
     char *name;
 } AFnon;
 typedef struct { AObj h; uint64_t n; aval slots[]; } AEnv;
-typedef struct { AObj h; uint32_t ok; aval value; } AResult;
+typedef struct { AObj h; uint32_t ok; uint32_t is_option; aval value; } AResult;
 typedef struct { AObj h; int64_t v; } AInt64;
 typedef struct {
     AObj h;
@@ -562,7 +562,7 @@ static void format_into(Buf *b, aval v, int quote) {
         }
         case K_RESULT: {
             AResult *r = (AResult *)obj_of(v);
-            buf_adds(b, r->ok ? "Ok(" : "Err(");
+            buf_adds(b, r->is_option ? "Some(" : (r->ok ? "Ok(" : "Err("));
             format_into(b, r->value, 1);
             buf_addc(b, ')');
             return;
@@ -602,11 +602,11 @@ static int truthy(aval v) {
     }
 }
 
-aval a_truthy_raw(aval v) { return (aval)(truthy(v) ? 1 : 0); }
+aval a_truthy_raw_slow(aval v) { return (aval)(truthy(v) ? 1 : 0); }
 aval a_not(aval v) { return bool_aval(!truthy(v)); }
 aval a_bool(aval v) { return bool_aval(truthy(v)); }
 
-aval a_neg(aval v) {
+aval a_neg_slow(aval v) {
     if (is_int_val(v)) {
         int64_t i = int_val_full(v);
         if (i == INT64_MIN) return mkdouble(-(double)INT64_MIN);
@@ -617,7 +617,7 @@ aval a_neg(aval v) {
     return A_NONE;
 }
 
-aval a_bnot(aval v) {
+aval a_bnot_slow(aval v) {
     if (!is_int_val(v))
         panicf("bad operand type for unary ~: '%s'", type_name_cstr(v));
     return mkint_full(~int_val_full(v));
@@ -789,14 +789,14 @@ static int values_equal(aval a, aval b) {
         }
         case K_RESULT: {
             AResult *x = (AResult *)obj_of(a), *y = (AResult *)obj_of(b);
-            return x->ok == y->ok && values_equal(x->value, y->value);
+            return x->ok == y->ok && x->is_option == y->is_option && values_equal(x->value, y->value);
         }
         default: return 0;
     }
 }
 
-aval a_eq(aval l, aval r) { return bool_aval(values_equal(l, r)); }
-aval a_ne(aval l, aval r) { return bool_aval(!values_equal(l, r)); }
+aval a_eq_slow(aval l, aval r) { return bool_aval(values_equal(l, r)); }
+aval a_ne_slow(aval l, aval r) { return bool_aval(!values_equal(l, r)); }
 
 static int cmp_ordered(aval a, aval b, const char *op) {
     if (is_num(a) && is_num(b)) {
@@ -824,10 +824,10 @@ static int cmp_ordered(aval a, aval b, const char *op) {
     return 0;
 }
 
-aval a_lt(aval l, aval r) { return bool_aval(cmp_ordered(l, r, "<") < 0); }
-aval a_le(aval l, aval r) { return bool_aval(cmp_ordered(l, r, "<=") <= 0); }
-aval a_gt(aval l, aval r) { return bool_aval(cmp_ordered(l, r, ">") > 0); }
-aval a_ge(aval l, aval r) { return bool_aval(cmp_ordered(l, r, ">=") >= 0); }
+aval a_lt_slow(aval l, aval r) { return bool_aval(cmp_ordered(l, r, "<") < 0); }
+aval a_le_slow(aval l, aval r) { return bool_aval(cmp_ordered(l, r, "<=") <= 0); }
+aval a_gt_slow(aval l, aval r) { return bool_aval(cmp_ordered(l, r, ">") > 0); }
+aval a_ge_slow(aval l, aval r) { return bool_aval(cmp_ordered(l, r, ">=") >= 0); }
 
 /* ------------------------------------------------------------------ */
 /* integer overflow helpers                                            */
@@ -1000,26 +1000,26 @@ static aval binary_arith(aval l, aval r, char op, const char *opname) {
     return A_NONE;
 }
 
-aval a_add(aval l, aval r) { return binary_arith(l, r, '+', "+"); }
-aval a_sub(aval l, aval r) { return binary_arith(l, r, '-', "-"); }
-aval a_mul(aval l, aval r) { return binary_arith(l, r, '*', "*"); }
-aval a_div(aval l, aval r) { return binary_arith(l, r, '/', "/"); }
-aval a_mod(aval l, aval r) { return binary_arith(l, r, '%', "%"); }
+aval a_add_slow(aval l, aval r) { return binary_arith(l, r, '+', "+"); }
+aval a_sub_slow(aval l, aval r) { return binary_arith(l, r, '-', "-"); }
+aval a_mul_slow(aval l, aval r) { return binary_arith(l, r, '*', "*"); }
+aval a_div_slow(aval l, aval r) { return binary_arith(l, r, '/', "/"); }
+aval a_mod_slow(aval l, aval r) { return binary_arith(l, r, '%', "%"); }
 aval a_pow(aval l, aval r) { return binary_arith(l, r, '^', "**"); }
 
 /* ------------------------------------------------------------------ */
 /* bitwise / shifts / membership                                       */
 /* ------------------------------------------------------------------ */
 
-aval a_band(aval l, aval r) {
+aval a_band_slow(aval l, aval r) {
     if (!is_int_val(l) || !is_int_val(r)) panic_binop("&", l, r);
     return mkint_full(int_val_full(l) & int_val_full(r));
 }
-aval a_bor(aval l, aval r) {
+aval a_bor_slow(aval l, aval r) {
     if (!is_int_val(l) || !is_int_val(r)) panic_binop("|", l, r);
     return mkint_full(int_val_full(l) | int_val_full(r));
 }
-aval a_bxor(aval l, aval r) {
+aval a_bxor_slow(aval l, aval r) {
     if (!is_int_val(l) || !is_int_val(r)) panic_binop("^", l, r);
     return mkint_full(int_val_full(l) ^ int_val_full(r));
 }
@@ -1032,12 +1032,12 @@ static int64_t shift_amount(aval v) {
     return s;
 }
 
-aval a_shl(aval l, aval r) {
+aval a_shl_slow(aval l, aval r) {
     if (!is_int_val(l)) panic_binop("<<", l, r);
     int64_t a = int_val_full(l), s = shift_amount(r);
     return mkint_full((int64_t)((uint64_t)a << s));
 }
-aval a_shr(aval l, aval r) {
+aval a_shr_slow(aval l, aval r) {
     if (!is_int_val(l)) panic_binop(">>", l, r);
     int64_t a = int_val_full(l), s = shift_amount(r);
     return mkint_full(a >> s);
@@ -1486,9 +1486,23 @@ static AResult *result_new(int ok, aval value) {
     r->h.len = ok ? 1 : 0;
     r->h.cap = 0;
     r->ok = ok ? 1u : 0u;
+    r->is_option = 0;
     r->value = value;
     return r;
 }
+
+aval a_some_new(aval value) {
+    AResult *r = (AResult *)xmalloc(sizeof(AResult));
+    r->h.type = T_RESULT;
+    r->h.len = 1;
+    r->h.cap = 0;
+    r->ok = 1;
+    r->is_option = 1;
+    r->value = value;
+    return mkobj(&r->h);
+}
+
+static int result_is_option(aval v) { return ((AResult *)obj_of(v))->is_option != 0; }
 
 static int is_result(aval v) {
     AObj *o = obj_of(v);
@@ -2008,6 +2022,44 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             int mode = !strcmp(name, "ljust") ? 0 : !strcmp(name, "rjust") ? 1 : !strcmp(name, "center") ? 2 : 3;
             return str_affix(obj, w, fill, mode);
         }
+        if (!strcmp(name, "chars")) {
+            want_args(name, n, 0, 0);
+            aval lst = a_list_new(0, NULL);
+            uint64_t i = 0;
+            while (i < s->h.len) {
+                uint64_t start = i;
+                unsigned char c = (unsigned char)s->data[i];
+                if (c < 0x80) i += 1;
+                else if ((c & 0xE0) == 0xC0) i += 2;
+                else if ((c & 0xF0) == 0xE0) i += 3;
+                else if ((c & 0xF8) == 0xF0) i += 4;
+                else i += 1;
+                if (i > s->h.len) i = s->h.len;
+                a_list_push(lst, a_str_new(s->data + start, i - start));
+            }
+            return lst;
+        }
+        if (!strcmp(name, "repeat")) {
+            want_args(name, n, 1, 1);
+            int64_t cnt = expect_int64(argv[0], "count");
+            if (cnt < 0) cnt = 0;
+            Buf b; buf_init(&b);
+            for (int64_t i = 0; i < cnt; ++i) buf_addn(&b, s->data, (size_t)s->h.len);
+            return buf_take(&b);
+        }
+        if (!strcmp(name, "contains")) {
+            want_args(name, n, 1, 1);
+            if (kind_of(argv[0]) != K_STR) return a_bool(0);
+            AStr *hay = (AStr *)obj_of(obj);
+            AStr *needle = (AStr *)obj_of(argv[0]);
+            if (needle->h.len == 0) return a_bool(1);
+            if (needle->h.len > hay->h.len) return a_bool(0);
+            for (uint64_t i = 0; i + needle->h.len <= hay->h.len; ++i) {
+                if (memcmp(hay->data + i, needle->data, (size_t)needle->h.len) == 0)
+                    return a_bool(1);
+            }
+            return a_bool(0);
+        }
         return method_no_method(obj, name);
     }
 
@@ -2034,8 +2086,8 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             return mkint_full(c);
         }
         if (!strcmp(name, "contains")) { want_args(name, n, 1, 1); return bool_aval(seq_contains(obj, argv[0])); }
-        if (!strcmp(name, "first")) { want_args(name, n, 0, 0); if (!a->h.len) panicf("index out of range"); return a->items[0]; }
-        if (!strcmp(name, "last")) { want_args(name, n, 0, 0); if (!a->h.len) panicf("index out of range"); return a->items[a->h.len - 1]; }
+        if (!strcmp(name, "first")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(a->items[0]); }
+        if (!strcmp(name, "last")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(a->items[a->h.len - 1]); }
         if (!strcmp(name, "copy")) {
             want_args(name, n, 0, 0);
             return list_from_vec(a->items, a->h.len, !is_list);
@@ -2065,6 +2117,23 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             a->items[i] = argv[1];
             a->h.len++;
             return A_NONE;
+        }
+        if (!strcmp(name, "remove_at")) {
+            want_args(name, n, 1, 1);
+            int64_t i = expect_int64(argv[0], "index");
+            if (i < 0) i += (int64_t)a->h.len;
+            if (i < 0 || i >= (int64_t)a->h.len) panicf("remove_at index out of range");
+            aval r = a->items[i];
+            memmove(a->items + i, a->items + i + 1, (size_t)(a->h.len - (uint64_t)i - 1) * sizeof(aval));
+            a->h.len--;
+            return r;
+        }
+        if (!strcmp(name, "join")) {
+            want_args(name, n, 1, 1);
+            aval tmp = collect_iterable(obj);
+            AArr *ja = (AArr *)obj_of(tmp);
+            for (uint64_t i = 0; i < ja->h.len; ++i) ja->items[i] = a_str(ja->items[i]);
+            return a_str_joinsep(argv[0], ja->h.len, ja->items);
         }
         if (!strcmp(name, "remove")) {
             want_args(name, n, 1, 1);
@@ -2154,6 +2223,10 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             dict_put(d, argv[0], dv);
             return dv;
         }
+        if (!strcmp(name, "contains")) {
+            want_args(name, n, 1, 1);
+            return a_bool(dict_find(d, argv[0]) >= 0);
+        }
         return method_no_method(obj, name);
     }
 
@@ -2207,6 +2280,10 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
             memmove(s->items, s->items + 1, (size_t)(s->h.len - 1) * sizeof(aval));
             s->h.len--;
             return r;
+        }
+        if (!strcmp(name, "contains")) {
+            want_args(name, n, 1, 1);
+            return a_bool(set_contains(s, argv[0]));
         }
         return method_no_method(obj, name);
     }
@@ -2429,6 +2506,8 @@ static aval bi_dict(uint64_t n, aval *argv) {
 
 static aval bi_map(uint64_t n, aval *argv) {
     want_args("map", n, 2, 2);
+    /* A calls map(xs, f); accept either order. */
+    if (kind_of(argv[1]) == K_FNON) { aval tmp2 = argv[0]; argv[0] = argv[1]; argv[1] = tmp2; }
     aval tmp = collect_iterable(argv[1]);
     AArr *a = (AArr *)obj_of(tmp);
     AVec out = { NULL, 0, 0 };
@@ -2443,6 +2522,7 @@ static aval bi_map(uint64_t n, aval *argv) {
 
 static aval bi_filter(uint64_t n, aval *argv) {
     want_args("filter", n, 2, 2);
+    if (kind_of(argv[1]) == K_FNON) { aval tmp2 = argv[0]; argv[0] = argv[1]; argv[1] = tmp2; }
     aval tmp = collect_iterable(argv[1]);
     AArr *a = (AArr *)obj_of(tmp);
     AVec out = { NULL, 0, 0 };
@@ -2455,17 +2535,29 @@ static aval bi_filter(uint64_t n, aval *argv) {
     return r;
 }
 
-static aval bi_any(uint64_t n, aval *argv) { (void)argv; want_args("any", n, 1, 1); aval t = collect_iterable(argv[0]); AArr *a=(AArr*)obj_of(t); for(uint64_t i=0;i<a->h.len;++i) if(truthy(a->items[i])) return A_TRUE; return A_FALSE; }
-static aval bi_all(uint64_t n, aval *argv) { (void)argv; want_args("all", n, 1, 1); aval t = collect_iterable(argv[0]); AArr *a=(AArr*)obj_of(t); for(uint64_t i=0;i<a->h.len;++i) if(!truthy(a->items[i])) return A_FALSE; return A_TRUE; }
-static aval bi_some(uint64_t n, aval *argv) { return bi_any(n, argv); }
+static aval bi_any(uint64_t n, aval *argv) { want_args("any", n, 1, 2); aval t = collect_iterable(argv[0]); AArr *a=(AArr*)obj_of(t); for(uint64_t i=0;i<a->h.len;++i){ aval v=a->items[i]; if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(truthy(v)) return A_TRUE; } return A_FALSE; }
+static aval bi_all(uint64_t n, aval *argv) { want_args("all", n, 1, 2); aval t = collect_iterable(argv[0]); AArr *a=(AArr*)obj_of(t); for(uint64_t i=0;i<a->h.len;++i){ aval v=a->items[i]; if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(!truthy(v)) return A_FALSE; } return A_TRUE; }
+static aval bi_some(uint64_t n, aval *argv) { want_args("Some", n, 1, 1); return a_some_new(argv[0]); }
+
+static aval bi_reduce(uint64_t n, aval *argv) {
+    want_args("reduce", n, 3, 3);
+    aval tmp = collect_iterable(argv[0]);
+    AArr *a = (AArr *)obj_of(tmp);
+    aval acc = argv[1];
+    for (uint64_t i = 0; i < a->h.len; ++i) {
+        aval two[2] = { acc, a->items[i] };
+        acc = a_call(argv[2], 2, two);
+    }
+    return acc;
+}
 
 static aval bi_ok(uint64_t n, aval *argv) { want_args("ok", n, 1, 1); return mkobj(result_new(1, argv[0])); }
 static aval bi_err(uint64_t n, aval *argv) { want_args("err", n, 1, 1); return mkobj(result_new(0, argv[0])); }
 
-static void panic_with_msg(uint64_t n, aval *argv, int has, const char *def) {
+static void panic_with_msg_at(uint64_t n, aval *argv, int idx, const char *def) {
     (void)n;
-    if (!has) { a_panic_msg(def); return; }
-    aval s = a_str(argv[0]);
+    if (idx < 0) { a_panic_msg(def); return; }
+    aval s = a_str(argv[idx]);
     uint64_t len;
     const char *p = str_data(s, &len);
     (void)len;
@@ -2475,26 +2567,39 @@ static void panic_with_msg(uint64_t n, aval *argv, int has, const char *def) {
 static aval bi_panic(uint64_t n, aval *argv) {
     want_args("panic", n, 0, 1);
     if (n == 0) a_panic_msg("panic");
-    else panic_with_msg(n, argv, 1, "panic");
+    else panic_with_msg_at(n, argv, 0, "panic");
     return A_NONE;
 }
 
 static aval bi_assert(uint64_t n, aval *argv) {
     want_args("assert", n, 1, 2);
-    if (!truthy(argv[0])) panic_with_msg(n, argv, n == 2, "Assertion failed");
+    if (!truthy(argv[0])) panic_with_msg_at(n, argv, n == 2 ? 1 : -1, "Assertion failed");
     return A_NONE;
 }
 
 static aval bi_assert_eq(uint64_t n, aval *argv) {
     want_args("assert_eq", n, 2, 3);
     if (!values_equal(argv[0], argv[1])) {
-        if (n == 3) panic_with_msg(n, argv, 1, "Assertion failed");
         Buf b;
         buf_init(&b);
-        buf_adds(&b, "assertion failed: ");
-        format_into(&b, argv[0], 1);
-        buf_adds(&b, " != ");
-        format_into(&b, argv[1], 1);
+        if (n == 3) {
+            /* Match integration test harness format. */
+            buf_adds(&b, "Assertion failed: expected ");
+            format_into(&b, argv[0], 1);
+            buf_adds(&b, ", found ");
+            format_into(&b, argv[1], 1);
+            buf_adds(&b, " (");
+            aval msg = a_str(argv[2]);
+            uint64_t mlen;
+            const char *mp = str_data(msg, &mlen);
+            buf_addn(&b, mp, mlen);
+            buf_addc(&b, ')');
+        } else {
+            buf_adds(&b, "assertion failed: ");
+            format_into(&b, argv[0], 1);
+            buf_adds(&b, " != ");
+            format_into(&b, argv[1], 1);
+        }
         aval s = buf_take(&b);
         uint64_t len;
         a_panic_msg(str_data(s, &len));
@@ -2733,9 +2838,7 @@ static aval bi_join(uint64_t n, aval *argv) {
     aval tmp = collect_iterable(argv[0]);
     AArr *a = (AArr *)obj_of(tmp);
     for (uint64_t i = 0; i < a->h.len; ++i)
-        if (kind_of(a->items[i]) != K_STR)
-            panicf("sequence item %llu: expected str instance, %s found",
-                   (unsigned long long)i, type_name_cstr(a->items[i]));
+        a->items[i] = a_str(a->items[i]);
     return a_str_joinsep(argv[1], a->h.len, a->items);
 }
 
@@ -2796,6 +2899,18 @@ static aval bi_zip(uint64_t n, aval *argv) {
     return r;
 }
 
+static aval bi_log2(uint64_t n, aval *argv) { want_args("log2", n, 1, 1); double x = math_arg(argv[0], "log2"); if (x <= 0.0) panicf("math domain error"); return mkdouble(log2(x)); }
+static aval bi_log10(uint64_t n, aval *argv) { want_args("log10", n, 1, 1); double x = math_arg(argv[0], "log10"); if (x <= 0.0) panicf("math domain error"); return mkdouble(log10(x)); }
+static aval bi_atan2(uint64_t n, aval *argv) { want_args("atan2", n, 2, 2); return mkdouble(atan2(math_arg(argv[0], "atan2"), math_arg(argv[1], "atan2"))); }
+static aval bi_flush(uint64_t n, aval *argv) { (void)argv; want_args("flush", n, 0, 0); fflush(stdout); return A_NONE; }
+static aval bi_i8(uint64_t n, aval *argv) { want_args("i8", n, 1, 1); return mkint_full((int8_t)int_val_full(a_int(argv[0]))); }
+static aval bi_i16(uint64_t n, aval *argv) { want_args("i16", n, 1, 1); return mkint_full((int16_t)int_val_full(a_int(argv[0]))); }
+static aval bi_i32(uint64_t n, aval *argv) { want_args("i32", n, 1, 1); return mkint_full((int32_t)int_val_full(a_int(argv[0]))); }
+static aval bi_u8(uint64_t n, aval *argv) { want_args("u8", n, 1, 1); return mkint_full((uint8_t)int_val_full(a_int(argv[0]))); }
+static aval bi_u16(uint64_t n, aval *argv) { want_args("u16", n, 1, 1); return mkint_full((uint16_t)int_val_full(a_int(argv[0]))); }
+static aval bi_u32(uint64_t n, aval *argv) { want_args("u32", n, 1, 1); return mkint_full((uint32_t)int_val_full(a_int(argv[0]))); }
+static aval bi_f32(uint64_t n, aval *argv) { want_args("f32", n, 1, 1); return a_mkdouble((float)num_to_double(argv[0])); }
+
 /* builtin table: order must match the enum in a_runtime.h */
 static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT] = {
     { "print", bi_print }, { "eprint", bi_eprint }, { "len", bi_len },
@@ -2819,7 +2934,10 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "rename", bi_rename }, { "current_dir", bi_current_dir },
     { "repr", bi_repr }, { "type", bi_type }, { "isinstance", bi_isinstance },
     { "join", bi_join }, { "sorted", bi_sorted }, { "reversed", bi_reversed },
-    { "enumerate", bi_enumerate }, { "zip", bi_zip }
+    { "enumerate", bi_enumerate }, { "zip", bi_zip }, { "reduce", bi_reduce },
+    { "log2", bi_log2 }, { "log10", bi_log10 }, { "atan2", bi_atan2 }, { "flush", bi_flush },
+    { "i8", bi_i8 }, { "i16", bi_i16 }, { "i32", bi_i32 }, { "u8", bi_u8 },
+    { "u16", bi_u16 }, { "u32", bi_u32 }, { "f32", bi_f32 }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

@@ -134,6 +134,11 @@ endif()
 # default library path looks for it (lib/ on Windows, the root elsewhere).
 
 file(COPY "${TCC_SRC}/include/" DESTINATION "${TCC_STAGE}/include")
+# A runtime (compiler/astra/runtime/): the frontend's emitted C includes
+# a_runtime.h and links a_runtime.c; stage both next to the support archive
+# so `astra` can compile emitted C standalone.
+file(COPY "${TCC_SRC}/runtime/a_runtime.h" "${TCC_SRC}/runtime/a_runtime.c"
+     DESTINATION "${TCC_STAGE}")
 if(WIN32)
     set(tcc_libdir "${TCC_STAGE}/lib")
     # Bundled Windows headers and the .def files naming system DLL

@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include "diagnostics/diagnostics.hpp"
+#include "codegen/codegen.hpp"
 #include "ir/ir.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "optimization/optimizer.hpp"
@@ -35,8 +36,8 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
 
 // ---------------------------------------------------------------- Astra exec
 // `a run`/`a build`/`a test` are thin wrappers over the Astra toolchain
-// driver (compiler/astra/): the .a source goes straight to `astra`, which
-// compiles A -> machine code and links the executable in-process.
+// driver (compiler/astra/): the frontend emits C, `astra` compiles that C
+// (plus the A runtime) to machine code and links the executable.
 
 // Locates the astra driver: A_ASTRA override, then the binary staged with
 // the runtime (build/tcclib/astra or next to this executable), then PATH.
@@ -97,43 +98,86 @@ std::string tempPath(const char* tag,const std::string& name=""){
   return base;
 }
 
-// Stages inline source (-c / repl) to a temp .a file; returns "" on failure.
-std::string stageSource(const std::string& source,std::ostream& err){
-  std::string p=tempPath("src",".a");
-  std::ofstream f(p,std::ios::binary|std::ios::trunc);
-  if(!f){err<<"error: cannot write temp source '"<<p<<"'\n"; return "";}
-  f<<source;
+// Locates the A runtime C source (compiler/astra/runtime/a_runtime.c) that
+// the emitted C links against. Candidates: $A_RUNTIME_C, next to the astra
+// binary (staged tcclib copy), the source tree relative to the astra binary
+// (build/tcc/astra -> ../../compiler/astra/runtime), and the cwd.
+bool findRuntime(const std::string& astra, std::string& runtimeC, std::string& runtimeDir) {
+  std::vector<std::string> candidates;
+  if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) candidates.push_back(e);
+  auto addDir = [&](const std::string& d) {
+    if (d.empty()) return;
+    candidates.push_back(d + "/a_runtime.c");
+    candidates.push_back(d + "/../tcclib/a_runtime.c");
+    candidates.push_back(d + "/../../compiler/astra/runtime/a_runtime.c");
+    candidates.push_back(d + "/../../../compiler/astra/runtime/a_runtime.c");
+  };
+  auto slash = astra.find_last_of('/');
+  if (slash != std::string::npos) addDir(astra.substr(0, slash));
+  else addDir(".");
+  candidates.push_back("compiler/astra/runtime/a_runtime.c");
+  candidates.push_back("./compiler/astra/runtime/a_runtime.c");
+  for (const auto& c : candidates) {
+    std::error_code ec;
+    if (std::filesystem::exists(c, ec)) {
+      runtimeC = std::filesystem::absolute(c, ec).string();
+      auto pos = runtimeC.find_last_of('/');
+      runtimeDir = pos == std::string::npos ? "." : runtimeC.substr(0, pos);
+      return true;
+    }
+  }
+  return false;
+}
+
+// Stages emitted C source to a temp .c file; returns "" on failure.
+std::string stageC(const std::string& source, std::ostream& err) {
+  std::string p = tempPath("gen", ".c");
+  std::ofstream f(p, std::ios::binary | std::ios::trunc);
+  if (!f) { err << "error: cannot write temp C source '" << p << "'\n"; return ""; }
+  f << source;
   return p;
 }
 
-// Compiles srcPath with astra into outPath. Returns 0 on success.
-int astraBuild(const std::string& srcPath,const std::string& outPath,std::ostream& err){
-  int rc=runAstra({srcPath,"-o",outPath});
-  if(rc!=0){err<<"error: astra failed to compile '"<<srcPath<<"'\n"; return 1;}
+// Compiles emitted C (plus the runtime) with astra into outPath.
+int astraBuildC(const std::string& cPath, const std::string& outPath, std::ostream& err) {
+  std::string astra = findAstra();
+  std::string runtimeC, runtimeDir;
+  if (!findRuntime(astra, runtimeC, runtimeDir)) {
+    err << "error: cannot locate A runtime (compiler/astra/runtime/a_runtime.c); set A_RUNTIME_C\n";
+    return 1;
+  }
+  // Host headers for libc (sys/wait.h, unistd.h, ... used by the test
+  // runner in generated C); TinyCC's staged headers alone are not enough.
+  int rc = runAstra({"-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
+                     "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include",
+                     cPath, runtimeC, "-o", outPath});
+  if (rc != 0) { err << "error: astra failed to compile '" << cPath << "'\n"; return 1; }
   return 0;
 }
 
-// Compiles `source` with astra and runs the resulting binary, returning the
-// program's exit code. `inputPath` is passed to astra directly when it names
-// a real file (runFile/build); otherwise the source is staged to /tmp.
-int astraCompileRun(const std::string& inputPath,const std::string& source,
-                    std::istream& in,std::ostream& out,std::ostream& err){
-  (void)in;(void)out;
-  std::string src=inputPath;
-  std::string staged;
-  std::error_code ec;
-  if(src.empty()||!std::filesystem::exists(src,ec)){
-    staged=stageSource(source,err);
-    if(staged.empty()) return kCErr;
-    src=staged;
+// Emits C for a checked program, compiles it with astra, and runs the
+// resulting binary. Returns the program's exit code.
+int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
+                  bool testMode = false) {
+  (void)in; (void)out;
+  std::string cSource, codegenError;
+  if (!emitC(*m.graph, *m.sema, cSource, codegenError, testMode)) {
+    err << "error: code generation failed: " << codegenError << "\n";
+    return kCErr;
   }
-  std::string bin=tempPath("bin");
-  int rc=astraBuild(src,bin,err);
-  std::filesystem::remove(staged,ec);
-  if(rc!=0){std::filesystem::remove(bin,ec); return kCErr;}
-  rc=runBinary(bin);
-  std::filesystem::remove(bin,ec);
-  return rc<0?kCErr:rc;
+  std::string cPath = stageC(cSource, err);
+  if (cPath.empty()) return kCErr;
+  if (const char* dbg = std::getenv("A_DEBUG_C"); dbg && *dbg) {
+    std::error_code dec; std::filesystem::copy_file(cPath, dbg, std::filesystem::copy_options::overwrite_existing, dec);
+  }
+  std::string bin = tempPath("bin");
+  int rc = astraBuildC(cPath, bin, err);
+  std::error_code ec;
+  std::filesystem::remove(cPath, ec);
+  if (rc != 0) { std::filesystem::remove(bin, ec); return kCErr; }
+  rc = runBinary(bin);
+  std::filesystem::remove(bin, ec);
+  return rc < 0 ? kCErr : rc;
 }
 }
 CompiledModule runFrontendPipeline(const std::string& path,std::string source,const PipelineConfig& config,DiagnosticSink& sink,std::ostream& diagOut,std::ostream& diagErr){
@@ -147,21 +191,25 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
-  // Execution is delegated to Astra: the .a source is compiled and linked
-  // by the builtin toolchain driver, then the binary runs as a child process.
-  return astraCompileRun(path,source,in,out,err);
+  // Execution: the frontend emits C, Astra compiles it to a binary, and the
+  // binary runs as a child process.
+  return compileAndRun(m,in,out,err);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,out,err); if(!m.ok) return kCErr;
-  // `a test` compiles and runs the program through Astra; test_* discovery
-  // is handled by the program's own entry point.
-  return astraCompileRun(path,"",in,out,err);
+  // `a test`: discover and run top-level `fn test_*()` functions.
+  return compileAndRun(m,in,out,err,true);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  return astraBuild(path,outputPath,err);
+  std::string cSource, codegenError;
+  if(!emitC(*m.graph,*m.sema,cSource,codegenError)){ err<<"error: code generation failed: "<<codegenError<<"\n"; return kCErr; }
+  std::string cPath=stageC(cSource,err); if(cPath.empty()) return kCErr;
+  int rc=astraBuildC(cPath,outputPath,err);
+  std::error_code ec; std::filesystem::remove(cPath,ec);
+  return rc;
 }
 int emitIRPipeline(const std::string& path,const PipelineConfig& config,bool optimize,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn; DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
@@ -169,7 +217,8 @@ int emitIRPipeline(const std::string& path,const PipelineConfig& config,bool opt
 }
 ReplSession::~ReplSession() = default;
 int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
-  (void)session;(void)config;
-  return astraCompileRun("",source,in,out,err);
+  (void)session;
+  DiagnosticSink sink; auto m=runFrontendPipeline("<repl>",source,config,sink,out,err); if(!m.ok) return 1;
+  return compileAndRun(m,in,out,err);
 }
 }
