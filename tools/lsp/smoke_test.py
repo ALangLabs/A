@@ -58,6 +58,16 @@ fn greet(name: str) -> str:
     return "hi " + name
 
 greeting = greet("world")
+
+fn wrapper() -> i32:
+    # docs: https://a-lang.dev
+    return add(1, 2)
+
+class Base:
+    v: i32
+
+class Child(Base):
+    w: i32
 '''
 
 
@@ -490,6 +500,119 @@ def main() -> int:
         if actions is None:
             fail("codeAction returned null")
 
+        # Call hierarchy: prepare on `add`, incoming calls from `wrapper`,
+        # outgoing calls from `wrapper` back to `add`.
+        prep_call = client.request(
+            "textDocument/prepareCallHierarchy",
+            {"textDocument": {"uri": uri}, "position": {"line": call_line, "character": call_column}},
+        )["result"]
+        if not prep_call or prep_call[0]["name"] != "add":
+            fail(f"prepareCallHierarchy unexpected: {prep_call}")
+        incoming = client.request(
+            "callHierarchy/incomingCalls", {"item": prep_call[0]}
+        )["result"]
+        if not any(call["from"]["name"] == "wrapper" for call in incoming):
+            fail(f"incomingCalls did not find wrapper(): {incoming}")
+        wrapper_line = next(i for i, text in enumerate(lines) if text.startswith("fn wrapper"))
+        prep_wrapper = client.request(
+            "textDocument/prepareCallHierarchy",
+            {"textDocument": {"uri": uri}, "position": {"line": wrapper_line, "character": 3}},
+        )["result"]
+        outgoing = client.request(
+            "callHierarchy/outgoingCalls", {"item": prep_wrapper[0]}
+        )["result"]
+        if not any(call["to"]["name"] == "add" for call in outgoing):
+            fail(f"outgoingCalls did not find add(): {outgoing}")
+
+        # Type hierarchy: Child -> Base via class(Base), and back down.
+        child_line = next(i for i, text in enumerate(lines) if text.startswith("class Child"))
+        prep_type = client.request(
+            "textDocument/prepareTypeHierarchy",
+            {"textDocument": {"uri": uri}, "position": {"line": child_line, "character": 8}},
+        )["result"]
+        if not prep_type or prep_type[0]["name"] != "Child":
+            fail(f"prepareTypeHierarchy unexpected: {prep_type}")
+        supers = client.request(
+            "typeHierarchy/supertypes", {"item": prep_type[0]}
+        )["result"]
+        if not any(item["name"] == "Base" for item in supers):
+            fail(f"supertypes did not find Base: {supers}")
+        subs = client.request(
+            "typeHierarchy/subtypes", {"item": supers[0]}
+        )["result"]
+        if not any(item["name"] == "Child" for item in subs):
+            fail(f"subtypes did not find Child: {subs}")
+
+        # Code lens: `add` has a declaration plus call sites.
+        lens = client.request(
+            "textDocument/codeLens", {"textDocument": {"uri": uri}}
+        )["result"]
+        add_lens = [
+            entry for entry in lens
+            if entry["command"]["arguments"][1]["line"] == expected_line
+        ]
+        if not add_lens or "reference" not in add_lens[0]["command"]["title"]:
+            fail(f"codeLens missing references for add: {lens}")
+
+        # Range formatting: only the messy assignment line is in range.
+        messy_line = next(i for i, text in enumerate(lines) if "total=add" in text)
+        range_edits = client.request(
+            "textDocument/rangeFormatting",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": messy_line, "character": 0},
+                    "end": {"line": messy_line + 1, "character": 0},
+                },
+                "options": {"tabSize": 4, "insertSpaces": True},
+            },
+        )["result"]
+        if not range_edits or "total = add(point.x, point.y)" not in range_edits[0]["newText"]:
+            fail(f"rangeFormatting did not fix the assignment: {range_edits}")
+
+        # Pull diagnostics, moniker, document links, includeDeclaration.
+        diag = client.request(
+            "textDocument/diagnostic",
+            {"textDocument": {"uri": uri}, "identifier": "a"},
+        )["result"]
+        if diag.get("kind") != "full" or diag.get("items"):
+            fail(f"pull diagnostics unexpected: {diag}")
+        mon = client.request(
+            "textDocument/moniker", {"textDocument": {"uri": uri}}
+        )["result"]
+        if mon.get("scheme") != "a":
+            fail(f"moniker unexpected: {mon}")
+        links = client.request(
+            "textDocument/documentLink", {"textDocument": {"uri": uri}}
+        )["result"]
+        if not any(link["target"] == "https://a-lang.dev" for link in links):
+            fail(f"documentLink missed the comment URL: {links}")
+        refs = client.request(
+            "textDocument/references",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": expected_line, "character": 3},
+                "context": {"includeDeclaration": False},
+            },
+        )["result"]
+        if any(ref["range"]["start"]["line"] == expected_line for ref in refs):
+            fail("references includeDeclaration=false still returned the declaration")
+
+        # Parameter-name inlay hints: add(point.x, point.y) -> a:/b:.
+        hints = client.request(
+            "textDocument/inlayHint",
+            {
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": len(lines), "character": 0},
+                },
+            },
+        )["result"]
+        param_labels = {hint["label"] for hint in hints if hint.get("kind") == 2}
+        if not {"a: ", "b: "}.issubset(param_labels):
+            fail(f"inlay hints missing parameter names: {param_labels}")
+
         # Async checking: didChange only enqueues (200ms debounce); a later
         # publishDiagnostics proves the worker ran without blocking requests.
         # Two rapid edits must coalesce (latest wins) instead of checking twice.
@@ -521,7 +644,8 @@ def main() -> int:
             "rename, highlights, folding, module/string completion, signature help, "
             "incremental sync, async checking (debounced, latest-wins), semantic "
             "tokens, inlay hints, prepareRename, declaration, selectionRange, "
-            "code actions"
+            "code actions, call/type hierarchy, code lens, range formatting, "
+            "pull diagnostics, moniker, document links, param hints"
         )
 
     return 0

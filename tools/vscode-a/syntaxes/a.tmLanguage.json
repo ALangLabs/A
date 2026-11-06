@@ -364,7 +364,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.a",
-          "match": "\\b(?:print|eprint|input|flush|len|str|bool|int|float|range|map|filter|reduce|sum|any|all|min|max|abs|pow|sqrt|round|floor|ceil|sorted|reversed|enumerate|zip|open|close|type|isinstance|assert|panic|sin|cos|tan|asin|acos|atan|atan2|exp|log|log2|log10|trunc|random|random_int|flush|move|copy|borrow|borrow_mut)\\b(?=\\s*\\()"
+          "match": "\\b(?:print|eprint|input|flush|len|str|bool|int|float|range|map|filter|reduce|sum|any|all|min|max|abs|pow|sqrt|round|floor|ceil|sorted|reversed|enumerate|zip|open|close|type|isinstance|assert|panic|ic|ic|sin|cos|tan|asin|acos|atan|atan2|exp|log|log2|log10|trunc|random|random_int|flush|move|copy|borrow|borrow_mut)\\b(?=\\s*\\()"
         },
         {
           "name": "support.constant.math.a",
@@ -397,14 +397,6 @@
         {
           "name": "storage.modifier.comptime.a",
           "match": "\\bcomptime\\b"
-        },
-        {
-          "name": "storage.modifier.a",
-          "match": "\\b(?:var|const|pvt)\\b"
-        },
-        {
-          "name": "keyword.control.async.a",
-          "match": "\\b(?:async|await)\\b"
         },
         {
           "name": "keyword.control.import.a",

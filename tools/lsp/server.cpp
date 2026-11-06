@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <climits>
@@ -439,11 +440,13 @@ Value hoverMarkdown(const std::string& signature, const std::string& documentati
   return result;
 }
 
+// Matches the lexer keyword set (compiler/stages/lexer/token.hpp Kw*
+// tokens) so semantic tokens color exactly the real keywords.
 const char* const kKeywords[] = {
     "fn", "if", "elif", "else", "while", "do", "for", "in", "loop",
     "break", "continue", "return", "defer", "class", "metaclass", "enum",
     "self", "true", "false", "and", "or", "not", "import", "from", "as", "match",
-    "None", "pass", "type",
+    "None", "pass", "type", "trait", "impl", "comptime", "where",
 };
 
 int completionKind(SymbolKind kind) {
@@ -464,6 +467,137 @@ int completionKind(SymbolKind kind) {
 }
 
 Value symbolRange(const std::string& text, Span span) { return rangeValue(text, span); }
+
+std::string simpleName(const std::string& name) {
+  const std::size_t dot = name.find_last_of('.');
+  return dot == std::string::npos ? name : name.substr(dot + 1);
+}
+
+// Finds the symbol declared at `line`/`col` (1-based) in the module at `path`.
+ResolvedSymbol findSymbolBySpan(const Compilation& compilation, const std::string& path,
+                                int line, int col) {
+  const std::string canonical = canonicalPath(path);
+  for (const FileIndex& file : compilation.indexes) {
+    if (canonicalPath(file.path) != canonical) continue;
+    for (const SymbolDef& symbol : file.symbols) {
+      if (symbol.span.line == line && symbol.span.col == col) {
+        return ResolvedSymbol{&symbol, &file};
+      }
+    }
+  }
+  return {};
+}
+
+// Resolves a collected call site's callee token to its declaration, the same
+// way resolveAt does for cursor positions.
+ResolvedSymbol resolveCallCallee(const Compilation& compilation,
+                                 const a::lsp::CallSite& site) {
+  if (site.moduleId < 0 ||
+      site.moduleId >= static_cast<int>(compilation.tokensByModule.size())) {
+    return {};
+  }
+  const FileIndex* file = compilation.indexForModule(site.moduleId);
+  if (!file) return {};
+  const std::vector<Token>& tokens =
+      compilation.tokensByModule[static_cast<std::size_t>(site.moduleId)];
+  for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
+    const Token& token = tokens[static_cast<std::size_t>(i)];
+    if (token.kind != Tok::Ident) continue;
+    if (token.span.line != site.calleeSpan.line || token.span.col != site.calleeSpan.col ||
+        token.span.endCol != site.calleeSpan.endCol) {
+      continue;
+    }
+    return a::lsp::resolveToken(compilation, *file, tokens, i);
+  }
+  return {};
+}
+
+// Myers O(ND) diff over source lines that keep their trailing '\n' (the last
+// line has none). Returns hunks [oldStart,oldEnd) -> [newStart,newEnd) in
+// line indices; applying them to `a` yields `b`.
+std::vector<std::array<int, 4>> diffLineHunks(const std::vector<std::string>& a,
+                                              const std::vector<std::string>& b) {
+  const int n = static_cast<int>(a.size());
+  const int m = static_cast<int>(b.size());
+  const int max = n + m;
+  const int off = max;
+  std::vector<int> v(2 * max + 1, 0);
+  std::vector<std::vector<int>> trace;
+  int d_final = -1;
+  for (int d = 0; d <= max; ++d) {
+    trace.push_back(v);
+    for (int k = -d; k <= d; k += 2) {
+      int x = (k == -d || (k != d && v[off + k - 1] < v[off + k + 1])) ? v[off + k + 1]
+                                                                       : v[off + k - 1] + 1;
+      int y = x - k;
+      while (x < n && y < m && a[x] == b[y]) {
+        ++x;
+        ++y;
+      }
+      v[off + k] = x;
+      if (x >= n && y >= m) {
+        d_final = d;
+        break;
+      }
+    }
+    if (d_final >= 0) break;
+  }
+  if (d_final <= 0) return {};
+
+  // Backtrack: trace[d] is V before step d. Each step contributes one
+  // insertion or deletion; adjacent steps merge into hunks below.
+  std::vector<std::array<int, 4>> steps;
+  int x = n;
+  int y = m;
+  for (int d = d_final; d > 0; --d) {
+    const std::vector<int>& pv = trace[static_cast<std::size_t>(d)];
+    const int k = x - y;
+    const int prevK =
+        (k == -d || (k != d && pv[off + k - 1] < pv[off + k + 1])) ? k + 1 : k - 1;
+    const int prevX = pv[off + prevK];
+    const int prevY = prevX - prevK;
+    while (x > prevX && y > prevY) {
+      --x;
+      --y;
+    }
+    steps.push_back({prevX, x, prevY, y});
+    x = prevX;
+    y = prevY;
+  }
+  std::reverse(steps.begin(), steps.end());
+
+  std::vector<std::array<int, 4>> hunks;
+  for (const auto& step : steps) {
+    if (!hunks.empty()) {
+      auto& last = hunks.back();
+      if (step[0] == last[1] && step[2] == last[3]) {
+        last[1] = step[1];
+        last[3] = step[3];
+        continue;
+      }
+    }
+    hunks.push_back(step);
+  }
+  return hunks;
+}
+
+// Splits text into lines that keep their trailing '\n'; a trailing newline
+// produces a final empty part so EOF positions stay representable.
+std::vector<std::string> splitLinesKeep(const std::string& text) {
+  std::vector<std::string> lines;
+  std::size_t start = 0;
+  while (start < text.size()) {
+    const std::size_t nl = text.find('\n', start);
+    if (nl == std::string::npos) {
+      lines.push_back(text.substr(start));
+      break;
+    }
+    lines.push_back(text.substr(start, nl - start + 1));
+    start = nl + 1;
+  }
+  if (text.empty() || text.back() == '\n') lines.push_back("");
+  return lines;
+}
 
 // ------------------------------------------------------------ language server
 
@@ -633,7 +767,10 @@ class LanguageServer {
         "textDocument/semanticTokens/full", "textDocument/semanticTokens/range",
         "textDocument/inlayHint", "textDocument/codeAction", "textDocument/selectionRange",
         "textDocument/declaration", "textDocument/typeDefinition",
-        "textDocument/implementation",
+        "textDocument/implementation", "textDocument/prepareCallHierarchy",
+        "textDocument/prepareTypeHierarchy", "textDocument/codeLens",
+        "textDocument/rangeFormatting", "textDocument/documentLink",
+        "textDocument/diagnostic",
     };
     if (kNeedsCompilation.count(method)) {
       if (Document* document = documentFrom(params)) ensureCompiled(document);
@@ -714,6 +851,50 @@ class LanguageServer {
     if (method == "textDocument/declaration" || method == "textDocument/typeDefinition" ||
         method == "textDocument/implementation") {
       definition(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/prepareCallHierarchy") {
+      prepareCallHierarchy(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "callHierarchy/incomingCalls") {
+      incomingCalls(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "callHierarchy/outgoingCalls") {
+      outgoingCalls(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/prepareTypeHierarchy") {
+      prepareTypeHierarchy(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "typeHierarchy/supertypes") {
+      typeHierarchyRelated(idValue ? *idValue : Value(), params, true);
+      return true;
+    }
+    if (method == "typeHierarchy/subtypes") {
+      typeHierarchyRelated(idValue ? *idValue : Value(), params, false);
+      return true;
+    }
+    if (method == "textDocument/codeLens") {
+      codeLens(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/rangeFormatting") {
+      rangeFormatting(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/diagnostic") {
+      documentDiagnostic(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/moniker") {
+      moniker(idValue ? *idValue : Value(), params);
+      return true;
+    }
+    if (method == "textDocument/documentLink") {
+      documentLinks(idValue ? *idValue : Value(), params);
       return true;
     }
 
@@ -830,6 +1011,25 @@ class LanguageServer {
     actionKinds.push("source.fixAll");
     codeAction["codeActionKinds"] = std::move(actionKinds);
     capabilities["codeActionProvider"] = std::move(codeAction);
+    Value callHierarchy = Value::object();
+    callHierarchy["prepareProvider"] = true;
+    capabilities["callHierarchyProvider"] = std::move(callHierarchy);
+    Value typeHierarchy = Value::object();
+    typeHierarchy["prepareProvider"] = true;
+    capabilities["typeHierarchyProvider"] = std::move(typeHierarchy);
+    Value codeLens = Value::object();
+    codeLens["resolveProvider"] = false;
+    capabilities["codeLensProvider"] = std::move(codeLens);
+    capabilities["documentRangeFormattingProvider"] = true;
+    Value diagnosticProvider = Value::object();
+    diagnosticProvider["identifier"] = "a";
+    diagnosticProvider["interFileDependencies"] = true;
+    diagnosticProvider["workspaceDiagnostics"] = false;
+    capabilities["diagnosticProvider"] = std::move(diagnosticProvider);
+    capabilities["monikerProvider"] = true;
+    Value documentLink = Value::object();
+    documentLink["resolveProvider"] = false;
+    capabilities["documentLinkProvider"] = std::move(documentLink);
 
     Value result = Value::object();
     result["capabilities"] = std::move(capabilities);
@@ -1869,6 +2069,16 @@ class LanguageServer {
     ResolvedSymbol target = a::lsp::resolveAt(compilation, *entry, *entryTokens, line + 1, byteColumn);
     if (!target.valid()) return replyNull(id);
 
+    bool includeDeclaration = true;
+    if (params) {
+      if (const Value* context = params->find("context")) {
+        if (const Value* include = context->find("includeDeclaration");
+            include && include->isBool()) {
+          includeDeclaration = include->asBool();
+        }
+      }
+    }
+
     Value result = Value::array();
     for (std::size_t moduleId = 0; moduleId < compilation.indexes.size(); ++moduleId) {
       const FileIndex& file = compilation.indexes[moduleId];
@@ -1877,6 +2087,11 @@ class LanguageServer {
       for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
         const Token& token = tokens[static_cast<std::size_t>(i)];
         if (token.kind != Tok::Ident) continue;
+        if (!includeDeclaration && token.span.line == target.symbol->span.line &&
+            token.span.col == target.symbol->span.col &&
+            token.span.endCol == target.symbol->span.endCol) {
+          continue;
+        }
         ResolvedSymbol resolved = a::lsp::resolveToken(compilation, file, tokens, i);
         if (!resolved.valid()) continue;
         if (resolved.symbol->span.line != target.symbol->span.line) continue;
@@ -2654,6 +2869,38 @@ class LanguageServer {
       hint["tooltip"] = "Inferred type (from a check)";
       hints.push(std::move(hint));
     }
+    // Parameter-name hints at call sites (ty/pyrefly style): `add(x, y)`
+    // shows `lhs:`/`rhs:` before positional arguments whose callee resolves
+    // to a known function or struct constructor.
+    const int entryModule = compilation.graph.entry >= 0 ? compilation.graph.entry : 0;
+    for (const a::lsp::CallSite& site : a::lsp::collectCallSites(compilation)) {
+      if (site.moduleId != entryModule || site.positionalArgSpans.empty()) continue;
+      ResolvedSymbol callee = resolveCallCallee(compilation, site);
+      if (!callee.valid()) continue;
+      const std::vector<std::string> names = paramNamesForSymbol(compilation, callee);
+      if (names.empty()) continue;
+      const std::string* moduleText = compilation.textForModule(site.moduleId);
+      const std::string& source = moduleText ? *moduleText : document->text;
+      const std::size_t argCount =
+          std::min(names.size(), site.positionalArgSpans.size());
+      for (std::size_t i = 0; i < argCount; ++i) {
+        const std::string& name = names[i];
+        if (name.empty() || name == "_" || name == "self") continue;
+        const Span& argSpan = site.positionalArgSpans[i];
+        if (!argSpan.valid()) continue;
+        Value hint = Value::object();
+        Value pos = Value::object();
+        pos["line"] = argSpan.line - 1;
+        pos["character"] =
+            byteToUtf16Column(lineText(source, argSpan.line),
+                              std::max(0, argSpan.col - 1));
+        hint["position"] = std::move(pos);
+        hint["label"] = name + ": ";
+        hint["kind"] = 2;  // Parameter
+        hint["paddingRight"] = false;
+        hints.push(std::move(hint));
+      }
+    }
     Value result = Value::array();
     // Return array of hints directly.
     reply(id, std::move(hints));
@@ -2796,6 +3043,727 @@ class LanguageServer {
       current["parent"] = std::move(outerArr);
       entry["ranges"] = std::move(ranges);
       result.push(std::move(entry));
+    }
+    reply(id, std::move(result));
+  }
+
+  // ---- call / type hierarchy --------------------------------------------
+
+  std::string modulePathForId(const Compilation& compilation, int moduleId) const {
+    if (moduleId < 0 ||
+        static_cast<std::size_t>(moduleId) >= compilation.graph.modules.size()) {
+      return {};
+    }
+    return compilation.graph.modules[static_cast<std::size_t>(moduleId)].path;
+  }
+
+  Value itemDataFor(const std::string& path, int line, int col) const {
+    Value data = Value::object();
+    data["path"] = path;
+    data["line"] = line;
+    data["col"] = col;
+    return data;
+  }
+
+  // Reads the `data` blob hierarchy items carry between prepare/incoming/
+  // outgoing requests: the declaration's file path and name-span position.
+  bool itemTargetFromData(const Value* item, std::string* path, int* line, int* col) const {
+    if (!item) return false;
+    const Value* data = item->find("data");
+    if (!data) return false;
+    const Value* p = data->find("path");
+    const Value* l = data->find("line");
+    const Value* c = data->find("col");
+    if (!p || !p->isString() || !l || !l->isNumber() || !c || !c->isNumber()) return false;
+    *path = p->asString();
+    *line = static_cast<int>(l->asInt());
+    *col = static_cast<int>(c->asInt());
+    return true;
+  }
+
+  // CallHierarchyItem for a resolved declaration (the "to" side, and the item
+  // prepareCallHierarchy returns).
+  Value callItemForSymbol(const Compilation& compilation, const ResolvedSymbol& resolved) const {
+    const SymbolDef& symbol = *resolved.symbol;
+    int declModule = -1;
+    const a::Stmt* decl =
+        a::lsp::findDeclAt(compilation, resolved.file->path, symbol.span.line,
+                           symbol.span.col, &declModule);
+    const std::string* text = compilation.textForPath(resolved.file->path);
+    static const std::string empty;
+    const std::string& source = text ? *text : empty;
+    Value item = Value::object();
+    item["name"] = symbol.name;
+    item["kind"] = static_cast<int>(symbol.kind);
+    if (!symbol.detail.empty()) item["detail"] = symbol.detail;
+    item["uri"] = pathToUri(resolved.file->path);
+    item["range"] = rangeValue(source, decl ? decl->span : symbol.span);
+    item["selectionRange"] = rangeValue(source, symbol.span);
+    item["data"] = itemDataFor(resolved.file->path, symbol.span.line, symbol.span.col);
+    return item;
+  }
+
+  // CallHierarchyItem for the enclosing callable of a call site (the "from"
+  // side of incomingCalls).
+  Value callItemForSite(const Compilation& compilation, const a::lsp::CallSite& site) const {
+    const std::string path = modulePathForId(compilation, site.moduleId);
+    const std::string* text = compilation.textForModule(site.moduleId);
+    static const std::string empty;
+    const std::string& source = text ? *text : empty;
+    Value item = Value::object();
+    item["name"] = site.callableName;
+    item["kind"] = static_cast<int>(site.callableKind);
+    if (!site.callableDetail.empty()) item["detail"] = site.callableDetail;
+    item["uri"] = pathToUri(path);
+    item["range"] = rangeValue(source, site.callableSpan);
+    item["selectionRange"] = rangeValue(source, site.callableNameSpan);
+    item["data"] = itemDataFor(path, site.callableNameSpan.line, site.callableNameSpan.col);
+    return item;
+  }
+
+  // CallHierarchyItem for the function an outgoingCalls request targets.
+  Value callItemForFnDecl(const Compilation& compilation, const a::FnDecl& fn,
+                          const std::string& path, int kind) const {
+    const std::string* text = compilation.textForPath(path);
+    static const std::string empty;
+    const std::string& source = text ? *text : empty;
+    Value item = Value::object();
+    item["name"] = fn.name;
+    item["kind"] = kind;
+    item["detail"] = a::lsp::signatureText(fn);
+    item["uri"] = pathToUri(path);
+    item["range"] = rangeValue(source, fn.span);
+    item["selectionRange"] = rangeValue(source, fn.nameSpan);
+    item["data"] = itemDataFor(path, fn.nameSpan.line, fn.nameSpan.col);
+    return item;
+  }
+
+  void prepareCallHierarchy(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation) return replyNull(id);
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (!file || !tokens) return replyNull(id);
+    int line = 0;
+    int character = 0;
+    if (!positionFrom(params, &line, &character)) return replyNull(id);
+    int byteColumn =
+        utf16ToByteColumn(lineText(document->text, line + 1), character) + 1;
+    ResolvedSymbol resolved =
+        a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
+    if (!resolved.valid() ||
+        (resolved.symbol->kind != SymbolKind::Function &&
+         resolved.symbol->kind != SymbolKind::Method)) {
+      return replyNull(id);
+    }
+    Value result = Value::array();
+    result.push(callItemForSymbol(compilation, resolved));
+    reply(id, std::move(result));
+  }
+
+  // callHierarchy/incomingCalls and callHierarchy/outgoingCalls take only
+  // {item} (no textDocument), so they ensure every open document is compiled
+  // and search all of their module graphs.
+  void incomingCalls(const Value& id, const Value* params) {
+    Value result = Value::array();
+    const Value* item = params ? params->find("item") : nullptr;
+    std::string path;
+    int line = 0;
+    int col = 0;
+    if (!itemTargetFromData(item, &path, &line, &col)) {
+      reply(id, std::move(result));
+      return;
+    }
+
+    for (auto& entry : documents_) ensureCompiled(&entry.second);
+    std::unordered_map<const Compilation*, std::vector<a::lsp::CallSite>> sitesCache;
+    std::unordered_set<std::string> seenSites;
+    for (auto& entry : documents_) {
+      Document& document = entry.second;
+      if (!document.compilation) continue;
+      const Compilation& compilation = *document.compilation;
+      ResolvedSymbol target = findSymbolBySpan(compilation, path, line, col);
+      if (!target.valid()) continue;
+      auto& sites = sitesCache[&compilation];
+      if (sites.empty()) sites = a::lsp::collectCallSites(compilation);
+      for (const a::lsp::CallSite& site : sites) {
+        const std::string modulePath = modulePathForId(compilation, site.moduleId);
+        const std::string key =
+            canonicalPath(modulePath) + "|" + std::to_string(site.callSpan.line) + ":" +
+            std::to_string(site.callSpan.col) + ":" + std::to_string(site.callSpan.endCol) +
+            "|" + std::to_string(site.calleeSpan.line) + ":" +
+            std::to_string(site.calleeSpan.col);
+        if (!seenSites.insert(key).second) continue;
+        if (!site.inCallable) continue;
+        ResolvedSymbol callee = resolveCallCallee(compilation, site);
+        if (!callee.valid()) continue;
+        if (callee.symbol->span.line != target.symbol->span.line ||
+            callee.symbol->span.col != target.symbol->span.col ||
+            canonicalPath(callee.file->path) != canonicalPath(target.file->path)) {
+          continue;
+        }
+        Value incoming = Value::object();
+        incoming["from"] = callItemForSite(compilation, site);
+        Value fromRanges = Value::array();
+        const std::string* text = compilation.textForPath(modulePath);
+        static const std::string empty;
+        fromRanges.push(rangeValue(text ? *text : empty, site.callSpan));
+        incoming["fromRanges"] = std::move(fromRanges);
+        incoming["to"] = callItemForSymbol(compilation, target);
+        result.push(std::move(incoming));
+      }
+    }
+    reply(id, std::move(result));
+  }
+
+  void outgoingCalls(const Value& id, const Value* params) {
+    Value result = Value::array();
+    const Value* item = params ? params->find("item") : nullptr;
+    std::string path;
+    int line = 0;
+    int col = 0;
+    if (!itemTargetFromData(item, &path, &line, &col)) {
+      reply(id, std::move(result));
+      return;
+    }
+
+    for (auto& entry : documents_) ensureCompiled(&entry.second);
+    const std::string canonical = canonicalPath(path);
+    // Prefer the compilation of the document the item was prepared in; any
+    // open document whose graph contains the module works as a fallback.
+    const Compilation* compilation = nullptr;
+    for (auto& entry : documents_) {
+      if (!entry.second.compilation) continue;
+      bool owns = canonicalPath(entry.second.path) == canonical;
+      for (const a::Module& module : entry.second.compilation->graph.modules) {
+        if (canonicalPath(module.path) == canonical) {
+          if (owns || !compilation) compilation = entry.second.compilation.get();
+          break;
+        }
+      }
+      if (compilation && canonicalPath(entry.second.path) == canonical) break;
+    }
+    if (!compilation) {
+      reply(id, std::move(result));
+      return;
+    }
+
+    int moduleId = -1;
+    const a::Stmt* decl = a::lsp::findDeclAt(*compilation, path, line, col, &moduleId);
+    if (!decl || decl->kind != a::StmtKind::FnDecl) {
+      reply(id, std::move(result));
+      return;
+    }
+    const a::FnDecl& fn = static_cast<const a::FnDecl&>(*decl);
+    const std::string modulePath = modulePathForId(*compilation, moduleId);
+    int kind = 12;  // SymbolKind::Function
+    if (item) {
+      if (const Value* k = item->find("kind"); k && k->isNumber()) {
+        kind = static_cast<int>(k->asInt());
+      }
+    }
+    const Value fromItem = callItemForFnDecl(*compilation, fn, modulePath, kind);
+
+    for (const a::lsp::CallSite& site : a::lsp::collectCallSites(*compilation)) {
+      if (!site.inCallable || site.moduleId != moduleId) continue;
+      if (site.callableNameSpan.line != fn.nameSpan.line ||
+          site.callableNameSpan.col != fn.nameSpan.col) {
+        continue;
+      }
+      ResolvedSymbol callee = resolveCallCallee(*compilation, site);
+      if (!callee.valid()) continue;
+      Value outgoing = Value::object();
+      outgoing["from"] = fromItem;
+      Value fromRanges = Value::array();
+      const std::string* text = compilation->textForPath(modulePath);
+      static const std::string empty;
+      fromRanges.push(rangeValue(text ? *text : empty, site.callSpan));
+      outgoing["fromRanges"] = std::move(fromRanges);
+      outgoing["to"] = callItemForSymbol(*compilation, callee);
+      result.push(std::move(outgoing));
+    }
+    reply(id, std::move(result));
+  }
+
+  // ---- type hierarchy -----------------------------------------------------
+
+  // TypeHierarchyItem for a collected type declaration.
+  Value typeItemForDecl(const Compilation& compilation,
+                        const a::lsp::TypeDeclInfo& decl) const {
+    const std::string path = modulePathForId(compilation, decl.moduleId);
+    const std::string* text = compilation.textForModule(decl.moduleId);
+    static const std::string empty;
+    const std::string& source = text ? *text : empty;
+    Value item = Value::object();
+    item["name"] = decl.name;
+    item["kind"] = static_cast<int>(decl.kind);
+    if (!decl.detail.empty()) item["detail"] = decl.detail;
+    item["uri"] = pathToUri(path);
+    item["range"] = rangeValue(source, decl.span);
+    item["selectionRange"] = rangeValue(source, decl.nameSpan);
+    item["data"] = itemDataFor(path, decl.nameSpan.line, decl.nameSpan.col);
+    return item;
+  }
+
+  using TypeDeclPair = std::pair<const Compilation*, a::lsp::TypeDeclInfo>;
+
+  // All type declarations visible to any open document (deduplicated by
+  // declaration span so shared modules appear once).
+  std::vector<TypeDeclPair> allTypeDecls() {
+    for (auto& entry : documents_) ensureCompiled(&entry.second);
+    std::vector<TypeDeclPair> decls;
+    std::unordered_set<std::string> seen;
+    for (auto& entry : documents_) {
+      if (!entry.second.compilation) continue;
+      const Compilation& compilation = *entry.second.compilation;
+      for (const a::lsp::TypeDeclInfo& info : a::lsp::collectTypeDecls(compilation)) {
+        const std::string path = modulePathForId(compilation, info.moduleId);
+        const std::string key = canonicalPath(path) + "|" +
+                                std::to_string(info.nameSpan.line) + ":" +
+                                std::to_string(info.nameSpan.col);
+        if (!seen.insert(key).second) continue;
+        decls.emplace_back(&compilation, info);
+      }
+    }
+    return decls;
+  }
+
+  const TypeDeclPair* findTypeDecl(const std::vector<TypeDeclPair>& decls,
+                                   const std::string& path, int line, int col) const {
+    const std::string canonical = canonicalPath(path);
+    for (const TypeDeclPair& pair : decls) {
+      const std::string declPath = modulePathForId(*pair.first, pair.second.moduleId);
+      if (canonicalPath(declPath) != canonical) continue;
+      if (pair.second.nameSpan.line == line && pair.second.nameSpan.col == col) {
+        return &pair;
+      }
+    }
+    return nullptr;
+  }
+
+  const TypeDeclPair* findTypeDeclByName(const std::vector<TypeDeclPair>& decls,
+                                         const std::string& name) const {
+    // Exact match first, then last-segment match for qualified base names.
+    for (const TypeDeclPair& pair : decls) {
+      if (pair.second.name == name) return &pair;
+    }
+    const std::string leaf = simpleName(name);
+    for (const TypeDeclPair& pair : decls) {
+      if (simpleName(pair.second.name) == leaf) return &pair;
+    }
+    return nullptr;
+  }
+
+  void prepareTypeHierarchy(const Value& id, const Value* params) {
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation) return replyNull(id);
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* file = compilation.entryIndex();
+    const std::vector<Token>* tokens = compilation.entryTokens();
+    if (!file || !tokens) return replyNull(id);
+    int line = 0;
+    int character = 0;
+    if (!positionFrom(params, &line, &character)) return replyNull(id);
+    int byteColumn =
+        utf16ToByteColumn(lineText(document->text, line + 1), character) + 1;
+    ResolvedSymbol resolved =
+        a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
+    if (!resolved.valid() ||
+        (resolved.symbol->kind != SymbolKind::Struct &&
+         resolved.symbol->kind != SymbolKind::Class &&
+         resolved.symbol->kind != SymbolKind::Enum)) {
+      return replyNull(id);
+    }
+    const std::vector<TypeDeclPair> decls = allTypeDecls();
+    if (const TypeDeclPair* pair =
+            findTypeDecl(decls, resolved.file->path, resolved.symbol->span.line,
+                         resolved.symbol->span.col)) {
+      Value result = Value::array();
+      result.push(typeItemForDecl(*pair->first, pair->second));
+      reply(id, std::move(result));
+      return;
+    }
+    // Fallback: the index knows the symbol but no AST declaration matched
+    // (e.g. analysis stopped early). Still return a usable item.
+    const std::string* text = compilation.textForPath(resolved.file->path);
+    static const std::string empty;
+    const std::string& source = text ? *text : empty;
+    Value item = Value::object();
+    item["name"] = resolved.symbol->name;
+    item["kind"] = static_cast<int>(resolved.symbol->kind);
+    if (!resolved.symbol->detail.empty()) item["detail"] = resolved.symbol->detail;
+    item["uri"] = pathToUri(resolved.file->path);
+    item["range"] = rangeValue(source, resolved.symbol->span);
+    item["selectionRange"] = rangeValue(source, resolved.symbol->span);
+    item["data"] = itemDataFor(resolved.file->path, resolved.symbol->span.line,
+                             resolved.symbol->span.col);
+    Value result = Value::array();
+    result.push(std::move(item));
+    reply(id, std::move(result));
+  }
+
+  void typeHierarchyRelated(const Value& id, const Value* params, bool supertypes) {
+    Value result = Value::array();
+    const Value* item = params ? params->find("item") : nullptr;
+    std::string path;
+    int line = 0;
+    int col = 0;
+    if (!itemTargetFromData(item, &path, &line, &col)) {
+      reply(id, std::move(result));
+      return;
+    }
+    const std::vector<TypeDeclPair> decls = allTypeDecls();
+    const TypeDeclPair* self = findTypeDecl(decls, path, line, col);
+    if (!self) {
+      reply(id, std::move(result));
+      return;
+    }
+    if (supertypes) {
+      for (const std::string& parent : self->second.parents) {
+        if (const TypeDeclPair* base = findTypeDeclByName(decls, parent)) {
+          result.push(typeItemForDecl(*base->first, base->second));
+        }
+      }
+    } else {
+      const std::string selfPath = modulePathForId(*self->first, self->second.moduleId);
+      for (const TypeDeclPair& pair : decls) {
+        const std::string pairPath = modulePathForId(*pair.first, pair.second.moduleId);
+        if (canonicalPath(pairPath) == canonicalPath(selfPath) &&
+            pair.second.nameSpan.line == self->second.nameSpan.line &&
+            pair.second.nameSpan.col == self->second.nameSpan.col) {
+          continue;  // never report the type as its own subtype
+        }
+        for (const std::string& parent : pair.second.parents) {
+          if (pair.second.name == self->second.name ||
+              simpleName(parent) == simpleName(self->second.name) ||
+              parent == self->second.name) {
+            result.push(typeItemForDecl(*pair.first, pair.second));
+            break;
+          }
+        }
+      }
+    }
+    reply(id, std::move(result));
+  }
+
+  // ---- misc providers -----------------------------------------------------
+
+  // Parameter names for a resolved call target: FnDecl params (methods drop
+  // `self`) or StructDecl fields for constructor calls.
+  std::vector<std::string> paramNamesForSymbol(const Compilation& compilation,
+                                               const ResolvedSymbol& resolved) const {
+    int moduleId = -1;
+    const a::Stmt* decl =
+        a::lsp::findDeclAt(compilation, resolved.file->path, resolved.symbol->span.line,
+                           resolved.symbol->span.col, &moduleId);
+    if (!decl) return {};
+    if (decl->kind == a::StmtKind::FnDecl) {
+      const auto& fn = static_cast<const a::FnDecl&>(*decl);
+      std::vector<std::string> names;
+      for (const auto& param : fn.params) names.push_back(param.name);
+      if (!names.empty() && names.front() == "self") names.erase(names.begin());
+      return names;
+    }
+    if (decl->kind == a::StmtKind::StructDecl) {
+      std::vector<std::string> names;
+      for (const auto& field : static_cast<const a::StructDecl&>(*decl).fields) {
+        names.push_back(field.name);
+      }
+      return names;
+    }
+    return {};
+  }
+
+  void codeLens(const Value& id, const Value* params) {
+    Value result = Value::array();
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation) {
+      reply(id, std::move(result));
+      return;
+    }
+    const Compilation& compilation = *document->compilation;
+    const FileIndex* entry = compilation.entryIndex();
+    if (!entry) {
+      reply(id, std::move(result));
+      return;
+    }
+
+    // Count resolved occurrences of every symbol across all modules, the same
+    // scan references() performs, grouped by declaration site.
+    std::unordered_map<std::string, int> refCounts;
+    for (std::size_t moduleId = 0; moduleId < compilation.indexes.size(); ++moduleId) {
+      if (moduleId >= compilation.tokensByModule.size()) continue;
+      const FileIndex& file = compilation.indexes[moduleId];
+      const std::vector<Token>& tokens = compilation.tokensByModule[moduleId];
+      for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
+        const Token& token = tokens[static_cast<std::size_t>(i)];
+        if (token.kind != Tok::Ident) continue;
+        ResolvedSymbol resolved = a::lsp::resolveToken(compilation, file, tokens, i);
+        if (!resolved.valid()) continue;
+        const std::string key = canonicalPath(resolved.file->path) + "|" +
+                                std::to_string(resolved.symbol->span.line) + ":" +
+                                std::to_string(resolved.symbol->span.col);
+        ++refCounts[key];
+      }
+    }
+
+    const std::string entryPath = canonicalPath(entry->path);
+    for (const SymbolDef& symbol : entry->symbols) {
+      const bool interesting = symbol.kind == SymbolKind::Function ||
+                               symbol.kind == SymbolKind::Method ||
+                               symbol.kind == SymbolKind::Struct ||
+                               symbol.kind == SymbolKind::Class ||
+                               symbol.kind == SymbolKind::Enum;
+      if (!interesting) continue;
+      const std::string key = entryPath + "|" + std::to_string(symbol.span.line) + ":" +
+                              std::to_string(symbol.span.col);
+      const int usages = std::max(0, refCounts[key] - 1);  // minus the declaration
+      if (usages <= 0) continue;
+      std::string lt = lineText(document->text, symbol.span.line);
+      Value lens = Value::object();
+      Value range = Value::object();
+      Value start = Value::object();
+      start["line"] = symbol.span.line - 1;
+      start["character"] = 0;
+      Value end = Value::object();
+      end["line"] = symbol.span.line - 1;
+      end["character"] = byteToUtf16Column(lt, static_cast<int>(lt.size()));
+      range["start"] = std::move(start);
+      range["end"] = std::move(end);
+      lens["range"] = std::move(range);
+      Value command = Value::object();
+      command["title"] = std::to_string(usages) + " reference" + (usages == 1 ? "" : "s");
+      command["command"] = "editor.action.showReferences";
+      Value arguments = Value::array();
+      arguments.push(pathToUri(entry->path));
+      Value position = Value::object();
+      position["line"] = symbol.span.line - 1;
+      position["character"] =
+          byteToUtf16Column(lt, std::max(0, symbol.span.col - 1));
+      arguments.push(std::move(position));
+      arguments.push(Value::array());
+      command["arguments"] = std::move(arguments);
+      lens["command"] = std::move(command);
+      result.push(std::move(lens));
+    }
+    reply(id, std::move(result));
+  }
+
+  void rangeFormatting(const Value& id, const Value* params) {
+    Value edits = Value::array();
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation || !params) {
+      reply(id, std::move(edits));
+      return;
+    }
+    const Value* rangeVal = params->find("range");
+    if (!rangeVal) {
+      reply(id, std::move(edits));
+      return;
+    }
+    const Value* reqStart = rangeVal->find("start");
+    const Value* reqEnd = rangeVal->find("end");
+    if (!reqStart || !reqEnd) {
+      reply(id, std::move(edits));
+      return;
+    }
+    const int reqStartLine = static_cast<int>(reqStart->find("line")
+                                                   ? reqStart->find("line")->asInt()
+                                                   : 0);
+    const int reqStartChar = static_cast<int>(reqStart->find("character")
+                                                  ? reqStart->find("character")->asInt()
+                                                  : 0);
+    const int reqEndLine = static_cast<int>(
+        reqEnd->find("line") ? reqEnd->find("line")->asInt() : 0);
+    const int reqEndChar = static_cast<int>(reqEnd->find("character")
+                                                ? reqEnd->find("character")->asInt()
+                                                : 0);
+
+    a::tooling::FormatOptions options;
+    if (const Value* formatOptions = params->find("options")) {
+      if (const Value* tabSize = formatOptions->find("tabSize");
+          tabSize && tabSize->isNumber()) {
+        const int size = static_cast<int>(tabSize->asInt());
+        if (size >= 1 && size <= 16) options.indentWidth = size;
+      }
+    }
+
+    a::DiagnosticSink sink;
+    sink.addFile(std::make_shared<a::SourceFile>(document->path, document->text));
+    a::tooling::FormatResult result =
+        a::tooling::formatSource(document->text, sink, options);
+    if (!result.ok || sink.hasErrors() || result.text == document->text) {
+      reply(id, std::move(edits));
+      return;
+    }
+
+    const std::vector<std::string> oldLines = splitLinesKeep(document->text);
+    const std::vector<std::string> newLines = splitLinesKeep(result.text);
+    const int lineCount = static_cast<int>(oldLines.size());
+    auto endOfFilePos = [&]() {
+      Value pos = Value::object();
+      pos["line"] = lineCount - 1;
+      pos["character"] =
+          byteToUtf16Column(oldLines.back(), static_cast<int>(oldLines.back().size()));
+      return pos;
+    };
+    auto insideRange = [&](int startLine, int startChar, int endLine, int endChar) {
+      const bool afterStart = startLine > reqStartLine ||
+                              (startLine == reqStartLine && startChar >= reqStartChar);
+      const bool beforeEnd = endLine < reqEndLine ||
+                             (endLine == reqEndLine && endChar <= reqEndChar);
+      return afterStart && beforeEnd;
+    };
+
+    for (const auto& hunk : diffLineHunks(oldLines, newLines)) {
+      const int oldStart = hunk[0];
+      const int oldEnd = hunk[1];
+      // Edit range: start of oldStart line through start of oldEnd line (or
+      // EOF when the hunk reaches the last line).
+      Value edit = Value::object();
+      Value range = Value::object();
+      Value start = Value::object();
+      if (oldStart < lineCount) {
+        start["line"] = oldStart;
+        start["character"] = 0;
+      } else {
+        start = endOfFilePos();
+      }
+      Value end = Value::object();
+      int endLine = 0;
+      int endChar = 0;
+      if (oldEnd < lineCount) {
+        endLine = oldEnd;
+        endChar = 0;
+      } else {
+        end = endOfFilePos();
+      }
+      end["line"] = endLine;
+      end["character"] = endChar;
+      range["start"] = std::move(start);
+      range["end"] = std::move(end);
+      if (!insideRange(static_cast<int>(range["start"]["line"].asInt()),
+                       static_cast<int>(range["start"]["character"].asInt()),
+                       static_cast<int>(range["end"]["line"].asInt()),
+                       static_cast<int>(range["end"]["character"].asInt()))) {
+        continue;
+      }
+      std::string newText;
+      for (int i = hunk[2]; i < hunk[3]; ++i) newText += newLines[static_cast<std::size_t>(i)];
+      edit["range"] = std::move(range);
+      edit["newText"] = std::move(newText);
+      edits.push(std::move(edit));
+    }
+    reply(id, std::move(edits));
+  }
+
+  // LSP 3.17 pull diagnostics: same items publishDiagnostics sends, scoped to
+  // this document's path.
+  void documentDiagnostic(const Value& id, const Value* params) {
+    Value result = Value::object();
+    result["kind"] = "full";
+    Value items = Value::array();
+    Document* document = documentFrom(params);
+    if (document && document->compilation) {
+      const Compilation& compilation = *document->compilation;
+      const std::string canonical = canonicalPath(document->path);
+      for (const Diagnostic& diagnostic : compilation.sink.diagnostics()) {
+        if (!diagnostic.span.valid()) continue;
+        const a::SourceFile* source = compilation.sink.file(diagnostic.span.fileId);
+        if (!source || canonicalPath(source->path()) != canonical) continue;
+        const std::string& text = source->text();
+        Value item = Value::object();
+        item["range"] = rangeValue(text, diagnostic.span);
+        item["severity"] = diagnostic.severity == Severity::Error ? 1 : 2;
+        item["message"] = diagnostic.message;
+        item["source"] = "a";
+        if (!diagnostic.code.empty()) {
+          item["code"] = diagnostic.code;
+          Value desc = Value::object();
+          desc["href"] =
+              "https://github.com/search?q=" + diagnostic.code + "+repo:own/a-lang";
+          item["codeDescription"] = std::move(desc);
+        }
+        Value tags = Value::array();
+        if (diagnostic.code == "W0002") tags.push(1);
+        if (!tags.asArray().empty()) item["tags"] = std::move(tags);
+        if (!diagnostic.help.empty()) {
+          Value related = Value::array();
+          Value info = Value::object();
+          info["location"] = locationValue(compilation, document->path, diagnostic.span);
+          info["message"] = diagnostic.help;
+          related.push(std::move(info));
+          item["relatedInformation"] = std::move(related);
+        }
+        items.push(std::move(item));
+      }
+    }
+    result["items"] = std::move(items);
+    reply(id, std::move(result));
+  }
+
+  void moniker(const Value& id, const Value* params) {
+    const Value* textDocument = params ? params->find("textDocument") : nullptr;
+    const Value* uri = textDocument ? textDocument->find("uri") : nullptr;
+    if (!uri || !uri->isString()) return replyNull(id);
+    Value result = Value::object();
+    result["scheme"] = "a";
+    result["uri"] = uri->asString();
+    result["unique"] = canonicalPath(uriToPath(uri->asString()));
+    reply(id, std::move(result));
+  }
+
+  // Links for http(s) URLs inside comments, like clangd's comment links.
+  void documentLinks(const Value& id, const Value* params) {
+    Value result = Value::array();
+    Document* document = documentFrom(params);
+    if (!document || !document->compilation) {
+      reply(id, std::move(result));
+      return;
+    }
+    const Compilation& compilation = *document->compilation;
+    const int entry = compilation.graph.entry >= 0 ? compilation.graph.entry : 0;
+    const std::vector<a::Comment>* comments = compilation.commentsForModule(entry);
+    if (!comments) {
+      reply(id, std::move(result));
+      return;
+    }
+    for (const a::Comment& comment : *comments) {
+      std::size_t pos = 0;
+      while ((pos = comment.text.find("http", pos)) != std::string::npos) {
+        const bool isHttp = comment.text.compare(pos, 7, "http://") == 0;
+        const bool isHttps = comment.text.compare(pos, 8, "https://") == 0;
+        if (!isHttp && !isHttps) {
+          ++pos;
+          continue;
+        }
+        std::size_t end = pos;
+        while (end < comment.text.size() &&
+               !std::isspace(static_cast<unsigned char>(comment.text[end])) &&
+               comment.text[end] != ')' && comment.text[end] != ']' &&
+               comment.text[end] != '>' && comment.text[end] != '"' &&
+               comment.text[end] != '\'') {
+          ++end;
+        }
+        // Trim trailing punctuation that is almost never part of the URL.
+        while (end > pos && (comment.text[end - 1] == '.' || comment.text[end - 1] == ',' ||
+                             comment.text[end - 1] == ';' || comment.text[end - 1] == ':')) {
+          --end;
+        }
+        const std::string url = comment.text.substr(pos, end - pos);
+        Value link = Value::object();
+        // comment.span covers the whole comment including '#'; text columns
+        // map 1:1 onto source columns (comments are single-line).
+        const int startCol = comment.span.col + static_cast<int>(pos);
+        const int endCol = comment.span.col + static_cast<int>(end);
+        link["range"] = rangeValue(
+            document->text,
+            Span{comment.span.line, startCol, comment.span.line, endCol, comment.span.fileId});
+        link["target"] = url;
+        result.push(std::move(link));
+        pos = end;
+      }
     }
     reply(id, std::move(result));
   }

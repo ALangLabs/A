@@ -6,6 +6,9 @@
 #include <cctype>
 #include <charconv>
 #include <chrono>
+#include <ctime>
+#include <iomanip>
+#include <sstream>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -2617,6 +2620,10 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
     if (expr.builtinId == BuiltinId::Print || expr.builtinId == BuiltinId::Eprint) {
       return callPrint(expr.builtinId == BuiltinId::Eprint, ident->name, expr, env);
     }
+    // ic(...) needs call-site labels/context captured by Sema.
+    if (expr.builtinId == BuiltinId::Ic) {
+      return callIc(expr, env);
+    }
     // Sema proved the callee is a builtin, not a variable: evaluate arguments
     // and dispatch on the resolved id instead of walking scopes and name maps.
     if (expr.builtinId != BuiltinId::None) {
@@ -3183,6 +3190,110 @@ Value KGENExecutionEngine::callBuiltinFast(BuiltinId id, const std::string& name
     }
   }
   return callBuiltin(name, args, span);
+}
+
+
+namespace {
+
+std::string icCurrentTime() {
+  using namespace std::chrono;
+  auto now = system_clock::now();
+  auto ms = duration_cast<milliseconds>(now.time_since_epoch()) % 1000;
+  std::time_t t = system_clock::to_time_t(now);
+  std::tm tm{};
+#if defined(_WIN32)
+  localtime_s(&tm, &t);
+#else
+  localtime_r(&t, &tm);
+#endif
+  std::ostringstream out;
+  out << std::setfill('0') << std::setw(2) << tm.tm_hour << ':' << std::setw(2) << tm.tm_min
+      << ':' << std::setw(2) << tm.tm_sec << '.' << std::setw(3) << ms.count();
+  return out.str();
+}
+
+std::string icAlignContinuations(const std::string& text, std::size_t width) {
+  if (text.find('\n') == std::string::npos) return text;
+  std::string pad(width + 2, ' ');
+  std::string out;
+  out.reserve(text.size() + 16);
+  bool first = true;
+  std::size_t start = 0;
+  while (start <= text.size()) {
+    std::size_t end = text.find('\n', start);
+    std::string_view line = end == std::string::npos ? std::string_view(text).substr(start)
+                                                      : std::string_view(text).substr(start, end - start);
+    if (first) {
+      out.append(line);
+      first = false;
+    } else if (line.empty()) {
+      out.push_back('\n');
+    } else {
+      out.push_back('\n');
+      out += pad;
+      out.append(line);
+    }
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return out;
+}
+
+}  // namespace
+
+Value KGENExecutionEngine::callIc(const CallExpr& expr, Env& env) {
+  if (hasNamedArgs(expr.args)) {
+    fail(expr.span, "'ic' does not accept named arguments.");
+  }
+
+  // ic() with no arguments is a breadcrumb: where we are + time.
+  if (expr.args.empty()) {
+    std::string context = expr.icContext.empty() ? "<unknown>" : expr.icContext;
+    err_ << "ic| " << context << " - " << icCurrentTime() << "\n";
+    err_.flush();
+    return makeVoid();
+  }
+
+  ArgList values;
+  values.reserve(expr.args.size());
+  for (const auto& arg : expr.args) values.push_back(eval(*arg.value, env));
+
+  bool allSimple = true;
+  for (const auto& arg : expr.args) {
+    if (!icExprIsSimple(*arg.value)) {
+      allSimple = false;
+      break;
+    }
+  }
+  const std::string context = expr.icContext.empty() ? "<unknown>" : expr.icContext;
+  const bool showContext = !allSimple;
+
+  std::string head = "ic| ";
+  if (showContext) head += "[" + context + "] >>> ";
+
+  std::string body;
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (i) body += ", ";
+    std::string label;
+    if (i < expr.icArgLabels.size()) label = expr.icArgLabels[i];
+    std::string rendered = formatValue(values[i], true);
+    std::string part;
+    if (icExprIsBare(*expr.args[i].value) || label.empty()) {
+      part = rendered;
+    } else {
+      part = label + ": " + rendered;
+    }
+    body += part;
+  }
+
+  err_ << head << icAlignContinuations(body, head.size()) << "\n";
+  err_.flush();
+
+  if (values.size() == 1) return std::move(values[0]);
+  std::vector<Value> items;
+  items.reserve(values.size());
+  for (std::size_t i = 0; i < values.size(); ++i) items.push_back(std::move(values[i]));
+  return makeTuple(std::move(items));
 }
 
 Value KGENExecutionEngine::callPrint(bool toStderr, const std::string& name, const CallExpr& expr, Env& env) {

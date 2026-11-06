@@ -3372,18 +3372,23 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
 }
 
 TypePtr Sema::checkIcCall(CallExpr& call) {
-  TypePtr result = typeVoid();
+  // Mirrors litprinter/ic(ecream): ic() returns void/None-like output only,
+  // ic(x) returns x, ic(x, y, ...) returns a tuple of the inspected values.
+  // Named arguments are rejected (reserved for future options).
+  std::vector<TypePtr> types;
+  types.reserve(call.args.size());
   for (auto& arg : call.args) {
     if (!arg.name.empty()) {
-      sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
+      sink_.error(arg.nameSpan, "'ic' does not accept named arguments.");
       inferExpr(*arg.value);
       continue;
     }
     TypePtr type = inferExpr(*arg.value);
     if (resolveType(type)->kind == TypeKind::Void) {
       sink_.error(arg.value->span, "Cannot inspect a void value with 'ic'.");
+      type = typeError();
     }
-    result = type;
+    types.push_back(type);
   }
 
   // Capture the display metadata while source spans are available: the
@@ -3402,7 +3407,10 @@ TypePtr Sema::checkIcCall(CallExpr& call) {
     }
     call.icArgLabels.push_back(std::move(label));
   }
-  return result;
+
+  if (types.empty()) return typeVoid();
+  if (types.size() == 1) return types[0];
+  return typeTuple(std::move(types));
 }
 
 std::string Sema::icContextString(Span span) const {

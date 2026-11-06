@@ -1718,15 +1718,10 @@ bool checkSupportedExpr(const Expr& expr) {
           name == "unsafe_load" || name == "unsafe_store" || name == "unsafe_offset") {
         return false;
       }
-      if (name == "print") {
-        if (c.args.size() != 1) return false;
-        const auto& a0 = *c.args[0].value;
-        if (a0.kind == ExprKind::StringLit) {
-          const auto& sl = static_cast<const StringLitExpr&>(a0);
-          for (const auto& part : sl.parts) if (part.isExpr) return false;
-          return true;
-        }
-        return checkSupportedExpr(a0);
+      if (name == "print" || name == "eprint" || name == "ic") {
+        // print/eprint/ic have dynamic formatting, keyword/context semantics,
+        // and (for ic) Sema-captured metadata; keep them on the interpreter.
+        return false;
       }
       for (const auto& a : c.args) if (!checkSupportedExpr(*a.value)) return false;
       return true;

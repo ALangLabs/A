@@ -191,6 +191,10 @@ inline const StringMap<BuiltinDoc>& builtinDocs() {
                   "Runtime error when the condition is false."}},
       {"assert_eq", {"assert_eq", "assert_eq(actual, expected[, message])",
                      "Runtime error when the two values differ."}},
+      {"ic", {"ic", "ic(*values) -> value | (values) | void",
+              "Debug-inspects values to stderr with file/function context and source labels (litprinter-style), and returns the inspected value(s) unchanged.",
+              ">>> x = 42\n>>> ic(x)\nic| x: 42\n>>> ic(x + 1)\nic| [app.a:2 in main()] >>> x + 1: 43",
+              "print, eprint, assert"}},
 
       // time
       {"now", {"now", "now() -> i64", "Current time as Unix epoch milliseconds."}},

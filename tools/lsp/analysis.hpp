@@ -175,6 +175,43 @@ std::vector<const SymbolDef*> structMembers(const Compilation& compilation,
 std::vector<const SymbolDef*> visibleSymbols(const Compilation& compilation,
                                              const FileIndex& file, int line, int byteColumn);
 
+// A call expression found by walking the module ASTs. Used by call hierarchy
+// and parameter-name inlay hints; callee resolution stays with the caller
+// (it needs the token stream).
+struct CallSite {
+  int moduleId = -1;
+  Span callSpan;     // the whole call expression
+  Span calleeSpan;   // the callee's name token (identifier or member name)
+  std::vector<Span> positionalArgSpans;  // positional argument value spans, in order
+  bool inCallable = false;
+  SymbolKind callableKind = SymbolKind::Function;
+  std::string callableName;    // "Type.method" for methods, plain name otherwise
+  std::string callableDetail;  // signature text
+  Span callableNameSpan;       // the callable's name token
+  Span callableSpan;           // the callable's full declaration span
+};
+
+std::vector<CallSite> collectCallSites(const Compilation& compilation);
+
+// A class/enum/trait declaration for textDocument/typeHierarchy.
+struct TypeDeclInfo {
+  int moduleId = -1;
+  std::string name;
+  SymbolKind kind = SymbolKind::Class;
+  std::string detail;
+  std::vector<std::string> parents;  // class base / trait parents
+  Span nameSpan;
+  Span span;
+};
+
+std::vector<TypeDeclInfo> collectTypeDecls(const Compilation& compilation);
+
+// Finds the declaration (function, method, type, trait, alias) whose name
+// span matches `line`/`col` (1-based) in the module at `path`. Returns nullptr
+// when the module or declaration is absent; `moduleIdOut` receives the module.
+const Stmt* findDeclAt(const Compilation& compilation, const std::string& path,
+                       int line, int col, int* moduleIdOut = nullptr);
+
 std::string typeExprText(const TypeExpr* type);
 std::string signatureText(const FnDecl& decl);
 std::string describeSymbol(const SymbolDef& symbol);
