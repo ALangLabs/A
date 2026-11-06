@@ -684,8 +684,8 @@ static ANode *parse_if_chain(AModule *m, AToken *kw) {
 static ANode *parse_fn_decl(AModule *m, AToken *kw) {
     ANode *fn = parse_fn_header(m, 0);
     fn->line = kw->line;
-    if (!eat(m, AT_COLON)) a_perror(m, kw->line, "expected ':' after function header");
-    fn->b = parse_block(m, kw->col);
+    if (pk(m)->kind != AT_COLON) a_perror(m, kw->line, "expected ':' after function header");
+    fn->b = parse_block(m, kw->col); /* parse_block consumes the ':' */
     return fn;
 }
 

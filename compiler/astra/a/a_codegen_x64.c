@@ -50,7 +50,7 @@ static int here(CG *g){ return (int)g->t->data_offset; }
 
 /* ---------- labels / fixups ---------- */
 static int newlabel(CG *g){ return ++g->nlabels; }
-static void deflabel(CG *g, int id){ g->labels[g->nlabels].id = id; g->labels[g->nlabels].pos = here(g); }
+static void deflabel(CG *g, int id){ if (id > 0 && id < 4096) { g->labels[id].id = id; g->labels[id].pos = here(g); } }
 static int findlabel(CG *g, int id){ for (int i = g->nlabels; i >= 1; i--) if (g->labels[i].id == id) return g->labels[i].pos; return -1; }
 static void jmp32(CG *g, int op2, int lbl){ /* op2: 0xE9 jmp, or 0x8x jcc second byte */
     if (op2 == 0xE9) ob(g, 0xE9); else { ob(g, 0x0F); ob(g, op2); }
@@ -77,9 +77,13 @@ static Sym *a_rsym(CG *g, const char *name){
     return s;
 }
 static Sym *data_sym(CG *g, const char *name, Section *sec, unsigned long off, unsigned long size){
+    fprintf(stderr, "[ds] enter %s\n", name); fflush(stderr);
     int v = tok_alloc_const(name);
+    fprintf(stderr, "[ds] tok %s v=%d\n", name, v); fflush(stderr);
     Sym *s = external_global_sym(v, &char_pointer_type);
+    fprintf(stderr, "[ds] ext sym %p\n", (void*)s); fflush(stderr);
     put_extern_sym(s, sec, off, size);
+    fprintf(stderr, "[ds] put ok\n"); fflush(stderr);
     return s;
 }
 /* call runtime function `name` with args already in rdi,rsi,rdx,rcx,r8,r9 */
@@ -398,7 +402,9 @@ static void cg_expr(CG *g, ANode *n, int fi){
         if (!f) { cgerr(g, n, "unsupported operator"); movabs_imm(g,0,A_NONE); store_slot(g,fi); break; }
         int a = tmp_new(g), b = tmp_new(g);
         cg_expr(g, n->a, a); cg_expr(g, n->b, b);
-        rt2(g, f, a, b, fi); tmp_free(g, 2); break;
+        if (!strcmp(op, "in")) rt2(g, f, b, a, fi); /* a_contains(cont, item): cont is RHS */
+        else rt2(g, f, a, b, fi);
+        tmp_free(g, 2); break;
     }
     case AN_UNARY: {
         if (!strcmp(n->name, "not")) { int t = tmp_new(g); cg_expr(g, n->a, t); rt1(g, "a_not", t, fi); tmp_free(g,1); break; }
@@ -439,9 +445,9 @@ static void cg_expr(CG *g, ANode *n, int fi){
         int t = tmp_new(g), o = tmp_new(g);
         cg_expr(g, n->a, t);
         load_slot(g, t); store_slot(g, o);       /* keep original */
-        load_slot(g, t); callrt(g, "a_try_result"); store_slot(g, fi);
+        load_slot(g, t); ob(g,0x48);ob(g,0x89);ob(g,0xC7); callrt(g, "a_try_result"); store_slot(g, fi);
         /* if original should propagate (None or Err result) -> return fi */
-        load_slot(g, o); callrt(g, "a_is_propagate");
+        load_slot(g, o); ob(g,0x48);ob(g,0x89);ob(g,0xC7); callrt(g, "a_is_propagate");
         ob(g,0x48);ob(g,0x85);ob(g,0xC0);        /* test rax,rax */
         int no = newlabel(g); jmp32(g, 0x84, no);
         load_slot(g, fi);
@@ -732,7 +738,8 @@ static void cg_comp_clauses(CG *g, ANode *comp, int ci, int fi){
     ANode *cl = comp->list[ci];
     int itf = tmp_new(g), of = tmp_new(g);
     cg_expr(g, cl->a, itf);
-    load_slot(g, itf); callrt(g, "a_iter_new"); store_slot(g, of);
+    load_slot(g, itf); ob(g,0x48);ob(g,0x89);ob(g,0xC7); /* rdi = iterable */
+    callrt(g, "a_iter_new"); store_slot(g, of);
     int top = newlabel(g), end = newlabel(g);
     deflabel(g, top);
     /* a_iter_next(it, &out) */
@@ -925,7 +932,8 @@ static void cg_stmt(CG *g, ANode *n){
     case AN_FOR: {
         int itf = tmp_new(g), of = tmp_new(g);
         cg_expr(g, n->a, itf);
-        load_slot(g, itf); callrt(g, "a_iter_new"); store_slot(g, of);
+        load_slot(g, itf); ob(g,0x48);ob(g,0x89);ob(g,0xC7); /* rdi = iterable */
+        callrt(g, "a_iter_new"); store_slot(g, of);
         int top = newlabel(g), end = newlabel(g), cont = newlabel(g);
         g->loopbp[g->loopdepth] = top; g->loopcont[g->loopdepth] = cont;
         g->loopend[g->loopdepth] = end; g->loopdepth++;
@@ -999,9 +1007,11 @@ static void emit_fn_sym(CG *g, const char *name, unsigned long start, unsigned l
 
 int a_codegen(AModule *m){
     TCCState *s1 = m->s1;
+    fprintf(stderr, "[cg] enter prog=%p nlist=%d\n", (void*)m->prog, m->prog ? m->prog->nlist : -1); fflush(stderr);
     CG g; memset(&g, 0, sizeof g);
     g.m = m; g.s1 = m->s1; g.t = text_section;
-    g.globals_sym = data_sym(&g, "a_globals", bss_section, bss_section->data_offset, (m->prog->aux ? m->prog->aux : 1) * 8);
+    fprintf(stderr, "[cg] sections ok text=%p data=%p bss=%p ro=%p\n", (void*)text_section,(void*)data_section,(void*)bss_section,(void*)rodata_section); fflush(stderr);
+    g.globals_sym = data_sym(&g, "a_globals", bss_section, bss_section ? bss_section->data_offset : 0, (m->prog->aux ? m->prog->aux : 1) * 8);
     /* reserve bss */
     section_ptr_add(bss_section, (m->prog->aux ? m->prog->aux : 1) * 8);
     /* collect top-level fns and lambdas count */
@@ -1021,10 +1031,12 @@ int a_codegen(AModule *m){
         emit_fn_sym(&g, s->name, start, g.t->data_offset - start);
         fn_global_idx[i] = s->loc_idx;
     }
+    fprintf(stderr, "[cg] fns done\n"); fflush(stderr);
     /* emit main */
     unsigned long mstart = g.t->data_offset;
     {
         AFuncInfo dummy; memset(&dummy,0,sizeof dummy);
+        dummy.nlocals = m->nmain_locals; /* top-level vars are main's locals */
         emit_fn_prologue(&g, &dummy);
         /* init fn FNONs into globals */
         for (int i = 0; i < m->prog->nlist; i++) {
@@ -1046,8 +1058,10 @@ int a_codegen(AModule *m){
         jmp32(&g, 0xE9, g.epilogue);
         emit_fn_epilogue(&g);
     }
+    fprintf(stderr, "[cg] main body done\n"); fflush(stderr);
     emit_fn_sym(&g, "main", mstart, g.t->data_offset - mstart);
     patchfix(&g);
+    fprintf(stderr, "[cg] exit\n"); fflush(stderr);
     return m->had_error ? -1 : 0;
 }
 

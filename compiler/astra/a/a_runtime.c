@@ -107,6 +107,44 @@ static char *xstrdup(const char *s) {
     return xstrndup(s ? s : "", strlen(s ? s : ""));
 }
 
+/* TCC emits a __fixxfdi libcall for (int64_t)long double conversions.
+ * libgcc is not linked into A programs, so provide it here.
+ * x86-64 long double is 80-bit extended in a 16-byte slot:
+ * bytes 0-7 mantissa (explicit integer bit), bytes 8-9 sign/exponent. */
+int64_t __fixxfdi(long double x) {
+    union { long double ld; unsigned char b[16]; } v;
+    uint64_t m, r = 0;
+    uint16_t se;
+    int sign, e, sh;
+    v.ld = x;
+    m = ((uint64_t *)v.b)[0];
+    se = ((uint16_t *)v.b)[4];
+    if ((se & 0x7FFF) == 0) return 0; /* zero or unsupported denormal */
+    sign = (se >> 15) & 1;
+    e = (int)(se & 0x7FFF) - 16383 - 63; /* power of two for mantissa lsb */
+    sh = e >= 0 ? e : -e;
+    if (sh < 64) {
+        if (e >= 0) {
+            if (m <= (UINT64_MAX >> e))
+                r = m << e;
+            else
+                r = UINT64_MAX;
+        } else {
+            r = m >> sh;
+        }
+    } else if (e < 0) {
+        r = 0;
+    } else {
+        r = UINT64_MAX;
+    }
+    if (r > (uint64_t)INT64_MAX + 1ULL) r = (uint64_t)INT64_MAX + 1ULL;
+    if (sign) {
+        if (r == (uint64_t)INT64_MAX + 1ULL) return INT64_MIN;
+        return -(int64_t)r;
+    }
+    return (int64_t)r;
+}
+
 static aval mkobj(void *p) {
     uintptr_t u = (uintptr_t)p;
     if ((u & 0xFULL) != 0 || u >= (UINT64_C(1) << 48))

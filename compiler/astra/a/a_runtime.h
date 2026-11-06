@@ -24,23 +24,14 @@
 #ifndef ASTRA_A_RUNTIME_H
 #define ASTRA_A_RUNTIME_H
 
-#if !defined(ASTRA_RUNTIME_TYPES)
-#define ASTRA_RUNTIME_TYPES
-typedef unsigned long long uint64_t;
-typedef long long int64_t;
-typedef unsigned int uint32_t;
-typedef int int32_t;
-typedef unsigned short uint16_t;
-typedef short int16_t;
-typedef unsigned char uint8_t;
-typedef signed char int8_t;
-typedef unsigned long uintptr_t;
-typedef long intptr_t;
-#define UINT64_MAX (~0ULL)
+#include <stdint.h>
+#include <stddef.h>
+#ifndef INT64_MAX
 #define INT64_MAX 0x7fffffffffffffffLL
+#endif
+#ifndef INT64_MIN
 #define INT64_MIN (-INT64_MAX-1LL)
 #endif
-#include <stddef.h>
 
 typedef uint64_t aval;
 typedef aval (*a_builtin_fn)(uint64_t n, aval *argv);

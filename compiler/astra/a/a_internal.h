@@ -1,6 +1,10 @@
 #ifndef ASTRA_A_INTERNAL_H
 #define ASTRA_A_INTERNAL_H
 #include "../tcc.h"
+#include <stdint.h>
+/* host TU already has real stdint types via tcc.h; skip a_runtime.h's
+   freestanding typedefs (used only when tcc compiles the embedded runtime) */
+#define ASTRA_RUNTIME_TYPES
 #include "a_runtime.h"
 #include <stdlib.h>
 #include <string.h>
@@ -97,6 +101,7 @@ typedef struct AModule {
     ANode *prog;
     int had_error, nerrors;
     int nlocals_peak;
+    int nmain_locals;   /* top-level "locals" (globals-scope nlocals) for main's frame */
 } AModule;
 
 static ANode *an_new(int k, int line) {
@@ -121,5 +126,6 @@ int a_parse(AModule *m);
 int a_sema(AModule *m);
 int a_codegen(AModule *m);
 int a_ensure_runtime(TCCState *s1);
+void tccpp_set_keep_tokens(int keep);
 
 #endif

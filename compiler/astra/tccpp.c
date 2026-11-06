@@ -3668,6 +3668,13 @@ ST_FUNC void preprocess_start(TCCState *s1, int filetype)
 }
 
 /* cleanup from error/setjmp */
+static int pp_keep_tokens;
+
+ST_FUNC void tccpp_set_keep_tokens(int keep)
+{
+    pp_keep_tokens = keep;
+}
+
 ST_FUNC void preprocess_end(TCCState *s1)
 {
     while (macro_stack)
@@ -3675,7 +3682,8 @@ ST_FUNC void preprocess_end(TCCState *s1)
     macro_ptr = NULL;
     while (file)
         tcc_close();
-    tccpp_delete(s1);
+    if (!pp_keep_tokens)
+        tccpp_delete(s1);
 }
 
 ST_FUNC int set_idnum(int c, int val)

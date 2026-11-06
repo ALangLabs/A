@@ -417,11 +417,13 @@ int a_sema(AModule *m) {
             if (!scope_find_local(S.globals, s->name)) {
                 int g = S.nglobals++;
                 scope_add(S.globals, s->name, L_GLOBAL, g);
+                s->loc_kind = L_GLOBAL; s->loc_idx = g;
             }
         }
     }
     sema_block(&S, m->prog);
     m->nlocals_peak = S.nglobals; /* reuse: global count for codegen */
+    m->nmain_locals = S.globals->nlocals;
     /* stash globals count in prog aux? codegen reads via scope — store on prog */
     m->prog->aux = S.nglobals;
     return m->had_error ? -1 : 0;
