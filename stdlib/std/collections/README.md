@@ -11,9 +11,16 @@ Bare `import collections` resolves to the **native** collections module
 name resolution. Reach this package with a quoted path:
 
 ```a
-import "std/collections/__init__.a" as col
-from "std/collections/__init__.a" import Counter, namedtuple
+from "std/collections/__init__.a" import Counter, namedtuple, deque_of
+import "std/collections/__init__.a" as col   # functions only: col.map_list
 ```
+
+Prefer `from ... import` for the ported **types**: struct constructors
+re-exported through `__init__.a` do not resolve via module-alias syntax
+(`col.Counter({})` yields an error-typed value — a name-resolution
+limitation; `from "std/collections/__init__.a" import Counter` works).
+Module-alias access is fine for plain functions (`col.user_list_of`,
+`col.namedtuple`, ...).
 
 Pre-existing helpers (`map_list`, `dict_get`, ...) are unchanged.
 
@@ -101,3 +108,8 @@ Pre-existing helpers (`map_list`, `dict_get`, ...) are unchanged.
 - **OrderedDict/dicts**: A `{K:V}` maps are insertion-ordered already
   (verified: new keys append, updates keep position), so `OrderedDict`
   is a thin wrapper adding `popitem`/`move_to_end`/order-sensitive `eq`.
+- **Dynamically-typed returns**: methods on these wrappers return
+  `Json`-typed values. `==`, `print`, indexing, and iteration all work
+  normally, but the test harness's `assert_eq` is type-strict and can
+  report Json-vs-native container mismatches — compare containers with
+  `assert(a == b)` in tests (scalar `assert_eq` is fine).

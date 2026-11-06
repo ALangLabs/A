@@ -4,18 +4,23 @@
 # so recursive calls on the same object return `fillvalue` instead of
 # recursing forever. The guard set is keyed by (id(self), thread id).
 #
-# A has no decorators and no callable objects, so the port returns a
-# `RecursiveRepr` record invoked via `.call(args)` (same convention as
-# `functools.LRUCache.call`):
+# A has no decorators and no callable objects, so the port wraps the
+# function in a `RecursiveRepr` record invoked via `.call(args)` (same
+# convention as `functools.LRUCache.call`):
 #
-#   rr = recursive_repr("...")        # decorator factory (fillvalue required;
-#   wrapped = rr(my_repr_fn)          #   A has no default arguments)
+#   wrapped = recursive_repr(my_repr_fn, "...")
 #   wrapped.call([obj])               # -> repr string or "..." on recursion
+#
+# Deviation: CPython's `recursive_repr(fillvalue)` decorator factory is
+# collapsed into a single call because A cannot return a callable decorator
+# that constructs a struct (interpreter limitation — see README.md).
 #
 # The running set stores the *argument value*; for containers A hashes map
 # keys by identity (like CPython's id()), so self-references are detected.
 # Scalar arguments compare by value, which is harmless: scalars cannot be
-# recursive anyway.
+# recursive anyway. Values that only exist as `Json` wrappers (e.g. fields
+# extracted via `json.as_map`) may not share identity with the original
+# object — pass native containers where possible.
 import core
 
 ## _call1(f, x) -> f(x); indirect call so sema sees a plain function value
@@ -43,7 +48,7 @@ struct RecursiveRepr:
         self.running.discard(key)
         return result
 
-## recursive_repr(fillvalue) -> decorator producing a RecursiveRepr.
-## Pass "..." to match the CPython default (no default args in A).
-fn recursive_repr(fillvalue):
-    return fn(user_function) => RecursiveRepr(user_function, fillvalue, set())
+## recursive_repr(user_function, fillvalue) -> RecursiveRepr wrapping
+## `user_function`. Pass "..." for the CPython default fillvalue.
+fn recursive_repr(user_function, fillvalue):
+    return RecursiveRepr(user_function, fillvalue, set())

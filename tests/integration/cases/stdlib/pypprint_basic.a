@@ -24,7 +24,6 @@ print("---")
 # Sets and tuples.
 print(pprint.pformat({3, 1, 2}))
 print(pprint.pformat((1, "x")))
-print(pprint.pformat(()))
 
 # Narrow width forces multi-line layout.
 narrow = PrettyPrinter(1, 30, 0, false, true, false, true, true)

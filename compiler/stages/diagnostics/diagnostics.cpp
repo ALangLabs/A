@@ -50,11 +50,13 @@ std::string escapeJson(const std::string& text) {
 }  // namespace
 
 FileId DiagnosticSink::addFile(std::shared_ptr<const SourceFile> source) {
+  std::lock_guard<std::mutex> lock(mutex_);
   files_.push_back(std::move(source));
   return static_cast<FileId>(files_.size()) - 1;
 }
 
 const SourceFile* DiagnosticSink::file(FileId id) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   if (id >= 0 && static_cast<std::size_t>(id) < files_.size()) return files_[id].get();
   return files_.empty() ? nullptr : files_.front().get();
 }
@@ -65,6 +67,7 @@ void DiagnosticSink::error(Span span, std::string message, std::string help) {
 
 void DiagnosticSink::errorWithCode(Span span, std::string code, std::string message, std::string help) {
   if (isSuppressed(span, Severity::Error, code)) return;
+  std::lock_guard<std::mutex> lock(mutex_);
   diagnostics_.push_back(
       Diagnostic{Severity::Error, std::move(code), span, std::move(message), std::move(help)});
   ++errors_;
@@ -73,8 +76,14 @@ void DiagnosticSink::errorWithCode(Span span, std::string code, std::string mess
 void DiagnosticSink::warning(Span span, std::string code, std::string message,
                              std::string help) {
   if (isSuppressed(span, Severity::Warning, code)) return;
+  std::lock_guard<std::mutex> lock(mutex_);
   diagnostics_.push_back(
       Diagnostic{Severity::Warning, std::move(code), span, std::move(message), std::move(help)});
+}
+
+std::vector<Diagnostic> DiagnosticSink::diagnosticsCopy() const {
+  std::lock_guard<std::mutex> lock(mutex_);
+  return diagnostics_;
 }
 
 bool DiagnosticSink::isSuppressed(Span span, const std::string& code) const {
@@ -119,6 +128,7 @@ bool DiagnosticSink::isSuppressed(Span span, Severity, const std::string& code) 
 }
 
 void DiagnosticSink::flush(std::ostream& os, bool useColor) {
+  std::lock_guard<std::mutex> lock(mutex_);
   const Colors& colors = useColor ? kAnsi : kPlain;
   for (; flushed_ < diagnostics_.size(); ++flushed_) {
     const Diagnostic& diagnostic = diagnostics_[flushed_];
@@ -165,6 +175,7 @@ void DiagnosticSink::flush(std::ostream& os, bool useColor) {
 }
 
 void DiagnosticSink::writeJson(std::ostream& os) const {
+  std::lock_guard<std::mutex> lock(mutex_);
   os << "{\"diagnostics\":[";
   bool first = true;
   for (const Diagnostic& diagnostic : diagnostics_) {

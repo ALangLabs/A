@@ -17,6 +17,9 @@ Port of CPython 3.14 `Lib/types.py` (345 lines) to A.
   The `types.*Type` names are string constants, not classes.
 - **No `isinstance`/`issubclass`/`getattr`/`hasattr`/`callable`.** Use
   `type_tag(x)` comparisons and direct field/method access.
+- **Qualified struct construction** (`types.SimpleNamespace(...)`)
+  hits an interpreter limitation; use the `simple_namespace()` factory
+  or `from types import SimpleNamespace` + unqualified construction.
 - **`SimpleNamespace` attribute access** is via `.get(name)`/`.set(name, v)`/
   `.has(name)` instead of `ns.attr`; construction takes an optional map or
   starts empty (no `**kwargs`). `repr` renders `namespace(k=v, ...)` using

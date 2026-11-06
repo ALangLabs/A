@@ -1,6 +1,8 @@
 #include "type-checker/sema.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <thread>
 #include <utility>
 
 #include "name-resolution/native_modules.hpp"
@@ -248,7 +250,12 @@ bool Sema::occursIn(TypePtr var, TypePtr type) {
   }
 }
 
+// Shared Type-var objects are mutated by unify/bindVar from parallel module
+// workers. Serialise those mutations; diagnostics are already locked.
+static std::mutex gVarMutex;
+
 bool Sema::bindVar(TypePtr var, TypePtr type) {
+  std::lock_guard<std::mutex> lock(gVarMutex);
   TypePtr resolved = resolveType(type);
   if (!resolved) return true;
   if (resolved->kind == TypeKind::Var) return unify(var, resolved);
@@ -277,6 +284,7 @@ bool Sema::bindVar(TypePtr var, TypePtr type) {
 }
 
 bool Sema::unify(TypePtr a, TypePtr b) {
+  std::lock_guard<std::mutex> lock(gVarMutex);
   a = resolveType(a);
   b = resolveType(b);
   if (!a || !b) return true;
@@ -361,6 +369,7 @@ bool Sema::unify(TypePtr a, TypePtr b) {
 }
 
 bool Sema::constrainVar(TypePtr var, Constraint constraint) {
+  std::lock_guard<std::mutex> lock(gVarMutex);
   TypePtr resolved = resolveType(var);
   if (!resolved) return false;
   if (resolved->kind == TypeKind::Var) {
@@ -1217,7 +1226,8 @@ void Sema::buildModuleExports(Module& module) {
 }
 
 SemaResult Sema::analyze() {
-  for (int id : graph_.order) analyzeModule(graph_.at(id));
+  for (int id : graph_.order) registerModule(graph_.at(id));
+  for (int id : graph_.order) checkModule(graph_.at(id));
 
   SemaResult result;
   result.functions = functionsByName_;
@@ -1236,7 +1246,101 @@ SemaResult Sema::analyze() {
   return result;
 }
 
+SemaResult Sema::analyzeParallel(int jobs) {
+  for (int id : graph_.order) registerModule(graph_.at(id));
+  if (jobs <= 0) jobs = 4;
+  const std::size_t n = graph_.order.size();
+  if (jobs <= 1 || n <= 1) {
+    for (int id : graph_.order) checkModule(graph_.at(id));
+  } else {
+    // Each worker clones the registered tables and checks a strided subset;
+    // per-worker outputs are merged under a lock. Diagnostics are already
+    // thread-safe; unify is serialised inside Sema via a global lock.
+    std::mutex mergeMutex;
+    std::atomic<std::size_t> next{0};
+    std::vector<std::thread> workers;
+    int threads = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(jobs), n));
+    for (int t = 0; t < threads; ++t) {
+      workers.emplace_back([this, &next, &mergeMutex, t, threads] {
+        Sema worker(graph_, sink_);
+        worker.functionsByName_ = functionsByName_;
+        worker.structsByName_ = structsByName_;
+        worker.traits_ = traits_;
+        worker.traitImpls_ = traitImpls_;
+        worker.enums_ = enums_;
+        worker.signatures_ = signatures_;
+        worker.structs_ = structs_;
+        worker.fnModules_ = fnModules_;
+        worker.structModules_ = structModules_;
+        worker.moduleStates_ = moduleStates_;
+        worker.moduleExports_ = moduleExports_;
+        worker.nextVarId_ = nextVarId_;
+        worker.typeVariables_ = typeVariables_;
+        worker.typeAliases_ = typeAliases_;
+        while (true) {
+          std::size_t i = next.fetch_add(1);
+          if (i >= graph_.order.size()) break;
+          int id = graph_.order[i];
+          worker.checkModule(graph_.at(id));
+        }
+        std::lock_guard<std::mutex> lock(mergeMutex);
+        for (auto& entry : worker.fnParamTypes_) fnParamTypes_[entry.first] = std::move(entry.second);
+        for (auto& entry : worker.fnReturnTypes_) fnReturnTypes_[entry.first] = std::move(entry.second);
+        for (auto& entry : worker.exprTypes_) exprTypes_[entry.first] = std::move(entry.second);
+        declaredVariables_.insert(declaredVariables_.end(), worker.declaredVariables_.begin(),
+                                  worker.declaredVariables_.end());
+        // typeVariables_ already holds registration vars in the base; workers
+        // only defaulted them in place (via checkTypeVariables), so do not
+        // merge copies. Body-created vars are already linked into Type
+        // objects referenced by fnParamTypes_/exprTypes_.
+        checkedFunctions_.insert(checkedFunctions_.end(), worker.checkedFunctions_.begin(),
+                                 worker.checkedFunctions_.end());
+        // Merge module exports (values) per module id.
+        for (std::size_t m = 0; m < worker.moduleExports_.size() && m < moduleExports_.size(); ++m) {
+          for (auto& entry : worker.moduleExports_[m].values) {
+            moduleExports_[m].values[entry.first] = entry.second;
+          }
+        }
+      });
+    }
+    for (auto& w : workers) w.join();
+  }
+
+  SemaResult result;
+  result.functions = functionsByName_;
+  result.structs = structsByName_;
+  result.enums = enums_;
+  result.modules = moduleExports_;
+  result.fnModule = fnModules_;
+  result.structModule = structModules_;
+  result.fnParamTypes = fnParamTypes_;
+  result.fnReturnTypes = fnReturnTypes_;
+  for (const DeclaredVarInfo& info : declaredVariables_) {
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+  }
+  result.exprTypes = exprTypes_;
+  return result;
+}
+
 void Sema::analyzeModule(Module& module) {
+  registerModule(module);
+  checkModule(module);
+}
+
+std::shared_ptr<Sema::AsyncHandle> Sema::analyzeAsync(int jobs) {
+  auto handle = std::make_shared<AsyncHandle>();
+  // Move a clone that owns a copy of the graph/sink references; the caller
+  // keeps its graph alive until wait() is called.
+  ModuleGraph& graph = graph_;
+  DiagnosticSink& sink = sink_;
+  handle->future = std::async(std::launch::async, [&graph, &sink, jobs] {
+    Sema worker(graph, sink);
+    return worker.analyzeParallel(jobs);
+  });
+  return handle;
+}
+
+void Sema::registerModule(Module& module) {
   currentModule_ = module.id;
   scopes_.clear();
   scopes_.push_back({});
@@ -1250,9 +1354,8 @@ void Sema::analyzeModule(Module& module) {
   currentFunction_ = nullptr;
   currentReturnType_ = nullptr;
   sawReturn_ = false;
-  typeVariables_.clear();
-  declaredVariables_.clear();
-  checkedFunctions_.clear();
+  // typeVariables_ accumulates across all registrations (signature vars);
+  // per-module check vectors are cleared in checkModule() instead.
 
   registerImports(module);
 
@@ -1370,6 +1473,39 @@ void Sema::analyzeModule(Module& module) {
     }
   }
 
+  // Snapshot import/alias bindings for the parallel body-check phase.
+  ModuleCheckState state;
+  state.moduleAliases = moduleAliases_;
+  state.fromBindings = fromBindings_;
+  state.structAliases = structAliases_;
+  state.typeAliases = typeAliases_;
+  moduleStates_[module.id] = std::move(state);
+}
+
+void Sema::checkModule(Module& module) {
+  currentModule_ = module.id;
+  auto foundState = moduleStates_.find(module.id);
+  if (foundState != moduleStates_.end()) {
+    moduleAliases_ = foundState->second.moduleAliases;
+    fromBindings_ = foundState->second.fromBindings;
+    structAliases_ = foundState->second.structAliases;
+    typeAliases_ = foundState->second.typeAliases;
+  }
+  scopes_.clear();
+  scopes_.push_back({});
+  genericParams_.clear();
+  loopDepth_ = 0;
+  deferDepth_ = 0;
+  currentFunction_ = nullptr;
+  currentReturnType_ = nullptr;
+  sawReturn_ = false;
+  // typeVariables_ holds signature vars from registration (all modules);
+  // keep it so checkTypeVariables() defaults every var once.
+  declaredVariables_.clear();
+  checkedFunctions_.clear();
+
+  auto& statements = module.program->statements;
+
   // Pass 4: top-level statements (global variables and executable code).
   for (auto& stmt : statements) {
     if (dynamic_cast<FnDecl*>(stmt.get()) || dynamic_cast<StructDecl*>(stmt.get()) ||
@@ -1405,6 +1541,8 @@ void Sema::analyzeModule(Module& module) {
 
   buildModuleExports(module);
 }
+
+void Sema::checkModuleBodies(Module& module) { checkModule(module); }
 
 // ------------------------------------------------------------- statement checks
 
@@ -5307,6 +5445,7 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
 }
 
 void Sema::checkTypeVariables() {
+  std::lock_guard<std::mutex> lock(gVarMutex);
   for (auto& info : typeVariables_) {
     TypePtr resolved = resolveType(info.var);
     if (!resolved || resolved->kind != TypeKind::Var) continue;

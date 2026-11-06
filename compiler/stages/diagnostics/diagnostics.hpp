@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <iosfwd>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -27,9 +28,16 @@ struct Diagnostic {
 // insertion order: errors from later compiler phases are reported after
 // earlier phases, matching the pipeline. It also owns the source registry used
 // to map spans back to files in multi-file programs.
+//
+// Thread-safe (ty/pyrefly checkers emit diagnostics from worker threads):
+// error/warning/addFile/diagnosticsCopy/flush may run concurrently. The
+// `diagnostics()` accessor returns the live vector and must only be called
+// when no writer is active; prefer `diagnosticsCopy()` otherwise.
 class DiagnosticSink {
  public:
   DiagnosticSink() = default;
+  DiagnosticSink(const DiagnosticSink&) = delete;
+  DiagnosticSink& operator=(const DiagnosticSink&) = delete;
 
   FileId addFile(std::shared_ptr<const SourceFile> source);
   const SourceFile* file(FileId id) const;
@@ -51,13 +59,22 @@ class DiagnosticSink {
   bool isSuppressed(Span span, const std::string& code = {}) const;
   bool isSuppressed(Span span, Severity severity, const std::string& code) const;
 
-  bool hasErrors() const { return errors_ > 0; }
-  int errorCount() const { return errors_; }
+  bool hasErrors() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return errors_ > 0;
+  }
+  int errorCount() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return errors_;
+  }
 
   // Diagnostics collected so far, in insertion order. Language tooling uses
   // this to translate compiler diagnostics into editor diagnostics without
   // going through the terminal renderer.
   const std::vector<Diagnostic>& diagnostics() const { return diagnostics_; }
+
+  // Thread-safe snapshot of everything collected so far.
+  std::vector<Diagnostic> diagnosticsCopy() const;
 
   // Prints diagnostics added since the previous flush. This lets each
   // pipeline stage flush without reprinting earlier output.
@@ -68,6 +85,7 @@ class DiagnosticSink {
   void writeJson(std::ostream& os) const;
 
  private:
+  mutable std::mutex mutex_;
   std::vector<std::shared_ptr<const SourceFile>> files_;
   std::vector<Diagnostic> diagnostics_;
   std::size_t flushed_ = 0;

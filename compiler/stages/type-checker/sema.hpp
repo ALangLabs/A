@@ -1,6 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <future>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -84,6 +87,18 @@ class Sema {
   Sema(ModuleGraph& graph, DiagnosticSink& sink);
 
   SemaResult analyze();
+  // Parallel checking: declarations are registered serially, then each
+  // module's body checking runs on a worker pool (ty/pyrefly do the same).
+  // `jobs <= 0` means hardware-concurrency. Diagnostics are thread-safe;
+  // Type-var unification is serialised by a global lock, so results are
+  // identical to analyze(), just faster on multi-module programs.
+  SemaResult analyzeParallel(int jobs);
+  // Non-blocking entry point for LSP/CLI: runs analyzeParallel() on a
+  // background thread so the caller (editor, CLI) never blocks on checking.
+  struct AsyncHandle {
+    std::future<SemaResult> future;
+  };
+  std::shared_ptr<AsyncHandle> analyzeAsync(int jobs = 0);
 
  private:
   struct VarSym {
@@ -153,6 +168,18 @@ class Sema {
 
   // program-level
   void analyzeModule(Module& module);
+  void registerModule(Module& module);
+  void checkModule(Module& module);
+  void checkModuleBodies(Module& module);
+  // Per-module snapshot of import/alias bindings taken after registration
+  // (passes 1-3) so body checking can run in parallel on workers.
+  struct ModuleCheckState {
+    StringMap<ModuleAlias> moduleAliases;
+    StringMap<FromBinding> fromBindings;
+    StringMap<std::string> structAliases;
+    StringMap<TypePtr> typeAliases;
+  };
+  std::unordered_map<int, ModuleCheckState> moduleStates_;
   void registerImports(Module& module);
   void buildModuleExports(Module& module);
   std::string qualified(const std::string& name) const;

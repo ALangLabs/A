@@ -5,9 +5,9 @@ fn main():
     print(colorsys.ONE_THIRD, colorsys.ONE_SIXTH, colorsys.TWO_THIRD)
 
     # YIQ round-trip
-    yiq = colorsys.rgb_to_yiq(0.5, 0.2, 0.8)
-    print(yiq)
-    print(colorsys.yiq_to_rgb(yiq[0], yiq[1], yiq[2]))
+    (y, i, q) = colorsys.rgb_to_yiq(0.5, 0.2, 0.8)
+    print(y, i, q)
+    print(colorsys.yiq_to_rgb(y, i, q))
 
     # HLS
     print(colorsys.rgb_to_hls(0.5, 0.2, 0.8))
@@ -24,8 +24,8 @@ fn main():
     print(colorsys.yiq_to_rgb(0.254, -0.1, 0.2))
 
     # YCbCr (A-only extension): round-trip
-    ycbcr = colorsys.rgb_to_ycbcr(0.5, 0.2, 0.8)
-    print(ycbcr)
-    print(colorsys.ycbcr_to_rgb(ycbcr[0], ycbcr[1], ycbcr[2]))
+    (cy, cb, cr) = colorsys.rgb_to_ycbcr(0.5, 0.2, 0.8)
+    print(cy, cb, cr)
+    print(colorsys.ycbcr_to_rgb(cy, cb, cr))
 
 main()
