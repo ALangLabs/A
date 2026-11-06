@@ -1,3 +1,2 @@
-# kernels package (Mojo MAX `max/kernels` analog).
 # GPU/CPU kernel library written in A itself — see kernels/src/*.a.
 from "src/__init__.a" import fused_add, fused_sub, fused_mul, fused_div, fused_mul_add, fused_scale, fused_clamp, fused_pow, fused_min, fused_max, fused_sqrt, fused_exp, fused_log, fused_reciprocal, reduce_sum, reduce_max, reduce_min, reduce_mean, reduce_prod, reduce_var, reduce_std, reduce_norm, argmax, argmin, dot, matvec, matmul, transpose, outer, eye, zeros, ones, full, trace, diag, reshape, relu, sigmoid, tanh, gelu, silu, elu, leaky_relu, softplus, mish, softmax, softmax_row, softmax_rows, bias_relu, normalize, rms_norm, layer_norm, layer_norm_rows, attention_scores, attention, conv1d, max_pool1d, avg_pool1d, quantize_int8, dequantize_int8

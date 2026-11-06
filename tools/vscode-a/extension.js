@@ -440,7 +440,11 @@ async function activateImpl(context, output) {
             if (server.client !== client) return;
             server.status = 'running';
             for (const document of vscode.workspace.textDocuments) {
-                if (isA(document)) client.openDocument(document);
+                if (isA(document)) {
+                    const key = document.uri.toString();
+                    openedDocuments.add(key);
+                    client.openDocument(document);
+                }
             }
         } catch (error) {
             if (server.client !== client) return;
@@ -1087,9 +1091,17 @@ async function activateImpl(context, output) {
         }),
 
         vscode.workspace.onDidChangeTextDocument(event => {
-            if (!getClient() || !isA(event.document)) return;
-            if (!openedDocuments.has(event.document.uri.toString())) return;
+            const active = getClient();
+            if (!active || !isA(event.document)) return;
             if (!event.contentChanges.length) return;
+            const key = event.document.uri.toString();
+            if (!openedDocuments.has(key)) {
+                // A document can be open before the server starts, or the
+                // open notification can be missed; sync it so hover/goto work.
+                openedDocuments.add(key);
+                active.openDocument(event.document);
+                return;
+            }
             debounceChange(event.document, event);
         }),
 
@@ -1102,7 +1114,11 @@ async function activateImpl(context, output) {
                 clearTimeout(timer);
                 changeTimers.delete(key);
             }
-            if (openedDocuments.has(key)) active.saveDocument(document);
+            if (!openedDocuments.has(key)) {
+                openedDocuments.add(key);
+                active.openDocument(document);
+            }
+            active.saveDocument(document);
         }),
 
         vscode.workspace.onDidCloseTextDocument(document => {

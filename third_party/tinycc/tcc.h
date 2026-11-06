@@ -430,7 +430,6 @@ extern long double strtold (const char *__nptr, char **__endptr);
 
 #define TOK_HASH_SIZE       16384 /* must be a power of two */
 #define TOK_ALLOC_INCR      512  /* must be a power of two */
-#define TOK_MAX_SIZE        4 /* token max size in int unit when stored in string */
 
 /* token symbol management */
 typedef struct TokenSym {

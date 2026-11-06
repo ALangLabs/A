@@ -11,7 +11,6 @@
 # opposite end on overflow; -1 means unbounded (Python `maxlen=None`).
 import core
 
-## Deque<T>: double-ended queue with optional max length.
 ## `left` holds the left portion reversed (its last element is the
 ## deque's leftmost); `right` holds the right portion with `roff` live
 ## elements skipped at the front. Both are internal — use the methods.
@@ -255,7 +254,6 @@ fn deque():
 fn deque_of<T>(xs: [T]) -> Deque<T>:
     return Deque([], xs.copy(), 0, -1)
 
-## deque_bounded(xs, maxlen) -> deque with a max length
 ## (Python `deque(iterable, maxlen)`).
 fn deque_bounded<T>(xs: [T], maxlen: i64) -> Deque<T>:
     d = Deque([], [], 0, maxlen)

@@ -1,4 +1,3 @@
-# std.iter.functional (Mojo itertools/iter helpers analog).
 import core
 
 fn repeat<T>(n: i64, x: T) -> [T]:

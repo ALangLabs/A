@@ -1,3 +1,2 @@
-# std.format package (Mojo `std/format` analog).
 from "csv.a" import csv_row
 from "table.a" import table, join_rows

@@ -1,4 +1,3 @@
-# SIMD helpers (Mojo `std/simd` + MAX kernel-adjacent analog).
 #
 # Fixed-width vectors are represented as structs with typed lanes. All lane math
 # here is scalar emulation: real fixed-width SIMD codegen needs a vector backend

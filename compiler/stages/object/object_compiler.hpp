@@ -1,5 +1,4 @@
 #pragma once
-// v2 object compiler (Mojo ref/Compiler/ObjectCompiler-inspired split, KGEN/LLVM target).
 #include <iosfwd>
 #include <string>
 namespace a { struct ModuleGraph; struct SemaResult; namespace ir { struct Program; }

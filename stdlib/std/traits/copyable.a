@@ -1,4 +1,3 @@
-# std.traits.copyable (Mojo `std/builtin/value.mojo` analog).
 
 trait Copyable:
     fn copy(self) -> Self

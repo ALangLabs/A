@@ -1,4 +1,3 @@
-# std.builtin.range (Mojo `std/builtin/range.mojo` analog).
 
 fn range_list(stop):
     out = []

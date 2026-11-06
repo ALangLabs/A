@@ -1,4 +1,3 @@
-# std.collections package (Mojo `std/collections/__init__.mojo` analog).
 #
 # Pure-A helpers plus Python `collections` ports. NOTE: bare
 # `import collections` resolves to the *native* collections module

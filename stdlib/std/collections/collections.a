@@ -1,4 +1,3 @@
-# Compatibility: collections split into modular files (Mojo-style).
 from "list.a" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
 from "dict.a" import dict_get, dict_has
 from "namedtuple.a" import namedtuple, NamedTuple, NamedTupleSpec

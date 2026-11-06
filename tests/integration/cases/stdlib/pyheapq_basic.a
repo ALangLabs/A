@@ -29,7 +29,6 @@ print(heapq.heapreplace(h3, 2))   # pops current min, inserts 2
 print(heapq.heapreplace(h3, 20))
 print(h3)
 
-# --- max-heap variants ---
 mh = []
 for x in [5, 1, 9, 3]:
     heapq.heappush_max(mh, x)

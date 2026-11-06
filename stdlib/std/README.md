@@ -1,4 +1,3 @@
-# `std/` — Self-hosted A Standard Library (Mojo-inspired)
 
 This directory mirrors the layout of [Mojo's `stdlib/std/`](https://github.com/modular/modular/tree/main/mojo/stdlib/std), adapted for the A language.
 
@@ -20,7 +19,6 @@ This directory mirrors the layout of [Mojo's `stdlib/std/`](https://github.com/m
 | `gpu/` | A | GPU stubs (Device/Buffer/Kernel abstractions; host-interpreted, no real GPU backend yet). |
 | `binary/`, `core/`, `fs/`, `http/`, `json/`, `log/`, `metrics/`, `net/`, `time/`, `trace/`, `testing/` | native-backed | Package stubs for toolchain-native modules. `import <name>` resolves to the native implementation in `compiler/stages/backend/stdlib/builtins.cpp`. |
 
-## Design notes (Mojo analogs)
 
 - **Compiler stays C++** (Modular KGEN precedent). Stdlib and kernels are written in A where practical.
 - **Prelude** is auto-loaded (`stdlib/prelude.a` / `stdlib/std/prelude/prelude.a`) so core vocabulary is available without explicit imports, mirroring Mojo's `std/prelude`.

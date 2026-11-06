@@ -1,4 +1,3 @@
-# A KGEN-only backend (Mojo ObjectCompiler/KGEN->LLVM architecture, adapted for A).
 add_subdirectory(kgen/mlir)
 add_library(a_backend STATIC
   kgen/kgen_backend.cpp

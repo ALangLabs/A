@@ -1,4 +1,3 @@
-# std.collections.dict (Mojo `std/collections/dict.mojo` analog).
 
 fn dict_get(d: {str: i64}, key: str, default: i64) -> i64:
     if key in d:

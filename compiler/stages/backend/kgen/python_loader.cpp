@@ -1,4 +1,3 @@
-// Runtime CPython discovery + dlopen, Mojo-style: instead of linking one
 // libpython at build time, `a` finds the Python environment that actually has
 // the packages you import — A_PYTHON / A_PYTHON_LIB overrides, project
 // ./.venv & venv, VIRTUAL_ENV / UV_PROJECT_ENVIRONMENT / CONDA_PREFIX, PATH

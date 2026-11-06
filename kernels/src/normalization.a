@@ -1,14 +1,40 @@
-# Normalization kernels (MAX nn normalization analog).
-import kernel_ops
+import math
 
 fn normalize(xs):
-    return kernel_ops.normalize(xs)
+    # L2-normalize; a zero vector stays zero (no division by zero).
+    sq = 0.0
+    for x in xs:
+        sq += x * x
+    norm = math.sqrt(sq)
+    out = []
+    for x in xs:
+        if norm == 0.0:
+            out.append(0.0)
+
+        else:
+            out.append(x / norm)
+    return out
 
 fn rms_norm(xs, eps):
-    return kernel_ops.rms_norm(xs, eps)
+    ms = 0.0
+    for x in xs:
+        ms += x * x
+    inv = 1.0 / math.sqrt(ms / len(xs) + eps)
+    return [x * inv for x in xs]
 
 fn layer_norm(xs, eps):
-    return kernel_ops.layer_norm(xs, eps)
+    mean = 0.0
+    for x in xs:
+        mean += x
+    mean = mean / len(xs)
+    var = 0.0
+    for x in xs:
+        var += (x - mean) * (x - mean)
+    inv = 1.0 / math.sqrt(var / len(xs) + eps)
+    return [(x - mean) * inv for x in xs]
 
 fn layer_norm_rows(mat, eps):
-    return kernel_ops.layer_norm_rows(mat, eps)
+    out = []
+    for row in mat:
+        out.append(layer_norm(row, eps))
+    return out

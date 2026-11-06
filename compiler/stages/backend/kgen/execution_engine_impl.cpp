@@ -3143,7 +3143,6 @@ Value KGENExecutionEngine::callBuiltin(const std::string& name, ArgList& args, S
     if (auto* number = std::get_if<double>(&value.data)) {
       if (!std::isfinite(*number)) fail(span, "Cannot convert a non-finite float to 'int'.");
       if (*number < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
-          *number > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
         fail(span, "Float value is out of range for 'int'.");
       }
       return makeInt(static_cast<std::int64_t>(*number));
@@ -4407,7 +4406,6 @@ Value KGENExecutionEngine::convertNumber(const std::string& typeName, const Valu
       fail(span, "Cannot convert a non-finite float to '" + typeName + "'.");
     }
     if (*floatValue < static_cast<double>(std::numeric_limits<std::int64_t>::min()) ||
-        *floatValue > static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
       fail(span, "Float value is out of range for '" + typeName + "'.");
     }
     result = static_cast<std::int64_t>(*floatValue);

@@ -130,8 +130,6 @@ typedef CONST void *LPCVOID;
 
 #ifndef __cplusplus
 #ifndef NOMINMAX
-#ifndef max
-#define max(a,b) (((a) > (b)) ? (a) : (b))
 #endif
 
 #ifndef min

@@ -1,41 +1,113 @@
-# Activation kernels (MAX `max/kernels/src/nn` analog).
-import kernel_ops
+#
+# Pure A maps over lists; `math` natives cover exp/log. `math` has no
+# tanh/erf/log1p, so those are implemented below in A (stable piecewise
+# forms, Abramowitz & Stegun erf approximation).
+import math
+
+fn _tanh(x):
+    # Numerically stable tanh via exp (avoids overflow for large |x|).
+    if x >= 0:
+        e = math.exp(-2.0 * x)
+        return (1.0 - e) / (1.0 + e)
+    e = math.exp(2.0 * x)
+    return (e - 1.0) / (e + 1.0)
+
+fn _erf(x):
+    # Abramowitz & Stegun 7.1.26 (|err| < 1.5e-7), odd-symmetric.
+    if x < 0:
+        return -_erf(-x)
+    t = 1.0 / (1.0 + 0.3275911 * x)
+    poly = (((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592
+    return 1.0 - poly * math.exp(-x * x)
+
+fn _softplus(x):
+    # |x| computed as sqrt(x*x) to keep a single assignment path.
+    mag = math.sqrt(x * x)
+    rest = math.log(1.0 + math.exp(-mag))
+    if x > 0:
+        return rest + x
+    return rest
 
 fn relu(xs):
-    return kernel_ops.relu(xs)
+    out = []
+    for x in xs:
+        if x >= 0:
+            out.append(x)
+
+        else:
+            out.append(0)
+    return out
 
 fn sigmoid(xs):
-    return kernel_ops.sigmoid(xs)
+    return [1.0 / (1.0 + math.exp(-x)) for x in xs]
 
 fn tanh(xs):
-    return kernel_ops.tanh(xs)
+    return [_tanh(x) for x in xs]
 
 fn gelu(xs):
-    return kernel_ops.gelu(xs)
+    return [0.5 * x * (1.0 + _erf(x / math.sqrt(2.0))) for x in xs]
 
 fn silu(xs):
-    return kernel_ops.silu(xs)
+    return [x / (1.0 + math.exp(-x)) for x in xs]
 
 fn elu(xs, alpha):
-    return kernel_ops.elu(xs, alpha)
+    out = []
+    for x in xs:
+        if x >= 0:
+            out.append(x)
+
+        else:
+            out.append(alpha * (math.exp(x) - 1.0))
+    return out
 
 fn leaky_relu(xs, alpha):
-    return kernel_ops.leaky_relu(xs, alpha)
+    out = []
+    for x in xs:
+        if x >= 0:
+            out.append(x)
+
+        else:
+            out.append(alpha * x)
+    return out
 
 fn softplus(xs):
-    return kernel_ops.softplus(xs)
+    return [_softplus(x) for x in xs]
 
 fn mish(xs):
-    return kernel_ops.mish(xs)
+    return [x * _tanh(_softplus(x)) for x in xs]
+
+fn _softmax_row(xs):
+    top = xs[0]
+    for x in xs:
+        if x > top:
+            top = x
+    exps = []
+    total = 0.0
+    for x in xs:
+        e = math.exp(x - top)
+        exps.append(e)
+        total += e
+    return [e / total for e in exps]
 
 fn softmax(xs):
-    return kernel_ops.softmax(xs)
+    return _softmax_row(xs)
 
 fn softmax_row(xs):
-    return kernel_ops.softmax(xs)
+    return _softmax_row(xs)
 
 fn softmax_rows(mat):
-    return kernel_ops.softmax_rows(mat)
+    out = []
+    for row in mat:
+        out.append(_softmax_row(row))
+    return out
 
 fn bias_relu(xs, bias):
-    return kernel_ops.bias_relu(xs, bias)
+    out = []
+    for x in xs:
+        shifted = x + bias
+        if shifted < 0:
+            out.append(0.0)
+
+        else:
+            out.append(shifted)
+    return out

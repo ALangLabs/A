@@ -56,7 +56,6 @@ struct Dispatcher:
         return self.dispatch(_type_tag(x))
 
     ## call(self, args) -> dispatches on the tag of `args[0]` and invokes the
-    ## selected implementation with all of `args` (array form; max 8 args).
     fn call(self, args):
         return _apply(self.dispatch_value(args[0]), args)
 

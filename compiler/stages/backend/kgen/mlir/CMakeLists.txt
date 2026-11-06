@@ -1,4 +1,3 @@
-# KGEN/MLIR codegen (Mojo-style): A IR/module -> LLVM IR -> llc/clang object/executable.
 find_package(LLVM 18.1 CONFIG QUIET PATHS /usr/lib/llvm-18/lib/cmake/llvm)
 find_package(MLIR CONFIG QUIET PATHS /usr/lib/llvm-18/lib/cmake/mlir)
 if(LLVM_FOUND)

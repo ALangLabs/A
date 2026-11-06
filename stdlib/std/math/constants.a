@@ -1,4 +1,3 @@
-# std.math.constants (Mojo `std/math/constants.mojo` analog).
 import math
 
 fn PI():

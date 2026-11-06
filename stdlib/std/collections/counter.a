@@ -214,7 +214,6 @@ struct Counter:
                 out.counts[k] = v
         return out
 
-    ## union(other) -> Counter with max counts (Python `c1 | c2`).
     fn union(self, other):
         out = Counter({})
         for k in self.counts:

@@ -1,2 +1,1 @@
-# std.memory package (Mojo `std/memory/__init__.mojo` analog).
 from "alloc.a" import arena_new, arena_pool, arena_region, alloc, release, reset, used, total

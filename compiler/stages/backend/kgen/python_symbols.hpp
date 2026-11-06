@@ -2,7 +2,6 @@
 // Symbol table for the CPython that python_loader.cpp discovers and dlopens
 // at runtime. python_interop.cpp never links libpython directly; it calls
 // through these pointers (see python_shim.hpp), so `a` embeds whichever
-// interpreter it finds — uv-managed, venv, or system — like Mojo does.
 #include <string>
 #include <vector>
 

@@ -1,4 +1,3 @@
-# Compatibility: builtin.a split into modular files (Mojo-style).
 from "int.a" import Int
 from "float.a" import Float
 from "bool.a" import Bool

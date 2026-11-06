@@ -1,4 +1,3 @@
-# std.builtin.debug_assert / assertions (Mojo `std/builtin/debug_assert.mojo` analog).
 
 fn assert_true(condition, message):
     assert(condition, message)

@@ -1,4 +1,3 @@
-# std.builtin.int (Mojo `std/builtin/int.mojo` analog).
 
 fn Int(x):
     return int(x)

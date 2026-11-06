@@ -1,4 +1,3 @@
-# std.traits.equatable (Mojo `std/builtin/comparable.mojo` analog).
 
 trait Equatable:
     fn eq(self, other) -> bool

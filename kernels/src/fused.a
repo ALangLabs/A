@@ -1,45 +1,89 @@
-# Fused elementwise kernels (MAX `max/kernels` analog).
-# Thin A wrappers over the native `kernel_ops` hooks so hot loops stay in C++.
-import kernel_ops
+#
+# everything else is plain A loops/comprehensions over lists.
+import math
 
 fn fused_add(a, b):
-    return kernel_ops.fused_add(a, b)
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] + b[i])
+    return out
 
 fn fused_sub(a, b):
-    return kernel_ops.fused_sub(a, b)
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] - b[i])
+    return out
 
 fn fused_mul(a, b):
-    return kernel_ops.fused_mul(a, b)
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] * b[i])
+    return out
 
 fn fused_div(a, b):
-    return kernel_ops.fused_div(a, b)
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] / b[i])
+    return out
 
 fn fused_mul_add(a, b, c):
-    return kernel_ops.fused_mul_add(a, b, c)
+    out = []
+    for i in 0..len(a):
+        out.append(a[i] * b[i] + c[i])
+    return out
 
 fn fused_scale(xs, scale):
-    return kernel_ops.fused_scale(xs, scale)
+    out = []
+    for x in xs:
+        out.append(x * scale)
+    return out
 
 fn fused_clamp(xs, low, high):
-    return kernel_ops.fused_clamp(xs, low, high)
+    out = []
+    for x in xs:
+        if x < low:
+            out.append(low)
+        elif x > high:
+            out.append(high)
+
+        else:
+            out.append(x)
+    return out
 
 fn fused_pow(a, b):
-    return kernel_ops.fused_pow(a, b)
+    out = []
+    for i in 0..len(a):
+        out.append(math.pow(a[i], b[i]))
+    return out
 
 fn fused_min(a, b):
-    return kernel_ops.fused_min(a, b)
+    out = []
+    for i in 0..len(a):
+        if a[i] < b[i]:
+            out.append(a[i])
+
+        else:
+            out.append(b[i])
+    return out
 
 fn fused_max(a, b):
-    return kernel_ops.fused_max(a, b)
+    out = []
+    for i in 0..len(a):
+        if a[i] > b[i]:
+            out.append(a[i])
+
+        else:
+            out.append(b[i])
+    return out
 
 fn fused_sqrt(xs):
-    return kernel_ops.fused_sqrt(xs)
+    return [math.sqrt(x) for x in xs]
 
 fn fused_exp(xs):
-    return kernel_ops.fused_exp(xs)
+    return [math.exp(x) for x in xs]
 
 fn fused_log(xs):
-    return kernel_ops.fused_log(xs)
+    return [math.log(x) for x in xs]
 
 fn fused_reciprocal(xs):
-    return kernel_ops.fused_reciprocal(xs)
+    return [1.0 / x for x in xs]

@@ -1,4 +1,3 @@
-# std.builtin.string (Mojo analog).
 
 fn String(x):
     return str(x)

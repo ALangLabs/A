@@ -1,2 +1,1 @@
-# Compatibility: memory split into modular files (Mojo-style).
 from "alloc.a" import arena_new, arena_pool, arena_region, alloc, release, reset, used, total

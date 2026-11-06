@@ -47,7 +47,6 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   for(unsigned char c:source){srcHash^=c;srcHash*=1099511628211ULL;}
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(source),config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
   // Fast path: native-subset programs compile and run directly
-  // (Goose/Mojo-style). If native compilation is unavailable, fall back to
   // the internal engine so `run` keeps full dynamic semantics.
   if(!std::getenv("A_NO_NATIVE_RUN")&&kgen::isSupported(*m.graph)){
     // Goose-style in-process JIT first: TinyCC compiles the C emission in

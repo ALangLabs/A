@@ -1827,7 +1827,6 @@ Value KGENExecutionEngine::callStdlibBuiltin(const std::string& name, ArgList& a
     if (auto* number = std::get_if<double>(&args[0].data)) {
       if (std::isfinite(*number) && std::floor(*number) == *number &&
           *number >= static_cast<double>(std::numeric_limits<std::int64_t>::min()) &&
-          *number <= static_cast<double>(std::numeric_limits<std::int64_t>::max())) {
         return vSome(vInt(static_cast<std::int64_t>(*number)));
       }
     }
@@ -2864,7 +2863,6 @@ Value KGENExecutionEngine::callStdlibBuiltin(const std::string& name, ArgList& a
   }
 
   // -------------------------------------------------------------- kernels
-  // MAX-style CPU kernels. These are the native hooks behind the A `kernels`
   // package: dynamic arrays in, numeric arrays out, with int/float promotion
   // matching the interpreter's arithmetic rules.
   if (name.rfind("kernels_", 0) == 0) {

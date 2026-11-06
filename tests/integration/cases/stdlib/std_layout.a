@@ -1,4 +1,3 @@
-# Smoke test: Mojo-inspired std/ package layout is resolvable.
 from "../../../../stdlib/std/test/__init__.a" import check, equal, summary, report
 from "../../../../stdlib/std/math/__init__.a" import sqrt, clamp
 from "../../../../stdlib/std/builtin/__init__.a" import len_of, range_list

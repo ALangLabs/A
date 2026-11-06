@@ -1,38 +1,110 @@
-# Dense linear-algebra and tensor-shape kernels (MAX linalg/layout analog).
-import kernel_ops
+# linalg/layout analog). Self-hosted pure A: triple-loop matmul with
+import math
 
 fn dot(a, b):
-    return kernel_ops.dot(a, b)
+    total = 0
+    for i in 0..len(a):
+        total += a[i] * b[i]
+    return total
 
 fn matvec(mat, vec):
-    return kernel_ops.matvec(mat, vec)
+    out = []
+    for row in mat:
+        out.append(dot(row, vec))
+    return out
 
 fn matmul(a, b):
-    return kernel_ops.matmul(a, b)
+    # C[i][j] = sum_k A[i][k] * B[k][j]
+    out = []
+    if len(a) == 0:
+        return out
+    for i in 0..len(a):
+        row = []
+        for j in 0..len(b[0]):
+            total = 0
+            for k in 0..len(b):
+                total += a[i][k] * b[k][j]
+            row.append(total)
+        out.append(row)
+    return out
 
 fn transpose(mat):
-    return kernel_ops.transpose(mat)
+    out = []
+    if len(mat) == 0:
+        return out
+    for j in 0..len(mat[0]):
+        row = []
+        for i in 0..len(mat):
+            row.append(mat[i][j])
+        out.append(row)
+    return out
 
 fn outer(a, b):
-    return kernel_ops.outer(a, b)
+    out = []
+    for x in a:
+        row = []
+        for y in b:
+            row.append(x * y)
+        out.append(row)
+    return out
 
 fn eye(n):
-    return kernel_ops.eye(n)
+    out = []
+    for r in 0..n:
+        row = []
+        for c in 0..n:
+            if r == c:
+                row.append(1)
+
+            else:
+                row.append(0)
+        out.append(row)
+    return out
+
+fn _nest(dims, d, leaf):
+    # Build a nested-list tensor of shape `dims` with `leaf` values.
+    if d == len(dims):
+        return leaf
+    row = []
+    for i in 0..dims[d]:
+        row.append(_nest(dims, d + 1, leaf))
+    return row
 
 fn zeros(shape):
-    return kernel_ops.zeros(shape)
+    return _nest(shape, 0, 0)
 
 fn ones(shape):
-    return kernel_ops.ones(shape)
+    return _nest(shape, 0, 1)
 
 fn full(shape, value):
-    return kernel_ops.full(shape, value)
+    return _nest(shape, 0, value)
 
 fn trace(mat):
-    return kernel_ops.trace(mat)
+    total = 0
+    for i in 0..len(mat):
+        total += mat[i][i]
+    return total
 
 fn diag(mat):
-    return kernel_ops.diag(mat)
+    out = []
+    n = len(mat)
+    if len(mat[0]) < n:
+        n = len(mat[0])
+    for i in 0..n:
+        out.append(mat[i][i])
+    return out
+
+fn _reshape_go(data, dims, d, box):
+    # Recursive shape walk; `box` is a one-slot counter threaded through
+    # the recursion so each depth consumes the next flat elements.
+    if d == len(dims):
+        value = data[box[0]]
+        box[0] = box[0] + 1
+        return value
+    row = []
+    for i in 0..dims[d]:
+        row.append(_reshape_go(data, dims, d + 1, box))
+    return row
 
 fn reshape(data, shape):
-    return kernel_ops.reshape(data, shape)
+    return _reshape_go(data, shape, 0, [0])

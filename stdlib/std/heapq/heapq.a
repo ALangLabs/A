@@ -107,7 +107,6 @@ fn heapify(x):
         _siftup(x, i, _asc)
         i -= 1
 
-# --- public max-heap API (heap[0] is the largest item) ---
 
 fn heappush_max(heap, item):
     """Maxheap version of a heappush."""
@@ -207,7 +206,6 @@ fn _klt_min(a, b):
     return a.seq < b.seq
 
 fn _klt_max(a, b):
-    # pops-first order for a max-heap over (k, seq)
     if a.k > b.k:
         return true
     if b.k > a.k:

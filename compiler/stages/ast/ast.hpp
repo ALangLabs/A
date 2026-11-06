@@ -470,7 +470,6 @@ struct DeferStmt : Stmt {
 };
 
 // `import "lib/util.a"`, `import "lib/util.a" as u`, `import math`, or
-// `import python:<package>` (Mojo-style CPython interop).
 struct ImportStmt : Stmt {
   ImportStmt() : Stmt(StmtKind::Import) {}
   std::string path;        // quoted path, empty for native/bare/python imports

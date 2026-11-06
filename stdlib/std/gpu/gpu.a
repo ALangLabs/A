@@ -1,6 +1,4 @@
-# GPU abstractions (Mojo `std/_gpu` + MAX GPU API analog).
 #
-# This is a CPU fallback implementation with the Mojo-shaped surface: typed
 # Device, Buffer, and Kernel values plus host-side launch. Real device memory
 # and kernel codegen require a device backend (see TODO.md); `available` is
 # false so callers can branch instead of silently assuming a GPU.

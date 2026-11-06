@@ -1,4 +1,3 @@
-# std.memory.alloc wrappers (Mojo `std/memory` analog).
 import arena
 
 fn arena_new(capacity):

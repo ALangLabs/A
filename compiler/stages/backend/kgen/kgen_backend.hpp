@@ -1,5 +1,4 @@
 #pragma once
-// KGEN-style backend for A (adapted from Mojo ref/Compiler/{Pipeline,ObjectCompiler,KGENCompiler} architecture).
 // Pipeline: A frontend/sema -> A IR/ownership -> KGEN lowering -> LLVM IR text/module -> object/binary.
 // Note: Full MLIR/KGEN dialect integration requires MLIR/LLVM dev deps; this implementation
 // provides the KGEN-structured pipeline and LLVM text/asm emission path for A.

@@ -1,32 +1,80 @@
-# Reduction and scan-style kernels (MAX algorithm analog).
-import kernel_ops
+#
+# Self-hosted pure A: plain loops over lists. Int inputs stay int for
+# native `kernel_ops` behavior they replace.
+import math
 
 fn reduce_sum(xs):
-    return kernel_ops.reduce_sum(xs)
+    total = 0
+    for x in xs:
+        total += x
+    return total
 
 fn reduce_max(xs):
-    return kernel_ops.reduce_max(xs)
+    best = xs[0]
+    for x in xs:
+        if x > best:
+            best = x
+    return best
 
 fn reduce_min(xs):
-    return kernel_ops.reduce_min(xs)
+    best = xs[0]
+    for x in xs:
+        if x < best:
+            best = x
+    return best
 
 fn reduce_mean(xs):
-    return kernel_ops.reduce_mean(xs)
+    total = 0.0
+    for x in xs:
+        total += x
+    return total / len(xs)
 
 fn reduce_prod(xs):
-    return kernel_ops.reduce_prod(xs)
+    total = 1
+    for x in xs:
+        total *= x
+    return total
+
+fn _variance(xs):
+    mean = 0.0
+    for x in xs:
+        mean += x
+    mean = mean / len(xs)
+    var = 0.0
+    for x in xs:
+        var += (x - mean) * (x - mean)
+    return var / len(xs)
 
 fn reduce_var(xs):
-    return kernel_ops.reduce_var(xs)
+    return _variance(xs)
 
 fn reduce_std(xs):
-    return kernel_ops.reduce_std(xs)
+    return math.sqrt(_variance(xs))
 
 fn reduce_norm(xs, ord):
-    return kernel_ops.reduce_norm(xs, ord)
+    total = 0.0
+    if ord == 1:
+        for x in xs:
+            if x < 0:
+                total += -x
+
+            else:
+                total += x
+        return total
+    for x in xs:
+        total += x * x
+    return math.sqrt(total)
 
 fn argmax(xs):
-    return kernel_ops.argmax(xs)
+    best = 0
+    for i in 0..len(xs):
+        if xs[i] > xs[best]:
+            best = i
+    return best
 
 fn argmin(xs):
-    return kernel_ops.argmin(xs)
+    best = 0
+    for i in 0..len(xs):
+        if xs[i] < xs[best]:
+            best = i
+    return best

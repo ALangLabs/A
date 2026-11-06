@@ -1,11 +1,38 @@
-# 1D convolution and pooling kernels (MAX algorithm analog).
-import kernel_ops
+# Self-hosted pure A: sliding-window loops with the standard
+# (len - window) / stride + 1 output length.
+import math
 
 fn conv1d(input, kernel, stride):
-    return kernel_ops.conv1d(input, kernel, stride)
+    out = []
+    k = len(kernel)
+    out_len = (len(input) - k) / stride + 1
+    for o in 0..out_len:
+        start = o * stride
+        total = 0
+        for j in 0..k:
+            total += input[start + j] * kernel[j]
+        out.append(total)
+    return out
 
 fn max_pool1d(input, size, stride):
-    return kernel_ops.max_pool1d(input, size, stride)
+    out = []
+    out_len = (len(input) - size) / stride + 1
+    for o in 0..out_len:
+        start = o * stride
+        best = input[start]
+        for j in 1..size:
+            if input[start + j] > best:
+                best = input[start + j]
+        out.append(best)
+    return out
 
 fn avg_pool1d(input, size, stride):
-    return kernel_ops.avg_pool1d(input, size, stride)
+    out = []
+    out_len = (len(input) - size) / stride + 1
+    for o in 0..out_len:
+        start = o * stride
+        total = 0.0
+        for j in 0..size:
+            total += input[start + j]
+        out.append(total / size)
+    return out

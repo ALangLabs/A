@@ -1,6 +1,6 @@
-# Kernel library entry point; kernels are host-launched CPU implementations
-# with the MAX-shaped surface (Mojo `max/kernels` analog). Real GPU codegen
-# needs a device backend (see TODO.md).
+# Kernel library entry point; kernels are self-hosted CPU implementations
+# written in the host language, not in a separate native layer).
+# No native `kernel_ops` dependency remains; only `math` natives are used.
 from "fused.a" import fused_add, fused_sub, fused_mul, fused_div, fused_mul_add, fused_scale, fused_clamp, fused_pow, fused_min, fused_max, fused_sqrt, fused_exp, fused_log, fused_reciprocal
 from "reductions.a" import reduce_sum, reduce_max, reduce_min, reduce_mean, reduce_prod, reduce_var, reduce_std, reduce_norm, argmax, argmin
 from "matmul.a" import dot, matvec, matmul, transpose, outer, eye, zeros, ones, full, trace, diag, reshape

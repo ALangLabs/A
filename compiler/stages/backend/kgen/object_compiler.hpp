@@ -5,7 +5,6 @@
 #include "name-resolution/module_loader.hpp"
 #include "type-checker/sema.hpp"
 namespace a::kgen {
-// Object compiler (Mojo ObjectCompiler/KGENToLLVMPipeline-inspired).
 class ObjectCompiler {
  public:
   static bool emitIR(const ModuleGraph& g, const SemaResult& s, std::ostream& out);

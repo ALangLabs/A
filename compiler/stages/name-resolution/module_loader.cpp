@@ -121,7 +121,6 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
 
   // The prelude loads before the entry so its declarations are in scope
   // everywhere. Programs compiled without a stdlib on disk are unaffected.
-  // Mojo-analog: stdlib/prelude.a or stdlib/std/prelude/prelude.a (or __init__.a).
   std::error_code exists;
   const fs::path stdRoot = fs::path(options_.stdlibRoot);
   for (const auto& candidate : {stdRoot / "prelude.a",

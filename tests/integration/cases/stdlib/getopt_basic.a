@@ -1,0 +1,25 @@
+# Golden test: std.getopt (port of CPython Lib/getopt.py).
+import getopt
+
+# --- short options: flags, required arg, optional arg, clustered ---
+r = getopt.getopt(["-a", "-b", "val", "-c", "file.txt", "rest"], "ab:c::", [])
+print(r)
+
+# --- long options: =, required, optional, unique prefix ---
+r2 = getopt.getopt(
+    ["--alpha=1", "--beta", "--gamma", "--gam", "x"],
+    "",
+    ["alpha=", "beta", "gamma=?"])
+print(r2)
+
+# --- gnu_getopt: intermixed args ---
+r3 = getopt.gnu_getopt(["one", "-a", "two", "--beta=2", "three"], "a", ["beta="])
+print(r3)
+
+# --- gnu_getopt return_in_order ('-' prefix in shortopts) ---
+r4 = getopt.gnu_getopt(["one", "-a", "two", "-b", "three"], "-ab", [])
+print(r4)
+
+# --- '--' terminator ---
+r5 = getopt.getopt(["-a", "--", "-not-an-opt", "x"], "a", [])
+print(r5)

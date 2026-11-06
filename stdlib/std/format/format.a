@@ -1,3 +1,2 @@
-# Compatibility: format split into modular files (Mojo-style).
 from "csv.a" import csv_row
 from "table.a" import table, join_rows

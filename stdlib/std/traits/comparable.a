@@ -1,4 +1,3 @@
-# std.traits.comparable (Mojo analog).
 from "equatable.a" import Equatable
 
 trait Comparable(Equatable):

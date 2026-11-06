@@ -1,2 +1,1 @@
-# std.comptime package (Mojo compile-time parameters analog).
 from "comptime.a" import comptime_version, type_tag, is_int, is_float, is_string, is_array, repeat_const, const_range

@@ -1,4 +1,3 @@
-# std.collections.list (Mojo `std/collections/list.mojo` analog).
 
 fn map_list<T>(values: [T], f: fn(T) -> T) -> [T]:
     return map(values, f)

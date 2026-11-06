@@ -1,4 +1,3 @@
-# std.builtin.float (Mojo analog).
 
 fn Float(x):
     return float(x)

@@ -1,8 +1,20 @@
-# Symmetric int8 quantization helpers (MAX quantization analog).
-import kernel_ops
+# Self-hosted pure A: round-to-nearest with symmetric clamp to
+# [-128, 127]; `math.round` rounds half away from zero, like llround.
+import math
 
 fn quantize_int8(xs, scale):
-    return kernel_ops.quantize_int8(xs, scale)
+    out = []
+    for x in xs:
+        q = int(math.round(x / scale))
+        if q > 127:
+            q = 127
+        elif q < -128:
+            q = -128
+        out.append(q)
+    return out
 
 fn dequantize_int8(xs, scale):
-    return kernel_ops.dequantize_int8(xs, scale)
+    out = []
+    for x in xs:
+        out.append(x * scale)
+    return out

@@ -1,4 +1,3 @@
-# std.traits package (Mojo traits analog).
 from "equatable.a" import Equatable, eq, ne
 from "hashable.a" import Hashable
 from "comparable.a" import Comparable, lt, gt

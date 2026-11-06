@@ -1,4 +1,3 @@
-# Compile-time helpers (Mojo `[T]` parameters + `where` constraints analog).
 #
 # The language now has `comptime` parameters (parsed; call-site specialization
 # is tracked in TODO.md) and real traits. This module keeps the runtime helpers

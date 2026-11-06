@@ -1,3 +1,2 @@
-# std.math package (Mojo `std/math/__init__.mojo` analog).
 from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, floor, ceil, round_val, clamp
 from "constants.a" import PI, E

@@ -9,7 +9,6 @@
 #   * Python's `%` on floats is floor-modulo (sign of the divisor); A's
 #     `%` on floats is C fmod (sign of the dividend). `_posmod` below
 #     reproduces Python semantics for the positive modulus used here.
-#   * `max`/`min` builtins take exactly 2 arguments in A, so the 3-way
 #     reductions are nested.
 #   * No `__all__`; everything defined here is public except `_`-prefixed
 #     helpers.

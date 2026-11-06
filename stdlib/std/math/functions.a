@@ -1,4 +1,3 @@
-# std.math.functions (Mojo math module analog).
 import math
 
 fn sqrt(x):
