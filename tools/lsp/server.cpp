@@ -1231,6 +1231,158 @@ class LanguageServer {
     return best;
   }
 
+  std::string extractDocstringAbove(const std::string& source, int declLine) const {
+    // Look backward from line immediately above declLine for closing """ or '''.
+    std::vector<std::string> lines;
+    {
+      std::istringstream stream(source);
+      std::string l;
+      while (std::getline(stream, l)) lines.push_back(l);
+    }
+    int checkLine = declLine - 2; // 0-based index for line before declLine
+    while (checkLine >= 0 && trimLine(lines[static_cast<std::size_t>(checkLine)]).empty()) {
+      --checkLine;
+    }
+    if (checkLine < 0) return {};
+    const std::string& endLineText = lines[static_cast<std::size_t>(checkLine)];
+    std::string quoteType;
+    std::size_t closePos = endLineText.rfind("\"\"\"");
+    if (closePos != std::string::npos) {
+      quoteType = "\"\"\"";
+    } else {
+      closePos = endLineText.rfind("'''");
+      if (closePos != std::string::npos) quoteType = "'''";
+    }
+    if (quoteType.empty()) return {};
+
+    // Check if it was a single-line docstring: """doc"""
+    if (closePos >= 3) {
+      std::size_t openPos = endLineText.rfind(quoteType, closePos - 3);
+      if (openPos != std::string::npos) {
+        return trimLine(endLineText.substr(openPos + 3, closePos - openPos - 3));
+      }
+    }
+
+    // Multi-line: scan backwards for the opening quote
+    std::vector<std::string> docLines;
+    docLines.push_back(endLineText.substr(0, closePos));
+    int startLineIdx = checkLine - 1;
+    bool foundOpen = false;
+    while (startLineIdx >= 0) {
+      const std::string& cur = lines[static_cast<std::size_t>(startLineIdx)];
+      std::size_t openPos = cur.find(quoteType);
+      if (openPos != std::string::npos) {
+        docLines.push_back(cur.substr(openPos + 3));
+        foundOpen = true;
+        break;
+      }
+      docLines.push_back(cur);
+      --startLineIdx;
+    }
+    if (!foundOpen) return {};
+    std::reverse(docLines.begin(), docLines.end());
+
+    std::size_t minIndent = std::string::npos;
+    for (std::size_t i = 1; i < docLines.size(); ++i) {
+      const std::string& l = docLines[i];
+      const std::size_t nb = l.find_first_not_of(" \t\r\n");
+      if (nb != std::string::npos) {
+        if (minIndent == std::string::npos || nb < minIndent) minIndent = nb;
+      }
+    }
+    if (minIndent == std::string::npos) minIndent = 0;
+
+    std::string result;
+    for (std::size_t i = 0; i < docLines.size(); ++i) {
+      std::string l = docLines[i];
+      while (!l.empty() && (l.back() == '\r' || l.back() == '\n')) l.pop_back();
+      if (i > 0 && l.size() >= minIndent) l = l.substr(minIndent);
+      if (i == 0 && trimLine(l).empty()) continue;
+      if (!result.empty()) result += "\n";
+      result += l;
+    }
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
+      result.pop_back();
+    return result;
+  }
+
+  std::string extractDocstring(const std::string& source, int startLine) const {
+    // startLine is 1-based line of the declaration (or body).
+    // Look for """ or ''' starting on startLine or succeeding lines.
+    std::istringstream stream(source);
+    std::string line;
+    int currentLine = 1;
+    bool foundStart = false;
+    std::string quoteType;
+    std::vector<std::string> docLines;
+
+    while (std::getline(stream, line)) {
+      if (currentLine >= startLine) {
+        if (!foundStart) {
+          const std::size_t firstNonBlank = line.find_first_not_of(" \t\r\n");
+          if (firstNonBlank != std::string::npos) {
+            std::string rem = line.substr(firstNonBlank);
+            if (rem.rfind("\"\"\"", 0) == 0) {
+              quoteType = "\"\"\"";
+            } else if (rem.rfind("'''", 0) == 0) {
+              quoteType = "'''";
+            }
+            if (!quoteType.empty()) {
+              foundStart = true;
+              std::string after = rem.substr(3);
+              const std::size_t closing = after.find(quoteType);
+              if (closing != std::string::npos) {
+                // Single-line docstring: """doc"""
+                return trimLine(after.substr(0, closing));
+              }
+              docLines.push_back(after);
+            } else if (currentLine > startLine + 1) {
+              // Reached other statements without finding docstring
+              break;
+            }
+          }
+        } else {
+          // Inside multi-line docstring
+          const std::size_t closing = line.find(quoteType);
+          if (closing != std::string::npos) {
+            docLines.push_back(line.substr(0, closing));
+            break;
+          }
+          docLines.push_back(line);
+        }
+      }
+      ++currentLine;
+    }
+
+    if (!foundStart || docLines.empty()) return {};
+
+    // Dedent common leading whitespace (like Python textwrap.dedent)
+    std::size_t minIndent = std::string::npos;
+    for (std::size_t i = 1; i < docLines.size(); ++i) {
+      const std::string& l = docLines[i];
+      const std::size_t nb = l.find_first_not_of(" \t\r\n");
+      if (nb != std::string::npos) {
+        if (minIndent == std::string::npos || nb < minIndent) minIndent = nb;
+      }
+    }
+    if (minIndent == std::string::npos) minIndent = 0;
+
+    std::string result;
+    for (std::size_t i = 0; i < docLines.size(); ++i) {
+      std::string l = docLines[i];
+      while (!l.empty() && (l.back() == '\r' || l.back() == '\n')) l.pop_back();
+      if (i > 0 && l.size() >= minIndent) {
+        l = l.substr(minIndent);
+      }
+      if (i == 0 && trimLine(l).empty()) continue;
+      if (!result.empty()) result += "\n";
+      result += l;
+    }
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r' || result.back() == ' '))
+      result.pop_back();
+    return result;
+  }
+
   std::string docCommentText(const Compilation& compilation, const FileIndex& file,
                              const Span& span) const {
     if (!span.valid()) return {};
@@ -1242,36 +1394,54 @@ class LanguageServer {
         break;
       }
     }
-    const std::vector<a::Comment>* comments = compilation.commentsForModule(moduleId);
-    if (!comments) return {};
 
-    std::vector<std::string> lines;
-    int expected = span.line - 1;
-    // Find the doc comment ending right above the declaration, then walk
-    // backward through the contiguous block (comments are in source order,
-    // so the block is not necessarily at the end of the file).
-    std::size_t start = comments->size();
-    for (std::size_t i = 0; i < comments->size(); ++i) {
-      if ((*comments)[i].span.line == expected) { start = i; break; }
-      if ((*comments)[i].span.line > expected) break;
+    // 1. Check for leading `##` doc comments above the symbol.
+    const std::vector<a::Comment>* comments = compilation.commentsForModule(moduleId);
+    if (comments) {
+      std::vector<std::string> lines;
+      int expected = span.line - 1;
+      std::size_t start = comments->size();
+      for (std::size_t i = 0; i < comments->size(); ++i) {
+        if ((*comments)[i].span.line == expected) { start = i; break; }
+        if ((*comments)[i].span.line > expected) break;
+      }
+      if (start < comments->size()) {
+        for (std::size_t index = start + 1; index > 0; --index) {
+          const a::Comment& comment = (*comments)[index - 1];
+          if (!comment.doc || comment.trailing || comment.span.line != expected) break;
+          std::string line = comment.text;
+          while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
+          if (line.rfind("##", 0) == 0) line.erase(0, 2);
+          if (!line.empty() && line.front() == ' ') line.erase(0, 1);
+          lines.push_back(std::move(line));
+          --expected;
+        }
+        if (!lines.empty()) {
+          std::string text;
+          for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
+            if (!text.empty()) text += '\n';
+            text += *it;
+          }
+          return text;
+        }
+      }
     }
-    if (start == comments->size()) return {};
-    for (std::size_t index = start + 1; index > 0; --index) {
-      const a::Comment& comment = (*comments)[index - 1];
-      if (!comment.doc || comment.trailing || comment.span.line != expected) break;
-      std::string line = comment.text;
-      while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
-      if (line.rfind("##", 0) == 0) line.erase(0, 2);
-      if (!line.empty() && line.front() == ' ') line.erase(0, 1);
-      lines.push_back(std::move(line));
-      --expected;
+
+    // 2. Check for Python-style `"""docstring"""` or `'''docstring'''` right
+    // above or as the first statement in the function / class / struct body.
+    const std::string* source = compilation.textForPath(file.path);
+    if (source) {
+      // Check immediately inside body (e.g. line span.line + 1)
+      std::string ds = extractDocstring(*source, span.line + 1);
+      if (!ds.empty()) return ds;
+      // Or immediately above declaration
+      if (span.line > 1) {
+        ds = extractDocstringAbove(*source, span.line);
+        if (!ds.empty()) return ds;
+      }
     }
-    std::string text;
-    for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
-      if (!text.empty()) text += '\n';
-      text += *it;
-    }
-    return text;
+
+    return {};
   }
 
   static bool validIdentifier(const std::string& name) {

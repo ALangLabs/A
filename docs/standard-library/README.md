@@ -77,8 +77,11 @@ These names are recognized by the type checker/runtime as builtins or builtin co
 
 | API | Signature (tooling) | Description |
 |---|---|---|
-| `print` | `print(value)` | Write value to stdout + newline |
-| `eprint` | `eprint(value)` | Write value to stderr + newline |
+| `print` | `print(*objects, sep: String = " ", end: String = "\n", file: IO = stdout, flush: bool = false) -> void` | Write values to a stream, separated, with an ending |
+| `eprint` | `eprint(*objects, sep: String = " ", end: String = "\n", file: IO = stderr, flush: bool = false) -> void` | Write values to stderr (or `file`), separated, with an ending |
+| `open` | `open(path: String, mode: String = "w") -> IO` | Open a file (`"w"`, `"a"`, `"r"`) for `print(file=...)` |
+| `close` | `close(stream: IO)` | Close a handle returned by `open()` |
+| `stdout` / `stderr` | `stdout: IO`, `stderr: IO` | Stream handles usable as `print(file=stdout)` |
 | `input` | `input([prompt]) -> String` | Read a line from stdin |
 | `flush` | `flush()` | Flush stdout |
 | `len` | `len(value) -> i64` | Length of string/array/map/set (and supported containers) |

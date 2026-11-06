@@ -1633,8 +1633,11 @@ bool checkSupportedExpr(const Expr& expr) {
       return true;
     case ExprKind::BoolLit:
       return false;  // bool literals print/behave differently natively
-    case ExprKind::Ident:
-      return true;
+    case ExprKind::Ident: {
+      // Stream constants only exist in the interpreter and C emitter.
+      const std::string ident = static_cast<const IdentExpr&>(expr).name;
+      return ident != "stdout" && ident != "stderr";
+    }
     case ExprKind::ArrayLit: {
       const auto& a = static_cast<const ArrayLitExpr&>(expr);
       for (const auto& el : a.elements)
@@ -1702,7 +1705,8 @@ bool checkSupportedExpr(const Expr& expr) {
       // trace, net, http) only exist in the interpreter.
       if (isStdlibBuiltin(name)) return false;
       // Native runtime functions are handled by interpreter or native backend
-      if (name == "write_file" || name == "read_file" || name == "append_file" ||
+      if (name == "open" || name == "close" ||
+          name == "write_file" || name == "read_file" || name == "append_file" ||
           name == "file_exists" || name == "remove_file" || name == "flush" ||
           name == "input" || name == "read_line" ||
           name == "int" || name == "float" || name == "set" ||

@@ -170,7 +170,10 @@ struct Closure {
   const FnDecl* fn = nullptr;        // named function referenced as a value
   int moduleId = -1;                 // module whose globals the closure sees
   StringMap<Value> captured;
-  void* liveEnv = nullptr;  // Python-style live capture (interpreter Env*)
+  void* liveEnv = nullptr;  // interpreter Env* the lambda body resolves names through
+  // Keeps the heap-allocated Env chain that `liveEnv` points into alive for as
+  // long as the closure exists (type-erased; owned by the execution engine).
+  std::shared_ptr<void> liveEnvOwner = nullptr;
 };
 
 }  // namespace a

@@ -401,6 +401,38 @@ class CEmitter {
             "  }\n"
             "  printf(\"]\");\n"
             "}\n"
+            "static void a_print_obj_to(void *s, a_obj *o) {\n"
+            "  if (o->type == 3) {\n"
+            "    fprintf(s, \"{\");\n"
+            "    aval *pairs = (aval *)o->data;\n"
+            "    for (a_i64 k = 0; k < o->len; ++k) {\n"
+            "      if (k) fprintf(s, \", \");\n"
+            "      aval key = pairs[k * 2];\n"
+            "      if (key.f == 2 && ((a_obj *)key.i)->type == 1)\n"
+            "        fprintf(s, \"\\\"%s\\\": \", (char *)((a_obj *)key.i)->data);\n"
+            "      else if (key.f == 2) a_print_obj_to(s, (a_obj *)key.i), fprintf(s, \": \");\n"
+            "      else if (key.f == 1) { char b[64]; a_fmt_double(b, key.d); fprintf(s, \"%s: \", b); }\n"
+            "      else fprintf(s, \"%lld: \", key.i);\n"
+            "      aval val = pairs[k * 2 + 1];\n"
+            "      if (val.f == 2) a_print_obj_to(s, (a_obj *)val.i);\n"
+            "      else if (val.f == 1) { char b[64]; a_fmt_double(b, val.d); fprintf(s, \"%s\", b); }\n"
+            "      else fprintf(s, \"%lld\", val.i);\n"
+            "    }\n"
+            "    fprintf(s, \"}\");\n"
+            "    return;\n"
+            "  }\n"
+            "  if (o->type == 1) { fprintf(s, \"\\\"%s\\\"\", (char *)o->data); return; }\n"
+            "  if (o->type != 2) { fprintf(s, \"<obj>\"); return; }\n"
+            "  fprintf(s, \"[\");\n"
+            "  for (a_i64 k = 0; k < o->len; ++k) {\n"
+            "    if (k) fprintf(s, \", \");\n"
+            "    aval e = ((aval *)o->data)[k];\n"
+            "    if (e.f == 2) a_print_obj_to(s, (a_obj *)e.i);\n"
+            "    else if (e.f == 1) { char b[64]; a_fmt_double(b, e.d); fprintf(s, \"%s\", b); }\n"
+            "    else fprintf(s, \"%lld\", e.i);\n"
+            "  }\n"
+            "  fprintf(s, \"]\");\n"
+            "}\n"
             "static aval a_strof(aval v) {\n"
             "  char buf[64];\n"
             "  if (v.f == 2) {\n"
@@ -1193,8 +1225,33 @@ class CEmitter {
         }
         if (c.callee->kind != ExprKind::Ident) return "(aval){.i=0,.f=0}";
         std::string name = cIdent(static_cast<const IdentExpr&>(*c.callee).name);
-        if (name == "print" && c.args.size() == 1) {
-          emitPrint(*c.args[0].value);
+        if (name == "print" || name == "eprint") {
+          emitPrintCall(c, name == "eprint");
+          return "(aval){.i=0,.f=0}";
+        }
+        if (name == "open" && !c.args.empty()) {
+          std::string p = evalA(*c.args[0].value);
+          std::string pn = tmp();
+          out_ << "  " << pn << " = " << p << ";\n";
+          std::string modeLit = "\"w\"";
+          if (c.args.size() >= 2 && c.args[1].value->kind == ExprKind::StringLit) {
+            modeLit = "\"" + escapeC(extractStringC(static_cast<const StringLitExpr&>(*c.args[1].value))) + "\"";
+            out_ << "  return (aval){.i=a_open((char *)((a_obj *)" << pn << ".i)->data, " << modeLit << "),.f=0};\n";
+          } else if (c.args.size() >= 2) {
+            std::string m = evalA(*c.args[1].value);
+            std::string mn = tmp();
+            out_ << "  " << mn << " = " << m << ";\n";
+            out_ << "  return (aval){.i=a_open((char *)((a_obj *)" << pn << ".i)->data, (char *)((a_obj *)" << mn << ".i)->data),.f=0};\n";
+          } else {
+            out_ << "  return (aval){.i=a_open((char *)((a_obj *)" << pn << ".i)->data, " << modeLit << "),.f=0};\n";
+          }
+          return "(aval){.i=0,.f=0}";
+        }
+        if (name == "close" && !c.args.empty()) {
+          std::string h = evalA(*c.args[0].value);
+          std::string tn = tmp();
+          out_ << "  " << tn << " = " << h << ";\n";
+          out_ << "  a_close(" << tn << ".i);\n";
           return "(aval){.i=0,.f=0}";
         }
         if (name == "int" && !c.args.empty()) {
@@ -1343,8 +1400,7 @@ class CEmitter {
       else if (arg.name == "sep") sep = arg.value.get();
       else if (arg.name == "end") end = arg.value.get();
       else if (arg.name == "file") file = arg.value.get();
-      else read_pass;  // 'flush' handled below
-      if (arg.name == "flush") flush = arg.value.get();
+      else if (arg.name == "flush") flush = arg.value.get();
     }
     const std::string stream = tmp();
     if (file != nullptr) {
@@ -1588,11 +1644,12 @@ class CEmitter {
         const auto& s = static_cast<const ExprStmt&>(stmt);
         if (s.expr->kind == ExprKind::Call) {
           const auto& c = static_cast<const CallExpr&>(*s.expr);
-          if (c.callee->kind == ExprKind::Ident &&
-              cIdent(static_cast<const IdentExpr&>(*c.callee).name) == "print" &&
-              c.args.size() == 1) {
-            emitPrint(*c.args[0].value);
-            break;
+          if (c.callee->kind == ExprKind::Ident) {
+            const std::string n = cIdent(static_cast<const IdentExpr&>(*c.callee).name);
+            if (n == "print" || n == "eprint") {
+              emitPrintCall(c, n == "eprint");
+              break;
+            }
           }
         }
         std::string ev = evalA(*s.expr);

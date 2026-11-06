@@ -311,6 +311,9 @@ def main() -> int:
         )["result"]
         if not hover or "**Example:**" not in hover["contents"]["value"] or "**See Also:**" not in hover["contents"]["value"]:
             fail(f"hover did not render Example/See Also for print: {hover}")
+        # print's real signature renders multi-line with keyword options.
+        if "print(\n    *objects," not in hover["contents"]["value"]:
+            fail(f"hover did not render print's multi-line signature: {hover}")
 
         # Rich hover: a 3-parameter user function renders a multi-line
         # signature plus structured doc sections (Args/Returns/Example).

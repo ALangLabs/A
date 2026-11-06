@@ -56,8 +56,12 @@ const BUILTINS = ['print','eprint','input','flush','len','str','int','float','bo
 // builtin_docs.hpp (the authoritative table read by a-lsp). Used by the
 // fallback hover when a-lsp is unavailable.
 const BUILTIN_SIGS = {
-  print: { signature: 'print(value)', documentation: 'Writes a value to standard output, followed by a newline.', example: ">>> print('Hello, A!')\nHello, A!", seeAlso: 'eprint, flush' },
-  eprint: { signature: 'eprint(value)', documentation: 'Writes a value to standard error, followed by a newline.', seeAlso: 'print' },
+  print: { signature: 'print(*objects, sep: String = " ", end: String = "\\n", file: IO = stdout, flush: bool = false) -> void', documentation: 'Writes values to a stream, separated, with an ending.', example: ">>> print('Hello, A!')\nHello, A!\n>>> print(1, 2, sep='-')\n1-2", seeAlso: 'eprint, open, close, flush' },
+  eprint: { signature: 'eprint(*objects, sep: String = " ", end: String = "\\n", file: IO = stderr, flush: bool = false) -> void', documentation: 'Writes values to standard error (or file), separated, with an ending.', seeAlso: 'print' },
+  open: { signature: 'open(path: String, mode: String = "w") -> IO', documentation: 'Opens a file for writing; mode is "w", "a", or "r".', seeAlso: 'close, print' },
+  close: { signature: 'close(stream: IO)', documentation: 'Closes a handle returned by open().', seeAlso: 'open' },
+  stdout: { signature: 'stdout: IO', documentation: 'The standard output stream handle.' },
+  stderr: { signature: 'stderr: IO', documentation: 'The standard error stream handle.' },
   input: { signature: 'input([prompt]) -> String', documentation: 'Reads one line from standard input.' },
   flush: { signature: 'flush()', documentation: 'Flushes buffered standard output.' },
   len: { signature: 'len(value) -> i64', documentation: 'Length of a string, array, map, or set.', seeAlso: 'str' },

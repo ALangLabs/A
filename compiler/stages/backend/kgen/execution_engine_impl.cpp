@@ -1969,10 +1969,28 @@ Value KGENExecutionEngine::evalLambda(const LambdaExpr& expr, Env& env) {
   auto closure = std::make_shared<Closure>();
   closure->decl = &expr;
   closure->moduleId = currentModule_;
-  // Python semantics: capture the enclosing environment live, so later
-  // reassignments are observed. The raw Env pointer is valid while the
-  // defining block is alive, which covers closures called in that block.
-  closure->liveEnv = &env;
+  // Env frames live on the C++ stack, so a captured pointer would dangle as
+  // soon as the defining function returns. Snapshot the chain into heap
+  // storage owned by the closure instead; the root of the chain is a module
+  // env owned by the engine and is shared, not copied.
+  std::vector<Env*> chain;
+  for (Env* e = &env; e && e->parent; e = e->parent) chain.push_back(e);
+  Env* root = chain.empty() ? &env : chain.back()->parent;
+  if (chain.empty()) {
+    closure->liveEnv = &env;
+  } else {
+    auto frames = std::make_shared<std::vector<std::shared_ptr<Env>>>();
+    Env* parentPtr = root;
+    for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+      auto copy = std::make_shared<Env>();
+      copy->vars = (*it)->vars;
+      copy->parent = parentPtr;
+      parentPtr = copy.get();
+      frames->push_back(std::move(copy));
+    }
+    closure->liveEnv = parentPtr;
+    closure->liveEnvOwner = std::move(frames);
+  }
   return makeClosureValue(std::move(closure));
 }
 
