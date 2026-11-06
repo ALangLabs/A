@@ -11,11 +11,11 @@ This document summarizes the current implementation architecture. For exact beha
 5. **Type checking / semantic analysis** — type inference/checking, builtin/native module typing, method signatures, trait/impl checks, symbol/module export tables.
 6. **Ownership / static analyses** — ownership/borrow-related analysis hooks (implementation-specific; runtime also enforces/tracks in places).
 7. **IR / optimization** — typed SSA IR emission and optional optimization passes.
-8. **Backend / execution** — Astra (`compiler/astra/`, the builtin TinyCC fork) compiles and links `.a` sources directly; `a run`/`a build`/`a test` delegate to the `astra` driver.
+8. **Code generation** — the frontend (`frontend/codegen/`) emits C that calls the A runtime API (`compiler/astra/runtime/a_runtime.h`); Astra (`compiler/astra/`, the builtin TinyCC fork) compiles that C plus the runtime (`a_runtime.c`) to machine code. `a run`/`a build`/`a test` delegate to the `astra` driver with the emitted C.
 
 ## Astra backend
 
-- The backend is **Astra** (`compiler/astra/`): a forked TinyCC that also contains a first-party A→x86-64/arm64 compiler (`a/`).
+- The backend is **Astra** (`compiler/astra/`): a forked TinyCC. The C++ frontend is the only A compiler; it emits C, which Astra compiles (x86-64/arm64) and links with the A runtime in `compiler/astra/runtime/`.
 - `a run`, `a build`, and `a test` invoke the `astra` driver (found via `A_ASTRA`, `<exe>/tcclib/astra`, or `PATH`); `astra link` links objects into an executable.
 - Python interop sources live in `compiler/astra/python/` (built as `a_python_interop`).
 
@@ -33,6 +33,7 @@ compiler/
     name-resolution/  # module loader, native modules, builtin docs
     type-checker/     # sema, types, method signatures
     ownership/        # ownership analysis
+    codegen/          # AST -> C emission (for Astra)
     ir/               # IR structures/lowering support
     optimization/     # optimization passes
     pipeline/         # frontend/pipeline orchestration

@@ -186,10 +186,12 @@ static inline aval a_mul(aval l, aval r) {
     if (a_is_int(l) && a_is_int(r)) {
         int64_t a = a_int_val(l), b = a_int_val(r);
         if (a == 0 || b == 0) return a_mkint(0);
-        /* Truncated product is exact when it fits in int64; check via
-           division to avoid UB, then require the inline range. */
-        int64_t res = a * b;
-        if (b == 0 || res / b == a) {
+        /* Check overflow before multiplying (avoid signed-overflow UB):
+           require |a| <= A_INT_LIM/|b| so the product stays in range. */
+        int64_t ub = b < 0 ? -b : b;
+        int64_t ua = a < 0 ? -a : a;
+        if (ua <= A_INT_LIM / ub) {
+            int64_t res = a * b;
             if (a_in_inline_range(res)) return a_mkint(res);
         }
         return a_mul_slow(l, r);
@@ -223,13 +225,6 @@ static inline aval a_mod(aval l, aval r) {
         } else if (b == -1) {
             return a_mkint(0);
         }
-        return a_mod_slow(l, r);
-    }
-    if (a_is_double(l) && a_is_double(r)) {
-        double b = a_double_val(r);
-        if (b == 0.0) return a_mod_slow(l, r);
-        double a = a_double_val(l), m = a;
-        /* fmod inline would need libm header in generated code; fall back. */
         return a_mod_slow(l, r);
     }
     return a_mod_slow(l, r);

@@ -37,13 +37,13 @@ python3 websearchcli.py "<query>" [-n 1-20] [--type auto|neural|keyword] [--live
 
 ## Project layout (high level)
 - `websearchcli.py` — standalone agent web-search CLI (Exa MCP; see "Web search" above).
-- `compiler/astra/frontend/` — C++ frontend modules (`a.hpp` umbrella; `diagnostics`, `lexer`, `ast`, `parser`, `name-resolution`, `type-checker`, `ownership`, `ir`, `optimization`, `tooling`, `pipeline`, `driver`, `cli`). The C Astra backend (TinyCC fork + `a/*.c`) lives alongside in `compiler/astra/`.
+- `compiler/astra/frontend/` — C++ frontend modules (`a.hpp` umbrella; `diagnostics`, `lexer`, `ast`, `parser`, `name-resolution`, `type-checker`, `ownership`, `codegen`, `ir`, `optimization`, `tooling`, `pipeline`, `driver`, `cli`). The C Astra backend (TinyCC fork) lives alongside in `compiler/astra/`, with the A runtime in `compiler/astra/runtime/`.
 - `runtime/` — runtime values, memory, strings, collections, IO.
 - `stdlib/` — stdlib docs/notes and A-file modules (native execution is delegated to the Astra backend (`compiler/astra/`); the A-subset it supports is still growing — confirm via docs/tests when changing behavior).
 - `kernels/` — A compute kernels.
 - `tools/lsp/` — `a-lsp` (stdio LSP) and smoke test; `tools/vscode-a/` — VS Code extension.
 - `tests/` — integration, IR, and tooling tests; `examples/` — runnable programs; `docs/` — spec/CLI/compiler/stdlib docs.
-- `compiler/astra/` — Astra backend: vendored TinyCC fork in the root + the C A-frontend in `a/` (A -> machine code for `a run`/`a build`) and the C++ frontend in `frontend/` (lex/parse/sema/IR for `a check`/`a fmt`/`a doc`/`a emit-ir`, LSP).
+- `compiler/astra/` — Astra backend: vendored TinyCC fork in the root + the A runtime in `runtime/` (`a_runtime.c`, compiled and linked with the frontend's emitted C) and the C++ frontend in `frontend/` (lex/parse/sema/codegen/IR for `a check`/`a run`/`a build`/`a fmt`/`a doc`/`a emit-ir`, LSP). The frontend emits C; Astra compiles that C to machine code.
 
 ## Coding and change conventions
 - C++20 in `namespace a`; keep headers next to implementations; follow the existing stage/module structure. Keep warnings clean — CI treats warnings as errors.

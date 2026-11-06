@@ -895,6 +895,66 @@ class Emitter {
       }
       case StmtKind::For: {
         const ForStmt& st = static_cast<const ForStmt&>(*s);
+        // Fast path: `for x in lo..hi` / `for x in lo..hi..step` over an
+        // integer range. Emit a counted loop with int64_t counters instead
+        // of heap-allocating an ARange + AIter and dispatching per element.
+        {
+          const Expr* loE = nullptr;
+          const Expr* hiE = nullptr;
+          const Expr* stE = nullptr;
+          const Expr* iter = st.iterable.get();
+          if (iter && iter->kind == ExprKind::Range) {
+            const RangeExpr& re = static_cast<const RangeExpr&>(*iter);
+            loE = re.start.get();
+            hiE = re.end.get();
+            stE = re.step.get();
+          } else if (iter && iter->kind == ExprKind::Binary &&
+                     static_cast<const BinaryExpr&>(*iter).op == "..") {
+            const BinaryExpr& be = static_cast<const BinaryExpr&>(*iter);
+            loE = be.lhs.get();
+            hiE = be.rhs.get();
+          }
+          if (loE && hiE) {
+            std::string loExpr = emitExpr(loE, out);
+            std::string hiExpr = emitExpr(hiE, out);
+            std::string stExpr = stE ? emitExpr(stE, out) : std::string("a_mkint(1)");
+            std::string loT = temp("rlo");
+            std::string hiT = temp("rhi");
+            std::string stT = temp("rst");
+            std::string cur = fresh("rcur");
+            std::string endv = fresh("rend");
+            std::string stepv = fresh("rstep");
+            std::string var = fresh("v");
+            pre("aval " + loT + " = " + loExpr + ";");
+            pre("aval " + hiT + " = " + hiExpr + ";");
+            pre("aval " + stT + " = " + stExpr + ";");
+            flushPre(out);
+            out << "int64_t " << cur << " = a_int_full(" << loT << ");\n";
+            out << "int64_t " << endv << " = a_int_full(" << hiT << ");\n";
+            out << "int64_t " << stepv << " = a_int_full(" << stT << ");\n";
+            out << "if (" << stepv << " == 0) { a_panic_msg(\"range() step must not be zero\"); }\n";
+            out << "aval " << var << ";\n";
+            out << "for (; (" << stepv << " > 0 ? " << cur << " < " << endv
+                << " : " << cur << " > " << endv << "); "
+                << cur << " = (" << stepv << " > 0 ? ("
+                << cur << " > INT64_MAX - " << stepv << " ? " << endv << " : " << cur << " + " << stepv
+                << ") : ("
+                << cur << " < INT64_MIN - " << stepv << " ? " << endv << " : " << cur << " + " << stepv
+                << "))) {\n";
+            out << var << " = a_mkint(" << cur << ");\n";
+            loopDeferDepth_.push_back(static_cast<int>(deferStack_.size()));
+            pushScope();
+            bindLocal(st.var, var);
+            deferStack_.emplace_back();
+            for (const StmtPtr& bs : st.body) emitStmt(bs.get(), out, false);
+            auto frame = deferStack_.back(); deferStack_.pop_back();
+            for (auto it2 = frame.rbegin(); it2 != frame.rend(); ++it2) emitStmt(*it2, out, false);
+            popScope();
+            loopDeferDepth_.pop_back();
+            out << "}\n";
+            return;
+          }
+        }
         std::string it = emitExpr(st.iterable.get(), out);
         std::string itv = temp("it");
         std::string var = fresh("v");
@@ -1434,7 +1494,7 @@ class Emitter {
       if (id >= 0) {
         auto args = positionalArgs(call, out);
         std::string arr = buildArgv(args, false);
-        return "a_call(a_builtin(" + std::to_string(id) + "), " +
+        return "a_bi_call(" + std::to_string(id) + ", " +
                std::to_string(args.size()) + ", " + arr + ")";
       }
     }
@@ -1456,7 +1516,7 @@ class Emitter {
         if (b->kind == BKind::Builtin) {
           auto args = positionalArgs(call, out);
           std::string arr = buildArgv(args, false);
-          return "a_call(a_builtin(" + std::to_string(b->builtinId) + "), " +
+          return "a_bi_call(" + std::to_string(b->builtinId) + ", " +
                  std::to_string(args.size()) + ", " + arr + ")";
         }
         if (b->kind == BKind::EnumValue) {
@@ -1472,7 +1532,7 @@ class Emitter {
       if (bid >= 0) {
         auto args = positionalArgs(call, out);
         std::string arr = buildArgv(args, false);
-        return "a_call(a_builtin(" + std::to_string(bid) + "), " +
+        return "a_bi_call(" + std::to_string(bid) + ", " +
                std::to_string(args.size()) + ", " + arr + ")";
       }
       fail("undefined function '" + id.name + "'");
@@ -1490,7 +1550,7 @@ class Emitter {
           if (bid >= 0) {
             auto args = positionalArgs(call, out);
             std::string arr = buildArgv(args, false);
-            return "a_call(a_builtin(" + std::to_string(bid) + "), " +
+            return "a_bi_call(" + std::to_string(bid) + ", " +
                    std::to_string(args.size()) + ", " + arr + ")";
           }
           if (mb->moduleId < 0) {

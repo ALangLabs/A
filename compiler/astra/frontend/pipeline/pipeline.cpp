@@ -60,21 +60,26 @@ std::string findAstra(){
   return "astra";  // fall back to PATH lookup in execvp
 }
 
-// fork/exec `astra` with the given arguments; the child inherits our
+// fork/exec `prog` with the given arguments; the child inherits our
 // stdin/stdout/stderr. Returns the exit code, 127 on exec failure.
-int runAstra(const std::vector<std::string>& args){
-  std::string astra=findAstra();
+int runChild(const std::string& prog, const std::vector<std::string>& args){
   std::vector<char*> argv;
-  argv.push_back(const_cast<char*>(astra.c_str()));
+  argv.push_back(const_cast<char*>(prog.c_str()));
   for(const auto& a:args) argv.push_back(const_cast<char*>(a.c_str()));
   argv.push_back(nullptr);
   pid_t pid=fork();
   if(pid<0) return 127;
-  if(pid==0){ execvp(astra.c_str(),argv.data()); _exit(127); }
+  if(pid==0){ execvp(prog.c_str(),argv.data()); _exit(127); }
   int status=0;
   while(waitpid(pid,&status,0)<0){ if(errno!=EINTR) return 127; }
   if(WIFEXITED(status)) return WEXITSTATUS(status);
   return 128+WTERMSIG(status);
+}
+
+// fork/exec `astra` with the given arguments; the child inherits our
+// stdin/stdout/stderr. Returns the exit code, 127 on exec failure.
+int runAstra(const std::vector<std::string>& args){
+  return runChild(findAstra(),args);
 }
 
 // fork/exec a built binary directly; the child inherits our
@@ -155,6 +160,47 @@ int astraBuildC(const std::string& cPath, const std::string& outPath, std::ostre
   return 0;
 }
 
+// Locates an executable on PATH; "" when absent.
+std::string findOnPath(const char* name){
+  const char* path=std::getenv("PATH");
+  if(!path||!*path) return "";
+  std::stringstream ss(path);
+  std::string dir;
+  while(std::getline(ss,dir,':')){
+    if(dir.empty()) continue;
+    std::string c=dir+"/"+name;
+    if(access(c.c_str(),X_OK)==0) return c;
+  }
+  return "";
+}
+
+// Locates a system C compiler for optimized `a build` output: $A_CC, then
+// the usual names on PATH. "" when none is available.
+std::string findCc(){
+  if(const char* e=std::getenv("A_CC"); e&&*e) return e;
+  for(const char* c: {"cc","gcc","clang"}){
+    std::string p=findOnPath(c);
+    if(!p.empty()) return p;
+  }
+  return "";
+}
+
+// Compiles emitted C (plus the runtime) with a system C compiler at -O2.
+// Returns 0 on success, 2 when no system compiler exists, 1 on failure.
+int ccBuildC(const std::string& cPath, const std::string& outPath, std::ostream& err) {
+  std::string cc=findCc();
+  if(cc.empty()) return 2;
+  std::string astra = findAstra();
+  std::string runtimeC, runtimeDir;
+  if (!findRuntime(astra, runtimeC, runtimeDir)) {
+    err << "error: cannot locate A runtime (compiler/astra/runtime/a_runtime.c); set A_RUNTIME_C\n";
+    return 1;
+  }
+  int rc = runChild(cc,{"-O2","-I"+runtimeDir,cPath,runtimeC,"-lm","-o",outPath});
+  if (rc != 0) { err << "error: " << cc << " failed to compile '" << cPath << "'\n"; return 1; }
+  return 0;
+}
+
 // Emits C for a checked program, compiles it with astra, and runs the
 // resulting binary. Returns the program's exit code.
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
@@ -207,7 +253,13 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   std::string cSource, codegenError;
   if(!emitC(*m.graph,*m.sema,cSource,codegenError)){ err<<"error: code generation failed: "<<codegenError<<"\n"; return kCErr; }
   std::string cPath=stageC(cSource,err); if(cPath.empty()) return kCErr;
-  int rc=astraBuildC(cPath,outputPath,err);
+  // `a build` prefers an optimizing system C compiler; astra (TinyCC) is the
+  // fallback for machines without cc/gcc/clang and for `a run`/`a test`.
+  int rc=ccBuildC(cPath,outputPath,err);
+  if(rc!=0){
+    if(rc==1) err<<"note: falling back to astra backend\n";
+    rc=astraBuildC(cPath,outputPath,err);
+  }
   std::error_code ec; std::filesystem::remove(cPath,ec);
   return rc;
 }

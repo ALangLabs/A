@@ -2951,6 +2951,13 @@ aval a_builtin(uint64_t id) {
     return g_builtin_objs[id];
 }
 
+aval a_bi_call(uint64_t id, uint64_t n, aval *argv) {
+    if (id >= A_BI_COUNT) panicf("invalid builtin id %llu", (unsigned long long)id);
+    return g_builtins[id].fn(n, argv);
+}
+
+int64_t a_int_full(aval v) { return int_val_full(v); }
+
 uint64_t a_builtin_count(void) { return (uint64_t)A_BI_COUNT; }
 
 const char *a_builtin_name(uint64_t id) {
