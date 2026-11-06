@@ -26,6 +26,6 @@ Runnable examples for the current A language implementation. Each file can be ex
 ## Notes
 
 - Examples target the **current** dynamic/Python-style runtime semantics with optional annotations.
-- Some stdlib packages (`json`, `binary`, `testing`, `log`, `metrics`, `trace`, `net`, `http`) are native-backed and primarily available through the interpreter/KGEN execution engine path.
+- Some stdlib packages (`json`, `binary`, `testing`, `log`, `metrics`, `trace`, `net`, `http`) are native-backed; their availability depends on the Astra backend subset.
 - `net.tls_connect` / HTTPS TLS requires an OpenSSL-enabled build.
 - `python:<pkg>` imports embed the CPython found at build time (`find_package(Python3)`); packages must be installed for *that* interpreter. See [python-interop/optional/README.md](python-interop/optional/README.md).

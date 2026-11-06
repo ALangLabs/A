@@ -27,7 +27,7 @@ CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ct
 ## Project layout (high level)
 - `compiler/` — toolchain sources (`a.hpp` umbrella; `stages/*` modules such as lexer, parser, ast, diagnostics, name-resolution, type-checker, ownership, ir, optimization, backend, tooling, pipeline, object, driver, cli).
 - `runtime/` — runtime values, memory, strings, collections, IO.
-- `stdlib/` — stdlib docs/notes and A-file modules (many capabilities are native-backed; some modules are interpreter/KGEN-path oriented — confirm via docs/tests when changing behavior).
+- `stdlib/` — stdlib docs/notes and A-file modules (native execution is delegated to the Astra backend (`compiler/astra/`); the A-subset it supports is still growing — confirm via docs/tests when changing behavior).
 - `kernels/` — A compute kernels.
 - `tools/lsp/` — `a-lsp` (stdio LSP) and smoke test; `tools/vscode-a/` — VS Code extension.
 - `tests/` — integration, IR, and tooling tests; `examples/` — runnable programs; `docs/` — spec/CLI/compiler/stdlib docs.

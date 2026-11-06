@@ -35,7 +35,7 @@ print(time.now() >= start)
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
 - Time precision/units are runtime-defined; use it for simple timing and delays.
 
 ## Source Files

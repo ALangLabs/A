@@ -23,9 +23,8 @@ help             show help
 
 | Option | Applies to | Description |
 |---|---|---|
-| `-o <file>` | `build`, `doc` | Output path (binary/LLVM IR output name context or doc output) |
+| `-o <file>` | `build`, `doc` | Output path (binary output name or doc output) |
 | `-c <code>` | `run` (or alone) | Run inline A source instead of a file |
-| `--emit-llvm` | `build` | Emit LLVM IR (`.ll`) instead of a native executable |
 | `-w, --write` | `fmt` | Rewrite source in place |
 | `--check` | `fmt` | Exit non-zero if file needs formatting |
 | `--indent <n>` | `fmt` | Indentation width (default 4, range 1-16) |
@@ -35,7 +34,7 @@ help             show help
 | `--opt` | `ir` | Run optimization passes before printing IR |
 | `-I <dir>` | module loading | Add module search directory (repeatable) |
 | `--stdlib <dir>` | module loading | Override standard library directory |
-| `--backend <name>` / `--backend=<name>` | compatibility | Accepted for compatibility; A v2 uses a single LLVM-oriented backend path |
+| `--backend <name>` / `--backend=<name>` | compatibility | Accepted for compatibility; A v2 uses the Astra backend |
 | `--no-color` | diagnostics | Disable colored diagnostics |
 | `-h, --help` | global | Show help |
 | `-V, --version` | global | Print version |
@@ -52,12 +51,14 @@ cmake --build build -j
 ./build/a check examples/classes/point.a
 ./build/a test examples/advanced/testing.a
 
-# Build native binary (requires LLVM/KGEN build support)
+# Build native binary via Astra (compiler/astra/)
 ./build/a build examples/basics/hello.a -o /tmp/hello-a
 /tmp/hello-a
 
-# Emit LLVM IR
-./build/a build examples/basics/hello.a --emit-llvm -o /tmp/hello.ll
+# The astra driver can also be used directly:
+./build/tcc/astra examples/basics/hello.a -o /tmp/hello-b
+./build/tcc/astra -c examples/basics/hello.a -o /tmp/hello.o
+./build/tcc/astra link /tmp/hello.o -o /tmp/hello-c
 
 # Print typed SSA IR
 ./build/a ir examples/basics/hello.a

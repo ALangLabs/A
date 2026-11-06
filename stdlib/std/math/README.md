@@ -41,7 +41,7 @@ print(math.PI)
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
 - Check `compiler/stages/name-resolution/native_modules.hpp` and package source for the exact exported surface in your build.
 - Numeric behavior follows A's current runtime/type semantics.
 

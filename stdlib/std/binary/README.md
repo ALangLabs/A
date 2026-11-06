@@ -29,7 +29,7 @@ import binary
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
 - A’s current semantics are dynamic/Python-style in many paths; verify edge cases with tests when porting Python code.
 - API names may be familiar, but behavior can differ where A lacks Python features (exceptions model differences, decorators, dynamic attributes/protocol hooks, regex engine, etc.).
 

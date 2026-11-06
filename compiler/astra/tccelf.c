@@ -1862,6 +1862,9 @@ ST_FUNC void tcc_add_runtime(TCCState *s1)
         if (lpthread)
             tcc_add_library(s1, "pthread");
         tcc_add_library(s1, "c");
+        /* Astra programs use libm unconditionally (A runtime math builtins),
+           so link it alongside libc rather than requiring -lm. */
+        tcc_add_library(s1, "m");
 #ifdef TCC_LIBGCC
         if (!s1->static_link) {
             if (TCC_LIBGCC[0] == '/')
@@ -1928,6 +1931,10 @@ static void tcc_add_linker_symbols(TCCState *s1)
     set_linker_sym(s1, "_etext", text_section, 0);
     set_linker_sym(s1, "_edata", data_section, 0);
     set_linker_sym(s1, "_end", bss_section, 0);
+    /* GNU ld scripts define __ehdr_start as the ELF header load address;
+       glibc crt objects reference it. TCC has no linker script, so provide
+       it as an absolute symbol at the image base. */
+    set_global_sym(s1, "__ehdr_start", NULL, ELF_START_ADDR);
 #if TARGETOS_OpenBSD
     set_global_sym(s1, "__executable_start", NULL, ELF_START_ADDR);
 #endif

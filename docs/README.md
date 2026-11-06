@@ -1,6 +1,6 @@
 # A Language Documentation
 
-This documentation describes the **current implementation** of the A language and toolchain (v2, KGEN/LLVM-oriented backend). It is derived from the compiler, type checker, module loader, native module tables, and integration tests in this repository.
+This documentation describes the **current implementation** of the A language and toolchain (v2, Astra backend). It is derived from the compiler, type checker, module loader, native module tables, and integration tests in this repository.
 
 > **Note:** Some older marketing/README claims may not reflect current semantics. Where behavior differs, trust the compiler and tests. Current A is **Python-style dynamic at runtime** in many cases (plain assignment creates/rebinds mutable variables; many checks happen dynamically), with **optional annotations** and static/type-checker support for typed signatures, classes, traits, generics, and method resolution.
 
@@ -12,7 +12,7 @@ This documentation describes the **current implementation** of the A language an
 - [Built-in functions](builtins.md) — auto-generated builtin function/constant reference
 - [Primitive type methods](methods.md) — auto-generated array/map/set/string method reference
 - [CLI Reference](cli/README.md) — `a` commands, flags, and workflows
-- [Compiler Internals](compiler-internals/README.md) — pipeline, KGEN/LLVM backend, module loading, and project layout
+- [Compiler Internals](compiler-internals/README.md) — pipeline, Astra backend, module loading, and project layout
 
 ## Examples
 

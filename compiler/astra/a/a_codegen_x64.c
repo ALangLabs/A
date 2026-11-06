@@ -77,13 +77,9 @@ static Sym *a_rsym(CG *g, const char *name){
     return s;
 }
 static Sym *data_sym(CG *g, const char *name, Section *sec, unsigned long off, unsigned long size){
-    fprintf(stderr, "[ds] enter %s\n", name); fflush(stderr);
     int v = tok_alloc_const(name);
-    fprintf(stderr, "[ds] tok %s v=%d\n", name, v); fflush(stderr);
     Sym *s = external_global_sym(v, &char_pointer_type);
-    fprintf(stderr, "[ds] ext sym %p\n", (void*)s); fflush(stderr);
     put_extern_sym(s, sec, off, size);
-    fprintf(stderr, "[ds] put ok\n"); fflush(stderr);
     return s;
 }
 /* call runtime function `name` with args already in rdi,rsi,rdx,rcx,r8,r9 */
@@ -1007,10 +1003,8 @@ static void emit_fn_sym(CG *g, const char *name, unsigned long start, unsigned l
 
 int a_codegen(AModule *m){
     TCCState *s1 = m->s1;
-    fprintf(stderr, "[cg] enter prog=%p nlist=%d\n", (void*)m->prog, m->prog ? m->prog->nlist : -1); fflush(stderr);
     CG g; memset(&g, 0, sizeof g);
     g.m = m; g.s1 = m->s1; g.t = text_section;
-    fprintf(stderr, "[cg] sections ok text=%p data=%p bss=%p ro=%p\n", (void*)text_section,(void*)data_section,(void*)bss_section,(void*)rodata_section); fflush(stderr);
     g.globals_sym = data_sym(&g, "a_globals", bss_section, bss_section ? bss_section->data_offset : 0, (m->prog->aux ? m->prog->aux : 1) * 8);
     /* reserve bss */
     section_ptr_add(bss_section, (m->prog->aux ? m->prog->aux : 1) * 8);
@@ -1031,7 +1025,6 @@ int a_codegen(AModule *m){
         emit_fn_sym(&g, s->name, start, g.t->data_offset - start);
         fn_global_idx[i] = s->loc_idx;
     }
-    fprintf(stderr, "[cg] fns done\n"); fflush(stderr);
     /* emit main */
     unsigned long mstart = g.t->data_offset;
     {
@@ -1058,10 +1051,8 @@ int a_codegen(AModule *m){
         jmp32(&g, 0xE9, g.epilogue);
         emit_fn_epilogue(&g);
     }
-    fprintf(stderr, "[cg] main body done\n"); fflush(stderr);
     emit_fn_sym(&g, "main", mstart, g.t->data_offset - mstart);
     patchfix(&g);
-    fprintf(stderr, "[cg] exit\n"); fflush(stderr);
     return m->had_error ? -1 : 0;
 }
 

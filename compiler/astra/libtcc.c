@@ -837,6 +837,13 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
             }
             tccpp_new(s1);
             tccgen_init(s1);
+            /* Compile the A runtime BEFORE opening this file's symbol range:
+               a_ensure_runtime() does its own balanced tccelf_begin/end_file,
+               so its symbols are merged on their own. Running it inside
+               tcc_compile_a() would nest it in the middle of our range and
+               tccelf_end_file() would remap the runtime's symbols as if they
+               belonged to the A file, leaving every reference unresolved. */
+            a_ensure_runtime(s1);
             tccelf_begin_file(s1);
             tcc_compile_a(s1, fd == -1 ? "<string>" : str, asrc ? asrc : "", alen);
             tccelf_end_file(s1);
@@ -1300,7 +1307,32 @@ static int tcc_add_library_internal(TCCState *s1, const char *fmt,
 
     for(i = 0; i < nb_paths; i++) {
         snprintf(buf, sizeof(buf), fmt, paths[i], filename);
-        ret = tcc_add_file_internal(s1, buf, flags & ~AFF_PRINT_ERROR);
+        /* For library lookups the filetype guess is skipped (AFF_TYPE_LIB is
+           already set), so .so files would be parsed as C source. Sniff the
+           content: ELF objects and archives are binary; anything else may be
+           a GNU ld linker script (Debian's libc.so/libm.so are scripts that
+           GROUP the real .so.6), so clear the type bits and let the
+           extension guess route it to the binary/ldscript path. */
+        if (flags & AFF_TYPE_LIB) {
+            FILE *f = tcc_fopen(buf, "rb");
+            unsigned char magic[8] = {0};
+            int isbin = 0;
+            if (f) {
+                if (fread(magic, 1, 8, f) == 8 &&
+                    (!memcmp(magic, "\177ELF", 4) || !memcmp(magic, "!<arch>\n", 8)))
+                    isbin = 1;
+                fclose(f);
+            }
+            if (isbin) {
+                ret = tcc_add_file_internal(s1, buf,
+                    (flags | AFF_TYPE_BIN) & ~AFF_PRINT_ERROR);
+            } else {
+                ret = tcc_add_file_internal(s1, buf,
+                    (flags & ~AFF_TYPE_MASK) & ~AFF_PRINT_ERROR);
+            }
+        } else {
+            ret = tcc_add_file_internal(s1, buf, flags & ~AFF_PRINT_ERROR);
+        }
         if (ret != FILE_NOT_FOUND)
             return ret;
     }

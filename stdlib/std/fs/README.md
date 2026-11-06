@@ -42,7 +42,7 @@ print(fs.read_file(path))
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
 - Filesystem errors are surfaced by the runtime (behavior may differ from Python exceptions/APIs).
 - Prefer workspace-local paths for tests and examples.
 

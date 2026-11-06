@@ -2,7 +2,7 @@
 // the packages you import — A_PYTHON / A_PYTHON_LIB overrides, project
 // ./.venv & venv, VIRTUAL_ENV / UV_PROJECT_ENVIRONMENT / CONDA_PREFIX, PATH
 // pythons, uv-managed installs, then system libraries as a last resort.
-#include "backend/kgen/python/python_symbols.hpp"
+#include "astra/python/python_symbols.hpp"
 
 #include <algorithm>
 #include <cctype>

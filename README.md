@@ -299,8 +299,6 @@ Options:
   --indent <n>     indentation width in spaces (for 'fmt', default 4)
   --json           emit structured JSON (for 'doc' and 'check')
   --opt            run optimization passes when printing IR (for 'ir')
-  --backend <name> 'native' (default, emits C++ and invokes g++) or 'llvm'
-  --emit-llvm      emit textual LLVM IR (.ll) instead of an executable
   -I <dir>         add a module search directory (repeatable)
   --stdlib <dir>   override the standard library directory
   --no-color       disable colored diagnostics

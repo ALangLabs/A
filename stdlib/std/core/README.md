@@ -35,7 +35,7 @@ core.assert(1 + 1 == 2, "math broke")
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
 - `panic` is commonly used by stdlib ports to report contract violations in A (where Python might raise).
 
 ## Source Files

@@ -46,8 +46,8 @@ print(json.is_valid("[1, 2"))
 
 ## Usage Notes
 
-- Native-backed/runtime behavior may vary by backend (interpreter/KGEN vs LLVM paths) and host environment.
-- Native-backed/runtime behavior may differ by backend path; this module is primarily exercised through interpreter/KGEN execution.
+- Native-backed/runtime behavior may vary by backend (Astra backend paths) and host environment.
+- Native-backed/runtime behavior may differ by backend path; this module is primarily exercised through interpreter execution.
 - Accessor results may be optional-like values; use the project’s established unwrapping patterns (as in existing tests/examples).
 
 ## Source Files

@@ -27,11 +27,18 @@
 # include "libtcc.c"
 #endif
 #include "tcctools.c"
+#include <stdio.h>
+#if defined(__APPLE__)
+# include <mach-o/dyld.h>
+#endif
 
 static const char help[] =
-    "Tiny C Compiler "TCC_VERSION" - Copyright (C) 2001-2006 Fabrice Bellard\n"
-    "Usage: tcc [options...] [-o outfile] [-c] infile(s)...\n"
-    "       tcc [options...] -run infile (or --) [arguments...]\n"
+    "Astra "TCC_VERSION" - Tiny C Compiler fork for the A language\n"
+    "Usage: astra [link|cc] [options...] [-o outfile] [-c] infile(s)...\n"
+    "       astra [options...] -run infile (or --) [arguments...]\n"
+    "Commands:\n"
+    "  link          link object files into an executable (default action)\n"
+    "  cc            compile and link (default action)\n"
     "General options:\n"
     "  -c           compile only - generate an object file\n"
     "  -o outfile   set output filename\n"
@@ -286,8 +293,53 @@ static unsigned getclock_ms(void)
 #endif
 }
 
+/* Locate the staged Astra runtime (libtcc1.a + headers) that
+   cmake/libtcc.cmake places next to the driver build, so `astra` works
+   without an explicit -B. Returns NULL when nothing is found; an explicit
+   -B on the command line still overrides this default. */
+static const char *astra_libpath(void)
+{
+    static char dirbuf[4096];
+    static char probebuf[4096];
+    char exe[4096];
+#if defined(__APPLE__)
+    uint32_t sz = sizeof exe;
+    if (_NSGetExecutablePath(exe, &sz) != 0)
+        return NULL;
+#else
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0)
+        return NULL;
+    exe[n] = '\0';
+#endif
+    char *slash = strrchr(exe, '/');
+    if (!slash)
+        return NULL;
+    *slash = '\0';
+    /* <exedir>, <exedir>/../tcclib, <exedir>/tcclib, <exedir>/.. — the staged
+       runtime layouts produced by cmake/libtcc.cmake. */
+    static const char *subs[] = { "", "/../tcclib", "/tcclib", "/.." };
+    for (size_t i = 0; i < sizeof subs / sizeof *subs; i++) {
+        snprintf(probebuf, sizeof probebuf, "%s%s/libtcc1.a", exe, subs[i]);
+        FILE *f = fopen(probebuf, "rb");
+        if (f) {
+            fclose(f);
+            snprintf(dirbuf, sizeof dirbuf, "%s%s", exe, subs[i]);
+            return dirbuf;
+        }
+    }
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
+    /* Astra toolchain subcommands: `astra link ...` is the linker front-end
+       (a plain tcc link invocation over object files); `astra cc ...` is an
+       alias for the default compile+link mode. */
+    if (argc > 1 && (!strcmp(argv[1], "link") || !strcmp(argv[1], "cc"))) {
+        memmove(&argv[1], &argv[2], (size_t)(argc - 2) * sizeof *argv);
+        argv[--argc] = NULL;
+    }
     TCCState *s, *s1;
     int ret, opt, n = 0, t = 0, done;
     unsigned start_time = 0, end_time = 0;
@@ -299,6 +351,11 @@ int main(int argc, char **argv)
 redo:
     argc = argc0, argv = argv0;
     s = s1 = tcc_new();
+    {
+        const char *lp = astra_libpath();
+        if (lp)
+            tcc_set_lib_path(s, lp);
+    }
     opt = tcc_parse_args(s, &argc, &argv);
 
     if (n == 0) {

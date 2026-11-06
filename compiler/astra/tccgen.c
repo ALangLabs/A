@@ -518,9 +518,7 @@ ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
     char buf1[256];
 
     if (!sym->c) {
-        fprintf(stderr, "[pes] name step sym->v=%d\n", sym->v); fflush(stderr);
         name = get_tok_str(sym->v, NULL);
-        fprintf(stderr, "[pes] got name %s\n", name); fflush(stderr);
         t = sym->type.t;
         if ((t & VT_BTYPE) == VT_FUNC) {
             sym_type = STT_FUNC;
@@ -566,9 +564,7 @@ ST_FUNC void put_extern_sym2(Sym *sym, int sh_num,
         }
 
         info = ELFW(ST_INFO)(sym_bind, sym_type);
-        fprintf(stderr, "[pes] put_elf_sym shnum=%d val=%lu size=%lu info=%d other=%d name=%s\n", sh_num, (unsigned long)value, size, info, other, name); fflush(stderr);
         sym->c = put_elf_sym(symtab_section, value, size, info, other, sh_num, name);
-        fprintf(stderr, "[pes] sym->c=%d\n", sym->c); fflush(stderr);
 
         if (debug_modes)
             tcc_debug_extern_sym(tcc_state, sym, sh_num, sym_bind, sym_type);

@@ -42,7 +42,6 @@ void printUsage(std::ostream& os) {
      << "  --parallel       check modules in parallel (async type checking; same diagnostics)\n"
      << "  -j <n>, --jobs <n>  parallel jobs (default: serial; -j 0 = all cores)\n"
      << "  --opt            run optimization passes (ir)\n"
-     << "  --emit-llvm      emit LLVM IR (.ll) instead of executable (build)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
      << "  --stdlib <dir>   override standard library directory\n"
      << "  --no-color       disable colored diagnostics\n"
@@ -63,7 +62,6 @@ struct Options {
   std::string path;
   std::string commandCode;
   std::string outputPath;
-  bool emitLLVM = false;
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;
   bool useColor = false;
@@ -81,7 +79,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     if (arg == "--no-color") colorDisabled = true;
-    else if (arg == "--emit-llvm") options.emitLLVM = true;
     else if (arg == "--check") options.checkOnly = true;
     else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
     else if (arg == "--json") options.jsonOutput = true;
@@ -158,7 +155,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     }
   }
   if (options.command != "build" && options.command != "doc" && !options.outputPath.empty()) { err << "error: '-o' is only valid with 'build' or 'doc'\n"; return false; }
-  if (options.command != "build" && options.emitLLVM) { err << "error: '--emit-llvm' is only valid with 'build'\n"; return false; }
   if (options.command != "fmt" && (options.writeInPlace || options.checkOnly || options.indentWidth != 4)) {
     err << "error: fmt options are only valid with 'fmt'\n"; return false;
   }
@@ -198,12 +194,8 @@ int main(int argc, char** argv) {
   if (options.command == "test") return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "build") {
     std::string out = options.outputPath;
-    if (options.emitLLVM) {
-      if (out.empty()) out = options.path + ".ll";
-      return a::emitLLVMFile(options.path, out, config, std::cerr);
-    }
     if (out.empty()) out = "a.out";
-    return a::buildFile(options.path, out, config, "llvm", std::cerr);
+    return a::buildFile(options.path, out, config, "astra", std::cerr);
   }
   if (options.command == "check") return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "fmt") {

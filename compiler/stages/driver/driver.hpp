@@ -9,7 +9,6 @@ int runSource(const std::string& displayPath,std::string source,const DriverConf
 int testFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int repl(const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int buildFile(const std::string& path,const std::string& outputPath,const DriverConfig& config,const std::string& backend,std::ostream& err);
-int emitLLVMFile(const std::string& path,const std::string& outputPath,const DriverConfig& config,std::ostream& err);
 int emitIRFile(const std::string& path,const DriverConfig& config,bool optimize,std::ostream& out,std::ostream& err);
 struct FormatFileOptions { bool checkOnly=false,writeInPlace=false; int indentWidth=4; bool useColor=false; };
 int formatFile(const std::string& path,const FormatFileOptions& options,std::ostream& out,std::ostream& err);

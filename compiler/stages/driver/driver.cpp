@@ -10,7 +10,6 @@
 #include "diagnostics/diagnostics.hpp"
 #include "pipeline/pipeline.hpp"
 #include "name-resolution/module_loader.hpp"
-#include "backend/kgen/runtime/terminal.hpp"
 #include "tooling/docgen.hpp"
 #include "tooling/formatter.hpp"
 #include <filesystem>
@@ -60,14 +59,8 @@ bool replInputComplete(const std::string& text){
 }
 }
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
-  // Interactive terminal: run the self-hosted A REPL (stdlib/std/repl) with
-  // line editing, history, highlighting, and completion. Piped stdin keeps
-  // the simple line-based fallback so scripts and tests still work.
-  if(kgen::terminal::isTty()){
-    const std::filesystem::path entry=std::filesystem::path(defaultStdlibRoot())/"std"/"repl"/"main.a";
-    PipelineConfig pc=toP(c); pc.checkOnly=false;
-    return runReplUi(entry.string(),pc,in,o,e);
-  }
+  // Line-based REPL: each complete input is compiled and run by Astra as a
+  // fresh process (top-level bindings do not persist between inputs).
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";
   ReplSession session;
   PipelineConfig pc=toP(c); pc.checkOnly=false;
@@ -90,7 +83,6 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
   return 0;
 }
 int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,const std::string& /*backend*/,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
-int emitLLVMFile(const std::string& p,const std::string& out,const DriverConfig& c,std::ostream& e){ return emitLLVMPipeline(p,out,toP(c),e); }
 int emitIRFile(const std::string& p,const DriverConfig& c,bool opt,std::ostream& o,std::ostream& e){ return emitIRPipeline(p,toP(c),opt,o,e); }
 int formatFile(const std::string& p,const FormatFileOptions& opt,std::ostream& o,std::ostream& e){
   std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink; tooling::FormatOptions f; f.indentWidth=opt.indentWidth;

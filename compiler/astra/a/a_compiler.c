@@ -67,18 +67,11 @@ ST_FUNC int tcc_compile_a(TCCState *s1, const char *filename, const char *buf, i
     am.filename = filename ? filename : "<a>";
     am.src = buf;
     am.len = len;
-
-    fprintf(stderr, "[a] lex\n"); fflush(stderr);
     if (a_lex(&am) < 0) return -1;
-    fprintf(stderr, "[a] parse\n"); fflush(stderr);
     if (a_parse(&am) < 0) return -1;
-    fprintf(stderr, "[a] sema\n"); fflush(stderr);
     if (a_sema(&am) < 0) return -1;
-    fprintf(stderr, "[a] runtime\n"); fflush(stderr);
     if (a_ensure_runtime(s1) < 0) return -1;
-    fprintf(stderr, "[a] codegen\n"); fflush(stderr);
     if (a_codegen(&am) < 0) return -1;
-    fprintf(stderr, "[a] done\n"); fflush(stderr);
     a_module_free(&am);
     return 0;
 }
