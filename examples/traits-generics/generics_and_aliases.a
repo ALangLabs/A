@@ -4,7 +4,7 @@ type UserId = i64
 fn identity(x):
     return x
 
-struct Box:
+class Box:
     value
 
     fn get(self):

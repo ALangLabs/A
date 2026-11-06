@@ -10,7 +10,7 @@ import core
 
 ## OrderedDict: insertion-ordered key/value map.
 ## `data` is public for interop with plain-map helpers.
-struct OrderedDict:
+class OrderedDict:
     data
 
     ## at(k) -> value for k; runtime error when absent

@@ -9,7 +9,7 @@ import core
 ## DefaultDict<T>: map with a default factory.
 ## `factory` is a `fn() -> T` called once per missing key (the value is
 ## then stored, like Python).
-struct DefaultDict<T>:
+class DefaultDict<T>:
     factory: fn() -> T
     data
 

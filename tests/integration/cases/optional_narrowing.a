@@ -1,4 +1,4 @@
-struct Point:
+class Point:
     x: i32
 
 fn width(p: Point?) -> i32:

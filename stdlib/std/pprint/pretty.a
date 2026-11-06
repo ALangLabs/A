@@ -176,13 +176,13 @@ fn _recursion(x):
 
 ## SafeRepr — (text, readable, recursive) triple from _safe_repr
 ## (Python returns a plain tuple; A tuples cannot be indexed).
-struct SafeRepr:
+class SafeRepr:
     text: str
     readable: bool
     recursive: bool
 
 ## Buf — mutable string sink for _format (Python writes to a stream).
-struct Buf:
+class Buf:
     parts: [String]
 
     fn put(self, s):
@@ -203,7 +203,7 @@ struct Buf:
 ## treats depth=0 as unlimited since 0 is falsy).
 ## There is no `stream` field: `pprint` writes to stdout, `pformat`
 ## returns the string.
-struct PrettyPrinter:
+class PrettyPrinter:
     indent: i64
     width: i64
     depth: i64

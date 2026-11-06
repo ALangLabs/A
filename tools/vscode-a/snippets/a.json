@@ -28,17 +28,6 @@
     "body": "${1:name} = fn(${2:args}) => ${3:expr}$0",
     "description": "Anonymous function"
   },
-  "Struct": {
-    "prefix": "struct",
-    "body": [
-      "struct ${1:Name}:",
-      "\t${2:field}",
-      "",
-      "\tfn ${3:method}(self):",
-      "\t\t$0"
-    ],
-    "description": "Struct with fields and methods"
-  },
   "Class": {
     "prefix": "class",
     "body": [

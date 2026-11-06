@@ -88,7 +88,6 @@ StmtPtr Parser::parseStatement() {
   switch (cur().kind) {
     case Tok::KwFn:
       return parseFnDecl();
-    case Tok::KwStruct:
     case Tok::KwClass:
     case Tok::KwMetaclass:
       return parseStructDecl();
@@ -284,16 +283,13 @@ ParamDecl Parser::parseParam() {
 
 StmtPtr Parser::parseStructDecl() {
   Span start = cur().span;
-  bool isClassDecl = (cur().kind == Tok::KwClass);
-  bool isMetaclassDecl = (cur().kind == Tok::KwMetaclass);
-  advance(); // consume struct, class, or metaclass
+  advance(); // consume class or metaclass
 
-  const Token& nameTok = expect(Tok::Ident, "a class or struct name");
+  const Token& nameTok = expect(Tok::Ident, "a class name");
 
   auto decl = std::make_unique<StructDecl>();
   decl->name = nameTok.lexeme;
   decl->nameSpan = nameTok.span;
-  decl->isClass = isClassDecl || isMetaclassDecl;
 
   if (match(Tok::Lt)) {
     while (!check(Tok::Gt) && !check(Tok::Eof)) {

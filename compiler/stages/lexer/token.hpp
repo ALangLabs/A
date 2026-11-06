@@ -31,7 +31,6 @@ enum class Tok {
   KwContinue,
   KwReturn,
   KwDefer,
-  KwStruct,
   KwClass,
   KwMetaclass,
   KwPass,

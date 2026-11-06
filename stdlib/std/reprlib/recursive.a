@@ -29,7 +29,7 @@ fn _call1(f, x):
     return f(x)
 
 ## RecursiveRepr — recursion-guarded wrapper around a repr function.
-struct RecursiveRepr:
+class RecursiveRepr:
     user_function
     fillvalue
     running    # set of in-flight arguments

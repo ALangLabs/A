@@ -1,6 +1,6 @@
 import json
 
-struct Point:
+class Point:
     x
     y
 

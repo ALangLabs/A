@@ -49,7 +49,7 @@ const STDLIB = {
   prelude: { detail: 'stdlib namespace', doc: 'Prelude helpers/types available via stdlib/prelude patterns.', members: ['prelude_version','Vec4','Result','Ok','Err','unwrap','is_ok','is_err','unwrap_or'] },
 };
 
-const KEYWORDS = ['fn','if','elif','else','while','for','in','loop','break','continue','return','defer','struct','class','enum','trait','type','import','from','as','match','and','or','not','true','false','None','self','pass','comptime','impl','where','do','async','await'];
+const KEYWORDS = ['fn','if','elif','else','while','for','in','loop','break','continue','return','defer','class','enum','trait','type','import','from','as','match','and','or','not','true','false','None','self','pass','comptime','impl','where','do','async','await'];
 const BUILTINS = ['print','eprint','input','flush','len','str','int','float','bool','range','map','filter','reduce','sum','any','all','min','max','abs','pow','sqrt','round','floor','ceil','sorted','reversed','enumerate','zip','open','type','isinstance','assert','panic'];
 
 // Curated builtin signatures mirroring compiler/stages/name-resolution/

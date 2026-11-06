@@ -43,7 +43,7 @@ fn _sort_by_count_desc(items):
 
 ## Counter: multiset / element-count map.
 ## `counts` is public so it composes with plain-map helpers.
-struct Counter:
+class Counter:
     counts
 
     ## _bump(k, delta) -> new count after adding delta (private helper).

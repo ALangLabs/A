@@ -18,7 +18,7 @@ from "_apply.a" import _apply
 ## Partial is the A analogue of a `functools.partial` object.
 ## `func` is the wrapped callable; `bound` is the array of pre-bound
 ## positional arguments. Call the remaining arguments with `.call(args)`.
-struct Partial:
+class Partial:
     func
     bound
 

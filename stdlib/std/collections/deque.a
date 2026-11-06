@@ -14,7 +14,7 @@ import core
 ## `left` holds the left portion reversed (its last element is the
 ## deque's leftmost); `right` holds the right portion with `roff` live
 ## elements skipped at the front. Both are internal — use the methods.
-struct Deque<T>:
+class Deque<T>:
     left: [T]
     right: [T]
     roff: i64

@@ -29,7 +29,6 @@ const char* tokName(Tok kind) {
     case Tok::KwContinue: return "'continue'";
     case Tok::KwReturn: return "'return'";
     case Tok::KwDefer: return "'defer'";
-    case Tok::KwStruct: return "'struct'";
     case Tok::KwClass: return "'class'";
     case Tok::KwMetaclass: return "'metaclass'";
     case Tok::KwPass: return "'pass'";
@@ -134,7 +133,7 @@ const std::unordered_map<std::string, Tok>& keywordTable() {
       {"elif", Tok::KwElif},     {"else", Tok::KwElse},     {"while", Tok::KwWhile},
       {"for", Tok::KwFor},       {"in", Tok::KwIn},         {"loop", Tok::KwLoop},
       {"break", Tok::KwBreak},   {"continue", Tok::KwContinue},
-      {"return", Tok::KwReturn}, {"defer", Tok::KwDefer},   {"struct", Tok::KwStruct},
+      {"return", Tok::KwReturn}, {"defer", Tok::KwDefer},
       {"class", Tok::KwClass},   {"Class", Tok::KwClass},   {"metaclass", Tok::KwMetaclass},
       {"Metaclass", Tok::KwMetaclass}, {"pass", Tok::KwPass},
       {"self", Tok::KwSelf},     {"true", Tok::KwTrue},     {"false", Tok::KwFalse},

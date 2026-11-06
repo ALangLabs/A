@@ -441,7 +441,7 @@ Value hoverMarkdown(const std::string& signature, const std::string& documentati
 
 const char* const kKeywords[] = {
     "fn", "if", "elif", "else", "while", "do", "for", "in", "loop",
-    "break", "continue", "return", "defer", "struct", "class", "metaclass", "enum",
+    "break", "continue", "return", "defer", "class", "metaclass", "enum",
     "self", "true", "false", "and", "or", "not", "import", "from", "as", "match",
     "None", "pass", "type",
 };
@@ -1195,11 +1195,25 @@ class LanguageServer {
     notify("textDocument/publishDiagnostics", std::move(params));
   }
 
+  // Token lookup by (1-based line, 1-based byte column).
+  //
+  // Spans are half-open [col, endCol) (see lexer/span.hpp) and layout tokens
+  // (Newline, Indent, Dedent) are zero-width; the lexer attaches a Newline to
+  // the start of the following line (col 1..2) and Dedent tokens can sit at
+  // line starts too. If they were considered, hovering the first character
+  // of an identifier at line start (or a member right after '.') returned the
+  // preceding token and hover gave up -- hover failed on the most common
+  // stdlib calls (json.parse, math.sqrt, print at line start, ...). Skip
+  // layout tokens and use half-open containment so the point belongs to the
+  // token that starts there; matches resolveAt's identifier-only semantics.
   const Token* tokenAt(const std::vector<Token>& tokens, int line, int byteColumn) const {
     for (const Token& token : tokens) {
-      if (token.kind == Tok::Eof) continue;
+      if (token.kind == Tok::Eof || token.kind == Tok::Newline || token.kind == Tok::Indent ||
+          token.kind == Tok::Dedent) {
+        continue;
+      }
       if (token.span.line != line) continue;
-      if (byteColumn < token.span.col || byteColumn > token.span.endCol) continue;
+      if (byteColumn < token.span.col || byteColumn >= token.span.endCol) continue;
       return &token;
     }
     return nullptr;
@@ -1208,9 +1222,12 @@ class LanguageServer {
   int tokenIndexAt(const std::vector<Token>& tokens, int line, int byteColumn) const {
     for (std::size_t i = 0; i < tokens.size(); ++i) {
       const Token& token = tokens[i];
-      if (token.kind == Tok::Eof) continue;
+      if (token.kind == Tok::Eof || token.kind == Tok::Newline || token.kind == Tok::Indent ||
+          token.kind == Tok::Dedent) {
+        continue;
+      }
       if (token.span.line != line) continue;
-      if (byteColumn < token.span.col || byteColumn > token.span.endCol) continue;
+      if (byteColumn < token.span.col || byteColumn >= token.span.endCol) continue;
       return static_cast<int>(i);
     }
     return -1;
@@ -1830,8 +1847,8 @@ class LanguageServer {
       case a::StmtKind::StructDecl: {
         const auto& decl = static_cast<const a::StructDecl&>(statement);
         symbol["name"] = decl.name;
-        symbol["detail"] = decl.isClass ? "class" : "struct";
-        symbol["kind"] = static_cast<int>(decl.isClass ? SymbolKind::Class : SymbolKind::Struct);
+        symbol["detail"] = "class";
+        symbol["kind"] = static_cast<int>(SymbolKind::Class);
         symbol["range"] = symbolRange(text, decl.span);
         symbol["selectionRange"] = symbolRange(text, decl.nameSpan);
         Value children = Value::array();

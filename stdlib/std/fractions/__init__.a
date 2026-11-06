@@ -34,7 +34,7 @@ fn _pow2i(n: i64) -> i64:
     return r
 
 ## Fraction: exact rational n/d (fields public like Python's ._numerator).
-struct Fraction:
+class Fraction:
     n
     d
 

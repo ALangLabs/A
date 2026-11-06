@@ -6,7 +6,7 @@
 # cannot be overloaded in A, so `at(i)`/`set(i, v)` are the equivalents.
 import core
 
-struct UserList<T>:
+class UserList<T>:
     data: [T]
 
     ## at(i) -> element at index i (negative indexes from the end);

@@ -1,5 +1,5 @@
 # Struct/class with fields and methods
-struct Point:
+class Point:
     x
     y
 

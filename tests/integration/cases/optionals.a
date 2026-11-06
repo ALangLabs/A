@@ -1,10 +1,10 @@
 # Optional values: Some, None, ??, !, optional chaining, equality.
 
-struct Address:
+class Address:
     city
     country
 
-struct User:
+class User:
     name
     address
 

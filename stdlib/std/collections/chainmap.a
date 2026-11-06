@@ -7,7 +7,7 @@ import core
 
 ## ChainMap: a list of maps searched front-to-back.
 ## `maps` is public (Python exposes `.maps` too).
-struct ChainMap:
+class ChainMap:
     maps
 
     fn _first(self):

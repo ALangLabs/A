@@ -1,9 +1,9 @@
 # Optionals: None, Some, ??, !, ?., equality
-struct Address:
+class Address:
     city
     country
 
-struct User:
+class User:
     name
     address
 

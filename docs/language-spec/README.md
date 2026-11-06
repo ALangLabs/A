@@ -53,7 +53,7 @@ Reserved keywords (lexer):
 
 ```text
 fn if elif else while for in loop break continue return defer
-struct class metaclass pass self true false and or not
+class metaclass pass self true false and or not
 import from as match None enum do type trait where comptime impl
 ```
 
@@ -184,7 +184,7 @@ import math
 fn main():
     print("hi")
 
-struct Point:
+class Point:
     x
     y
 
@@ -408,7 +408,7 @@ from python:math import sqrt, pi
 
 - Bare imports like `import math` resolve to native modules or stdlib modules as configured by the module loader.
 - Quoted imports load `.a` modules from filesystem/module paths.
-- `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev headers; runs in the interpreter (`a run`/`a test`/`a repl`/`a -c`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, structs, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, `==`, and A's operators (`+ - * / % **`, comparisons, `in` — forwarded to CPython's `PyNumber_*`/rich-compare/`sq_contains`).
+- `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev headers; runs in the interpreter (`a run`/`a test`/`a repl`/`a -c`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, classes, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, `==`, and A's operators (`+ - * / % **`, comparisons, `in` — forwarded to CPython's `PyNumber_*`/rich-compare/`sq_contains`).
 - The interpreter is discovered at runtime and `dlopen`ed — no libpython is linked into `a`. Discovery order: `A_PYTHON`/`A_PYTHON_LIB`, local `.venv`/`venv`, `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`/`CONDA_PREFIX`, `python3`/`python` on `PATH`, uv-managed installs, system libraries; the environment containing the imported module is preferred. The chosen interpreter's `site-packages` joins `sys.path`, `A_PYTHONPATH` (colon-separated) adds more, and `-DPython3_EXECUTABLE` at configure time only selects the headers used to compile the interop layer.
 - Imports are only allowed at module top level.
 
@@ -582,14 +582,14 @@ Supported pattern forms (parser/AST):
 
 Arms use `=>` and may include guards with `if`.
 
-## 9. Structs, classes, methods, and inheritance syntax
+## 9. Classes, methods, and inheritance syntax
 
-### 9.1 Structs / classes
+### 9.1 Classes
 
-`struct`, `class`, and `metaclass` declarations are parsed into class-like struct declarations.
+`class` and `metaclass` declarations define class-like types.
 
 ```a
-struct Point:
+class Point:
     x
     y
 
@@ -689,7 +689,7 @@ fn same(a: T, b: T) -> bool where Equatable:
 
 ### 11.4 Generics
 
-Functions, structs, and type positions support generic parameter syntax in the parser/type checker:
+Functions, classes, and type positions support generic parameter syntax in the parser/type checker:
 
 ```a
 fn identity[T](x: T) -> T:

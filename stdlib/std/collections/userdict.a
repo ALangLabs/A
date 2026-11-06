@@ -9,7 +9,7 @@ import core
 
 ## UserDict: dict wrapper with the MutableMapping-style API.
 ## Construct with `UserDict({...})` or `user_dict()` for an empty one.
-struct UserDict:
+class UserDict:
     data
 
     ## at(k) -> value for k; runtime error when absent

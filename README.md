@@ -339,7 +339,7 @@ a doc -o docs/geometry.md geometry.a
 a doc --json geometry.a             # machine-readable API model
 ```
 
-Functions, classes/structs, enums, type aliases, fields, methods, variants,
+Functions, classes, enums, type aliases, fields, methods, variants,
 constants, and variables are included. (Docgen lives in
 `compiler/stages/tooling/`.)
 
@@ -358,12 +358,12 @@ with no third-party dependencies.
 | Capability | What it does |
 | :--- | :--- |
 | **Diagnostics** | Live lex, parse, and type errors with spans, messages, and compiler help text |
-| **Go to definition** | Locals, parameters, functions, structs/classes, fields, methods, enum variants, and imported module members |
+| **Go to definition** | Locals, parameters, functions, classes, fields, methods, enum variants, and imported module members |
 | **Find references** | Every use of a symbol, including across imported modules |
 | **Hover** | Signatures and types for symbols, plus documentation for builtins, native module members (`json.parse`), and dot methods (`"abc".strip`) |
 | **Completion** | Keywords, builtins, visible bindings, module members after `.` — including native modules (`json.`) and the string/array/map/set method sets — plus `import`/`from … import` candidates; docs load on demand via `completionItem/resolve` |
 | **Signature help** | Call signature with the active parameter highlighted for user functions, builtins, module members, and dot methods (triggered by `(` and `,`) |
-| **Document symbols** | Outline of functions, structs, fields, methods, enums, variants, and top-level bindings |
+| **Document symbols** | Outline of functions, classes, fields, methods, enums, variants, and top-level bindings |
 | **Workspace symbols** | `Ctrl+T` / `Cmd+T` search across open A documents |
 | **Formatting** | Full-document formatting through the same AST formatter as `a fmt` |
 | **Rename** | Rename a symbol across its declaration and every resolved reference |
@@ -383,7 +383,7 @@ cmake --build build --target a-lsp -j
 `tools/vscode-a/` adds TextMate syntax highlighting and connects VS Code to
 `a-lsp`:
 
-- Keywords (`var` `const` `pvt` `type` `fn` `struct` `class` `enum` `import` …),
+- Keywords (`var` `const` `pvt` `type` `fn` `class` `enum` `import` …),
   declarations, types (`Json`, fixed arrays, `T?` optionals), builtins, numbers,
   operators (`..`, `++`, `--`, `|>`, `??`, `?.`), and comments
 - Strings with `{interpolation}`, raw `"""` strings, char literals, and escapes

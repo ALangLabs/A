@@ -1,7 +1,7 @@
 trait Sized:
     fn size(self) -> i64
 
-struct Buffer:
+class Buffer:
     n: i64
 
     fn size(self) -> i64:

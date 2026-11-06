@@ -283,10 +283,9 @@ class IndexBuilder {
       }
       case StmtKind::StructDecl: {
         auto& decl = static_cast<StructDecl&>(stmt);
-        const SymbolKind kind = decl.isClass ? SymbolKind::Class : SymbolKind::Struct;
+        const SymbolKind kind = SymbolKind::Class;
         int structIndex =
-            addSymbol(decl.name, decl.nameSpan, kind, (decl.isClass ? "class " : "struct ") +
-                                                         decl.name,
+            addSymbol(decl.name, decl.nameSpan, kind, "class " + decl.name,
                       decl.name, scope, true);
         int memberScope = addScope(stmt.span, scope);
         if (structIndex >= 0) file_.symbols[static_cast<std::size_t>(structIndex)].memberScope =

@@ -16,7 +16,7 @@ counter = 100
 print("captured:", bump(), "current:", counter)
 
 # Structs and arrays captured by reference still share identity.
-struct Point:
+class Point:
     x
     y
 origin = Point(0, 0)

@@ -43,7 +43,7 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   fails to parse). Packages named after A keywords (`enum`, `type`, `match`,
   `class`, `loop`, `do`, `pass`, `self`, `in`, `as`, `from`, `defer`, `where`,
   `comptime`, `impl`, `trait`, `fn`, `if`, `else`, `elif`, `while`, `for`,
-  `break`, `continue`, `return`, `struct`, `metaclass`, `true`, `false`,
+  `break`, `continue`, `return`, `class`, `metaclass`, `true`, `false`,
   `None`, `and`, `or`, `not`, `import`) must either use a `py`-prefixed dir
   (e.g. `stdlib/std/pyenum/`) or rely on quoted-path imports. Check by writing
   a tiny `import <name>` test file before committing to a name.
@@ -100,8 +100,8 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
 - **`a % b` is C fmod** (sign of dividend), not Python floor-mod; `a / b`
   truncates for ints; `max`/`min` take exactly 2 args; no `sorted`/`reversed`/
   `enumerate`/`zip`/`open`/`isinstance`/`getattr` builtins.
-- **Struct constructors via module alias** (`pkg.Struct(...)`) can fail
-  ("unknown struct") — `from pkg import Struct` works.
+- **Class constructors via module alias** (`pkg.Struct(...)`) can fail
+  ("unknown class") — `from pkg import Struct` works.
 - **Native modules win bare imports**: `import collections` resolves the
   NATIVE module, not `stdlib/std/collections/` — Python-compat packages
   sharing a native name need quoted-path imports or a different name.
@@ -115,7 +115,7 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   coverage vs Python (what's missing and why), and semantic deviations
   (exceptions -> panic/Result, iterators -> lists, etc.).
 - Keep functions small and dependency-light; prefer returning `[T]`/`{K:V}`/
-  `(A,B)` builtins over new structs unless the Python API is class-based.
+  `(A,B)` builtins over new classes unless the Python API is class-based.
 
 ## Testing
 

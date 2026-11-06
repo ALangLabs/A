@@ -139,8 +139,7 @@ std::string declarationKeyword(const SourceText& source, const Span& declaration
   std::istringstream stream(prefix);
   std::string first;
   stream >> first;
-  if (first == "class" ||
-      first == "struct" || first == "metaclass") {
+  if (first == "class" || first == "metaclass") {
     return first;
   }
   if (first == "Class") return "class";

@@ -37,7 +37,7 @@ fn _type_tag(x) -> str:
 ## Dispatcher is the A analogue of a `functools.singledispatch` object.
 ## `func` is the default implementation; `registry` maps tag strings to
 ## registered function values.
-struct Dispatcher:
+class Dispatcher:
     func
     registry
 

@@ -30,7 +30,7 @@ import json
 ## GetoptError: vocabulary struct mirroring Python's exception fields.
 ## Errors are raised via core.panic (A has no exceptions); construct this
 ## only if you need to carry (msg, opt) pairs yourself.
-struct GetoptError:
+class GetoptError:
     msg
     opt
 

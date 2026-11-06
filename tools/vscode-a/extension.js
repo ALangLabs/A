@@ -645,7 +645,10 @@ function deactivate() { return stopOnDeactivate ? stopOnDeactivate() : Promise.r
 
 // ---- minimal provider registration for LSP mode (kept from previous extension) ----
 function registerProviders(getClient) {
-    const selector = { language: 'a', scheme: 'file' };
+    // Include untitled buffers: otherwise hover/completion/etc. are silently
+    // dead for untitled A files while fallback (which also covers them) is
+    // unregistered in server mode.
+    const selector = [{ language: 'a', scheme: 'file' }, { language: 'a', scheme: 'untitled' }];
     function toRange(range) { if (!range) return new vscode.Range(0,0,0,0); return new vscode.Range(range.start.line, range.start.character, range.end.line, range.end.character); }
     function locationsFrom(result) {
         if (!result) return null; const entries = Array.isArray(result) ? result : [result]; const locations = [];
@@ -663,6 +666,28 @@ function registerProviders(getClient) {
     function workspaceEditFromLsp(edit) { const we = new vscode.WorkspaceEdit(); if (!edit) return we; if (edit.changes) for (const [uri, edits] of Object.entries(edit.changes)) we.set(vscode.Uri.parse(uri), (edits||[]).map(toTextEdit)); if (Array.isArray(edit.documentChanges)) for (const c of edit.documentChanges) if (c && c.textDocument && Array.isArray(c.edits)) we.set(vscode.Uri.parse(c.textDocument.uri), c.edits.map(toTextEdit)); return we; }
     const A_LEGEND = new vscode.SemanticTokensLegend(['namespace','type','class','enum','function','method','parameter','variable','property','keyword','comment','string','number','operator'], ['declaration','readonly','static']);
     function semanticTokensFrom(data) { const b = new vscode.SemanticTokensBuilder(A_LEGEND); let line=-1, ch=0; for (let i=0;i+4<data.length;i+=5){ const dl=data[i],dc=data[i+1],len=data[i+2],type=data[i+3],mods=data[i+4]; if (dl>0){line+=dl;ch=dc;} else ch+=dc; while(line<0)line=0; b.push(new vscode.Range(line,ch,line,ch+len), type, mods&1?['declaration']:mods&2?['readonly']:mods&4?['static']:[]);} return b.build(); }
+    // Newer VS Code builds replace registerSemanticTokensProvider with
+    // registerDocumentSemanticTokensProvider + registerDocumentRangeSemanticTokensProvider;
+    // older builds expose the single combined API. Probe so the extension
+    // activates on both -- calling a missing API used to crash activate(),
+    // leaving the extension entirely dead (no LSP, no hover, empty output).
+    function registerSemanticTokens() {
+        const langs = vscode.languages;
+        const fullProvider = { async provideDocumentSemanticTokens(document, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/semanticTokens/full',{textDocument:{uri:document.uri.toString()}},token); if(!r||!Array.isArray(r.data)) return null; return semanticTokensFrom(r.data); } };
+        if (typeof langs.registerSemanticTokensProvider === 'function') {
+            return [langs.registerSemanticTokensProvider(selector, fullProvider, A_LEGEND)];
+        }
+        const subs = [];
+        if (typeof langs.registerDocumentSemanticTokensProvider === 'function') {
+            subs.push(langs.registerDocumentSemanticTokensProvider(selector, fullProvider, A_LEGEND));
+        }
+        if (typeof langs.registerDocumentRangeSemanticTokensProvider === 'function') {
+            const rangeProvider = { async provideDocumentRangeSemanticTokens(document, range, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/semanticTokens/range',{textDocument:{uri:document.uri.toString()},range:{start:{line:range.start.line,character:range.start.character},end:{line:range.end.line,character:range.end.character}}},token); if(!r||!Array.isArray(r.data)) return null; return semanticTokensFrom(r.data); } };
+            subs.push(langs.registerDocumentRangeSemanticTokensProvider(selector, rangeProvider, A_LEGEND));
+        }
+        return subs;
+    }
+    const semanticTokenSubs = registerSemanticTokens();
 
     const subs = [
         vscode.languages.registerDefinitionProvider(selector, { async provideDefinition(document, position, token) { const a=getClient(); if(!a) return null; return locationsFrom(await a.request('textDocument/definition',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}},token)); } }),
@@ -688,7 +713,7 @@ function registerProviders(getClient) {
         vscode.languages.registerDocumentHighlightProvider(selector, { async provideDocumentHighlights(document, position) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/documentHighlight',{textDocument:{uri:document.uri.toString()},position:{line:position.line,character:position.character}}); if(!Array.isArray(r)) return null; return r.map(e=>new vscode.DocumentHighlight(toRange(e.range), Math.max(0,Math.min(2,(e.kind||1)-1)))); } }),
         vscode.languages.registerFoldingRangeProvider(selector, { async provideFoldingRanges(document) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/foldingRange',{textDocument:{uri:document.uri.toString()}}); if(!Array.isArray(r)) return null; return r.map(e=>new vscode.FoldingRange(e.startLine,e.endLine,e.kind==='comment'?vscode.FoldingRangeKind.Comment:e.kind==='imports'?vscode.FoldingRangeKind.Imports:vscode.FoldingRangeKind.Region)); } }),
         vscode.languages.registerWorkspaceSymbolProvider({ async provideWorkspaceSymbols(query) { const a=getClient(); if(!a) return null; const r=await a.request('workspace/symbol',{query}); if(!Array.isArray(r)) return null; return r.filter(e=>e&&e.location).map(e=>new vscode.SymbolInformation(e.name,toSymbolKind(e.kind),e.containerName||'A',new vscode.Location(vscode.Uri.parse(e.location.uri),toRange(e.location.range)))); } }),
-        vscode.languages.registerSemanticTokensProvider(selector, { async provideDocumentSemanticTokens(document, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/semanticTokens/full',{textDocument:{uri:document.uri.toString()}},token); if(!r||!Array.isArray(r.data)) return null; return semanticTokensFrom(r.data); } }, A_LEGEND),
+        ...semanticTokenSubs,
         vscode.languages.registerInlayHintsProvider(selector, { async provideInlayHints(document, range, token) { const a=getClient(); if(!a) return null; const r=await a.request('textDocument/inlayHint',{textDocument:{uri:document.uri.toString()},range:{start:{line:range.start.line,character:range.start.character},end:{line:range.end.line,character:range.end.character}}},token); if(!Array.isArray(r)) return null; return r.map(e=>{ const h=new vscode.InlayHint(new vscode.Position(e.position.line,e.position.character),e.label,e.kind===1?vscode.InlayHintKind.Type:e.kind===2?vscode.InlayHintKind.Parameter:undefined); h.paddingLeft=Boolean(e.paddingLeft); h.paddingRight=Boolean(e.paddingRight); if(e.tooltip)h.tooltip=typeof e.tooltip==='string'?e.tooltip:e.tooltip.value; return h; }); } }),
     ];
     // attach to global context via side-effect in activate? easier: push to module not available; activate pushes nothing here but providers live while extension active in VS Code; we'll store globally is not necessary — VS Code disposes on deactivate? not directly. Keep simple: rely on extension host lifecycle.

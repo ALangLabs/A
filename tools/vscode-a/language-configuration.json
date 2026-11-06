@@ -39,13 +39,13 @@
   ],
   "folding": {
     "markers": {
-      "start": "^\\s*(?:fn|struct|class|enum|trait|impl|type|if|elif|else|while|do|for|loop|match|async)\\b.*:\\s*$",
+      "start": "^\\s*(?:fn|class|enum|trait|impl|type|if|elif|else|while|do|for|loop|match|async)\\b.*:\\s*$",
       "end": "^\\s*$"
     }
   },
   "indentationRules": {
     "increaseIndentPattern": "^\\s*.*:\\s*(?:#.*)?$",
-    "increaseIndentPattern2": "^\\s*(?:fn|struct|class|enum|trait|impl|type)\\s+[^\\n]*:\\s*$",
+    "increaseIndentPattern2": "^\\s*(?:fn|class|enum|trait|impl|type)\\s+[^\\n]*:\\s*$",
     "decreaseIndentPattern": "^\\s*(?:elif\\b|else\\b|while\\b.*|do\\b)$",
     "decreaseIndentPattern2": "^\\s*(?:except\\b|finally\\b)$",
     "indentNextLinePattern": "\\s+:\\s*(?:#.*)?$",
@@ -72,11 +72,11 @@
       "appendText": "\"\"\""
     },
     {
-      "beforeText": "^\\s*(?:fn|struct|class|enum|trait|impl)\\b.*:\\s*$",
+      "beforeText": "^\\s*(?:fn|class|enum|trait|impl)\\b.*:\\s*$",
       "action": { "indent": "indent" }
     },
     {
-      "beforeText": "^\\s*(?:match|enum|struct).*:\\s*$",
+      "beforeText": "^\\s*(?:match|enum|class).*:\\s*$",
       "action": { "indent": "indent" }
     }
   ],

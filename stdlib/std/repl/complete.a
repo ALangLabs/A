@@ -31,8 +31,8 @@ fn note_source(src):
         line = raw.strip()
         if line == "" or line[0..1] == "#":
             continue
-        # fn/struct/class/enum/trait NAME
-        for kw in ["fn ", "struct ", "class ", "enum ", "trait "]:
+        # fn/class/enum/trait NAME
+        for kw in ["fn ", "class ", "enum ", "trait "]:
             if len(line) >= len(kw) and line[0..len(kw)] == kw:
                 rest = line[len(kw)..]
                 end = 0
@@ -71,7 +71,7 @@ fn note_source(src):
                     c_add(word)
 
 keywords = ["fn", "if", "elif", "else", "while", "for", "in", "loop",
-            "break", "continue", "return", "defer", "struct", "class",
+            "break", "continue", "return", "defer", "class",
             "Class", "metaclass", "Metaclass", "pass", "self", "true",
             "false", "and", "or", "not", "import", "from", "as", "match",
             "None", "Some", "Ok", "Err", "enum", "do", "type", "trait",

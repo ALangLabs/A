@@ -20,7 +20,7 @@
 import pprint
 
 ## SimpleNamespace — attribute bag backed by a dynamic map.
-struct SimpleNamespace:
+class SimpleNamespace:
     data
 
     ## get(self, name) -> value or None when absent (dict.get analog).

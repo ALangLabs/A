@@ -116,7 +116,7 @@ fn _middle_truncate(s, limit: i64, fill):
 ##   maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
 ##   maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent
 ## `indent < 0` means Python `indent=None`.
-struct Repr:
+class Repr:
     maxlevel: i64
     maxtuple: i64
     maxlist: i64

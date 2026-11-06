@@ -473,7 +473,7 @@ TypePtr Sema::resolveTypeExpr(TypeExpr& expr) {
     }
     sink_.error(named->span, "Unknown type '" + named->name + "'.",
                 "Type names are 'bool', 'char', 'String', 'void', the sized numeric types, "
-                "struct names, '[T]' for arrays, '(T, U)' for tuples, 'fn(T) -> R' for "
+                "class names, '[T]' for arrays, '(T, U)' for tuples, 'fn(T) -> R' for "
                 "functions, or 'T?' for optionals.");
     return typeError();
   }

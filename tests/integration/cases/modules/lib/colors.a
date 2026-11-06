@@ -12,7 +12,7 @@ fn name_of(c):
         Color.Blue => "blue"
         _ => "unknown"
 
-struct Swatch:
+class Swatch:
     color
     label
 

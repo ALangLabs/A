@@ -17,7 +17,7 @@ from pathlib import Path
 SOURCE = '''import json
 
 ## A two-dimensional point.
-struct Point:
+class Point:
     x: i32
     y: i32
 
@@ -233,7 +233,7 @@ def main() -> int:
         )["result"]["items"]
         labels = {item["label"] for item in completion}
         if not {"add", "Point", "print"}.issubset(labels):
-            fail("completion did not include functions, structs, and builtins")
+            fail("completion did not include functions, classes, and builtins")
 
         formatting = client.request(
             "textDocument/formatting",
@@ -277,9 +277,9 @@ def main() -> int:
         folding = client.request(
             "textDocument/foldingRange", {"textDocument": {"uri": uri}}
         )["result"]
-        struct_line = next(i for i, text in enumerate(lines) if text.startswith("struct Point:"))
+        struct_line = next(i for i, text in enumerate(lines) if text.startswith("class Point:"))
         if not any(entry["startLine"] == struct_line for entry in folding):
-            fail(f"folding ranges did not include the struct body: {folding}")
+            fail(f"folding ranges did not include the class body: {folding}")
 
         def position_of(fragment: str) -> tuple[int, int]:
             for i, text in enumerate(lines):
@@ -324,6 +324,31 @@ def main() -> int:
         )["result"]
         if not hover or "strip([chars])" not in hover["contents"]["value"]:
             fail("hover did not describe the string method strip")
+
+        # Hover works at the very left edge (first character) of a module
+        # member and of a line-start builtin. Before the token lookup fix,
+        # the preceding '.' and the leading Newline/Indent token stole these
+        # positions and hover returned null.
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": json_line, "character": json_col + 5}},
+        )["result"]
+        if not hover or "json.parse(text)" not in hover["contents"]["value"]:
+            fail("hover at the left edge of json.parse (member start)")
+        standalone_print_line, standalone_print_col = position_of("print(doc, words.strip())")
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": standalone_print_line, "character": standalone_print_col}},
+        )["result"]
+        if not hover or "print(" not in hover["contents"]["value"]:
+            fail("hover at the left edge of a line-start builtin call")
+        arg_line, arg_col = position_of("return a + b + c")
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": arg_line, "character": arg_col + len("return ")}},
+        )["result"]
+        if not hover or "a: i32" not in hover["contents"]["value"]:
+            fail("hover on an indented parameter use")
 
         # Rich hover: builtin docs render Example and See Also sections.
         print_line, print_col = position_of('print("total = {total}")')

@@ -3,7 +3,7 @@ import fs
 import terminal
 
 entries = []
-struct HistState:
+class HistState:
     cursor
     stash
 

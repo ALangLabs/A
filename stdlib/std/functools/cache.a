@@ -23,7 +23,7 @@ from "_apply.a" import _apply, _key
 
 ## CacheInfo mirrors the fields of Python's `functools._CacheInfo`
 ## namedtuple: (hits, misses, maxsize, currsize).
-struct CacheInfo:
+class CacheInfo:
     hits
     misses
     maxsize
@@ -31,7 +31,7 @@ struct CacheInfo:
 
 ## LRUCache memoizes calls to `func`. Fields are public so advanced users can
 ## inspect/reset state; prefer the methods.
-struct LRUCache:
+class LRUCache:
     func
     cache      # {key: value}
     order      # [key] in least->most recently used order

@@ -14,7 +14,7 @@ Runnable examples for the current A language implementation. Each file can be ex
 | [control-flow](control-flow/) | `if`/`elif`/`else`, loops, `match`, ranges, comprehensions, `defer` |
 | [functions](functions/) | Functions, lambdas, closures, pipelines, recursion |
 | [data-types](data-types/) | Arrays, tuples, maps, sets, slicing, destructuring |
-| [classes](classes/) | `struct`/`class`, fields, methods, `self`, inheritance/metaclass syntax |
+| [classes](classes/) | `class`, fields, methods, `self`, inheritance/metaclass syntax |
 | [enums-match](enums-match/) | Enums (integer and algebraic), pattern matching, guards, variants |
 | [traits-generics](traits-generics/) | Traits, `impl`, `where`, type aliases, generics, `comptime` params |
 | [optionals-result](optionals-result/) | `T?`, `Some`/`None`, `??`, `!`, `?.`, `Result`/`Ok`/`Err`, `?` propagation |

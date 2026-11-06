@@ -24,7 +24,7 @@ print(prelude_version())  # "0.0.1"
 ### 1.2 `Vec4` (SIMD-like value type, width 4)
 
 ```a
-struct Vec4:
+class Vec4:
     x
     y
     z

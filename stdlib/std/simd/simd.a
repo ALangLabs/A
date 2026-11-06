@@ -7,7 +7,7 @@ import math
 
 # --- Vec8: eight typed i64 lanes ---
 
-struct Vec8:
+class Vec8:
     a: i64
     b: i64
     c: i64

@@ -578,7 +578,6 @@ struct StructDecl : Stmt {
   std::string metaclass;  // metaclass name if specified
   std::vector<FieldDecl> fields;
   std::vector<std::unique_ptr<FnDecl>> methods;
-  bool isClass = false;
   std::string doc;  // docstring: first string-literal statement in the body
 };
 

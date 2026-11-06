@@ -4,7 +4,7 @@ fn add(a, b):
 fn mul(a, b):
     return a * b
 
-struct Point:
+class Point:
     x
     y
 

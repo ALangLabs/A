@@ -15,7 +15,7 @@ import core
 ## A namedtuple value: an immutable record keyed by field name.
 ## Mirrors the Python namedtuple instance API (`_fields`, `_asdict`,
 ## `_replace`, `count`, `index`, tuple-style positional access via `at`).
-struct NamedTuple:
+class NamedTuple:
     _typename
     _fields
     _values
@@ -117,7 +117,7 @@ struct NamedTuple:
 ## NamedTupleSpec is what `namedtuple()` returns: the "class" analogue.
 ## `make(values)` is the `_make` classmethod analogue (takes an
 ## ordered list of values); `make_map(d)` is the kwargs constructor.
-struct NamedTupleSpec:
+class NamedTupleSpec:
     _typename
     _fields
 

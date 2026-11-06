@@ -11,7 +11,7 @@ print(types.type_tag({1, 2}))
 print(types.type_tag({"a": 1}))
 print(types.type_tag((1, 2)))
 
-struct Point:
+class Point:
     x
     y
 

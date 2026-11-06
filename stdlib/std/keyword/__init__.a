@@ -22,7 +22,7 @@
 
 kwlist = [
     "fn", "if", "elif", "else", "while", "for", "in", "loop",
-    "break", "continue", "return", "defer", "struct", "class", "Class",
+    "break", "continue", "return", "defer", "class", "Class",
     "metaclass", "Metaclass", "pass", "self", "true", "false",
     "and", "or", "not", "import", "from", "as", "match", "None",
     "enum", "do", "type", "trait", "where", "comptime", "impl",

@@ -10,7 +10,7 @@ import core
 fn prelude_version():
     return "0.0.1"
 
-struct Vec4:
+class Vec4:
     x
     y
     z
@@ -41,7 +41,7 @@ struct Vec4:
     fn sum(self):
         return self.x + self.y + self.z + self.w
 
-struct Result:
+class Result:
     ok
     value
     error

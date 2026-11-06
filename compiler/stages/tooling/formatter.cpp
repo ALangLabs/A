@@ -344,7 +344,7 @@ class Formatter {
 
   void emitStruct(const StructDecl& decl, int level, int nextLine, int& lastLine) {
     const std::string keyword = declarationKeyword(source_, decl.span, decl.nameSpan);
-    std::string header = keyword.empty() ? (decl.isClass ? "class" : "struct") : keyword;
+    std::string header = keyword.empty() ? "class" : keyword;
     header += " " + decl.name + typeParamsText(decl.typeParams);
 
     std::string parents;

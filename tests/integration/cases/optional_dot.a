@@ -1,4 +1,4 @@
-struct Point:
+class Point:
     x
 p = Point(1)
 print(p?.x)

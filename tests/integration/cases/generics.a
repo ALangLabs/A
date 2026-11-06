@@ -4,7 +4,7 @@ fn identity(x):
 fn first(items):
     return items[0]
 
-struct Box:
+class Box:
     value
 
     fn get(self):

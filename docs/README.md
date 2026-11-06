@@ -2,7 +2,7 @@
 
 This documentation describes the **current implementation** of the A language and toolchain (v2, KGEN/LLVM-oriented backend). It is derived from the compiler, type checker, module loader, native module tables, and integration tests in this repository.
 
-> **Note:** Some older marketing/README claims may not reflect current semantics. Where behavior differs, trust the compiler and tests. Current A is **Python-style dynamic at runtime** in many cases (plain assignment creates/rebinds mutable variables; many checks happen dynamically), with **optional annotations** and static/type-checker support for typed signatures, structs, traits, generics, and method resolution.
+> **Note:** Some older marketing/README claims may not reflect current semantics. Where behavior differs, trust the compiler and tests. Current A is **Python-style dynamic at runtime** in many cases (plain assignment creates/rebinds mutable variables; many checks happen dynamically), with **optional annotations** and static/type-checker support for typed signatures, classes, traits, generics, and method resolution.
 
 ## Contents
 
@@ -34,7 +34,7 @@ cmake --build build -j
 fn add(a, b):
     return a + b
 
-struct Point:
+class Point:
     x
     y
 

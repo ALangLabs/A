@@ -5,11 +5,11 @@
 import prelude
 import core
 
-struct Kernel:
+class Kernel:
     name: str
     func: fn(i64) -> i64
 
-struct Buffer:
+class Buffer:
     data: [i64]
     size: i64
 
@@ -21,7 +21,7 @@ struct Buffer:
     fn transfer_out(self) -> [i64]:
         return self.data
 
-struct Device:
+class Device:
     available: bool
     name: str
     backend: str

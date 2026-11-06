@@ -1,4 +1,4 @@
-36
+35
 35 4
 true
 true
@@ -20,5 +20,5 @@ true
 true
 true
 false
-["fn", "if", "elif", "else", "while", "for", "in", "loop", "break", "continue", "return", "defer", "struct", "class", "Class", "metaclass", "Metaclass", "pass", "self", "true", "false", "and", "or", "not", "import", "from", "as", "match", "None", "enum", "do", "type", "trait", "where", "comptime", "impl"]
+["fn", "if", "elif", "else", "while", "for", "in", "loop", "break", "continue", "return", "defer", "class", "Class", "metaclass", "Metaclass", "pass", "self", "true", "false", "and", "or", "not", "import", "from", "as", "match", "None", "enum", "do", "type", "trait", "where", "comptime", "impl"]
 ["False", "None", "True", "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del", "elif", "else", "except", "finally", "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", "not", "or", "pass", "raise", "return", "try", "while", "with", "yield"]

@@ -181,16 +181,13 @@ DocItem structItem(const StructDecl& decl, const DocMap& docs, const SourceText&
                    const std::string& aboveDoc = {}) {
   DocItem item;
   const std::string keyword = declarationKeyword(source, decl.span, decl.nameSpan);
-  if (keyword == "struct") {
-    item.kind = DocItem::Kind::Struct;
-  } else if (keyword == "metaclass") {
+  if (keyword == "metaclass") {
     item.kind = DocItem::Kind::Metaclass;
   } else {
     item.kind = DocItem::Kind::Class;
   }
   item.name = decl.name;
-  item.signature = structSignature(decl, keyword.empty() ? (decl.isClass ? "class" : "struct")
-                                                         : keyword);
+  item.signature = structSignature(decl, keyword.empty() ? "class" : keyword);
   item.doc = pickDoc(docs, decl.span, {decl.doc, aboveDoc});
 
   for (const FieldDecl& field : decl.fields) {

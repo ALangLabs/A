@@ -14,7 +14,7 @@ C_MATCH = "\x1b[1;32m"
 C_ERR = "\x1b[1;31m"
 C_RESET = "\x1b[0m"
 
-struct EdState:
+class EdState:
     lines
     row
     col
@@ -34,7 +34,7 @@ struct EdState:
 
 S = EdState([""], 0, 0, ">>> ", "edit", "", -1, [], 0, false, "", 0, 80, 0, 0, "")
 
-struct DRow:
+class DRow:
     w
     p
     b
