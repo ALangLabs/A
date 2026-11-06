@@ -56,6 +56,7 @@
 #else
 #error unknown target
 #endif
+#include "a/a_compiler.c"
 #ifdef TCC_TARGET_PE
 #include "tccpe.c"
 #endif
@@ -821,23 +822,46 @@ static int tcc_compile(TCCState *s1, int filetype, const char *str, int fd)
             file->fd = fd;
         }
 
-        preprocess_start(s1, filetype);
-        tccgen_init(s1);
-
-        if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
-            tcc_preprocess(s1);
-        } else {
-            tccelf_begin_file(s1);
-            if (filetype & (AFF_TYPE_ASM | AFF_TYPE_ASMPP)) {
-                tcc_assemble(s1, !!(filetype & AFF_TYPE_ASMPP));
+        if (filetype & AFF_TYPE_A) {
+            /* A language: direct A->machine code (no C, no preprocessor). */
+            const char *asrc = NULL;
+            int alen = 0;
+            char *atmp = NULL;
+            if (fd == -1) {
+                asrc = (const char *)file->buffer;
+                alen = (int)(file->buf_end - file->buffer);
             } else {
-                tccgen_compile(s1);
+                atmp = tcc_load_text(fd);
+                asrc = atmp;
+                alen = atmp ? (int)strlen(atmp) : 0;
             }
+            tccpp_new(s1);
+            tccgen_init(s1);
+            tccelf_begin_file(s1);
+            tcc_compile_a(s1, fd == -1 ? "<string>" : str, asrc ? asrc : "", alen);
             tccelf_end_file(s1);
+            tccgen_finish(s1);
+            preprocess_end(s1);
+            if (atmp) tcc_free(atmp);
+        } else {
+            preprocess_start(s1, filetype);
+            tccgen_init(s1);
+
+            if (s1->output_type == TCC_OUTPUT_PREPROCESS) {
+                tcc_preprocess(s1);
+            } else {
+                tccelf_begin_file(s1);
+                if (filetype & (AFF_TYPE_ASM | AFF_TYPE_ASMPP)) {
+                    tcc_assemble(s1, !!(filetype & AFF_TYPE_ASMPP));
+                } else {
+                    tccgen_compile(s1);
+                }
+                tccelf_end_file(s1);
+            }
+            tccgen_finish(s1);
+            preprocess_end(s1);
         }
     }
-    tccgen_finish(s1);
-    preprocess_end(s1);
     s1->error_set_jmp_enabled = 0;
     tcc_exit_state(s1);
     return s1->nb_errors != 0 ? -1 : 0;
@@ -1204,6 +1228,19 @@ static int guess_filetype(const char *filename)
                 filetype = AFF_TYPE_ASMPP;
             else if (!strcmp(ext, "s"))
                 filetype = AFF_TYPE_ASM;
+            else if (!strcmp(ext, "a")) {
+                /* ".a" is also the Unix archive extension: sniff for the
+                   archive magic before treating it as A source. */
+                FILE *f = tcc_fopen(filename, "rb");
+                char magic[8] = {0};
+                int is_archive = 0;
+                if (f) {
+                    if (fread(magic, 1, 8, f) == 8 && !memcmp(magic, "!<arch>\n", 8))
+                        is_archive = 1;
+                    fclose(f);
+                }
+                filetype = is_archive ? AFF_TYPE_BIN : AFF_TYPE_A;
+            }
             else if (!PATHCMP(ext, "c")
                      || !PATHCMP(ext, "h")
                      || !PATHCMP(ext, "i"))
