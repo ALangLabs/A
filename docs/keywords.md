@@ -45,6 +45,9 @@ fn add(a, b):
     return a + b
 
 class Point:
+    x
+    y
+
     fn sum(self):
         return self.x + self.y
 
@@ -52,7 +55,7 @@ double = fn(n) => n * 2
 ```
 
 Parameters may be typed (`name: String`) and the return may be typed
-(`-> String`); generic functions use `fn name[T](x: T) -> T`.
+(`-> String`); generic functions use `fn name<T>(x: T) -> T`.
 
 ## `class` / `metaclass` — class declarations
 
@@ -125,10 +128,11 @@ fn repeat(comptime N: int, x):
 Import statements (Python's `import` / `from ... import` / `import ... as`).
 
 ```a
-import math
+import std:math
 import "lib/util.a" as util
 from "lib/util.a" import add, Point
 import python:json
+from python:math import sqrt, pi
 ```
 
 ## `if`, `elif`, `else`

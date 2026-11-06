@@ -1,6 +1,6 @@
 # Native-backed json/binary modules (interpreter/execution-engine path)
-import json
-import binary
+import std:json
+import std:binary
 
 doc = json.parse("""{"a": 1, "b": [true, null], "s": "hi"}""")
 print(json.kind(doc))

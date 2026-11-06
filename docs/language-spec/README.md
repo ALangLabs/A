@@ -182,8 +182,8 @@ Common top-level forms:
 
 ```a
 import "lib/util.a"
-from "lib/util.a" import helper
-import math
+from "lib/util.a" import add
+import std:math
 
 fn main():
     print("hi")
@@ -325,7 +325,7 @@ Tuple destructuring is supported (parser/type checker/runtime support; integrati
 
 ```a
 pair = (1, 2)
-a, b = pair
+(a, b) = pair
 print(a, b)
 ```
 
@@ -409,7 +409,7 @@ fn demo():
 ### 5.11 `import` and `from ... import`
 
 ```a
-import math
+import std:math
 import "lib/util.a"
 import "lib/util.a" as util
 from "lib/util.a" import add, Point
@@ -417,7 +417,8 @@ import python:json
 from python:math import sqrt, pi
 ```
 
-- Bare imports like `import math` resolve to native modules or stdlib modules as configured by the module loader.
+- `import std:<name>` (and bare `import <name>` for native modules) resolves to native modules or stdlib modules as configured by the module loader.
+- `import std:<name>` / `from std:<name> import ...` also resolve `stdlib/std/<name>` packages (e.g. `import std:math`, `import std:json`).
 - Quoted imports load `.a` modules from filesystem/module paths.
 - `import python:<pkg>` / `from python:<pkg> import name` embed CPython (Mojo-style interop). Requires a build with Python 3 dev headers; runs in the interpreter (`a run`/`a test`/`a repl`/`a -c`), not the LLVM/native backends. Scalars, strings, arrays, maps, sets, tuples, optionals, results, classes, and enum variants convert automatically; other objects (modules, functions, class instances) stay live Python objects supporting `.attr`, `obj[key]`, calls, `==`, and A's operators (`+ - * / % **`, comparisons, `in` — forwarded to CPython's `PyNumber_*`/rich-compare/`sq_contains`).
 - The interpreter is discovered at runtime and `dlopen`ed — no libpython is linked into `a`. Discovery order: `A_PYTHON`/`A_PYTHON_LIB`, local `.venv`/`venv`, `VIRTUAL_ENV`/`UV_PROJECT_ENVIRONMENT`/`CONDA_PREFIX`, `python3`/`python` on `PATH`, uv-managed installs, system libraries; the environment containing the imported module is preferred. The chosen interpreter's `site-packages` joins `sys.path`, `A_PYTHONPATH` (colon-separated) adds more, and `-DPython3_EXECUTABLE` at configure time only selects the headers used to compile the interop layer.
@@ -631,7 +632,7 @@ class Animal:
         return "..."
 
 class Dog(Animal):
-    fn speak(self):
+    fn bark(self):
         return "woof"
 ```
 
@@ -703,7 +704,7 @@ fn same(a: T, b: T) -> bool where Equatable:
 Functions, classes, and type positions support generic parameter syntax in the parser/type checker:
 
 ```a
-fn identity[T](x: T) -> T:
+fn identity<T>(x: T) -> T:
     return x
 ```
 
@@ -750,7 +751,7 @@ fn divide(a, b):
 
 ### 13.1 Module resolution
 
-- `import math` / `import core` resolve to native modules (backed by C++ runtime bindings).
+- `import std:math` / `import std:core` resolve to native modules (backed by C++ runtime bindings).
 - quoted imports resolve to `.a` files (relative/module paths and stdlib resolution rules apply).
 - the module loader auto-loads the prelude before the entry program when a stdlib root is found (`stdlib/prelude.a` / `std/prelude` variants).
 

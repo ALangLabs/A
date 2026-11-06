@@ -1,4 +1,4 @@
 # Hello world
 print("Hello, A!")
-import prelude
+import std:prelude
 print("prelude:", prelude.prelude_version())

@@ -1,8 +1,8 @@
 # Native modules: core, math, time, fs
-import core
-import math
-import time
-import fs
+import std:core
+import std:math
+import std:time
+import std:fs
 
 core.assert(1 + 1 == 2)
 core.assert_eq("A".lower(), "a")

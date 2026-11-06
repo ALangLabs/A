@@ -18,6 +18,34 @@ also available through their native module; methods are documented on
 
 ## Built-in functions
 
+### `__debug_context__() -> String`
+
+Returns `file:line in fn()` or module context.
+
+### `__debug_repr__(value) -> String`
+
+Returns a debug string for a value.
+
+### `__debug_time__() -> String`
+
+Returns a local debug timestamp `HH:MM:SS.mmm`.
+
+### `__file__()`
+
+Returns the current source file path.
+
+### `__func__()`
+
+Returns the current function name, or `<module>`.
+
+### `__ic_format__(context[, label, value]) -> String`
+
+Formats a litprinter-style `ic|` line. With one arg it formats a breadcrumb; with label/value it formats an inspection.
+
+### `__line__()`
+
+Returns the current 1-based source line.
+
 ### `abs(x) -> number`
 
 Absolute value, keeping the argument type.
@@ -292,7 +320,7 @@ ic| x: 42
 ic| [app.a:2 in main()] >>> x + 1: 43
 ```
 
-See also: `print`, `eprint`, `assert`
+See also: `print`, `eprint`, `__debug_context__`, `__debug_time__`, `__debug_repr__`
 
 ### `input([prompt]) -> String`
 
@@ -411,7 +439,7 @@ Parses one JSON document; malformed input is a runtime error.
 Example:
 
 ```a
->>> import json
+>>> import std:json
 >>> doc = json.parse('[1, 2, 3]')
 >>> doc
 [1, 2, 3]
@@ -442,7 +470,7 @@ Compact JSON text for any serializable A value.
 Example:
 
 ```a
->>> import json
+>>> import std:json
 >>> json.stringify([1, 2, 3])
 '[1, 2, 3]'
 ```
@@ -811,7 +839,7 @@ Square root of x.
 Example:
 
 ```a
->>> import math
+>>> import std:math
 >>> math.sqrt(16)
 4.0
 ```

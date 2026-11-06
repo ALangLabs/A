@@ -1,5 +1,5 @@
 # Result values: Ok/Err helpers
-import prelude
+import std:prelude
 
 fn divide(a, b):
     if b == 0:

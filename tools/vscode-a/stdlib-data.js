@@ -80,7 +80,7 @@ const BUILTIN_SIGS = {
   max: { signature: 'max(a, b) -> number', documentation: 'The larger of two values of the same numeric type.', seeAlso: 'min' },
   abs: { signature: 'abs(x) -> number', documentation: 'Absolute value, keeping the argument type.', seeAlso: 'min, max' },
   pow: { signature: 'pow(base, exponent) -> f64', documentation: 'Raises base to the exponent.' },
-  sqrt: { signature: 'sqrt(x) -> f64', documentation: 'Square root of x.', example: '>>> import math\n>>> math.sqrt(16)\n4.0', seeAlso: 'floor, ceil, round' },
+  sqrt: { signature: 'sqrt(x) -> f64', documentation: 'Square root of x.', example: '>>> import std:math\n>>> math.sqrt(16)\n4.0', seeAlso: 'floor, ceil, round' },
   floor: { signature: 'floor(x) -> f64', documentation: 'Rounds down to the nearest integer value.' },
   ceil: { signature: 'ceil(x) -> f64', documentation: 'Rounds up to the nearest integer value.' },
   round: { signature: 'round(x) -> f64', documentation: 'Rounds to the nearest integer value.' },

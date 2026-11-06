@@ -1,6 +1,6 @@
 # Unsafe/arena examples (advanced; semantics are implementation-specific)
-import arena
-import unsafe
+import std:arena
+import std:unsafe
 
 # Pool allocator supports individual releases; bump/region have different rules.
 a = arena.pool(1024)

@@ -24,7 +24,7 @@ inline const StringMap<BuiltinDoc>& builtinDocs() {
   static const StringMap<BuiltinDoc> docs = {
       // math (signature + docstring + doctest example)
       {"sqrt", {"sqrt", "sqrt(x) -> f64", "Square root of x.",
-                ">>> import math\n>>> math.sqrt(16)\n4.0",
+                ">>> import std:math\n>>> math.sqrt(16)\n4.0",
                 "floor, ceil, round"}},
       {"abs", {"abs", "abs(x) -> number", "Absolute value, keeping the argument type.",
                ">>> abs(-7)\n7",
@@ -224,11 +224,11 @@ inline const StringMap<BuiltinDoc>& builtinDocs() {
       // json (mirrors Python's json.dumps/loads; doctests below)
       {"json_parse", {"json_parse", "json.parse(text) -> Json",
                        "Parses one JSON document; malformed input is a runtime error.",
-                       ">>> import json\n>>> doc = json.parse('[1, 2, 3]')\n>>> doc\n[1, 2, 3]",
+                       ">>> import std:json\n>>> doc = json.parse('[1, 2, 3]')\n>>> doc\n[1, 2, 3]",
                        "json.stringify"}},
       {"json_stringify", {"json_stringify", "json.stringify(value) -> String",
                            "Compact JSON text for any serializable A value.",
-                           ">>> import json\n>>> json.stringify([1, 2, 3])\n'[1, 2, 3]'",
+                           ">>> import std:json\n>>> json.stringify([1, 2, 3])\n'[1, 2, 3]'",
                            "json.parse"}},
       {"json_pretty", {"json_pretty", "json.pretty(value) -> String",
                         "Indented JSON text with two-space indent.",

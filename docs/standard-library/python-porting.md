@@ -55,13 +55,13 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   `startswith`, case ops — ASCII-only). No regex engine — `re`-dependent
   modules need hand-rolled parsing or are deferred.
 - **Numbers:** `int`/`float` builtins + `i64`/`f64` etc.; math via global
-  builtins or `import math`. `time.now()` returns epoch **milliseconds**
+  builtins or `import std:math`. `time.now()` returns epoch **milliseconds**
   (Python uses seconds — convert).
-- **Files:** `import fs` gives `read_file/write_file/append_file/file_exists/
+- **Files:** `import std:fs` gives `read_file/write_file/append_file/file_exists/
   list_dir/remove_file/create_dir/remove_dir/rename/current_dir` (string
   paths; `remove_dir` only removes empty dirs; no rglob). No file-object IO —
   design APIs around whole-file strings or document the gap.
-- **JSON:** `import json` — `parse/stringify/pretty/is_valid/get/at/len/has/
+- **JSON:** `import std:json` — `parse/stringify/pretty/is_valid/get/at/len/has/
   keys/kind/as_*`. `parse` errors are runtime errors; check `is_valid` first.
 - **Random:** global `random()`/`random_int(lo,hi)`; `testing.seed(v)` seeds
   the shared engine. No `random.choice/shuffle` yet — implement in-module.
@@ -102,7 +102,7 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   `enumerate`/`zip`/`open`/`isinstance`/`getattr` builtins.
 - **Class constructors via module alias** (`pkg.Struct(...)`) can fail
   ("unknown class") — `from pkg import Struct` works.
-- **Native modules win bare imports**: `import collections` resolves the
+- **Native modules win bare imports**: `import std:collections` resolves the
   NATIVE module, not `stdlib/std/collections/` — Python-compat packages
   sharing a native name need quoted-path imports or a different name.
 

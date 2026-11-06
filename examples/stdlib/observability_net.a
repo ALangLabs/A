@@ -1,8 +1,8 @@
 # Native-backed observability/network APIs (examples; some require runtime support/network access)
-import log
-import metrics
-import trace
-import net
+import std:log
+import std:metrics
+import std:trace
+import std:net
 
 log.set_level("info")
 log.info("hello", {"component": "example"})

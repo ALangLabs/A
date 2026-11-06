@@ -18,13 +18,14 @@ This reference documents the current A standard library surface as implemented b
 ### 1.1 `prelude_version()`
 
 ```a
-print(prelude_version())  # "0.0.1"
+import std:prelude
+print(prelude.prelude_version())  # "0.0.1"
 ```
 
 ### 1.2 `Vec4` (SIMD-like value type, width 4)
 
 ```a
-class Vec4:
+class Vec4:   # provided by prelude; shown for shape
     x
     y
     z
@@ -44,29 +45,32 @@ Methods:
 
 ### 1.3 Result helpers
 
+Provided by `prelude` (import it first); signatures:
+
 ```a
-fn Ok(value):        # -> Result(ok=true, value, error=None)
-fn Err(message):     # -> Result(ok=false, value=None, error)
-fn unwrap(r):        # returns value or panics with r.error
-fn is_ok(r) -> bool
-fn is_err(r) -> bool
-fn unwrap_or(r, fallback)
-fn err_value(r)
-fn map_result(r, f: fn(i64) -> i64)
-fn and_then(r, f: fn(i64) -> Result) -> Result
-fn vectorize(f: fn(i64) -> i64, xs: [i64]) -> [i64]
+import std:prelude
+
+# prelude.Ok(value)        # -> Result(ok=true, value, error=None)
+# prelude.Err(message)     # -> Result(ok=false, value=None, error)
+# prelude.unwrap(r)        # returns value or panics with r.error
+# prelude.is_ok(r) -> bool
+# prelude.is_err(r) -> bool
+# prelude.unwrap_or(r, fallback)
+# prelude.err_value(r)
 ```
 
 Example:
 
 ```a
+import std:prelude
+
 fn divide(a, b):
     if b == 0:
-        return Err("division by zero")
-    return Ok(a / b)
+        return prelude.Err("division by zero")
+    return prelude.Ok(a / b)
 
-print(is_ok(divide(10, 2)))
-print(unwrap_or(divide(10, 0), -1))
+print(prelude.is_ok(divide(10, 2)))
+print(prelude.unwrap_or(divide(10, 0), -1))
 ```
 
 ## 2. Global builtins and constants
@@ -117,14 +121,19 @@ sets support `add/remove/discard/union/intersection/difference`.
 
 ## 4. Native modules (toolchain-backed)
 
-Import native modules by bare name:
+Import native modules with the `std:` prefix:
 
 ```a
-import math
-import fs
-import json
-from net import tcp_connect
+import std:math
+import std:fs
+import std:json
+from std:net import tcp_connect
 ```
+
+Native modules and ported `std/*` packages are both reached through the
+`std:` prefix (`import std:<name>` / `from std:<name> import ...`). Bare
+`import <name>` is also accepted as shorthand for native modules and
+auto-resolves to `stdlib/std/<name>/__init__.a` for ported packages.
 
 Native module members map to runtime builtins (see `native_modules.hpp`).
 
@@ -134,7 +143,7 @@ Functions: `sqrt, abs, min, max, pow, sin, cos, tan, asin, acos, atan, atan2, ex
 Constants: `PI`, `E`
 
 ```a
-import math
+import std:math
 print(math.sqrt(81))
 print(math.PI)
 ```
@@ -144,7 +153,7 @@ print(math.PI)
 Functions: `print, eprint, input, flush`
 
 ```a
-import io
+import std:io
 io.print("hello")
 ```
 
@@ -153,7 +162,7 @@ io.print("hello")
 Functions: `read_file, write_file, append_file, file_exists, list_dir, remove_file, create_dir, remove_dir, rename, current_dir`
 
 ```a
-import fs
+import std:fs
 fs.write_file("/tmp/a-demo.txt", "hi")
 print(fs.read_file("/tmp/a-demo.txt"))
 print(fs.file_exists("/tmp/a-demo.txt"))
