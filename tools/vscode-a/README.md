@@ -5,9 +5,18 @@ Syntax highlighting, language intelligence, and compiler tasks for the
 
 ## Features
 
-- TextMate syntax highlighting for `.a` files: keywords, declarations, types,
-  builtins, numbers, strings, string interpolation, characters, comments, and
-  operators. ` ```a ` fenced blocks in Markdown get highlighting too.
+- TextMate syntax highlighting for `.a` files (Python-grade, then the same
+  on top of it with LSP semantic tokens): keywords (`fn`/`struct`/`trait`/
+  `impl`/`comptime`/control/import), declarations with parameters and generic
+  type arguments (`entity.name.*`, `variable.parameter`, `support.type.*`),
+  primitive + generic types (`Option<T>`, `Result<T, E>`, `Async<T>`, …),
+  both call sites and builtins (`support.function.*`, `meta.function-call`),
+  numbers (hex/binary/octal/float, underscores), strings (normal, raw
+  `"""…"""` docstrings, `{expr}` interpolation), chars, `#`/`##` doc
+  comments (with TODO markers), operators (`??`, `?.`, `..`, `|>`, `->`,
+  `=>`), members, and punctuation. ` ```a ` fenced blocks in Markdown get
+  highlighting too. LSP semantic tokens and inlay hints refine this further
+  (types, members, inferred `: i32` on `x = 1`), like Pyright/Pyrefly.
 - Snippets for functions, structs, classes, enums, traits, imports, control
   flow, match, comprehensions, defer, tests, and asserts.
 - Two analysis modes, chosen automatically:

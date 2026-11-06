@@ -101,6 +101,11 @@ function modulePaths(config, cwd, file) {
 
 // Settings for the document (or task) at `uri`: the entry file commands act
 // on, the compiler, module paths, stdlib override, timeouts and switches.
+function jobsOf(config) {
+    const jobs = Number(config.get('jobs', 0));
+    return Number.isFinite(jobs) && jobs >= 0 ? Math.trunc(jobs) : 0;
+}
+
 function settings(vscode, uri, definition = {}, taskFolder) {
     const workspaceFolder = taskFolder || vscode.workspace.getWorkspaceFolder(uri);
     const cwd = workspaceFolder ? workspaceFolder.uri.fsPath : path.dirname(uri.fsPath);
@@ -117,6 +122,7 @@ function settings(vscode, uri, definition = {}, taskFolder) {
         timeout: Math.min(300000, Math.max(1000, config.get('checkTimeout', 30000))),
         checkOnSave: config.get('checkOnSave', true),
         useLanguageServer: config.get('useLanguageServer', true),
+        jobs: jobsOf(config),
         output
     };
 }
@@ -131,6 +137,12 @@ function argumentsFor(action, config, options = {}) {
     if (options.json) args.push('--json');
     if (config.stdlib) args.push('--stdlib', config.stdlib);
     for (const dir of config.modulePaths) args.push('-I', dir);
+    // Parallel/async checking: same diagnostics, faster on multi-module code.
+    if (config.jobs !== undefined && config.jobs > 1) {
+        args.push(`--jobs=${config.jobs}`);
+    } else if (config.jobs === 0) {
+        args.push('--parallel');
+    }
     if (action === 'build') args.push('-o', config.output);
     if (action === 'fmt') args.push('-w');
     args.push(config.file);

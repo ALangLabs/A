@@ -18,9 +18,19 @@ class LanguageClient {
         this.nextId = 1;
         this.pending = new Map();
         this.ready = false;
+        this.checking = false;
+        this.onCheckingChanged = undefined;
         this.disposables = [];
         this.diagnostics = vscode.languages.createDiagnosticCollection('a');
         this.disposables.push(this.diagnostics);
+    }
+
+    setChecking(checking) {
+        if (this.checking === checking) return;
+        this.checking = checking;
+        if (this.onCheckingChanged) {
+            try { this.onCheckingChanged(checking); } catch { /* ignore */ }
+        }
     }
 
     async start() {
@@ -28,12 +38,18 @@ class LanguageClient {
             ? vscode.workspace.workspaceFolders[0].uri.toString()
             : null;
 
+        // Async parallel checking: A_JOBS selects the worker-pool size
+        // (0 = all cores, 1 = serial). The server debounces edits itself
+        // (200 ms), so the extension only snapshots text.
+        const jobs = this.initOptions.jobs;
+        const env = { ...process.env };
+        if (jobs !== undefined && jobs !== null) env.A_JOBS = String(jobs);
         this.process = cp.spawn(this.serverPath, this.args, {
             cwd: vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length
                 ? vscode.workspace.workspaceFolders[0].uri.fsPath
                 : undefined,
             stdio: ['pipe', 'pipe', 'pipe'],
-            env: process.env,
+            env,
             windowsHide: true,
         });
 
@@ -91,19 +107,28 @@ class LanguageClient {
                     synchronization: { didSave: true, dynamicRegistration: false },
                     completion: {
                         completionItem: {
-                            snippetSupport: false,
+                            snippetSupport: true,
                             resolveSupport: { properties: ['documentation'] },
                         },
+                        insertTextFormatSupport: true,
+                        documentationFormat: ['markdown', 'plaintext'],
                     },
                     signatureHelp: {},
                     hover: { contentFormat: ['markdown', 'plaintext'] },
                     documentSymbol: { hierarchicalDocumentSymbolSupport: true },
                     definition: { linkSupport: true },
+                    declaration: { linkSupport: true },
+                    typeDefinition: { linkSupport: true },
+                    implementation: {},
                     references: {},
                     documentHighlight: {},
                     formatting: {},
-                    rename: {},
+                    rename: { prepareSupport: true },
                     foldingRange: {},
+                    selectionRange: {},
+                    semanticTokens: { tokenTypes: ['namespace', 'type', 'class', 'enum', 'function', 'method', 'parameter', 'variable', 'property', 'keyword', 'comment', 'string', 'number', 'operator'], full: true, range: true },
+                    inlayHint: { resolveSupport: { properties: [] } },
+                    codeAction: { codeActionLiteralSupport: { codeActionKind: { valueSet: ['quickfix', 'refactor', 'source.fixAll'] } } },
                 },
             },
             initializationOptions: {
@@ -170,10 +195,36 @@ class LanguageClient {
         this.send({ jsonrpc: '2.0', method, params });
     }
 
-    request(method, params) {
+    request(method, params, token) {
         const id = this.nextId++;
         return new Promise((resolve, reject) => {
-            this.pending.set(id, { resolve, reject });
+            // Async-friendly cancellation (LSP $/cancelRequest, like
+            // ty/pyrefly): if VS Code cancels, tell the server to drop
+            // the work instead of blocking.
+            let settled = false;
+            const pending = {
+                resolve: (value) => { if (!settled) { settled = true; resolve(value); } },
+                reject: (error) => { if (!settled) { settled = true; reject(error); } },
+            };
+            const cancel = () => {
+                if (settled) return;
+                settled = true;
+                this.pending.delete(id);
+                try { this.notify('$/cancelRequest', { id }); } catch { /* pipe closed */ }
+                reject(new Error('Cancelled.'));
+            };
+            let subscription;
+            if (token) {
+                if (token.isCancellationRequested) { cancel(); return; }
+                if (typeof token.onCancellationRequested === 'function') {
+                    subscription = token.onCancellationRequested(cancel);
+                }
+            }
+            const originalResolve = pending.resolve;
+            const originalReject = pending.reject;
+            pending.resolve = (value) => { if (subscription) subscription.dispose(); originalResolve(value); };
+            pending.reject = (error) => { if (subscription) subscription.dispose(); originalReject(error); };
+            this.pending.set(id, pending);
             this.send({ jsonrpc: '2.0', id, method, params });
         });
     }
@@ -250,6 +301,7 @@ class LanguageClient {
 
     publishDiagnostics(params) {
         if (!params || !params.uri) return;
+        this.setChecking(false);
         const uri = vscode.Uri.parse(params.uri);
         const diagnostics = (params.diagnostics || []).map((item) => {
             const diagnostic = new vscode.Diagnostic(
@@ -258,13 +310,38 @@ class LanguageClient {
                 toSeverity(item.severity)
             );
             diagnostic.source = item.source || 'a';
-            if (item.code !== undefined) diagnostic.code = item.code;
+            if (item.code !== undefined && item.code !== null) {
+                const target = item.codeDescription && item.codeDescription.href;
+                diagnostic.code = target
+                    ? { value: String(item.code), target: vscode.Uri.parse(target) }
+                    : String(item.code);
+            }
+            if (Array.isArray(item.tags)) {
+                const tags = [];
+                for (const tag of item.tags) {
+                    if (tag === 1) tags.push(vscode.DiagnosticTag.Unnecessary);
+                    else if (tag === 2) tags.push(vscode.DiagnosticTag.Deprecated);
+                }
+                if (tags.length) diagnostic.tags = tags;
+            }
+            if (Array.isArray(item.relatedInformation)) {
+                diagnostic.relatedInformation = item.relatedInformation
+                    .filter((info) => info && info.location)
+                    .map((info) => new vscode.DiagnosticRelatedInformation(
+                        new vscode.Location(vscode.Uri.parse(info.location.uri), toRange(info.location.range)),
+                        info.message || ''
+                    ));
+            }
             return diagnostic;
         });
         this.diagnostics.set(uri, diagnostics);
+        if (this.onDiagnosticsChanged) {
+            try { this.onDiagnosticsChanged(); } catch { /* ignore */ }
+        }
     }
 
     openDocument(document) {
+        this.setChecking(true);
         this.notify('textDocument/didOpen', {
             textDocument: {
                 uri: document.uri.toString(),
@@ -275,10 +352,17 @@ class LanguageClient {
         });
     }
 
-    changeDocument(document) {
+    // Incremental now (textDocumentSync kind=2): still accepts a full
+    // replacement, which the server treats as kind=1, but ranged edits are
+    // smaller and keep byte offsets exact under the 200 ms async debounce.
+    changeDocument(document, range, text) {
+        this.setChecking(true);
+        const change = range
+            ? { range: { start: { line: range.start.line, character: range.start.character }, end: { line: range.end.line, character: range.end.character } }, text: text !== undefined ? text : '' }
+            : { text: document.getText() };
         this.notify('textDocument/didChange', {
             textDocument: { uri: document.uri.toString(), version: document.version },
-            contentChanges: [{ text: document.getText() }],
+            contentChanges: [change],
         });
     }
 

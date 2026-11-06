@@ -75,6 +75,9 @@ async function activateImpl(context, output) {
             if (server.status === 'starting') {
                 checkStatus.text = '$(sync~spin) A: Starting';
                 checkStatus.tooltip = 'Starting the A language server.';
+            } else if (server.client && server.client.checking) {
+                checkStatus.text = '$(sync~spin) A: Checking';
+                checkStatus.tooltip = 'The language server is checking in the background.';
             } else {
                 let errors = 0;
                 for (const [, items] of vscode.languages.getDiagnostics()) {
@@ -425,7 +428,10 @@ async function activateImpl(context, output) {
         await stopServer();
         if (disposed) return;
         const client = new LanguageClient(setup.path, setup.args,
-            { modulePaths: setup.modulePaths, stdlibRoot: setup.stdlib }, output);
+            { modulePaths: setup.modulePaths, stdlibRoot: setup.stdlib, jobs: setup.jobs }, output);
+        // Async checking spinner: the server debounces edits (200 ms) and
+        // publishes diagnostics from a worker; show progress meanwhile.
+        client.onCheckingChanged = (checking) => updateCheckStatus();
         server = { status: 'starting', client, setup };
         updateCheckStatus();
         output.appendLine(`> ${setup.path} ${(setup.args || []).map(arg => JSON.stringify(arg)).join(' ')}  (language server)`);
@@ -489,12 +495,14 @@ async function activateImpl(context, output) {
         const beside = compiler && /[\\/]/.test(compiler)
             ? path.join(path.dirname(compiler), process.platform === 'win32' ? 'a-lsp.exe' : 'a-lsp')
             : '';
+        const jobsRaw = Number(config.get('jobs', 0));
         return {
             enabled: config.get('useLanguageServer', true),
             path: serverPath(configured, cwd, context.extensionPath) || (beside && isExecutable(beside) ? beside : ''),
             args: Array.isArray(config.get('server.args', [])) ? config.get('server.args', []) : [],
             modulePaths: modulePaths(config, cwd, ''),
-            stdlib: stdlibRaw ? absolute(stdlibRaw, cwd, '') : ''
+            stdlib: stdlibRaw ? absolute(stdlibRaw, cwd, '') : '',
+            jobs: Number.isFinite(jobsRaw) && jobsRaw >= 0 ? Math.trunc(jobsRaw) : 0
         };
     }
 
@@ -596,13 +604,49 @@ async function activateImpl(context, output) {
 
         context.subscriptions.push(
             vscode.languages.registerDefinitionProvider(selector, {
-                async provideDefinition(document, position) {
+                async provideDefinition(document, position, token) {
                     const active = getClient();
                     if (!active) return null;
                     const result = await active.request('textDocument/definition', {
                         textDocument: { uri: document.uri.toString() },
                         position: { line: position.line, character: position.character },
-                    });
+                    }, token);
+                    return locationsFrom(result);
+                },
+            }),
+
+            vscode.languages.registerDeclarationProvider(selector, {
+                async provideDeclaration(document, position, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/declaration', {
+                        textDocument: { uri: document.uri.toString() },
+                        position: { line: position.line, character: position.character },
+                    }, token);
+                    return locationsFrom(result);
+                },
+            }),
+
+            vscode.languages.registerTypeDefinitionProvider(selector, {
+                async provideTypeDefinition(document, position, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/typeDefinition', {
+                        textDocument: { uri: document.uri.toString() },
+                        position: { line: position.line, character: position.character },
+                    }, token);
+                    return locationsFrom(result);
+                },
+            }),
+
+            vscode.languages.registerImplementationProvider(selector, {
+                async provideImplementation(document, position, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/implementation', {
+                        textDocument: { uri: document.uri.toString() },
+                        position: { line: position.line, character: position.character },
+                    }, token);
                     return locationsFrom(result);
                 },
             }),
@@ -621,13 +665,13 @@ async function activateImpl(context, output) {
             }),
 
             vscode.languages.registerHoverProvider(selector, {
-                async provideHover(document, position) {
+                async provideHover(document, position, token) {
                     const active = getClient();
                     if (!active) return null;
                     const result = await active.request('textDocument/hover', {
                         textDocument: { uri: document.uri.toString() },
                         position: { line: position.line, character: position.character },
-                    });
+                    }, token);
                     if (!result || !result.contents) return null;
                     const range = result.range ? toRange(result.range) : undefined;
                     return new vscode.Hover(hoverContents(result.contents), range);
@@ -637,34 +681,41 @@ async function activateImpl(context, output) {
             vscode.languages.registerCompletionItemProvider(
                 selector,
                 {
-                    async provideCompletionItems(document, position) {
+                    async provideCompletionItems(document, position, token) {
                         const active = getClient();
                         if (!active) return null;
                         const result = await active.request('textDocument/completion', {
                             textDocument: { uri: document.uri.toString() },
                             position: { line: position.line, character: position.character },
-                        });
+                            context: { triggerKind: 1, triggerCharacter: undefined },
+                        }, token);
                         if (!result) return null;
                         const entries = Array.isArray(result) ? result : result.items || [];
                         const items = entries.map((entry) => {
                             const item = new vscode.CompletionItem(entry.label, toCompletionKind(entry.kind));
                             if (entry.detail) item.detail = entry.detail;
                             if (entry.documentation) item.documentation = documentationToMarkdown(entry.documentation);
-                            item.insertText = typeof entry.insertText === 'string' ? entry.insertText : entry.label;
+                            if (entry.insertTextFormat === 2 && typeof entry.insertText === 'string') {
+                                item.insertText = new vscode.SnippetString(entry.insertText);
+                                item.insertTextFormat = vscode.InsertTextFormat.Snippet;
+                            } else {
+                                item.insertText = typeof entry.insertText === 'string' ? entry.insertText : entry.label;
+                            }
                             if (entry.filterText) item.filterText = entry.filterText;
                             if (entry.sortText) item.sortText = entry.sortText;
                             if (entry.data) item.data = entry.data;
+                            if (entry.preselect) item.preselect = entry.preselect;
                             return item;
                         });
                         return new vscode.CompletionList(items, Boolean(result.isIncomplete));
                     },
-                    async resolveCompletionItem(item) {
+                    async resolveCompletionItem(item, token) {
                         const active = getClient();
                         if (!active || !item.data) return item;
                         const result = await active.request('completionItem/resolve', {
                             label: item.label,
                             data: item.data,
-                        });
+                        }, token);
                         if (result && result.documentation) {
                             item.documentation = documentationToMarkdown(result.documentation);
                         }
@@ -674,7 +725,9 @@ async function activateImpl(context, output) {
                 '.',
                 '"',
                 '(',
-                ','
+                ',',
+                ':',
+                '<'
             ),
 
             vscode.languages.registerSignatureHelpProvider(selector, {
@@ -718,17 +771,122 @@ async function activateImpl(context, output) {
             }),
 
             vscode.languages.registerRenameProvider(selector, {
-                async provideRenameEdits(document, position, newName) {
+                async providePrepareRename(document, position, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/prepareRename', {
+                        textDocument: { uri: document.uri.toString() },
+                        position: { line: position.line, character: position.character },
+                    }, token);
+                    if (!result) return null;
+                    return toRange(result);
+                },
+                async provideRenameEdits(document, position, newName, token) {
                     const active = getClient();
                     if (!active) return null;
                     const result = await active.request('textDocument/rename', {
                         textDocument: { uri: document.uri.toString() },
                         position: { line: position.line, character: position.character },
                         newName,
-                    });
+                    }, token);
                     if (!result) return null;
                     return workspaceEditFromLsp(result);
                 },
+            }),
+
+            vscode.languages.registerSelectionRangeProvider(selector, {
+                async provideSelectionRanges(document, positions, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/selectionRange', {
+                        textDocument: { uri: document.uri.toString() },
+                        positions: positions.map((position) => ({ line: position.line, character: position.character })),
+                    }, token);
+                    if (!Array.isArray(result)) return null;
+                    return result.map((entry) => selectionRangesFrom(entry));
+                },
+            }),
+
+            vscode.languages.registerSemanticTokensProvider(selector, {
+                async provideDocumentSemanticTokens(document, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/semanticTokens/full', {
+                        textDocument: { uri: document.uri.toString() },
+                    }, token);
+                    if (!result || !Array.isArray(result.data)) return null;
+                    return semanticTokensFrom(result.data);
+                },
+                async provideDocumentSemanticTokensEdits(document, range, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/semanticTokens/range', {
+                        textDocument: { uri: document.uri.toString() },
+                        range: {
+                            start: { line: range.start.line, character: range.start.character },
+                            end: { line: range.end.line, character: range.end.character },
+                        },
+                    }, token);
+                    if (!result || !Array.isArray(result.data)) return null;
+                    return semanticTokensFrom(result.data);
+                },
+            }, A_LEGEND),
+
+            vscode.languages.registerInlayHintsProvider(selector, {
+                async provideInlayHints(document, range, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const result = await active.request('textDocument/inlayHint', {
+                        textDocument: { uri: document.uri.toString() },
+                        range: {
+                            start: { line: range.start.line, character: range.start.character },
+                            end: { line: range.end.line, character: range.end.character },
+                        },
+                    }, token);
+                    if (!Array.isArray(result)) return null;
+                    return result.map((entry) => {
+                        const hint = new vscode.InlayHint(
+                            new vscode.Position(entry.position.line, entry.position.character),
+                            entry.label,
+                            entry.kind === 1 ? vscode.InlayHintKind.Type : entry.kind === 2 ? vscode.InlayHintKind.Parameter : undefined
+                        );
+                        hint.paddingLeft = Boolean(entry.paddingLeft);
+                        hint.paddingRight = Boolean(entry.paddingRight);
+                        if (entry.tooltip) hint.tooltip = typeof entry.tooltip === 'string' ? entry.tooltip : entry.tooltip.value;
+                        return hint;
+                    });
+                },
+            }),
+
+            vscode.languages.registerCodeActionsProvider(selector, {
+                async provideCodeActions(document, range, context, token) {
+                    const active = getClient();
+                    if (!active) return null;
+                    const kinds = context && context.only && context.only.length ? context.only : undefined;
+                    const result = await active.request('textDocument/codeAction', {
+                        textDocument: { uri: document.uri.toString() },
+                        range: {
+                            start: { line: range.start.line, character: range.start.character },
+                            end: { line: range.end.line, character: range.end.character },
+                        },
+                        context: { only: kinds || [], diagnostics: (context && context.diagnostics || []).map((item) => ({ message: item.message, severity: item.severity === vscode.DiagnosticSeverity.Error ? 1 : 2, range: { start: { line: item.range.start.line, character: item.range.start.character }, end: { line: item.range.end.line, character: item.range.end.character } } })) },
+                    }, token);
+                    if (!Array.isArray(result)) return null;
+                    return result.map((entry) => {
+                        const action = new vscode.CodeAction(entry.title, entry.kind);
+                        if (entry.edit) action.edit = workspaceEditFromLsp(entry.edit);
+                        if (entry.command) action.command = entry.command;
+                        if (entry.diagnostics) action.diagnostics = entry.diagnostics.map((item) => {
+                            const diagnostic = new vscode.Diagnostic(toRange(item.range), item.message || '', item.severity === 1 ? vscode.DiagnosticSeverity.Error : item.severity === 2 ? vscode.DiagnosticSeverity.Warning : vscode.DiagnosticSeverity.Information);
+                            return diagnostic;
+                        });
+                        if (entry.isPreferred) action.isPreferred = entry.isPreferred;
+                        if (entry.disabled) action.disabled = entry.disabled;
+                        return action;
+                    });
+                },
+            }, {
+                providedCodeActionKinds: [vscode.CodeActionKind.QuickFix, vscode.CodeActionKind.Refactor, vscode.CodeActionKind.SourceFixAll],
             }),
 
             vscode.languages.registerDocumentHighlightProvider(selector, {
@@ -799,17 +957,29 @@ async function activateImpl(context, output) {
 
     const openedDocuments = new Set();
     const changeTimers = new Map();
+    // Previous text per URI for incremental (kind=2) sync: the server
+    // debounces 200 ms itself, so the extension only coalesces keystrokes.
+    const previousText = new Map();
 
-    function debounceChange(document) {
+    function debounceChange(document, changeEvent) {
         const key = document.uri.toString();
         const existing = changeTimers.get(key);
         if (existing) clearTimeout(existing);
+        // Capture the first pending change's range while the text is fresh;
+        // later keystrokes supersede it, so keep the whole-document text as
+        // fallback when multiple changes arrived in one burst.
+        const captured = changeEvent && changeEvent.contentChanges && changeEvent.contentChanges.length === 1
+            ? { range: changeEvent.contentChanges[0].range, text: changeEvent.contentChanges[0].text }
+            : undefined;
         changeTimers.set(
             key,
             setTimeout(() => {
                 changeTimers.delete(key);
                 const active = getClient();
-                if (active && openedDocuments.has(key)) active.changeDocument(document);
+                if (active && openedDocuments.has(key)) {
+                    if (captured && captured.range) active.changeDocument(document, captured.range, captured.text);
+                    else active.changeDocument(document);
+                }
             }, 250)
         );
     }
@@ -920,7 +1090,7 @@ async function activateImpl(context, output) {
             if (!getClient() || !isA(event.document)) return;
             if (!openedDocuments.has(event.document.uri.toString())) return;
             if (!event.contentChanges.length) return;
-            debounceChange(event.document);
+            debounceChange(event.document, event);
         }),
 
         vscode.workspace.onDidSaveTextDocument(document => {
@@ -1047,6 +1217,59 @@ function locationsFrom(result) {
         locations.push(new vscode.Location(vscode.Uri.parse(uri), toRange(range)));
     }
     return locations.length ? locations : null;
+}
+
+// Legend matching a-lsp's semanticTokensProvider and package.json.
+// Token type indices: 0 namespace, 1 type, 2 class, 3 enum, 4 function,
+// 5 method, 6 parameter, 7 variable, 8 property, 9 keyword, 10 comment,
+// 11 string, 12 number, 13 operator. Modifiers: 0 declaration, 1 readonly, 2 static.
+const A_LEGEND = new vscode.SemanticTokensLegend(
+    ['namespace', 'type', 'class', 'enum', 'function', 'method', 'parameter', 'variable', 'property', 'keyword', 'comment', 'string', 'number', 'operator'],
+    ['declaration', 'readonly', 'static']
+);
+
+function semanticTokensFrom(data) {
+    // data is delta-encoded [deltaLine, deltaChar, length, tokenType, modifiers]*.
+    const tokens = new vscode.SemanticTokensBuilder(A_LEGEND);
+    let line = -1, character = 0;
+    for (let i = 0; i + 4 < data.length; i += 5) {
+        const deltaLine = data[i], deltaChar = data[i + 1], length = data[i + 2];
+        const type = data[i + 3], modifiers = data[i + 4];
+        if (deltaLine > 0) { line += deltaLine; character = deltaChar; }
+        else { character += deltaChar; }
+        while (line < 0) line = 0;
+        const start = new vscode.Position(line, character);
+        const end = new vscode.Position(line, character + length);
+        let modifierMask = 0;
+        if (modifiers & 1) modifierMask |= 1 << 0;
+        if (modifiers & 2) modifierMask |= 1 << 1;
+        if (modifiers & 4) modifierMask |= 1 << 2;
+        tokens.push(start, end, type, modifierMask);
+    }
+    return tokens.build();
+}
+
+function selectionRangesFrom(entry) {
+    if (!entry || !Array.isArray(entry.ranges) || !entry.ranges.length) return [];
+    // Server sends one inner range per position with a `parent` array
+    // holding the enclosing block (expand-selection). Flatten to a chain
+    // innermost -> outermost, as VS Code's SelectionRange expects.
+    const build = (node) => {
+        const current = new vscode.SelectionRange(toRange(node.range));
+        const parents = Array.isArray(node.parent) ? node.parent : node.parent ? [node.parent] : [];
+        if (parents.length) {
+            const next = build(parents[0]);
+            current.parent = next;
+        }
+        return current;
+    };
+    // Flat array form (older servers): chain in order.
+    if (entry.ranges.length > 1 && !entry.ranges[0].parent) {
+        const list = entry.ranges.map((item) => new vscode.SelectionRange(toRange(item.range)));
+        for (let i = 0; i < list.length - 1; i++) list[i].parent = list[i + 1];
+        return [list[0]];
+    }
+    return [build(entry.ranges[0])];
 }
 
 function documentationToMarkdown(documentation) {
