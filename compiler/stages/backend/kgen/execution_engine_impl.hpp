@@ -278,6 +278,8 @@ class KGENExecutionEngine {
                         Span span);
   Value callBuiltin(const std::string& name, ArgList& args, Span span);
   Value callBuiltinFast(BuiltinId id, const std::string& name, ArgList& args, Span span);
+  // print/eprint with Python-style keyword options (sep/end/file/flush).
+  Value callPrint(bool toStderr, const std::string& name, const CallExpr& expr, Env& env);
   // json/binary/testing/log/metrics/trace/net/http, implemented in
   // backend/stdlib/builtins.cpp.
   Value callStdlibBuiltin(const std::string& name, ArgList& args, Span span);

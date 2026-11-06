@@ -7,7 +7,9 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <limits>
@@ -16,6 +18,7 @@
 #include <string_view>
 #include <system_error>
 #include <thread>
+#include <unordered_map>
 #include <utility>
 
 #include "errors/runtime_error.hpp"
@@ -28,6 +31,40 @@ namespace a {
 namespace {
 bool hasNamedArgs(const std::vector<CallArg>& args) {
   return std::any_of(args.begin(), args.end(), [](const CallArg& arg) { return !arg.name.empty(); });
+}
+
+// ------------------------------------------------------------- file handles
+// print(file=...), close(), and the stdout/stderr constants speak in integer
+// stream handles, mirroring the socket handles in runtime/builtins.cpp.
+// Handles 1 and 2 are reserved for stdout and stderr so the interpreter and
+// the native C backend agree on the values of the constants.
+struct StreamEntry {
+  enum class Kind { Stdout, Stderr, File } kind = Kind::File;
+  std::FILE* file = nullptr;
+};
+
+std::unordered_map<std::int64_t, StreamEntry> g_streams;
+std::int64_t g_nextStream = 3;
+
+void ensureStreamRegistry() {
+  if (!g_streams.empty()) return;
+  g_streams[1] = StreamEntry{StreamEntry::Kind::Stdout, nullptr};
+  g_streams[2] = StreamEntry{StreamEntry::Kind::Stderr, nullptr};
+}
+
+std::int64_t registerStream(std::FILE* file) {
+  ensureStreamRegistry();
+  const std::int64_t handle = g_nextStream++;
+  g_streams[handle] = StreamEntry{StreamEntry::Kind::File, file};
+  return handle;
+}
+
+bool lookupStream(std::int64_t handle, StreamEntry& out) {
+  ensureStreamRegistry();
+  const auto found = g_streams.find(handle);
+  if (found == g_streams.end()) return false;
+  out = found->second;
+  return true;
 }
 
 
@@ -227,6 +264,16 @@ bool builtinConstantValue(const std::string& name, Value& out) {
   }
   if (name == "E") {
     out = makeFloat(2.71828182845904523536);
+    return true;
+  }
+  if (name == "stdout") {
+    ensureStreamRegistry();
+    out = makeInt(1);
+    return true;
+  }
+  if (name == "stderr") {
+    ensureStreamRegistry();
+    out = makeInt(2);
     return true;
   }
   struct IntConstant {
@@ -2547,6 +2594,11 @@ Value KGENExecutionEngine::applyBinary(BinOp op, const Value& lhs, const Value& 
 
 Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
   if (auto* ident = asExpr<IdentExpr>(*expr.callee, ExprKind::Ident)) {
+    // print/eprint are the only builtins that take keyword arguments
+    // (sep/end/file/flush); route them before the positional fast path.
+    if (expr.builtinId == BuiltinId::Print || expr.builtinId == BuiltinId::Eprint) {
+      return callPrint(expr.builtinId == BuiltinId::Eprint, ident->name, expr, env);
+    }
     // Sema proved the callee is a builtin, not a variable: evaluate arguments
     // and dispatch on the resolved id instead of walking scopes and name maps.
     if (expr.builtinId != BuiltinId::None) {
@@ -3115,6 +3167,55 @@ Value KGENExecutionEngine::callBuiltinFast(BuiltinId id, const std::string& name
   return callBuiltin(name, args, span);
 }
 
+Value KGENExecutionEngine::callPrint(bool toStderr, const std::string& name, const CallExpr& expr, Env& env) {
+  ArgList objects;
+  std::string sep = " ", end = "\n";
+  bool hasFile = false;
+  std::int64_t fileHandle = 0;
+  bool flush = false;
+  for (const auto& arg : expr.args) {
+    if (arg.name.empty()) {
+      objects.push_back(eval(*arg.value, env));
+    } else if (arg.name == "sep") {
+      sep = expectString(eval(*arg.value, env), arg.value->span, "The 'sep' passed to '" + name + "'");
+    } else if (arg.name == "end") {
+      end = expectString(eval(*arg.value, env), arg.value->span, "The 'end' passed to '" + name + "'");
+    } else if (arg.name == "file") {
+      fileHandle = expectInt(eval(*arg.value, env), arg.value->span, "The 'file' passed to '" + name + "'");
+      hasFile = true;
+    } else if (arg.name == "flush") {
+      flush = expectBool(eval(*arg.value, env), arg.value->span, "The 'flush' passed to '" + name + "'");
+    } else {
+      fail(arg.nameSpan, "'" + name + "() got an unexpected keyword argument '" + arg.name + "'.");
+    }
+  }
+  std::string line;
+  for (std::size_t i = 0; i < objects.size(); ++i) {
+    if (i) line += sep;
+    line += formatValue(objects[i], false);
+  }
+  line += end;
+  const std::int64_t handle = hasFile ? fileHandle : (toStderr ? 2 : 1);
+  StreamEntry stream;
+  if (!lookupStream(handle, stream)) {
+    fail(expr.span, "'" + name + "': unknown stream handle. Pass 'stdout', 'stderr', or a handle returned by 'open()'.");
+  }
+  if (stream.kind == StreamEntry::Kind::Stdout) {
+    out_ << line;
+    if (flush) out_.flush();
+  } else if (stream.kind == StreamEntry::Kind::Stderr) {
+    err_ << line;
+    // eprint always flushed stderr; keep that default for the stderr stream.
+    if (flush || toStderr) err_.flush();
+  } else {
+    if (std::fwrite(line.data(), 1, line.size(), stream.file) != line.size()) {
+      fail(expr.span, "'" + name + "': failed to write to the file.");
+    }
+    if (flush) std::fflush(stream.file);
+  }
+  return makeVoid();
+}
+
 Value KGENExecutionEngine::callBuiltin(const std::string& name, ArgList& args, Span span) {
   if (isStdlibBuiltin(name)) return callStdlibBuiltin(name, args, span);
   // Hottest builtins first: numeric conversion, math, and string/collection
@@ -3412,17 +3513,47 @@ Value KGENExecutionEngine::callBuiltin(const std::string& name, ArgList& args, S
   }
 
   if (name == "print" || name == "eprint") {
+    // Positional-only fallback (keyword forms are handled by callPrint).
     std::string line;
     for (std::size_t i = 0; i < args.size(); ++i) {
       if (i) line += " ";
       line += formatValue(args[i], false);
     }
+    line += "\n";
     if (name == "print") {
-      out_ << line << '\n';
+      out_ << line;
     } else {
-      err_ << line << '\n';
+      err_ << line;
       err_.flush();
     }
+    return makeVoid();
+  }
+
+  if (name == "open") {
+    if (args.size() < 1 || args.size() > 2) fail(span, "'open' expects 1 or 2 argument(s).");
+    const std::string& path = expectString(args[0], span, "The 'open' path");
+    std::string mode = "w";
+    if (args.size() == 2) mode = expectString(args[1], span, "The 'open' mode");
+    if (mode != "r" && mode != "w" && mode != "a" && mode != "r+" && mode != "w+" && mode != "a+") {
+      fail(span, "'open': invalid mode '" + mode + "'. Use \"r\", \"w\", or \"a\".");
+    }
+    FILE* file = std::fopen(path.c_str(), mode.c_str());
+    if (file == nullptr) {
+      fail(span, "Cannot open '" + path + "': " + std::strerror(errno) + ".");
+    }
+    return makeInt(registerStream(file));
+  }
+
+  if (name == "close") {
+    if (args.size() != 1) fail(span, "'close' expects 1 argument.");
+    const std::int64_t handle = expectInt(args[0], span, "The 'close' stream");
+    StreamEntry stream;
+    if (!lookupStream(handle, stream)) fail(span, "'close': unknown stream handle.");
+    if (stream.kind != StreamEntry::Kind::File) {
+      fail(span, "'close': cannot close the standard streams; pass a handle returned by 'open()'.");
+    }
+    std::fclose(stream.file);
+    g_streams.erase(handle);
     return makeVoid();
   }
 

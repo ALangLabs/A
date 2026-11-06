@@ -400,6 +400,25 @@ bool ensurePythonLoaded(const std::string& moduleHint) {
         continue;
       }
       if (fillSymbols(handle)) {
+        // The dlopened libpython must match the headers we compiled against;
+        // a different major.minor is an ABI mismatch (wrong argument
+        // conversions, crashes).
+        auto pyGetVersion = reinterpret_cast<const char* (*)()>(
+            dlsym(handle, "Py_GetVersion"));
+        const char* libVersion = pyGetVersion ? pyGetVersion() : nullptr;
+        int libMajor = 0, libMinor = 0;
+        bool versionMatch =
+            libVersion &&
+            std::sscanf(libVersion, "%d.%d", &libMajor, &libMinor) == 2 &&
+            libMajor == PY_MAJOR_VERSION && libMinor == PY_MINOR_VERSION;
+        if (!versionMatch) {
+          tried += lib.string() + ": version mismatch (headers " +
+                   std::to_string(PY_MAJOR_VERSION) + "." +
+                   std::to_string(PY_MINOR_VERSION) + ", lib " +
+                   (libVersion ? libVersion : "unknown") + "); ";
+          dlclose(handle);
+          continue;
+        }
         g_pythonRuntime.status = 1;
         g_pythonRuntime.siteDirs = probe.siteDirs;
         g_pythonRuntime.pythonHome = probe.home;

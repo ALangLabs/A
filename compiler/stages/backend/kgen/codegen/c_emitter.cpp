@@ -53,7 +53,28 @@ class CEmitter {
     out_ << "static double ad(aval v) { return v.f ? v.d : (double)v.i; }\n";
     out_ << "int printf(const char *, ...);\n";
     out_ << "int fprintf(void *, const char *, ...);\n";
+    out_ << "int fputs(const char *, void *);\n";
+    out_ << "int fflush(void *);\n";
+    out_ << "void *fopen(const char *, const char *);\n";
+    out_ << "int fclose(void *);\n";
     out_ << "extern void *stderr;\n";
+    out_ << "extern void *stdout;\n";
+    // File/stream handles for print(file=...): 1 = stdout, 2 = stderr,
+    // 3+ = open() results, matching the interpreter's numbering.
+    out_ << "static void *a_files[1024];\n"
+            "static int a_nextfile = 3;\n"
+            "static a_i64 a_open(const char *path, const char *mode) {\n"
+            "  void *f = fopen(path, mode); if (!f) return -1;\n"
+            "  if (a_nextfile >= 1024) { fclose(f); return -1; }\n"
+            "  a_files[a_nextfile] = f; return a_nextfile++;\n"
+            "}\n"
+            "static void *a_stream(a_i64 h) {\n"
+            "  if (h == 1) return stdout; if (h == 2) return stderr;\n"
+            "  if (h >= 3 && h < 1024) return a_files[h]; return stdout;\n"
+            "}\n"
+            "static void a_close(a_i64 h) {\n"
+            "  if (h >= 3 && h < 1024 && a_files[h]) { fclose(a_files[h]); a_files[h] = 0; }\n"
+            "}\n";
     out_ << "void *malloc(unsigned long);\n";
     out_ << "void free(void *);\n";
     out_ << "void *memcpy(void *, const void *, unsigned long);\n";
@@ -891,6 +912,9 @@ class CEmitter {
     std::string n = cIdent(rawName);
     if (locals_.count(n)) return "v_" + n;
     if (globalNames_.count(n)) return "g_" + n;
+    // Stream handles 1/2 agree with the interpreter's stdout/stderr.
+    if (rawName == "stdout") return "(aval){.i=1,.f=0}";
+    if (rawName == "stderr") return "(aval){.i=2,.f=0}";
     // Undeclared names (e.g. comprehension vars bound in an inner block)
     // still resolve to v_<n>; genuinely undefined names fail C compilation
     // and fall back to the interpreter.
@@ -1290,6 +1314,74 @@ class CEmitter {
          << "    else a_print_obj(o_), printf(\"\\n\");\n"
          << "  } else if (" << tn << ".f) a_print_double(" << tn << ".d);"
          << " else printf(\"%lld\\n\", " << tn << ".i);\n";
+  }
+
+  // One printed object into `stream` (no separator/newline).
+  void emitPrintValue(const std::string& stream, const Expr& arg) {
+    if (arg.kind == ExprKind::StringLit) {
+      std::string lit = extractStringC(static_cast<const StringLitExpr&>(arg));
+      out_ << "  fputs(\"" << escapeC(lit) << "\", " << stream << ");\n";
+      return;
+    }
+    std::string av = evalA(arg);
+    std::string tn = tmp();
+    out_ << "  " << tn << " = " << av << ";\n";
+    out_ << "  if (" << tn << ".f == 2) {\n"
+         << "    a_obj *o_ = (a_obj *)" << tn << ".i;\n"
+         << "    if (o_->type == 1) fprintf(" << stream << ", \"%s\", (char *)o_->data);\n"
+         << "    else a_print_obj_to(" << stream << ", o_);\n"
+         << "  } else if (" << tn << ".f) { char buf_[64]; a_fmt_double(buf_, " << tn << ".d); fprintf(" << stream << ", \"%s\", buf_); }"
+         << " else fprintf(" << stream << ", \"%lld\", " << tn << ".i);\n";
+  }
+
+  // Full print/eprint call with *objects plus sep/end/file/flush keywords.
+  void emitPrintCall(const CallExpr& c, bool toStderr) {
+    std::vector<const Expr*> objects;
+    const Expr *sep = nullptr, *end = nullptr, *file = nullptr, *flush = nullptr;
+    for (const auto& arg : c.args) {
+      if (arg.name.empty()) objects.push_back(arg.value.get());
+      else if (arg.name == "sep") sep = arg.value.get();
+      else if (arg.name == "end") end = arg.value.get();
+      else if (arg.name == "file") file = arg.value.get();
+      else read_pass;  // 'flush' handled below
+      if (arg.name == "flush") flush = arg.value.get();
+    }
+    const std::string stream = tmp();
+    if (file != nullptr) {
+      std::string fh = evalA(*file);
+      std::string tn = tmp();
+      out_ << "  " << tn << " = " << fh << ";\n";
+      out_ << "  void *" << stream << " = a_stream(" << tn << ".i);\n";
+    } else {
+      out_ << "  void *" << stream << " = " << (toStderr ? "stderr" : "stdout") << ";\n";
+    }
+    auto emitTextVar = [&](const Expr* expr, const char* def, const std::string& var) {
+      if (expr == nullptr) {
+        out_ << "  const char *" << var << " = \"" << def << "\";\n";
+      } else if (expr->kind == ExprKind::StringLit) {
+        out_ << "  const char *" << var << " = \"" << escapeC(extractStringC(static_cast<const StringLitExpr&>(*expr))) << "\";\n";
+      } else {
+        std::string av = evalA(*expr);
+        std::string tn = tmp();
+        out_ << "  " << tn << " = " << av << ";\n";
+        out_ << "  const char *" << var << " = (" << tn << ".f == 2 ? (char *)((a_obj *)" << tn << ".i)->data : \"\");\n";
+      }
+    };
+    emitTextVar(sep, " ", "sep_");
+    emitTextVar(end, "\\n", "end_");
+    for (std::size_t i = 0; i < objects.size(); ++i) {
+      if (i) out_ << "  fputs(sep_, " << stream << ");\n";
+      emitPrintValue(stream, *objects[i]);
+    }
+    out_ << "  fputs(end_, " << stream << ");\n";
+    if (flush != nullptr) {
+      std::string av = evalA(*flush);
+      std::string tn = tmp();
+      out_ << "  " << tn << " = " << av << ";\n";
+      out_ << "  if (" << tn << ".i) fflush(" << stream << ");\n";
+    } else if (toStderr) {
+      out_ << "  fflush(" << stream << ");\n";
+    }
   }
 
   void emitFunction(const FnDecl& fn) {
