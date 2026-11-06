@@ -1,65 +1,96 @@
 # `std.copy`
 
-Shallow and deep copy helpers adapted to A's container/runtime model (inspired by Python's `copy` module).
+> Shallow/deep copy helpers for A values, inspired by CPython's [`copy`](https://docs.python.org/3/library/copy.html) module.
 
-Provides practical copying for common A containers. Python-specific protocols and identity/memo semantics are not fully replicated.
+`std.copy` provides **practical copying utilities** adapted to A's container and runtime semantics. It is useful when you need an independent copy of common array/map values or to preserve scalar values unchanged.
+
+> [!IMPORTANT]
+> This implementation is **adapted to A**. It uses JSON-compatible serialization strategies where available for portable deep copying of common containers. It is **not a drop-in replacement** for CPython's `copy` (no memo/cycle graph, no `__copy__`/`__deepcopy__` protocol, and behavior may differ for identity-sensitive or non-JSON-native values).
 
 ## Status
 
-- **Kind:** Pure A stdlib package (`stdlib/std/copy`)
-- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
-- **Source path:** `stdlib/std/copy/`
+| Field | Value |
+|---|---|
+| Kind | Pure A stdlib package |
+| Source | `stdlib/std/copy/__init__.a` |
+| Import names | `copy` (explicit path import recommended for source layouts) |
+| API style | Python-inspired subset, A-adapted |
+| Deep-copy strategy | JSON stringify/parse for supported container shapes |
 
 ## Import
 
 ```a
-import copy
+from "std/copy/__init__.a" import copy, deepcopy
 ```
 
 ```a
-# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
-from "std/copy/__init__.a" import *
+import copy
+import json
+print(json.stringify(copy.deepcopy([1, 2, 3])))
 ```
 
-## What It Provides
+## API reference
 
-- **Functions/exports (detected):** `copy`, `deepcopy`
+### `copy(x)`
 
-## API Reference (Practical)
+Return a copy of `x` for common containers/scalars.
 
-- `copy(x)` — shallow copy for common containers (lists/dicts where supported); scalars return as-is.
-- `deepcopy(x)` — recursive deep copy for nested lists/dicts (best effort).
+- Arrays/maps: copied (implementation uses a JSON-compatible copy strategy for portability).
+- Scalars/other values: returned as-is.
+
+### `deepcopy(x)`
+
+Return an independent deep copy for nested arrays/maps in common A usage.
+
+- Nested containers: deep-copied via JSON-compatible serialization.
+- Scalars: returned as-is.
+- No cycle detection.
 
 ## Examples
 
+### Copy arrays and maps
+
 ```a
-import copy
+from "std/copy/__init__.a" import copy, deepcopy
+import json
 
-a = [1, [2, 3], 4]
-b = copy.copy(a)
-b[0] = 9
-b[1][0] = 8
-print(a)  # nested element is shared with a shallow copy
+a = [1, 2, 3, 4]
+b = copy(a)
+print(json.stringify(b))
 
-c = [1, [2, 3], {"x": [4]}]
-d = copy.deepcopy(c)
-d[1][0] = 7
-d[2]["x"][0] = 6
-print(c)
-print(d)
+m = {"x": 1, "y": 2}
+n = copy(m)
+print(json.stringify(n))
+
+nested = [[1, 2], [3, 4]]
+d = deepcopy(nested)
+print(json.stringify(d))
 ```
 
-## Usage Notes
+### Scalars
 
-- No cycle detection and no Python `__copy__`/`__deepcopy__` hook support.
-- Behavior is adapted to A runtime/container semantics; test against your data shapes when copying complex values.
+```a
+from "std/copy/__init__.a" import copy, deepcopy
 
-## Source Files
+print(copy(5))          # 5
+print(deepcopy("hi"))   # hi
+```
 
-- `__init__.a`
+## Differences from CPython
 
-## Related Docs / Tests
+- No `copy.Error` / `copy.replace`.
+- No cycle-detection memo.
+- No `__copy__` / `__deepcopy__` / `__reduce__` hooks.
+- Deep copy is implemented with JSON serialization for supported values; values not representable/compatible with that strategy may behave differently than CPython.
 
-- Main stdlib index: `stdlib/std/README.md`
-- Extended reference: `docs/standard-library/README.md`
-- Integration tests: `tests/integration/cases/stdlib/`
+## Validation
+
+```bash
+build/a run tests/integration/cases/stdlib/pycopy_basic.a
+```
+
+## See also
+
+- [`docs/standard-library/README.md`](../../../docs/standard-library/README.md)
+- [`stdlib/std/README.md`](../README.md)
+- [CPython `copy` docs](https://docs.python.org/3/library/copy.html)

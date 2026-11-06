@@ -1,64 +1,91 @@
 # `std.statistics`
 
-Descriptive statistics for numeric data, inspired by Python's `statistics` module.
+> Descriptive statistics for numeric data, inspired by CPython's [`statistics`](https://docs.python.org/3/library/statistics.html) module.
 
-Implements common averages and spread measures over A lists/arrays of numbers. Inputs should be numeric values; behavior is adapted to A's runtime semantics.
+`std.statistics` provides a **pure-A subset** of common averages and dispersion measures for numeric arrays/lists. It is useful for quick analysis in scripts, CLI tools, and test helpers.
+
+> [!NOTE]
+> This is **not a drop-in CPython module**. Inputs are expected to be numeric A values; invalid inputs result in runtime `panic` messages (A does not use CPython's exception types here).
 
 ## Status
 
-- **Kind:** Pure A stdlib package (`stdlib/std/statistics`)
-- **Style:** Python-inspired API subset adapted to A semantics (not a drop-in CPython module)
-- **Source path:** `stdlib/std/statistics/`
+| Field | Value |
+|---|---|
+| Kind | Pure A stdlib package |
+| Source | `stdlib/std/statistics/__init__.a` |
+| Import names | `statistics` (explicit path import recommended for source layouts) |
+| API style | Python-inspired subset |
+| Error model | Runtime `panic` for invalid inputs/insufficient data |
 
 ## Import
 
 ```a
-import statistics
+from "std/statistics/__init__.a" import mean, median, stdev, variance
 ```
 
 ```a
-# Explicit stdlib path import (works in source layouts that load stdlib modules by path)
-from "std/statistics/__init__.a" import *
+import statistics
+print(statistics.mean([1, 2, 3, 4]))
 ```
 
-## What It Provides
+## API reference
 
-- **Functions/exports (detected):** `mean`, `fmean`, `median`, `median_low`, `median_high`, `mode`, `pvariance`, `variance`, `pstdev`, `stdev`, `geometric_mean`, `harmonic_mean`
-
-## API Reference (Practical)
-
-- `mean(data)`, `fmean(data)` — arithmetic mean (`fmean` does not accept weights in this subset).
-- `median(data)`, `median_low(data)`, `median_high(data)` — median variants.
-- `mode(data)` — most common value (first among ties for highest count).
-- `pvariance(data)`, `variance(data)` — population/sample variance.
-- `pstdev(data)`, `stdev(data)` — population/sample standard deviation.
-- `geometric_mean(data)`, `harmonic_mean(data)` — geometric/harmonic means for positive data.
+| Function | Description | Notes |
+|---|---|---|
+| `mean(data)` | Arithmetic mean. | Requires at least 1 data point. |
+| `fmean(data)` | Arithmetic mean as float. | Weights not supported in this subset. |
+| `median(data)` | Median (middle value). | Returns average of middle two for even-sized data. |
+| `median_low(data)` | Low median. | Useful for even-sized samples. |
+| `median_high(data)` | High median. | Useful for even-sized samples. |
+| `mode(data)` | Most common value. | First value with highest count among ties (by first occurrence). |
+| `pvariance(data)` | Population variance. | Requires at least 1 data point. |
+| `variance(data)` | Sample variance (`ddof=1`). | Requires at least 2 data points. |
+| `pstdev(data)` | Population standard deviation. | `sqrt(pvariance(data))`. |
+| `stdev(data)` | Sample standard deviation. | `sqrt(variance(data))`. |
+| `geometric_mean(data)` | Geometric mean. | Requires positive data points. |
+| `harmonic_mean(data)` | Harmonic mean. | Requires positive data points. |
 
 ## Examples
 
+### Averages and spread
+
 ```a
-import statistics
+from "std/statistics/__init__.a" import mean, fmean, median, median_low, median_high, mode, variance, stdev
 
 data = [1, 2, 3, 4, 4]
-print(statistics.mean(data))
-print(statistics.fmean(data))
-print(statistics.median([1, 3, 5, 7]))
-print(statistics.mode([1, 2, 2, 3, 3, 3]))
-print(statistics.variance([1, 2, 3, 4, 5]))
-print(statistics.stdev([1, 2, 3, 4, 5]))
+print(mean(data))          # 2.8
+print(fmean(data))         # 2.8
+print(median([1, 3, 5, 7]))    # 4.0
+print(median_low([1, 3, 5, 7]))  # 3.0
+print(median_high([1, 3, 5, 7])) # 5.0
+print(mode([1, 2, 2, 3, 3, 3]))  # 3
+print(variance([1, 2, 3, 4, 5])) # sample variance
+print(stdev([1, 2, 3, 4, 5]))    # sample stdev
 ```
 
-## Usage Notes
+### Positive-data means
 
-- Invalid input (e.g. empty data, insufficient points, non-positive values where required) results in a runtime `panic` with a descriptive message.
-- This is a focused subset; advanced Python features like `NormalDist`, `quantiles`, `multimode`, and full type coercion (`Decimal`/`Fraction`) are not implemented.
+```a
+from "std/statistics/__init__.a" import geometric_mean, harmonic_mean
 
-## Source Files
+print(geometric_mean([1, 2, 4]))   # 2.0
+print(harmonic_mean([1, 2, 4]))    # 1.714285...
+```
 
-- `__init__.a`
+## Differences from CPython
 
-## Related Docs / Tests
+- No `StatisticsError` exceptions; invalid cases `panic` with descriptive messages.
+- `fmean` does not accept weights in this subset.
+- Not implemented: `median_grouped`, `multimode`, `quantiles`, covariance/correlation, linear regression, `NormalDist`, and full `Decimal`/`Fraction` coercions.
 
-- Main stdlib index: `stdlib/std/README.md`
-- Extended reference: `docs/standard-library/README.md`
-- Integration tests: `tests/integration/cases/stdlib/`
+## Validation
+
+```bash
+build/a run tests/integration/cases/stdlib/pystatistics_basic.a
+```
+
+## See also
+
+- [`docs/standard-library/README.md`](../../../docs/standard-library/README.md)
+- [`stdlib/std/README.md`](../README.md)
+- [CPython `statistics` docs](https://docs.python.org/3/library/statistics.html)
