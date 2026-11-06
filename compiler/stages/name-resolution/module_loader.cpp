@@ -1,5 +1,6 @@
 #include "name-resolution/module_loader.hpp"
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -194,9 +195,54 @@ void ModuleLoader::loadImports(Module& module) {
     return id;
   };
 
+  // `std:<package>` imports resolve to a native module when one exists,
+  // otherwise to a package under <stdlib>/std/.
+  auto resolveStd = [&](const std::string& name, Span span, bool& nativeOut) -> int {
+    nativeOut = false;
+    if (isNativeModule(name)) {
+      nativeOut = true;
+      return -1;
+    }
+    if (options_.stdlibRoot.empty()) {
+      sink_.error(span, "Cannot find stdlib package '" + name + "'.",
+                  "Native packages are math, io, fs, strings, collections, core, and time. "
+                  "A-file packages live under the stdlib 'std' directory.");
+      return -1;
+    }
+    std::string rel = name;
+    std::replace(rel.begin(), rel.end(), '.', '/');
+    const std::size_t slash = rel.find_last_of('/');
+    const std::string leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
+    const fs::path root = fs::path(options_.stdlibRoot) / "std";
+    for (const fs::path& candidate :
+         {root / (rel + ".a"), root / rel / "__init__.a", root / rel / (leaf + ".a")}) {
+      std::error_code error;
+      if (!fs::is_regular_file(candidate, error) || error) continue;
+      const std::string path = candidate.string();
+      const std::string key = canonicalKey(path);
+      auto existing = byPath_.find(key);
+      if (existing != byPath_.end() && existing->second.state == State::Loading) {
+        sink_.error(span, "Import cycle detected while loading '" + path + "'.",
+                    "Modules cannot import each other in a cycle.");
+        return -1;
+      }
+      return loadModule(path, path, nullptr);
+    }
+    sink_.error(span, "Cannot find stdlib package '" + name + "'.",
+                "Native packages are math, io, fs, strings, collections, core, and time. "
+                "A-file packages live under the stdlib 'std' directory.");
+    return -1;
+  };
+
   for (auto& statement : module.program->statements) {
     if (auto* import = dynamic_cast<ImportStmt*>(statement.get())) {
       if (import->pythonModuleImport) { import->nativeModule = false; import->moduleId = -1; continue; }
+      if (import->stdModuleImport) {
+        bool native = false;
+        import->moduleId = resolveStd(import->stdModule, import->targetSpan, native);
+        import->nativeModule = native;
+        continue;
+      }
       bool native = false;
       int id = resolve(import->path, import->bareName, import->quoted, import->targetSpan, native);
       import->nativeModule = native;
@@ -205,6 +251,12 @@ void ModuleLoader::loadImports(Module& module) {
     }
     if (auto* from = dynamic_cast<FromImportStmt*>(statement.get())) {
       if (from->pythonModuleImport) { from->nativeModule = false; from->moduleId = -1; continue; }
+      if (from->stdModuleImport) {
+        bool native = false;
+        from->moduleId = resolveStd(from->stdModule, from->targetSpan, native);
+        from->nativeModule = native;
+        continue;
+      }
       bool native = false;
       int id = resolve(from->path, from->bareName, from->quoted, from->targetSpan, native);
       from->nativeModule = native;

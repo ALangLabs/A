@@ -94,7 +94,10 @@ struct SymbolDef {
 };
 
 // `alias` refers either to a whole module or to one name imported with
-// `from ... import ...`.
+// `from ... import ...`. `span` covers the alias/member name used at the
+// import site; `moduleSpan` covers the module specifier of a from-import
+// (empty for whole-module imports, where `span` already covers it), so
+// go-to-definition can jump both to members and to the module file itself.
 struct ImportDef {
   std::string alias;
   std::string modulePath;
@@ -102,6 +105,7 @@ struct ImportDef {
   std::string member;
   bool wholeModule = true;
   Span span;
+  Span moduleSpan;
 };
 
 struct FileIndex {

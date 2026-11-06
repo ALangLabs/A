@@ -1,0 +1,6 @@
+import std:math
+from std:math import sqrt
+from std:io import print
+
+print(sqrt(16.0))
+print(math.floor(3.7))

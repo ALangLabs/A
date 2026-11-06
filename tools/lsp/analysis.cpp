@@ -350,7 +350,9 @@ class IndexBuilder {
         auto& import = static_cast<ImportStmt&>(stmt);
         ImportDef def;
         def.alias = importAlias(import.alias, import.path, import.bareName);
-        def.modulePath = import.path.empty() ? import.bareName : import.path;
+        def.modulePath = !import.stdModule.empty() ? import.stdModule
+                            : import.path.empty()    ? import.bareName
+                                                     : import.path;
         def.moduleId = import.moduleId;
         def.wholeModule = true;
         def.span = import.targetSpan;
@@ -359,7 +361,9 @@ class IndexBuilder {
       }
       case StmtKind::FromImport: {
         auto& import = static_cast<FromImportStmt&>(stmt);
-        std::string path = import.path.empty() ? import.bareName : import.path;
+        std::string path = !import.stdModule.empty() ? import.stdModule
+                              : import.path.empty()    ? import.bareName
+                                                       : import.path;
         for (const auto& item : import.items) {
           ImportDef def;
           def.alias = item.alias;
@@ -368,6 +372,7 @@ class IndexBuilder {
           def.member = item.name;
           def.wholeModule = false;
           def.span = item.span;
+          def.moduleSpan = import.targetSpan;
           file_.imports.push_back(std::move(def));
         }
         return;

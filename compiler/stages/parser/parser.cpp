@@ -802,13 +802,12 @@ StmtPtr Parser::parseImport() {
   expect(Tok::KwImport, "'import'");
 
   auto stmt = std::make_unique<ImportStmt>();
-  auto parsePythonModule = [&](Span& targetSpan, std::string& out) {
-    const Token& py = expect(Tok::Ident, "'python'");
-    if (py.lexeme != "python") fail(py.span, "Expected 'python' before ':'.");
-    expect(Tok::Colon, "':' after 'python'");
-    std::string mod = expect(Tok::Ident, "a Python module name after 'python:'").lexeme;
+  auto parseModulePrefix = [&](Span& targetSpan, std::string& out) {
+    const Token& kw = expect(Tok::Ident, "'python' or 'std'");
+    expect(Tok::Colon, "':' after '" + kw.lexeme + "'");
+    std::string mod = expect(Tok::Ident, "a module name after '" + kw.lexeme + ":'").lexeme;
     while (check(Tok::Dot) && peek(1).kind == Tok::Ident) { advance(); mod += "." + advance().lexeme; }
-    targetSpan = Span::join(py.span, previousSpan());
+    targetSpan = Span::join(kw.span, previousSpan());
     out = std::move(mod);
   };
   if (check(Tok::String)) {
@@ -816,16 +815,25 @@ StmtPtr Parser::parseImport() {
     stmt->quoted = true;
     stmt->path = decodeEscapes(pathTok.strValue, pathTok.span);
     stmt->targetSpan = pathTok.span;
-  } else if (check(Tok::Ident) && cur().lexeme == "python" && peek(1).kind == Tok::Colon) {
-    stmt->pythonModuleImport = true;
-    parsePythonModule(stmt->targetSpan, stmt->pythonModule);
+  } else if (check(Tok::Ident) && (cur().lexeme == "python" || cur().lexeme == "std") &&
+             peek(1).kind == Tok::Colon) {
+    if (cur().lexeme == "python") {
+      stmt->pythonModuleImport = true;
+      parseModulePrefix(stmt->targetSpan, stmt->pythonModule);
+    } else {
+      stmt->stdModuleImport = true;
+      parseModulePrefix(stmt->targetSpan, stmt->stdModule);
+      const std::size_t dot = stmt->stdModule.find_last_of('.');
+      stmt->bareName = dot == std::string::npos ? stmt->stdModule
+                                              : stmt->stdModule.substr(dot + 1);
+    }
   } else if (check(Tok::Ident)) {
     const Token& nameTok = advance();
     stmt->bareName = nameTok.lexeme;
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'import'.",
-         "Write import \"lib/util.a\", import math, or import python:<package>.");
+         "Write import \"lib/util.a\", import math, import std:<package>, or import python:<package>.");
   }
 
   if (match(Tok::KwAs)) {
@@ -843,13 +851,12 @@ StmtPtr Parser::parseFromImport() {
   expect(Tok::KwFrom, "'from'");
 
   auto stmt = std::make_unique<FromImportStmt>();
-  auto parsePythonModule = [&](Span& targetSpan, std::string& out) {
-    const Token& py = expect(Tok::Ident, "'python'");
-    if (py.lexeme != "python") fail(py.span, "Expected 'python' before ':'.");
-    expect(Tok::Colon, "':' after 'python'");
-    std::string mod = expect(Tok::Ident, "a Python module name after 'python:'").lexeme;
+  auto parseModulePrefix = [&](Span& targetSpan, std::string& out) {
+    const Token& kw = expect(Tok::Ident, "'python' or 'std'");
+    expect(Tok::Colon, "':' after '" + kw.lexeme + "'");
+    std::string mod = expect(Tok::Ident, "a module name after '" + kw.lexeme + ":'").lexeme;
     while (check(Tok::Dot) && peek(1).kind == Tok::Ident) { advance(); mod += "." + advance().lexeme; }
-    targetSpan = Span::join(py.span, previousSpan());
+    targetSpan = Span::join(kw.span, previousSpan());
     out = std::move(mod);
   };
   if (check(Tok::String)) {
@@ -857,16 +864,25 @@ StmtPtr Parser::parseFromImport() {
     stmt->quoted = true;
     stmt->path = decodeEscapes(pathTok.strValue, pathTok.span);
     stmt->targetSpan = pathTok.span;
-  } else if (check(Tok::Ident) && cur().lexeme == "python" && peek(1).kind == Tok::Colon) {
-    stmt->pythonModuleImport = true;
-    parsePythonModule(stmt->targetSpan, stmt->pythonModule);
+  } else if (check(Tok::Ident) && (cur().lexeme == "python" || cur().lexeme == "std") &&
+             peek(1).kind == Tok::Colon) {
+    if (cur().lexeme == "python") {
+      stmt->pythonModuleImport = true;
+      parseModulePrefix(stmt->targetSpan, stmt->pythonModule);
+    } else {
+      stmt->stdModuleImport = true;
+      parseModulePrefix(stmt->targetSpan, stmt->stdModule);
+      const std::size_t dot = stmt->stdModule.find_last_of('.');
+      stmt->bareName = dot == std::string::npos ? stmt->stdModule
+                                              : stmt->stdModule.substr(dot + 1);
+    }
   } else if (check(Tok::Ident)) {
     const Token& nameTok = advance();
     stmt->bareName = nameTok.lexeme;
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'from'.",
-         "Write from \"lib/util.a\" import add, from math import sqrt, or from python:<pkg> import name.");
+         "Write from \"lib/util.a\" import add, from math import sqrt, from std:<pkg> import name, or from python:<pkg> import name.");
   }
 
   expect(Tok::KwImport, "'import' after the module path");

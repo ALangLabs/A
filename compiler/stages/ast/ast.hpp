@@ -477,9 +477,11 @@ struct ImportStmt : Stmt {
   std::string alias;       // explicit alias, or empty
   std::string bareName;    // identifier for bare imports
   std::string pythonModule;  // Python module path for `python:<package>`
+  std::string stdModule;     // stdlib package for `std:<package>`
   bool quoted = false;
   bool nativeModule = false;  // resolved to a built-in native module
   bool pythonModuleImport = false;
+  bool stdModuleImport = false;
   int moduleId = -1;          // resolved module id
   Span targetSpan;
 };
@@ -495,9 +497,11 @@ struct FromImportStmt : Stmt {
   std::string path;
   std::string bareName;
   std::string pythonModule;
+  std::string stdModule;
   bool quoted = false;
   bool nativeModule = false;
   bool pythonModuleImport = false;
+  bool stdModuleImport = false;
   int moduleId = -1;
   std::vector<Item> items;
   Span targetSpan;

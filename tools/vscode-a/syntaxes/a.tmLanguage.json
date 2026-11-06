@@ -149,6 +149,14 @@
     "declarations": {
       "patterns": [
         {
+          "name": "meta.struct.a",
+          "match": "\\b(struct)\\s+([A-Z][A-Za-z0-9_]*)\\s*:",
+          "captures": {
+            "1": { "name": "storage.modifier.a" },
+            "2": { "name": "entity.name.type.struct.a" }
+          }
+        },
+        {
           "name": "meta.class.a",
           "match": "\\b(class|Class|metaclass|Metaclass)\\s+([A-Z][A-Za-z0-9_]*)\\s*(?:<([^>]*)>)?",
           "captures": {
@@ -213,10 +221,38 @@
           }
         },
         {
+          "name": "meta.from-import.a",
+          "begin": "\\b(from)\\s+(\"[^\"]*\"|python:[A-Za-z_][A-Za-z0-9_.]*|[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)\\s+(import)",
+          "end": "$",
+          "beginCaptures": {
+            "1": { "name": "keyword.control.import.a" },
+            "2": { "name": "entity.name.type.module.a" },
+            "3": { "name": "keyword.control.import.a" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            {
+              "name": "keyword.control.import.a",
+              "match": "\\bas\\b"
+            },
+            {
+              "name": "punctuation.separator.a",
+              "match": ","
+            },
+            {
+              "name": "entity.name.type.module.member.a",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b"
+            }
+          ]
+        },
+        {
           "name": "meta.import.a",
-          "match": "\\b(import|from)\\s+(?:\"(?:[^\"\\\\]|\\\\.)*\"|python:[A-Za-z_][A-Za-z0-9_.]*|[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)",
+          "match": "\\b(import)\\s+(\"[^\"]*\"|python:[A-Za-z_][A-Za-z0-9_.]*|[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)*)(\\s+as\\s+([A-Za-z_][A-Za-z0-9_]*))?",
           "captures": {
-            "0": { "name": "keyword.control.import.a" }
+            "1": { "name": "keyword.control.import.a" },
+            "2": { "name": "entity.name.type.module.a" },
+            "3": { "name": "keyword.control.import.a" },
+            "4": { "name": "entity.name.type.module.alias.a" }
           }
         }
       ]
@@ -264,7 +300,7 @@
       "patterns": [
         {
           "name": "support.function.builtin.a",
-          "match": "\\b(?:print|eprint|input|len|str|sqrt|f64|i64|abs|round|floor|ceil|pow|join|map|filter|sum|reduce|any|all|Some|Ok|Err|panic|assert|assert_eq|int|float|min|max|sin|cos|tan|asin|acos|atan|atan2|exp|log|log2|log10|trunc|random|random_int|now|sleep|read_file|write_file|append_file|file_exists|list_dir|remove_file|create_dir|remove_dir|rename|current_dir|set|move|copy|borrow|borrow_mut|flush)\\b(?=\\s*\\()"
+          "match": "\\b(?:print|eprint|input|flush|len|str|bool|int|float|range|map|filter|reduce|sum|any|all|min|max|abs|pow|sqrt|round|floor|ceil|sorted|reversed|enumerate|zip|open|close|type|isinstance|assert|panic|sin|cos|tan|asin|acos|atan|atan2|exp|log|log2|log10|trunc|random|random_int|flush|move|copy|borrow|borrow_mut)\\b(?=\\s*\\()"
         },
         {
           "name": "support.constant.math.a",
@@ -293,6 +329,10 @@
         {
           "name": "storage.modifier.a",
           "match": "\\b(?:var|const|pvt)\\b"
+        },
+        {
+          "name": "keyword.control.async.a",
+          "match": "\\b(?:async|await)\\b"
         },
         {
           "name": "keyword.control.import.a",
@@ -378,6 +418,10 @@
     },
     "members": {
       "patterns": [
+        {
+          "name": "entity.name.function.call.a",
+          "match": "(?<=[.?])\\s*[A-Za-z_][A-Za-z0-9_]*(?=\\s*\\()"
+        },
         {
           "name": "variable.other.property.a",
           "match": "(?<=[.?])\\s*[A-Za-z_][A-Za-z0-9_]*"

@@ -1682,8 +1682,76 @@ class LanguageServer {
     int byteColumn = utf16ToByteColumn(lineText(document->text, line + 1), character) + 1;
 
     ResolvedSymbol resolved = a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
-    if (!resolved.valid()) return replyNull(id);
-    reply(id, locationValue(compilation, resolved.file->path, resolved.symbol->span));
+    if (resolved.valid()) {
+      reply(id, locationValue(compilation, resolved.file->path, resolved.symbol->span));
+      return;
+    }
+
+    // Pyright-style fallback: ctrl+click on the module alias in the import
+    // statement (or as a member receiver, `utils.helper()`) opens the module.
+    // `from m import n` resolves to the member when it can be found.
+    const Token* token = tokenAt(*tokens, line + 1, byteColumn);
+    log("def fallback line=" + std::to_string(line) + " char=" + std::to_string(character) +
+        " tok=" + (token ? token->lexeme : std::string("<null>")) +
+        " imports=" + std::to_string(file->imports.size()));
+    for (const auto& d : file->imports) {
+      log("  def alias=" + d.alias + " member=" + d.member + " whole=" +
+          std::to_string(d.wholeModule ? 1 : 0) + " moduleId=" + std::to_string(d.moduleId) +
+          " span=[" + std::to_string(d.span.line) + ":" + std::to_string(d.span.col) + "-" +
+          std::to_string(d.span.endCol) + "] moduleSpan=[" +
+          std::to_string(d.moduleSpan.line) + ":" + std::to_string(d.moduleSpan.col) + "-" +
+          std::to_string(d.moduleSpan.endCol) + "] byteCol=" + std::to_string(byteColumn));
+    }
+    if (token && token->kind == Tok::Ident) {
+      auto importModulePath = [&](const a::lsp::ImportDef& def) -> const std::string* {
+        if (def.moduleId < 0 ||
+            static_cast<std::size_t>(def.moduleId) >= compilation.graph.modules.size()) {
+          return nullptr;
+        }
+        return &compilation.graph.modules[static_cast<std::size_t>(def.moduleId)].path;
+      };
+      auto jumpToModule = [&](const a::lsp::ImportDef& def, const std::string& path) {
+        if (!def.wholeModule && !def.member.empty()) {
+          const a::lsp::FileIndex* target = compilation.indexForModule(def.moduleId);
+          if (target) {
+            for (const a::lsp::SymbolDef& sym : target->symbols) {
+              if (sym.name == def.member) {
+                reply(id, locationValue(compilation, path, sym.span));
+                return true;
+              }
+            }
+          }
+        }
+        reply(id, locationValue(compilation, path, Span{1, 1, 1, 2, 0}));
+        return true;
+      };
+      // The cursor sits inside an import statement's own span. For a
+      // from-import, `span` covers the member and `moduleSpan` the module.
+      for (const a::lsp::ImportDef& def : file->imports) {
+        auto covers = [&](const Span& span) {
+          return span.valid() && span.line == line + 1 && byteColumn >= span.col &&
+                 byteColumn < span.endCol;
+        };
+        if (covers(def.moduleSpan)) {
+          const std::string* path = importModulePath(def);
+          if (path) {
+            reply(id, locationValue(compilation, *path, Span{1, 1, 1, 2, 0}));
+            return;
+          }
+        }
+        if (covers(def.span)) {
+          const std::string* path = importModulePath(def);
+          if (path && jumpToModule(def, *path)) return;
+        }
+      }
+      // A whole-module alias used as the base of a member access.
+      for (const a::lsp::ImportDef& def : file->imports) {
+        if (!def.wholeModule || def.alias != token->lexeme) continue;
+        const std::string* path = importModulePath(def);
+        if (path && jumpToModule(def, *path)) return;
+      }
+    }
+    return replyNull(id);
   }
 
   void hover(const Value& id, const Value* params) {
@@ -2175,19 +2243,28 @@ class LanguageServer {
           insideWord && words.size() >= 2 ? words[words.size() - 2] : words.back();
     }
     if (previousWord == "import" || previousWord == "from") {
-      if (previousWord == "from" && words.size() >= 2) {
+      const std::string& typed = insideWord ? words.back() : std::string();
+      if (typed.rfind("std:", 0) == 0) {
+        // `import std:<TAB>` / `from std:<TAB>`: complete stdlib packages.
+        for (const auto& module : a::nativeModules()) {
+          pushItem(module.first, 9, "native module");
+        }
+      } else if (previousWord == "from" && words.size() >= 2) {
         const std::size_t needed = insideWord ? 3 : 2;
         if (words.size() >= needed) {
           const std::size_t moduleIndex = insideWord ? words.size() - 3 : words.size() - 2;
-          if (a::isNativeModule(words[moduleIndex])) {
+          std::string moduleName = words[moduleIndex];
+          if (moduleName.rfind("std:", 0) == 0) moduleName.erase(0, 4);
+          if (a::isNativeModule(moduleName)) {
             for (const a::lsp::MemberInfo& member :
-                 a::lsp::nativeModuleMembers(words[moduleIndex])) {
+                 a::lsp::nativeModuleMembers(moduleName)) {
               pushItem(member.name, member.isConstant ? 21 : 3, member.signature,
                        member.documentation);
             }
           }
         }
       } else {
+        pushItem("std:", 9, "stdlib package");
         for (const auto& module : a::nativeModules()) {
           pushItem(module.first, 9, "native module");
         }

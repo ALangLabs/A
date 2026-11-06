@@ -560,6 +560,26 @@ async function activate(context) {
         return task;
     }
 
+    // Terminal-based run (Python-style): the "Run" button opens/reuses a
+    // terminal named "A" and sends "<compiler> run <file>" to it, so program
+    // output appears in the terminal instead of a task panel.
+    let runTerminal = undefined;
+    function shellQuote(arg) {
+        const s = String(arg);
+        if (!s) return "''";
+        if (!/[ \t$"'`\\;|&<>(){}\[\]*?!#]/.test(s)) return s;
+        return '"' + s.replace(/(["\\$`])/g, '\\$1') + '"';
+    }
+    function runInTerminal(doc) {
+        const config = settings(vscode, doc.uri);
+        const command = argumentsFor('run', config).map(shellQuote).join(' ');
+        if (!runTerminal || runTerminal.exitStatus !== undefined) {
+            runTerminal = vscode.window.createTerminal({ name: 'A', cwd: config.cwd });
+        }
+        runTerminal.show();
+        runTerminal.sendText(command + '\n');
+    }
+
     const runStatus = vscode.window.createStatusBarItem('a.run', vscode.StatusBarAlignment.Left, 5);
     runStatus.name = 'A: Run Program'; runStatus.text = '$(play) Run'; runStatus.tooltip = 'Compile and run the A program'; runStatus.command = 'a.run';
     function updateRunStatus() { if (vscode.workspace.isTrusted && vscode.window.activeTextEditor && isA(vscode.window.activeTextEditor.document)) runStatus.show(); else runStatus.hide(); }
@@ -583,8 +603,7 @@ async function activate(context) {
         vscode.commands.registerCommand('a.run', async target => {
             const uri = typeof target === 'string' ? vscode.Uri.parse(target) : target instanceof vscode.Uri ? target : undefined;
             const doc = await savedDocument(uri); if (!doc) return;
-            const definition = { type: 'a', action: 'run' }; if (uri) definition.file = doc.uri.fsPath;
-            await vscode.tasks.executeTask(makeTask(definition, doc.uri));
+            runInTerminal(doc);
         }),
         ...['build', 'test', 'fmt'].map(action => vscode.commands.registerCommand(`a.${action}`, async () => { const doc = await savedDocument(); if (doc) await vscode.tasks.executeTask(makeTask({ type: 'a', action }, doc.uri)); })),
         vscode.tasks.registerTaskProvider('a', {
