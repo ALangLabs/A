@@ -1,0 +1,8 @@
+ok test_bisect_left
+ok test_bisect_right
+ok test_bisect_alias
+ok test_range_bounds
+ok test_insort
+ok test_insort_range
+
+6 passed, 0 failed

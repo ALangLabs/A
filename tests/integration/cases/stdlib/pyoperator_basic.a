@@ -1,0 +1,74 @@
+import operator
+
+fn test_arithmetic():
+    assert_eq(operator.add(2, 3), 5)
+    assert_eq(operator.sub(10, 4), 6)
+    assert_eq(operator.mul(3, 4), 12)
+    assert_eq(operator.neg(5), -5)
+    assert_eq(operator.pos(5), 5)
+    assert_eq(operator.abs(-9), 9)
+    assert_eq(operator.pow(2, 8), 256)
+    assert_eq(operator.truediv(7, 2), 3.5)
+    assert_eq(operator.floordiv(7, 2), 3)
+    assert_eq(operator.floordiv(-7, 2), -4)
+    assert_eq(operator.mod(-7, 2), 1)
+    assert_eq(operator.mod(7, -2), -1)
+
+fn test_bitwise():
+    assert_eq(operator.invert(5), -6)
+    assert_eq(operator.lshift(1, 4), 16)
+    assert_eq(operator.rshift(256, 4), 16)
+    assert_eq(operator.and_(5, 3), 1)
+    assert_eq(operator.or_(5, 3), 7)
+    assert_eq(operator.xor(5, 3), 6)
+
+fn test_comparisons():
+    assert_eq(operator.lt(1, 2), true)
+    assert_eq(operator.le(2, 2), true)
+    assert_eq(operator.eq(2, 2), true)
+    assert_eq(operator.ne(2, 3), true)
+    assert_eq(operator.ge(3, 2), true)
+    assert_eq(operator.gt(1, 2), false)
+    assert_eq(operator.is_(1, 1), true)
+    assert_eq(operator.is_not(1, 2), true)
+    assert_eq(operator.is_none(None), true)
+    assert_eq(operator.is_not_none(0), true)
+
+fn test_logical():
+    assert_eq(operator.truth(0), false)
+    assert_eq(operator.truth(5), true)
+    assert_eq(operator.truth(""), false)
+    assert_eq(operator.truth("x"), true)
+    assert_eq(operator.truth([]), false)
+    assert_eq(operator.truth([1]), true)
+    assert_eq(operator.not_(0), true)
+    assert_eq(operator.not_(3), false)
+
+fn test_sequences():
+    assert_eq(str(operator.concat([1, 2], [3])), "[1, 2, 3]")
+    assert_eq(operator.concat("ab", "cd"), "abcd")
+    assert_eq(operator.contains([1, 2], 2), true)
+    assert_eq(operator.countOf([1, 2, 1], 1), 2)
+    assert_eq(operator.getitem([10, 20], 1), 20)
+    assert_eq(operator.indexOf([5, 7, 9], 7), 1)
+    assert_eq(operator.length_hint([1, 2, 3]), 3)
+    assert_eq(str(operator.repeat([1, 2], 2)), "[1, 2, 1, 2]")
+    assert_eq(operator.repeat("ab", 3), "ababab")
+
+fn test_itemgetter():
+    f = operator.itemgetter(1)
+    assert_eq(f([10, 20, 30]), 20)
+    g = operator.itemgetter_all([0, 2])
+    assert_eq(str(g([10, 20, 30])), "[10, 30]")
+
+fn test_setitem_delitem():
+    m = {"a": 1}
+    operator.setitem(m, "b", 7)
+    assert_eq(m["b"], 7)
+    xs = [1, 2, 3]
+    operator.setitem(xs, 0, 9)
+    assert_eq(xs[0], 9)
+    operator.delitem(m, "a")
+    assert_eq(m.contains("a"), false)
+    operator.delitem(xs, 0)
+    assert_eq(xs[0], 2)

@@ -1,0 +1,8 @@
+# Symmetric int8 quantization helpers (MAX quantization analog).
+import kernel_ops
+
+fn quantize_int8(xs, scale):
+    return kernel_ops.quantize_int8(xs, scale)
+
+fn dequantize_int8(xs, scale):
+    return kernel_ops.dequantize_int8(xs, scale)

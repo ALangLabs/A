@@ -66,6 +66,46 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
 - **Random:** global `random()`/`random_int(lo,hi)`; `testing.seed(v)` seeds
   the shared engine. No `random.choice/shuffle` yet — implement in-module.
 
+## Type-checker hazards (verified — read before writing dynamic code)
+
+- **Untyped-param helper functions can hang semantic analysis.** Calling
+  `fn f(x)` where `x` is later used in typed operations (`x + ""`, `len(x)`,
+  `x[i]`) from multiple call sites with different types can make `a check`/
+  `a run` non-terminate (observed >4 min). Keep dynamic-dispatch helpers
+  self-contained or annotate params `x: Json` and use only `json.*` accessors
+  (`json.kind/as_int/as_float/as_bool/as_str/as_array/as_map/len`) — `Json`
+  params accept any argument and allow dynamic operators, but `len`,
+  iteration, and indexing do NOT work on `Json` (use `json.len`,
+  `json.as_array(x)`, etc.).
+- **`json.kind(x)` returns**: `"null" "bool" "number" "string" "array"
+  "object"` (NOT int/float — all numbers are `"number"`). It **unwraps
+  optionals**: `Some(5)` reports `"number"`, so `None` vs `Some` is
+  indistinguishable through it. Sets report `"array"`.
+- **`json.as_*` return real optionals** (`Some(v)`/`None`). After an
+  `x != None` / `x == None` check the value is **narrowed** — do NOT apply
+  `!` (errors "can only unwrap an optional"); use the narrowed value directly.
+- **`== None` inside function bodies can miscompile** under the native
+  backend; prefer `x == None` only at top level or use `str(x) == "None"`
+  probes where semantics allow.
+- **`str(x)` is total** — accepts every value without constraining its type;
+  useful for kind dispatch (`str(x)` of None is `"None"`, of a map is a
+  JSON-ish repr).
+- **Chars vs Strings:** `s.chars()` yields `char` values; `char == String`
+  is a type error, `char + int` errors, chars can't be indexed into strings.
+  `join(char_array, "")` rebuilds a String; `str(char)` gives a 1-char
+  String. No `ord`/`chr` builtins — use a 256-entry `\xNN` literal table +
+  `.chars()` + `.index(c)` for codepoint lookup (see `stdlib/std/types/tags.a`
+  `_slice` helper style).
+- **String literals treat `{`/`}` as interpolation** — escape as `\{` `\}`.
+- **`a % b` is C fmod** (sign of dividend), not Python floor-mod; `a / b`
+  truncates for ints; `max`/`min` take exactly 2 args; no `sorted`/`reversed`/
+  `enumerate`/`zip`/`open`/`isinstance`/`getattr` builtins.
+- **Struct constructors via module alias** (`pkg.Struct(...)`) can fail
+  ("unknown struct") — `from pkg import Struct` works.
+- **Native modules win bare imports**: `import collections` resolves the
+  NATIVE module, not `stdlib/std/collections/` — Python-compat packages
+  sharing a native name need quoted-path imports or a different name.
+
 ## Style
 
 - Match existing stdlib: snake_case fns, CamelCase types, `fn name(args):`

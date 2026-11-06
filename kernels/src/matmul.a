@@ -1,8 +1,38 @@
-# Matrix-vector multiply kernel (MAX matmul analog, written in A).
-import "../../stdlib/std/simd/simd.a" as simd
+# Dense linear-algebra and tensor-shape kernels (MAX linalg/layout analog).
+import kernel_ops
 
-fn matvec(mat: [[i64]], vec: [i64]) -> [i64]:
-    out = []
-    for row in mat:
-        out.append(simd.dot_list(row, vec))
-    return out
+fn dot(a, b):
+    return kernel_ops.dot(a, b)
+
+fn matvec(mat, vec):
+    return kernel_ops.matvec(mat, vec)
+
+fn matmul(a, b):
+    return kernel_ops.matmul(a, b)
+
+fn transpose(mat):
+    return kernel_ops.transpose(mat)
+
+fn outer(a, b):
+    return kernel_ops.outer(a, b)
+
+fn eye(n):
+    return kernel_ops.eye(n)
+
+fn zeros(shape):
+    return kernel_ops.zeros(shape)
+
+fn ones(shape):
+    return kernel_ops.ones(shape)
+
+fn full(shape, value):
+    return kernel_ops.full(shape, value)
+
+fn trace(mat):
+    return kernel_ops.trace(mat)
+
+fn diag(mat):
+    return kernel_ops.diag(mat)
+
+fn reshape(data, shape):
+    return kernel_ops.reshape(data, shape)

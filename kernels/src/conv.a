@@ -1,0 +1,11 @@
+# 1D convolution and pooling kernels (MAX algorithm analog).
+import kernel_ops
+
+fn conv1d(input, kernel, stride):
+    return kernel_ops.conv1d(input, kernel, stride)
+
+fn max_pool1d(input, size, stride):
+    return kernel_ops.max_pool1d(input, size, stride)
+
+fn avg_pool1d(input, size, stride):
+    return kernel_ops.avg_pool1d(input, size, stride)

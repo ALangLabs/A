@@ -1,0 +1,14 @@
+# Normalization kernels (MAX nn normalization analog).
+import kernel_ops
+
+fn normalize(xs):
+    return kernel_ops.normalize(xs)
+
+fn rms_norm(xs, eps):
+    return kernel_ops.rms_norm(xs, eps)
+
+fn layer_norm(xs, eps):
+    return kernel_ops.layer_norm(xs, eps)
+
+fn layer_norm_rows(mat, eps):
+    return kernel_ops.layer_norm_rows(mat, eps)

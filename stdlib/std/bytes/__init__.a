@@ -1,0 +1,2 @@
+# std.bytes package — byte/char utilities (Python `bytes`-type helpers).
+from "bytes.a" import chr, ord, utf8_encode, utf8_decode, b2s, s2b

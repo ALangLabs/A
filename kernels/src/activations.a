@@ -1,26 +1,41 @@
-# Activation / normalization kernels (MAX analog, written in A).
+# Activation kernels (MAX `max/kernels/src/nn` analog).
+import kernel_ops
 
-fn softmax_row(xs: [f64]) -> [f64]:
-    m = xs[0]
-    for x in xs:
-        if x > m:
-            m = x
-    out = []
-    total = 0.0
-    for x in xs:
-        e = 2.718281828459045 ** (x - m)
-        out.append(e)
-        total = total + e
-    result = []
-    for e in out:
-        result.append(e / total)
-    return result
+fn relu(xs):
+    return kernel_ops.relu(xs)
 
-fn bias_relu(xs: [f64], bias: f64) -> [f64]:
-    out = []
-    for x in xs:
-        v = x + bias
-        if v < 0.0:
-            v = 0.0
-        out.append(v)
-    return out
+fn sigmoid(xs):
+    return kernel_ops.sigmoid(xs)
+
+fn tanh(xs):
+    return kernel_ops.tanh(xs)
+
+fn gelu(xs):
+    return kernel_ops.gelu(xs)
+
+fn silu(xs):
+    return kernel_ops.silu(xs)
+
+fn elu(xs, alpha):
+    return kernel_ops.elu(xs, alpha)
+
+fn leaky_relu(xs, alpha):
+    return kernel_ops.leaky_relu(xs, alpha)
+
+fn softplus(xs):
+    return kernel_ops.softplus(xs)
+
+fn mish(xs):
+    return kernel_ops.mish(xs)
+
+fn softmax(xs):
+    return kernel_ops.softmax(xs)
+
+fn softmax_row(xs):
+    return kernel_ops.softmax(xs)
+
+fn softmax_rows(mat):
+    return kernel_ops.softmax_rows(mat)
+
+fn bias_relu(xs, bias):
+    return kernel_ops.bias_relu(xs, bias)

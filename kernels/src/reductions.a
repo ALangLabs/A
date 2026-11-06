@@ -1,0 +1,32 @@
+# Reduction and scan-style kernels (MAX algorithm analog).
+import kernel_ops
+
+fn reduce_sum(xs):
+    return kernel_ops.reduce_sum(xs)
+
+fn reduce_max(xs):
+    return kernel_ops.reduce_max(xs)
+
+fn reduce_min(xs):
+    return kernel_ops.reduce_min(xs)
+
+fn reduce_mean(xs):
+    return kernel_ops.reduce_mean(xs)
+
+fn reduce_prod(xs):
+    return kernel_ops.reduce_prod(xs)
+
+fn reduce_var(xs):
+    return kernel_ops.reduce_var(xs)
+
+fn reduce_std(xs):
+    return kernel_ops.reduce_std(xs)
+
+fn reduce_norm(xs, ord):
+    return kernel_ops.reduce_norm(xs, ord)
+
+fn argmax(xs):
+    return kernel_ops.argmax(xs)
+
+fn argmin(xs):
+    return kernel_ops.argmin(xs)

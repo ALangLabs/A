@@ -1,0 +1,171 @@
+# std.bytes — byte/char utilities (A analogue of Python's `bytes` type helpers).
+#
+# A strings are UTF-8 sequences of Unicode codepoints; `char` values are
+# codepoints. This module provides the conversions Python code needs for
+# byte-oriented algorithms:
+#
+#   chr(cp) / ord(c)      — codepoint <-> char (any Unicode scalar value)
+#   utf8_encode(s)        — String -> [i64] UTF-8 bytes (0-255)
+#   utf8_decode(bytes)    — [i64] UTF-8 bytes -> String? (None on malformed)
+#   b2s(bytes)            — Latin-1 bytes -> String (byte value == codepoint)
+#   s2b(s)                — String -> Latin-1 bytes (panics above U+00FF)
+#
+# Byte arrays are plain `[i64]` with values 0-255, matching `binary.decode`.
+# `chr`/`ord` go through the `binary` codec's char tag (kBinChar = 13 +
+# varint codepoint) so every Unicode scalar value is supported.
+import binary
+import core
+
+## _varint_encode(v, out) -> appends the LEB128 varint bytes of v >= 0.
+fn _varint_encode(v: i64, out: [i64]):
+    while v >= 128:
+        out.append((v % 128) + 128)
+        v = v / 128
+    out.append(v)
+
+## _Varint is the (value, new_pos) result of _varint_decode; tuples cannot
+## be indexed in A and struct optionals cannot be None-compared, so a struct
+## with a `pos` of -1 signals failure.
+struct _Varint:
+    value
+    pos
+
+## _varint_decode(bytes, pos) -> _Varint decoding an LEB128 varint;
+## `.pos` is -1 when truncated or the varint exceeds 64 bits.
+fn _varint_decode(bytes: [i64], pos: i64):
+    value = 0
+    mult = 1
+    p = pos
+    while p < len(bytes):
+        byte = bytes[p]
+        p = p + 1
+        value = value + (byte % 128) * mult
+        if byte < 128:
+            return _Varint(value, p)
+        mult = mult * 128
+        if mult > 72057594037927936:
+            return _Varint(0, -1)
+    return _Varint(0, -1)
+
+## chr(cp) -> char for a Unicode code point, or None when out of range.
+## Equivalent of Python `chr()`; returns None instead of raising
+## ValueError for cp < 0 or cp > 0x10FFFF.
+fn chr(cp: i64):
+    if cp < 0 or cp > 1114111:
+        return None
+    bytes = [13]
+    _varint_encode(cp, bytes)
+    d = binary.decode(bytes)
+    if d == None:
+        return None
+    return d!
+
+## ord(c) -> code point of a char or 1-character string, None otherwise.
+## Equivalent of Python `ord()`.
+fn ord(c):
+    b = binary.encode(c)
+    if len(b) < 2 or b[0] != 13:
+        return None
+    r = _varint_decode(b, 1)
+    if r.pos < 0:
+        return None
+    return r.value
+
+## _utf8_len(cp) -> number of UTF-8 bytes for a code point.
+fn _utf8_len(cp: i64):
+    if cp < 128:
+        return 1
+    if cp < 2048:
+        return 2
+    if cp < 65536:
+        return 3
+    return 4
+
+## utf8_encode(s) -> [i64] UTF-8 bytes of the string s.
+fn utf8_encode(s: String):
+    out = []
+    for c in s.chars():
+        cp = ord(c)
+        if cp == None:
+            core.panic("utf8_encode: invalid char")
+        if cp < 128:
+            out.append(cp)
+        elif cp < 2048:
+            out.append(192 + cp / 64)
+            out.append(128 + cp % 64)
+        elif cp < 65536:
+            out.append(224 + cp / 4096)
+            out.append(128 + (cp / 64) % 64)
+            out.append(128 + cp % 64)
+        else:
+            out.append(240 + cp / 262144)
+            out.append(128 + (cp / 4096) % 64)
+            out.append(128 + (cp / 64) % 64)
+            out.append(128 + cp % 64)
+    return out
+
+## utf8_decode(bytes) -> String? decoding UTF-8; None on malformed input
+## (bad continuation bytes, overlong forms, surrogates, > U+10FFFF).
+fn utf8_decode(bytes: [i64]):
+    cps = []
+    i = 0
+    n = len(bytes)
+    while i < n:
+        b0 = bytes[i]
+        if b0 < 128:
+            cps.append(chr(b0))
+            i = i + 1
+        elif b0 >= 192 and b0 < 224:
+            if i + 1 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192:
+                return None
+            cp = (b0 - 192) * 64 + (bytes[i + 1] - 128)
+            if cp < 128:
+                return None
+            cps.append(chr(cp))
+            i = i + 2
+        elif b0 >= 224 and b0 < 240:
+            if i + 2 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192:
+                return None
+            cp = (b0 - 224) * 4096 + (bytes[i + 1] - 128) * 64 + (bytes[i + 2] - 128)
+            if cp < 2048 or (cp >= 55296 and cp <= 57343):
+                return None
+            cps.append(chr(cp))
+            i = i + 3
+        elif b0 >= 240 and b0 < 248:
+            if i + 3 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192 or bytes[i + 3] < 128 or bytes[i + 3] >= 192:
+                return None
+            cp = (b0 - 240) * 262144 + (bytes[i + 1] - 128) * 4096 + (bytes[i + 2] - 128) * 64 + (bytes[i + 3] - 128)
+            if cp < 65536 or cp > 1114111:
+                return None
+            cps.append(chr(cp))
+            i = i + 4
+        else:
+            return None
+    out = ""
+    for c in cps:
+        if c == None:
+            return None
+        out = out + str(c!)
+    return out
+
+## b2s(bytes) -> String interpreting each byte value as a Latin-1 code point
+## (byte 0xE9 becomes 'é'). This is the "bytes are Latin-1 text" model used
+## by quopri-style codecs; for real UTF-8 text use utf8_decode.
+fn b2s(bytes: [i64]):
+    out = ""
+    for b in bytes:
+        c = chr(b)
+        if c == None:
+            core.panic("b2s: byte out of range")
+        out = out + str(c!)
+    return out
+
+## s2b(s) -> [i64] Latin-1 bytes of the string (each char must be <= U+00FF).
+fn s2b(s: String):
+    out = []
+    for c in s.chars():
+        cp = ord(c)
+        if cp == None or cp > 255:
+            core.panic("s2b: character above U+00FF; use utf8_encode")
+        out.append(cp)
+    return out

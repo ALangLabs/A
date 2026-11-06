@@ -13,6 +13,7 @@ struct MethodSig {
   const char* name;
   const char* signature;
   const char* documentation;
+  const char* example = nullptr;  // CPython-style doctest, rendered in hover
 };
 
 inline const std::vector<MethodSig>& arrayMethods() {

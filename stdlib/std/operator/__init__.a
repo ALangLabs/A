@@ -2,36 +2,22 @@
 #
 # A has no special-method protocol, no `is` identity operator, no `getattr`,
 # no `callable`, no exceptions, and no default/variadic parameters. See
-# README.md for the full coverage matrix and deviations.
+# README.md for the coverage matrix and deviations.
 #
-# Implementation note: the type checker infers `Json` for any value passed to
-# `json.kind`/`comptime.type_tag`, which then forbids every other operation on
-# that value. Runtime dispatch is therefore done with total probes instead:
-#   _is_string(x)  <=>  (x + "") == x        (only strings survive + "")
-#   _is_number(x)  <=>  (x + 0) == x         (only numbers survive + 0)
-# `None` cannot be compared inside function bodies (native backend limitation),
-# so it is detected via str(x) == "None" with an is_str guard.
+# Implementation notes (type-checker/backend limitations shaped the code):
+#   * Dispatch probes are inlined: calling a helper with an untyped parameter
+#     and then using that parameter in typed operations can hang semantic
+#     analysis, so each function below is self-contained.
+#   * `str(x)` accepts every value without constraining its type, so kind
+#     dispatch goes through string probes like `(x + "") == x` (true only for
+#     strings) instead of `json.kind` (which would pin the parameter to Json).
+#   * `== None` inside a function body miscompiles under the native backend,
+#     so None is detected via `str(x) == "None"` (the string "None" itself is
+#     indistinguishable — documented deviation).
 import math
 import core
 
-# -- probes ------------------------------------------------------------------
-
-fn _is_string(x):
-    return (x + "") == x
-
-fn _is_number(x):
-    return (x + 0) == x
-
-fn _is_int_value(x):
-    # Integral floats print with a '.' ("3.0"); ints never do. Large floats in
-    # exponent form ("1e+20") can be misdetected — harmless for floordiv.
-    return _is_number(x) and not ("." in str(x))
-
-fn _is_none(x):
-    # str(None) == "None"; the is_str guard excludes the string "None" itself.
-    return str(x) == "None" and not _is_string(x)
-
-# -- comparisons --------------------------------------------------------------
+# -- comparisons ---------------------------------------------------------------
 
 fn lt(a, b):
     return a < b
@@ -51,21 +37,18 @@ fn ge(a, b):
 fn gt(a, b):
     return a > b
 
-# -- logical -------------------------------------------------------------------
+# -- logical --------------------------------------------------------------------
 
 fn truth(x):
-    # Python-style truthiness for bool/None/number/string/array/map/set.
-    # Structs and function values have no len/+ probe and raise a runtime
-    # error here (Python would return True) — documented deviation.
-    if _is_none(x):
+    # Python-style truthiness for bool/None/number/string/array/map/set,
+    # approximated from the value's string representation (str() is total).
+    # Strings that literally equal a falsy repr ("0", "None", "false", "[]",
+    # "{}", "") report the falsy side — see README deviations. Structs and
+    # function values have no meaningful repr check and may misreport.
+    s = str(x)
+    if s == "" or s == "None" or s == "false" or s == "0" or s == "0.0" or s == "-0.0" or s == "[]" or s == "\{\}":
         return false
-    if x == true:
-        return true
-    if x == false:
-        return false
-    if _is_number(x):
-        return x != 0
-    return len(x) > 0
+    return true
 
 fn not_(a):
     return not truth(a)
@@ -78,12 +61,13 @@ fn is_not(a, b):
     return a != b
 
 fn is_none(a):
-    return _is_none(a)
+    # str(None) == "None"; also true for the string "None" (documented).
+    return str(a) == "None"
 
 fn is_not_none(a):
-    return not _is_none(a)
+    return not is_none(a)
 
-# -- math / bitwise ------------------------------------------------------------
+# -- math / bitwise ---------------------------------------------------------------
 
 fn abs(a):
     return math.abs(a)
@@ -96,7 +80,8 @@ fn and_(a, b):
 
 fn floordiv(a, b):
     # Python `a // b` floors toward -inf; A's `/` truncates toward zero.
-    if _is_int_value(a) and _is_int_value(b):
+    # Integral floats print with a '.' ("3.0"), ints never do.
+    if not str(a).contains(".") and not str(b).contains("."):
         q = a / b
         r = a % b
         if r != 0 and ((r < 0) != (b < 0)):
@@ -106,7 +91,7 @@ fn floordiv(a, b):
 
 fn index(a):
     # Approximation of a.__index__(): integral numbers only.
-    if not _is_number(a):
+    if not ((a + 0) == a):
         core.panic("operator.index: argument is not an integer")
     i = int(a)
     if float(i) != float(a):
@@ -163,13 +148,14 @@ fn xor(a, b):
 # -- sequence operations ---------------------------------------------------------
 
 fn concat(a, b):
-    # Python `a + b` for sequences. Strings use `+`; arrays (and other
-    # iterables) are copied element-wise into a fresh array.
-    if _is_string(a):
-        if _is_string(b):
+    # Python `a + b` for sequences. Strings use `+`; other iterables are
+    # copied element-wise into a fresh array. `(x + "") == x` is true only
+    # for strings (every other type formats differently under `+ ""`).
+    if (a + "") == a:
+        if (b + "") == b:
             return a + b
         core.panic("operator.concat: mismatched operand types")
-    if _is_string(b):
+    if (b + "") == b:
         core.panic("operator.concat: mismatched operand types")
     out = []
     for v in a:
@@ -183,13 +169,13 @@ fn contains(a, b):
     return b in a
 
 fn countOf(a, b):
-    # Elements equal to `b`. For strings, `.count` has substring semantics
-    # (CPython counts single characters — see README).
-    if _is_string(a):
-        return a.count(b)
+    # Elements equal to `b`. `v == b` covers ordinary values; the str()
+    # fallback lets string iteration (which yields chars) match string
+    # elements — closer to CPython's per-character count than .count's
+    # substring semantics (see README deviations).
     n = 0
     for v in a:
-        if v == b:
+        if v == b or str(v) == str(b):
             n = n + 1
     return n
 
@@ -201,15 +187,15 @@ fn getitem(a, b):
     return a[b]
 
 fn indexOf(a, b):
-    # First index of `b` in `a`; panics like CPython's ValueError.
-    if _is_string(a):
-        return a.index(b)
+    # First index of `b` in `a`; panics like CPython's ValueError. The str()
+    # fallback handles string iteration (chars) like countOf.
     i = 0
     for v in a:
-        if v == b:
+        if v == b or str(v) == str(b):
             return i
         i = i + 1
     core.panic("operator.indexOf: value not in sequence")
+    return i
 
 fn setitem(a, b, c):
     a[b] = c
@@ -220,7 +206,7 @@ fn length_hint(obj):
     # runtime error instead of returning the default (documented deviation).
     return len(obj)
 
-# -- generalized lookup objects ---------------------------------------------------
+# -- generalized lookup objects ----------------------------------------------------
 
 fn itemgetter(item):
     # Returns a callable fetching `item` from its operand (CPython parity).
@@ -231,8 +217,10 @@ fn itemgetter_all(items):
     return fn(obj) => [obj[i] for i in items]
 
 fn repeat_seq(a, n):
-    # Sequence repetition `a * n` (CPython has no operator.repeat; `*` is mul).
-    if _is_string(a):
+    # Sequence repetition `a * n` (CPython has no operator.repeat; `*` is
+    # spelled mul there). Strings repeat via concatenation, other iterables
+    # are copied element-wise `n` times into a fresh array.
+    if (a + "") == a:
         out = ""
         i = 0
         while i < n:

@@ -1,12 +1,45 @@
-# Fused elementwise kernels (MAX `max/kernels` analog, written in A).
-# Host implementations; each takes the same shape a device buffer would.
-import "../../stdlib/std/simd/simd.a" as simd
+# Fused elementwise kernels (MAX `max/kernels` analog).
+# Thin A wrappers over the native `kernel_ops` hooks so hot loops stay in C++.
+import kernel_ops
 
-fn fused_add(a: [i64], b: [i64]) -> [i64]:
-    return simd.add_lists(a, b)
+fn fused_add(a, b):
+    return kernel_ops.fused_add(a, b)
 
-fn fused_mul_add(a: [i64], b: [i64], c: [i64]) -> [i64]:
-    out = []
-    for i in 0..len(a):
-        out.append(a[i] * b[i] + c[i])
-    return out
+fn fused_sub(a, b):
+    return kernel_ops.fused_sub(a, b)
+
+fn fused_mul(a, b):
+    return kernel_ops.fused_mul(a, b)
+
+fn fused_div(a, b):
+    return kernel_ops.fused_div(a, b)
+
+fn fused_mul_add(a, b, c):
+    return kernel_ops.fused_mul_add(a, b, c)
+
+fn fused_scale(xs, scale):
+    return kernel_ops.fused_scale(xs, scale)
+
+fn fused_clamp(xs, low, high):
+    return kernel_ops.fused_clamp(xs, low, high)
+
+fn fused_pow(a, b):
+    return kernel_ops.fused_pow(a, b)
+
+fn fused_min(a, b):
+    return kernel_ops.fused_min(a, b)
+
+fn fused_max(a, b):
+    return kernel_ops.fused_max(a, b)
+
+fn fused_sqrt(xs):
+    return kernel_ops.fused_sqrt(xs)
+
+fn fused_exp(xs):
+    return kernel_ops.fused_exp(xs)
+
+fn fused_log(xs):
+    return kernel_ops.fused_log(xs)
+
+fn fused_reciprocal(xs):
+    return kernel_ops.fused_reciprocal(xs)

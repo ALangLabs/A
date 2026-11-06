@@ -1,0 +1,144 @@
+# std.html — port of CPython 3.14 Lib/html/__init__.py.
+#
+# escape() / unescape() ports. The full html5 entity table lives in
+# entities.a (generated from CPython's html.entities.html5).
+#
+# Deviations vs CPython: entity scanning works on codepoint arrays; legacy
+# entities without ';' are replaced only when the exact prefix key exists
+# in the html5 table (same rule CPython uses); numeric character references
+# are handled by unescape_num below.
+from "entities.a" import html5
+import bytes
+import core
+
+## escape(s, quote) -> HTML-escaped string (CPython html.escape parity):
+## & -> &amp;, < -> &lt;, > -> &gt;, and with quote=true also
+## " -> &quot; and ' -> &#x27;.
+fn escape(s: String, quote: bool):
+    out = ""
+    for c in s.chars():
+        cs = str(c)
+        if cs == "&":
+            out = out + "&amp;"
+        elif cs == "<":
+            out = out + "&lt;"
+        elif cs == ">":
+            out = out + "&gt;"
+        elif quote and cs == "\"":
+            out = out + "&quot;"
+        elif quote and cs == "'":
+            out = out + "&#x27;"
+        else:
+            out = out + cs
+    return out
+
+## _join_chars(cs) -> String from an array of chars.
+fn _join_chars(cs):
+    out = ""
+    for c in cs:
+        out = out + str(c)
+    return out
+
+## _table_get(name) -> entity replacement or "" when absent.
+## `name` is the entity text WITHOUT '&' and WITH any trailing ';'.
+fn _table_get(name: String):
+    table = html5()
+    if name in table:
+        return table[name]
+    return ""
+
+## _is_name_char(c) -> entity-name characters are ASCII alnum plus '#'.
+fn _is_name_char(c):
+    cs = str(c)
+    if cs.isalnum():
+        return true
+    return cs == "#"
+
+## _digits_value(cs, base) -> integer value of digit chars, -1 on bad digit.
+fn _digits_value(cs, base):
+    v = 0
+    for c in cs.chars():
+        d = -1
+        s = str(c)
+        if s >= "0" and s <= "9":
+            d = bytes.ord(s.chars()[0]) - bytes.ord("0".chars()[0])
+        elif base == 16 and s >= "a" and s <= "f":
+            d = 10 + bytes.ord(s.chars()[0]) - bytes.ord("a".chars()[0])
+        elif base == 16 and s >= "A" and s <= "F":
+            d = 10 + bytes.ord(s.chars()[0]) - bytes.ord("A".chars()[0])
+        if d < 0 or d >= base:
+            return -1
+        v = v * base + d
+    return v
+
+## unescape(s) -> string with HTML entities replaced (CPython html.unescape
+## parity for named, legacy-semicolonless, decimal and hex references).
+fn unescape(s: String):
+    cs = s.chars()
+    n = len(cs)
+    out = ""
+    i = 0
+    while i < n:
+        c = cs[i]
+        if str(c) != "&":
+            out = out + str(c)
+            i = i + 1
+            continue
+        # gather the candidate name after '&' (up to ';' or 32 chars)
+        j = i + 1
+        name_chars = []
+        semi = -1
+        while j < n and j < i + 34:
+            cj = cs[j]
+            if str(cj) == ";":
+                semi = j
+                break
+            if not _is_name_char(cj):
+                break
+            name_chars.append(cj)
+            j = j + 1
+        done = false
+        if semi >= 0 and len(name_chars) > 0:
+            full = _join_chars(name_chars) + ";"
+            rep = _table_get(full)
+            if rep != "":
+                out = out + rep
+                i = semi + 1
+                done = true
+            else:
+                # "&name;" where only the legacy "&name" key exists
+                rep = _table_get(_join_chars(name_chars))
+                if rep != "":
+                    out = out + rep
+                    i = semi + 1
+                    done = true
+            if not done and len(name_chars) > 1 and str(name_chars[0]) == "#":
+                # numeric character reference &#123; / &#x1F;
+                digs = name_chars[1..]
+                hexform = false
+                if len(digs) > 0 and (str(digs[0]) == "x" or str(digs[0]) == "X"):
+                    hexform = true
+                    digs = digs[1..]
+                v = _digits_value(_join_chars(digs), hexform ? 16 : 10)
+                if v >= 0 and v <= 1114111 and not (v >= 55296 and v <= 57343):
+                    ch = bytes.chr(v)
+                    if ch != None:
+                        out = out + str(ch!)
+                        i = semi + 1
+                        done = true
+        if not done and len(name_chars) > 0:
+            # legacy entity without ';': longest prefix that is a key
+            table = html5()
+            k = len(name_chars)
+            while k > 0:
+                cand = _join_chars(name_chars[0..k])
+                if cand in table:
+                    out = out + table[cand]
+                    i = i + 1 + k
+                    done = true
+                    break
+                k = k - 1
+        if not done:
+            out = out + "&"
+            i = i + 1
+    return out

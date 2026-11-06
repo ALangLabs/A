@@ -1,0 +1,8 @@
+# Attention kernels (MAX attention analog, single-head CPU path).
+import kernel_ops
+
+fn attention_scores(q, k):
+    return kernel_ops.attention_scores(q, k)
+
+fn attention(q, k, v):
+    return kernel_ops.attention(q, k, v)

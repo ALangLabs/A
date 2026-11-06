@@ -1,0 +1,9 @@
+ok test_arithmetic
+ok test_bitwise
+ok test_comparisons
+ok test_itemgetter
+ok test_logical
+ok test_sequences
+ok test_setitem_delitem
+
+7 passed, 0 failed

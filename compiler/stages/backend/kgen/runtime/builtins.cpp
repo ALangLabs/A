@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <functional>
 #include <system_error>
 #include <limits>
 #include <map>
@@ -124,9 +125,35 @@ Value vTuple(std::vector<Value> items) {
   return out;
 }
 
+struct KernelScalar {
+  bool isFloat = false;
+  double f = 0.0;
+  std::int64_t i = 0;
+};
+
+bool kernelScalar(const Value& value, KernelScalar& out) {
+  if (auto* integer = std::get_if<std::int64_t>(&value.data)) {
+    out.isFloat = false;
+    out.i = *integer;
+    out.f = static_cast<double>(*integer);
+    return true;
+  }
+  if (auto* real = std::get_if<double>(&value.data)) {
+    out.isFloat = true;
+    out.f = *real;
+    return true;
+  }
+  return false;
+}
+
+Value kernelScalarValue(const KernelScalar& scalar) {
+  return scalar.isFloat ? vFloat(scalar.f) : vInt(scalar.i);
+}
+
 std::string displayBuiltinName(const std::string& name) {
   static const char* modules[] = {"json",   "binary", "testing", "log",
-                                  "metrics", "trace", "net",     "http"};
+                                  "metrics", "trace", "net",     "http",
+                                  "kernels"};
   for (const char* module : modules) {
     const std::string prefix = std::string(module) + "_";
     if (name.rfind(prefix, 0) == 0) return std::string(module) + "." + name.substr(prefix.size());
@@ -2834,6 +2861,1020 @@ Value KGENExecutionEngine::callStdlibBuiltin(const std::string& name, ArgList& a
       if (!sent) fail(span, "'" + display + "' could not write the response: " + error + ".");
       if (once) return vBool(true);
     }
+  }
+
+  // -------------------------------------------------------------- kernels
+  // MAX-style CPU kernels. These are the native hooks behind the A `kernels`
+  // package: dynamic arrays in, numeric arrays out, with int/float promotion
+  // matching the interpreter's arithmetic rules.
+  if (name.rfind("kernels_", 0) == 0) {
+    auto requireWindow = [&](const Value& value, const std::string& what) {
+      ArrayWindow window;
+      if (!arrayWindowOf(value, window)) {
+        fail(span, "'" + display + "' requires " + what + ".");
+      }
+      return window;
+    };
+    auto requireNumber = [&](const Value& value, const std::string& what) {
+      KernelScalar scalar;
+      if (!kernelScalar(value, scalar)) {
+        fail(span, "'" + display + "' requires " + what + " to be numeric.");
+      }
+      return scalar;
+    };
+    auto intBinOp = [&](char op, std::int64_t x, std::int64_t y, std::int64_t& out) {
+      switch (op) {
+        case '+':
+          if (__builtin_add_overflow(x, y, &out)) {
+            fail(span, "Integer overflow in '" + display + "'.");
+          }
+          return;
+        case '-':
+          if (__builtin_sub_overflow(x, y, &out)) {
+            fail(span, "Integer overflow in '" + display + "'.");
+          }
+          return;
+        case '*':
+          if (__builtin_mul_overflow(x, y, &out)) {
+            fail(span, "Integer overflow in '" + display + "'.");
+          }
+          return;
+        case '/':
+          if (y == 0) fail(span, "Division by zero.", "Check the divisor before dividing.");
+          if (x == std::numeric_limits<std::int64_t>::min() && y == -1) {
+            fail(span, "Integer overflow in '" + display + "'.");
+          }
+          out = x / y;
+          return;
+        default:
+          fail(span, "Internal error: unknown kernel operator.");
+      }
+    };
+    auto floatBinOp = [&](char op, double x, double y) {
+      switch (op) {
+        case '+': return x + y;
+        case '-': return x - y;
+        case '*': return x * y;
+        case '/': return x / y;
+        default: fail(span, "Internal error: unknown kernel operator.");
+      }
+    };
+    auto scalarFloat = [](double f) {
+      KernelScalar r;
+      r.isFloat = true;
+      r.f = f;
+      return r;
+    };
+    auto scalarInt = [](std::int64_t i) {
+      KernelScalar r;
+      r.isFloat = false;
+      r.i = i;
+      r.f = static_cast<double>(i);
+      return r;
+    };
+    auto mapUnary = [&](const ArrayWindow& xs, auto&& fn) {
+      std::vector<Value> out;
+      out.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        out.push_back(kernelScalarValue(fn(x)));
+      }
+      return vArray(std::move(out));
+    };
+    auto mapBinary = [&](const ArrayWindow& a, const ArrayWindow& b, auto&& fn) {
+      if (a.length != b.length) {
+        fail(span, "'" + display + "' requires arrays of the same length.");
+      }
+      std::vector<Value> out;
+      out.reserve(a.length);
+      for (std::size_t i = 0; i < a.length; ++i) {
+        KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+        KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+        out.push_back(kernelScalarValue(fn(x, y)));
+      }
+      return vArray(std::move(out));
+    };
+    auto numbersOf = [&](const ArrayWindow& xs) {
+      std::vector<KernelScalar> nums;
+      nums.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        nums.push_back(requireNumber((*xs.storage)[xs.offset + i], "an array element"));
+      }
+      return nums;
+    };
+    auto nonEmpty = [&](const ArrayWindow& xs) {
+      if (xs.length == 0) fail(span, "'" + display + "' requires a non-empty array.");
+    };
+
+    if (name == "kernels_fused_add" || name == "kernels_fused_sub" ||
+        name == "kernels_fused_mul" || name == "kernels_fused_div") {
+      expectArgs(2);
+      const char op = name == "kernels_fused_add" ? '+' : name == "kernels_fused_sub" ? '-'
+                       : name == "kernels_fused_mul"             ? '*'
+                                                                  : '/';
+      ArrayWindow a = requireWindow(args[0], "an array of numbers");
+      ArrayWindow b = requireWindow(args[1], "an array of numbers");
+      if (a.length != b.length) {
+        fail(span, "'" + display + "' requires arrays of the same length.");
+      }
+      std::vector<Value> out;
+      out.reserve(a.length);
+      for (std::size_t i = 0; i < a.length; ++i) {
+        KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+        KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+        KernelScalar r;
+        if (x.isFloat || y.isFloat) {
+          r.isFloat = true;
+          r.f = floatBinOp(op, x.f, y.f);
+        } else {
+          intBinOp(op, x.i, y.i, r.i);
+        }
+        out.push_back(kernelScalarValue(r));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_fused_mul_add") {
+      expectArgs(3);
+      ArrayWindow a = requireWindow(args[0], "an array of numbers");
+      ArrayWindow b = requireWindow(args[1], "an array of numbers");
+      ArrayWindow c = requireWindow(args[2], "an array of numbers");
+      if (a.length != b.length || a.length != c.length) {
+        fail(span, "'" + display + "' requires arrays of the same length.");
+      }
+      std::vector<Value> out;
+      out.reserve(a.length);
+      for (std::size_t i = 0; i < a.length; ++i) {
+        KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+        KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+        KernelScalar z = requireNumber((*c.storage)[c.offset + i], "an array element");
+        KernelScalar r;
+        if (x.isFloat || y.isFloat || z.isFloat) {
+          r.isFloat = true;
+          r.f = x.f * y.f + z.f;
+        } else {
+          std::int64_t product = 0;
+          intBinOp('*', x.i, y.i, product);
+          intBinOp('+', product, z.i, r.i);
+        }
+        out.push_back(kernelScalarValue(r));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_fused_scale") {
+      expectArgs(2);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      KernelScalar scale = requireNumber(args[1], "a numeric scale");
+      std::vector<Value> out;
+      out.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        KernelScalar r;
+        if (x.isFloat || scale.isFloat) {
+          r.isFloat = true;
+          r.f = x.f * scale.f;
+        } else {
+          intBinOp('*', x.i, scale.i, r.i);
+        }
+        out.push_back(kernelScalarValue(r));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_fused_clamp") {
+      expectArgs(3);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      KernelScalar low = requireNumber(args[1], "a numeric lower bound");
+      KernelScalar high = requireNumber(args[2], "a numeric upper bound");
+      if (low.f > high.f) fail(span, "'" + display + "' requires low <= high.");
+      std::vector<Value> out;
+      out.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        KernelScalar r = x;
+        const bool asFloat = x.isFloat || low.isFloat || high.isFloat;
+        if (asFloat) {
+          r.isFloat = true;
+          r.f = std::min(std::max(x.f, low.f), high.f);
+        } else {
+          r.i = std::min(std::max(x.i, low.i), high.i);
+        }
+        out.push_back(kernelScalarValue(r));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_dot") {
+      expectArgs(2);
+      ArrayWindow a = requireWindow(args[0], "an array of numbers");
+      ArrayWindow b = requireWindow(args[1], "an array of numbers");
+      if (a.length != b.length) {
+        fail(span, "'" + display + "' requires arrays of the same length.");
+      }
+      bool allInt = true;
+      for (std::size_t i = 0; i < a.length; ++i) {
+        KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+        KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+        allInt = allInt && !x.isFloat && !y.isFloat;
+      }
+      KernelScalar total;
+      if (allInt) {
+        std::int64_t sum = 0;
+        for (std::size_t i = 0; i < a.length; ++i) {
+          KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+          KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+          std::int64_t product = 0;
+          intBinOp('*', x.i, y.i, product);
+          intBinOp('+', sum, product, sum);
+        }
+        total.i = sum;
+      } else {
+        total.isFloat = true;
+        for (std::size_t i = 0; i < a.length; ++i) {
+          KernelScalar x = requireNumber((*a.storage)[a.offset + i], "an array element");
+          KernelScalar y = requireNumber((*b.storage)[b.offset + i], "an array element");
+          total.f += x.f * y.f;
+        }
+      }
+      return kernelScalarValue(total);
+    }
+
+    if (name == "kernels_reduce_sum" || name == "kernels_reduce_max" ||
+        name == "kernels_reduce_min" || name == "kernels_reduce_mean" ||
+        name == "kernels_reduce_argmax" || name == "kernels_reduce_argmin") {
+      expectArgs(1);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      const bool isArg = name == "kernels_reduce_argmax" || name == "kernels_reduce_argmin";
+      const bool isMean = name == "kernels_reduce_mean";
+      if (xs.length == 0) {
+        if (name == "kernels_reduce_sum") return vInt(0);
+        fail(span, "'" + display + "' requires a non-empty array.");
+      }
+      std::vector<KernelScalar> nums;
+      nums.reserve(xs.length);
+      bool allInt = true;
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        nums.push_back(x);
+        allInt = allInt && !x.isFloat;
+      }
+      if (name == "kernels_reduce_sum") {
+        KernelScalar total;
+        if (allInt) {
+          std::int64_t sum = 0;
+          for (const KernelScalar& x : nums) intBinOp('+', sum, x.i, sum);
+          total.i = sum;
+        } else {
+          total.isFloat = true;
+          for (const KernelScalar& x : nums) total.f += x.f;
+        }
+        return kernelScalarValue(total);
+      }
+      if (isMean) {
+        double sum = 0.0;
+        for (const KernelScalar& x : nums) sum += x.f;
+        return vFloat(sum / static_cast<double>(nums.size()));
+      }
+      if (isArg) {
+        const bool wantMax = name == "kernels_reduce_argmax";
+        std::size_t best = 0;
+        for (std::size_t i = 1; i < nums.size(); ++i) {
+          const bool better = allInt ? (wantMax ? nums[i].i > nums[best].i
+                                                 : nums[i].i < nums[best].i)
+                                     : (wantMax ? nums[i].f > nums[best].f
+                                                : nums[i].f < nums[best].f);
+          if (better) best = i;
+        }
+        return vInt(static_cast<std::int64_t>(best));
+      }
+      const bool wantMax = name == "kernels_reduce_max";
+      KernelScalar best = nums.front();
+      for (std::size_t i = 1; i < nums.size(); ++i) {
+        const bool better = allInt ? (wantMax ? nums[i].i > best.i : nums[i].i < best.i)
+                                   : (wantMax ? nums[i].f > best.f : nums[i].f < best.f);
+        if (better) best = nums[i];
+      }
+      if (!allInt) return vFloat(best.f);
+      return kernelScalarValue(best);
+    }
+
+    if (name == "kernels_matvec") {
+      expectArgs(2);
+      ArrayWindow mat = requireWindow(args[0], "a matrix (array of rows)");
+      ArrayWindow vec = requireWindow(args[1], "a vector (array of numbers)");
+      std::vector<Value> out;
+      out.reserve(mat.length);
+      for (std::size_t r = 0; r < mat.length; ++r) {
+        ArrayWindow row = requireWindow((*mat.storage)[mat.offset + r], "a matrix row");
+        if (row.length != vec.length) {
+          fail(span, "'" + display + "' requires each row to have the same length as the vector.");
+        }
+        bool rowInt = true;
+        for (std::size_t i = 0; i < vec.length; ++i) {
+          KernelScalar x = requireNumber((*row.storage)[row.offset + i], "a matrix element");
+          KernelScalar y = requireNumber((*vec.storage)[vec.offset + i], "a vector element");
+          rowInt = rowInt && !x.isFloat && !y.isFloat;
+        }
+        KernelScalar total;
+        if (rowInt) {
+          std::int64_t sum = 0;
+          for (std::size_t i = 0; i < vec.length; ++i) {
+            KernelScalar x = requireNumber((*row.storage)[row.offset + i], "a matrix element");
+            KernelScalar y = requireNumber((*vec.storage)[vec.offset + i], "a vector element");
+            std::int64_t product = 0;
+            intBinOp('*', x.i, y.i, product);
+            intBinOp('+', sum, product, sum);
+          }
+          total.i = sum;
+        } else {
+          total.isFloat = true;
+          for (std::size_t i = 0; i < vec.length; ++i) {
+            KernelScalar x = requireNumber((*row.storage)[row.offset + i], "a matrix element");
+            KernelScalar y = requireNumber((*vec.storage)[vec.offset + i], "a vector element");
+            total.f += x.f * y.f;
+          }
+        }
+        out.push_back(kernelScalarValue(total));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_matmul") {
+      expectArgs(2);
+      ArrayWindow a = requireWindow(args[0], "a matrix (array of rows)");
+      ArrayWindow b = requireWindow(args[1], "a matrix (array of rows)");
+      if (a.length == 0) return vArray({});
+      std::vector<ArrayWindow> aRows;
+      aRows.reserve(a.length);
+      std::size_t k = 0;
+      bool firstRow = true;
+      bool allInt = true;
+      for (std::size_t r = 0; r < a.length; ++r) {
+        ArrayWindow row = requireWindow((*a.storage)[a.offset + r], "a matrix row");
+        if (firstRow) {
+          k = row.length;
+          firstRow = false;
+        } else if (row.length != k) {
+          fail(span, "'" + display + "' requires a rectangular left matrix.");
+        }
+        for (std::size_t i = 0; i < row.length; ++i) {
+          KernelScalar x = requireNumber((*row.storage)[row.offset + i], "a matrix element");
+          allInt = allInt && !x.isFloat;
+        }
+        aRows.push_back(row);
+      }
+      if (b.length != k) {
+        fail(span, "'" + display + "' requires the left row length to match the right row count.");
+      }
+      std::vector<ArrayWindow> bRows;
+      bRows.reserve(b.length);
+      std::size_t n = 0;
+      firstRow = true;
+      for (std::size_t r = 0; r < b.length; ++r) {
+        ArrayWindow row = requireWindow((*b.storage)[b.offset + r], "a matrix row");
+        if (firstRow) {
+          n = row.length;
+          firstRow = false;
+        } else if (row.length != n) {
+          fail(span, "'" + display + "' requires a rectangular right matrix.");
+        }
+        for (std::size_t i = 0; i < row.length; ++i) {
+          KernelScalar x = requireNumber((*row.storage)[row.offset + i], "a matrix element");
+          allInt = allInt && !x.isFloat;
+        }
+        bRows.push_back(row);
+      }
+      std::vector<Value> out;
+      out.reserve(aRows.size());
+      for (std::size_t i = 0; i < aRows.size(); ++i) {
+        std::vector<Value> rowOut;
+        rowOut.reserve(n);
+        for (std::size_t j = 0; j < n; ++j) {
+          KernelScalar total;
+          if (allInt) {
+            std::int64_t sum = 0;
+            for (std::size_t t = 0; t < k; ++t) {
+              KernelScalar x = requireNumber((*aRows[i].storage)[aRows[i].offset + t],
+                                              "a matrix element");
+              KernelScalar y = requireNumber((*bRows[t].storage)[bRows[t].offset + j],
+                                              "a matrix element");
+              std::int64_t product = 0;
+              intBinOp('*', x.i, y.i, product);
+              intBinOp('+', sum, product, sum);
+            }
+            total.i = sum;
+          } else {
+            total.isFloat = true;
+            for (std::size_t t = 0; t < k; ++t) {
+              KernelScalar x = requireNumber((*aRows[i].storage)[aRows[i].offset + t],
+                                              "a matrix element");
+              KernelScalar y = requireNumber((*bRows[t].storage)[bRows[t].offset + j],
+                                              "a matrix element");
+              total.f += x.f * y.f;
+            }
+          }
+          rowOut.push_back(kernelScalarValue(total));
+        }
+        out.push_back(vArray(std::move(rowOut)));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_transpose") {
+      expectArgs(1);
+      ArrayWindow mat = requireWindow(args[0], "a matrix (array of rows)");
+      if (mat.length == 0) return vArray({});
+      std::vector<ArrayWindow> rows;
+      rows.reserve(mat.length);
+      std::size_t cols = 0;
+      bool firstRow = true;
+      for (std::size_t r = 0; r < mat.length; ++r) {
+        ArrayWindow row = requireWindow((*mat.storage)[mat.offset + r], "a matrix row");
+        if (firstRow) {
+          cols = row.length;
+          firstRow = false;
+        } else if (row.length != cols) {
+          fail(span, "'" + display + "' requires a rectangular matrix.");
+        }
+        rows.push_back(row);
+      }
+      std::vector<Value> out;
+      out.reserve(cols);
+      for (std::size_t j = 0; j < cols; ++j) {
+        std::vector<Value> rowOut;
+        rowOut.reserve(rows.size());
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+          rowOut.push_back((*rows[i].storage)[rows[i].offset + j]);
+        }
+        out.push_back(vArray(std::move(rowOut)));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_relu" || name == "kernels_sigmoid" || name == "kernels_tanh" ||
+        name == "kernels_normalize" || name == "kernels_bias_relu") {
+      const bool unary = name != "kernels_bias_relu";
+      expectArgs(unary ? 1 : 2);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      KernelScalar bias;
+      if (!unary) bias = requireNumber(args[1], "a numeric bias");
+      if (name == "kernels_normalize") {
+        double norm = 0.0;
+        for (std::size_t i = 0; i < xs.length; ++i) {
+          KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+          norm += x.f * x.f;
+        }
+        norm = std::sqrt(norm);
+        std::vector<Value> out;
+        out.reserve(xs.length);
+        for (std::size_t i = 0; i < xs.length; ++i) {
+          KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+          out.push_back(vFloat(norm == 0.0 ? 0.0 : x.f / norm));
+        }
+        return vArray(std::move(out));
+      }
+      std::vector<Value> out;
+      out.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        KernelScalar r;
+        if (name == "kernels_relu") {
+          r = x;
+          if (x.isFloat ? x.f < 0.0 : x.i < 0) {
+            r.isFloat = x.isFloat;
+            r.f = 0.0;
+            r.i = 0;
+          }
+        } else if (name == "kernels_sigmoid") {
+          r.isFloat = true;
+          r.f = 1.0 / (1.0 + std::exp(-x.f));
+        } else if (name == "kernels_tanh") {
+          r.isFloat = true;
+          r.f = std::tanh(x.f);
+        } else {
+          r.isFloat = true;
+          r.f = x.f + bias.f;
+          if (r.f < 0.0) r.f = 0.0;
+        }
+        out.push_back(kernelScalarValue(r));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_softmax" || name == "kernels_softmax_rows") {
+      const bool rows = name == "kernels_softmax_rows";
+      expectArgs(1);
+      auto softmaxRow = [&](const ArrayWindow& xs) {
+        std::vector<KernelScalar> nums;
+        nums.reserve(xs.length);
+        double maxValue = -std::numeric_limits<double>::infinity();
+        for (std::size_t i = 0; i < xs.length; ++i) {
+          KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+          nums.push_back(x);
+          maxValue = std::max(maxValue, x.f);
+        }
+        std::vector<Value> out;
+        out.reserve(xs.length);
+        double total = 0.0;
+        std::vector<double> exps;
+        exps.reserve(xs.length);
+        for (const KernelScalar& x : nums) {
+          double e = std::exp(x.f - maxValue);
+          exps.push_back(e);
+          total += e;
+        }
+        for (double e : exps) out.push_back(vFloat(e / total));
+        return out;
+      };
+      if (!rows) {
+        ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+        if (xs.length == 0) fail(span, "'" + display + "' requires a non-empty array.");
+        return vArray(softmaxRow(xs));
+      }
+      ArrayWindow mat = requireWindow(args[0], "a matrix (array of rows)");
+      std::vector<Value> out;
+      out.reserve(mat.length);
+      for (std::size_t r = 0; r < mat.length; ++r) {
+        ArrayWindow row = requireWindow((*mat.storage)[mat.offset + r], "a matrix row");
+        if (row.length == 0) fail(span, "'" + display + "' requires non-empty rows.");
+        out.push_back(vArray(softmaxRow(row)));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_fused_pow" || name == "kernels_fused_min" ||
+        name == "kernels_fused_max") {
+      expectArgs(2);
+      ArrayWindow a = requireWindow(args[0], "an array of numbers");
+      ArrayWindow b = requireWindow(args[1], "an array of numbers");
+      if (name == "kernels_fused_pow") {
+        return mapBinary(a, b, [&](const KernelScalar& x, const KernelScalar& y) {
+          return scalarFloat(std::pow(x.f, y.f));
+        });
+      }
+      const bool wantMax = name == "kernels_fused_max";
+      return mapBinary(a, b, [&](const KernelScalar& x, const KernelScalar& y) {
+        if (x.isFloat || y.isFloat) {
+          return scalarFloat(wantMax ? std::max(x.f, y.f) : std::min(x.f, y.f));
+        }
+        return scalarInt(wantMax ? std::max(x.i, y.i) : std::min(x.i, y.i));
+      });
+    }
+
+    if (name == "kernels_fused_sqrt" || name == "kernels_fused_exp" ||
+        name == "kernels_fused_log" || name == "kernels_fused_reciprocal") {
+      expectArgs(1);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      nonEmpty(xs);
+      return mapUnary(xs, [&](const KernelScalar& x) {
+        if (name == "kernels_fused_sqrt") return scalarFloat(std::sqrt(x.f));
+        if (name == "kernels_fused_exp") return scalarFloat(std::exp(x.f));
+        if (name == "kernels_fused_log") return scalarFloat(std::log(x.f));
+        return scalarFloat(1.0 / x.f);
+      });
+    }
+
+    if (name == "kernels_reduce_prod" || name == "kernels_reduce_var" ||
+        name == "kernels_reduce_std" || name == "kernels_reduce_norm") {
+      expectArgs(name == "kernels_reduce_norm" ? 2 : 1);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      nonEmpty(xs);
+      std::vector<KernelScalar> nums = numbersOf(xs);
+      bool allInt = true;
+      for (const KernelScalar& x : nums) allInt = allInt && !x.isFloat;
+      if (name == "kernels_reduce_prod") {
+        KernelScalar total = scalarInt(1);
+        if (allInt) {
+          for (const KernelScalar& x : nums) {
+            std::int64_t v = 0;
+            intBinOp('*', total.i, x.i, v);
+            total.i = v;
+          }
+        } else {
+          total.isFloat = true;
+          total.f = 1.0;
+          for (const KernelScalar& x : nums) total.f *= x.f;
+        }
+        return kernelScalarValue(total);
+      }
+      if (name == "kernels_reduce_norm") {
+        KernelScalar ord = requireNumber(args[1], "a numeric order");
+        if (ord.f != 1.0 && ord.f != 2.0) {
+          fail(span, "'" + display + "' supports norm order 1 or 2.");
+        }
+        const bool l1 = ord.f == 1.0;
+        double total = 0.0;
+        for (const KernelScalar& x : nums) {
+          total += l1 ? std::abs(x.f) : x.f * x.f;
+        }
+        return vFloat(l1 ? total : std::sqrt(total));
+      }
+      double mean = 0.0;
+      for (const KernelScalar& x : nums) mean += x.f;
+      mean /= static_cast<double>(nums.size());
+      double var = 0.0;
+      for (const KernelScalar& x : nums) var += (x.f - mean) * (x.f - mean);
+      var /= static_cast<double>(nums.size());
+      return vFloat(name == "kernels_reduce_var" ? var : std::sqrt(var));
+    }
+
+    if (name == "kernels_outer") {
+      expectArgs(2);
+      ArrayWindow a = requireWindow(args[0], "a vector (array of numbers)");
+      ArrayWindow b = requireWindow(args[1], "a vector (array of numbers)");
+      nonEmpty(a);
+      nonEmpty(b);
+      std::vector<KernelScalar> xs = numbersOf(a);
+      std::vector<KernelScalar> ys = numbersOf(b);
+      bool allInt = true;
+      for (const KernelScalar& x : xs) allInt = allInt && !x.isFloat;
+      for (const KernelScalar& y : ys) allInt = allInt && !y.isFloat;
+      std::vector<Value> out;
+      out.reserve(xs.size());
+      for (const KernelScalar& x : xs) {
+        std::vector<Value> row;
+        row.reserve(ys.size());
+        for (const KernelScalar& y : ys) {
+          if (allInt) {
+            std::int64_t v = 0;
+            intBinOp('*', x.i, y.i, v);
+            row.push_back(vInt(v));
+          } else {
+            row.push_back(vFloat(x.f * y.f));
+          }
+        }
+        out.push_back(vArray(std::move(row)));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_eye" || name == "kernels_zeros" || name == "kernels_ones" ||
+        name == "kernels_full") {
+      expectArgs(name == "kernels_eye" ? 1 : name == "kernels_full" ? 2 : 1);
+      auto shapeDims = [&](const Value& value) {
+        ArrayWindow shape = requireWindow(value, "a shape (array of integers)");
+        nonEmpty(shape);
+        std::vector<std::int64_t> dims;
+        dims.reserve(shape.length);
+        for (std::size_t i = 0; i < shape.length; ++i) {
+          KernelScalar d = requireNumber((*shape.storage)[shape.offset + i], "a shape dimension");
+          if (!d.isFloat && d.i < 0) fail(span, "'" + display + "' requires non-negative dimensions.");
+          if (d.isFloat || d.i <= 0) fail(span, "'" + display + "' requires positive dimensions.");
+          dims.push_back(d.i);
+        }
+        return dims;
+      };
+      auto nest = [&](const std::vector<std::int64_t>& dims, Value leaf) {
+        Value cur = std::move(leaf);
+        for (std::size_t d = dims.size(); d-- > 0;) {
+          std::vector<Value> level;
+          level.reserve(static_cast<std::size_t>(dims[d]));
+          for (std::int64_t i = 0; i < dims[d]; ++i) level.push_back(cur);
+          cur = vArray(std::move(level));
+        }
+        return cur;
+      };
+      if (name == "kernels_eye") {
+        KernelScalar n = requireNumber(args[0], "an integer size");
+        if (n.isFloat || n.i <= 0) fail(span, "'" + display + "' requires a positive integer size.");
+        std::vector<Value> out;
+        out.reserve(static_cast<std::size_t>(n.i));
+        for (std::int64_t r = 0; r < n.i; ++r) {
+          std::vector<Value> row;
+          row.reserve(static_cast<std::size_t>(n.i));
+          for (std::int64_t c = 0; c < n.i; ++c) row.push_back(vInt(r == c ? 1 : 0));
+          out.push_back(vArray(std::move(row)));
+        }
+        return vArray(std::move(out));
+      }
+      std::vector<std::int64_t> dims = shapeDims(args[0]);
+      if (name == "kernels_zeros") return nest(dims, vInt(0));
+      if (name == "kernels_ones") return nest(dims, vInt(1));
+      KernelScalar fill = requireNumber(args[1], "a numeric fill value");
+      return nest(dims, kernelScalarValue(fill));
+    }
+
+    if (name == "kernels_trace" || name == "kernels_diag") {
+      expectArgs(1);
+      ArrayWindow mat = requireWindow(args[0], "a matrix (array of rows)");
+      if (mat.length == 0) fail(span, "'" + display + "' requires a non-empty matrix.");
+      std::vector<ArrayWindow> rows;
+      std::size_t cols = 0;
+      bool first = true;
+      for (std::size_t r = 0; r < mat.length; ++r) {
+        ArrayWindow row = requireWindow((*mat.storage)[mat.offset + r], "a matrix row");
+        if (first) { cols = row.length; first = false; }
+        else if (row.length != cols) fail(span, "'" + display + "' requires a rectangular matrix.");
+        rows.push_back(row);
+      }
+      if (name == "kernels_trace") {
+        if (rows.size() != cols) fail(span, "'" + display + "' requires a square matrix.");
+        bool allInt = true;
+        for (std::size_t i = 0; i < rows.size(); ++i) {
+          KernelScalar x = requireNumber((*rows[i].storage)[rows[i].offset + i], "a matrix element");
+          allInt = allInt && !x.isFloat;
+        }
+        KernelScalar total = scalarInt(0);
+        if (allInt) {
+          for (std::size_t i = 0; i < rows.size(); ++i) {
+            KernelScalar x = requireNumber((*rows[i].storage)[rows[i].offset + i], "a matrix element");
+            std::int64_t v = 0;
+            intBinOp('+', total.i, x.i, v);
+            total.i = v;
+          }
+        } else {
+          total.isFloat = true;
+          for (std::size_t i = 0; i < rows.size(); ++i) {
+            KernelScalar x = requireNumber((*rows[i].storage)[rows[i].offset + i], "a matrix element");
+            total.f += x.f;
+          }
+        }
+        return kernelScalarValue(total);
+      }
+      std::vector<Value> out;
+      const std::size_t n = std::min(rows.size(), cols);
+      out.reserve(n);
+      for (std::size_t i = 0; i < n; ++i) {
+        out.push_back((*rows[i].storage)[rows[i].offset + i]);
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_reshape") {
+      expectArgs(2);
+      ArrayWindow data = requireWindow(args[0], "a flat array of numbers");
+      ArrayWindow shape = requireWindow(args[1], "a shape (array of integers)");
+      nonEmpty(shape);
+      std::vector<std::int64_t> dims;
+      std::int64_t total = 1;
+      for (std::size_t i = 0; i < shape.length; ++i) {
+        KernelScalar d = requireNumber((*shape.storage)[shape.offset + i], "a shape dimension");
+        if (d.isFloat || d.i <= 0) fail(span, "'" + display + "' requires positive dimensions.");
+        dims.push_back(d.i);
+        total *= d.i;
+      }
+      if (total != static_cast<std::int64_t>(data.length)) {
+        fail(span, "'" + display + "' requires the shape size to match the data length.");
+      }
+      std::size_t pos = 0;
+      std::function<Value(std::size_t)> build = [&](std::size_t dim) {
+        if (dim == dims.size()) return (*data.storage)[data.offset + pos++];
+        std::vector<Value> level;
+        level.reserve(static_cast<std::size_t>(dims[dim]));
+        for (std::int64_t i = 0; i < dims[dim]; ++i) level.push_back(build(dim + 1));
+        return vArray(std::move(level));
+      };
+      return build(0);
+    }
+
+    if (name == "kernels_gelu" || name == "kernels_silu" || name == "kernels_elu" ||
+        name == "kernels_leaky_relu" || name == "kernels_softplus" || name == "kernels_mish") {
+      const bool hasAlpha = name == "kernels_elu" || name == "kernels_leaky_relu";
+      expectArgs(hasAlpha ? 2 : 1);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      KernelScalar alpha;
+      if (hasAlpha) alpha = requireNumber(args[1], "a numeric alpha");
+      return mapUnary(xs, [&](const KernelScalar& x) {
+        const double v = x.f;
+        if (name == "kernels_gelu") {
+          return scalarFloat(0.5 * v * (1.0 + std::erf(v / std::sqrt(2.0))));
+        }
+        if (name == "kernels_silu") {
+          return scalarFloat(v / (1.0 + std::exp(-v)));
+        }
+        if (name == "kernels_elu") {
+          return scalarFloat(v >= 0.0 ? v : alpha.f * (std::exp(v) - 1.0));
+        }
+        if (name == "kernels_leaky_relu") {
+          return scalarFloat(v >= 0.0 ? v : alpha.f * v);
+        }
+        if (name == "kernels_softplus") {
+          return scalarFloat(std::log1p(std::exp(-std::abs(v))) + std::max(v, 0.0));
+        }
+        const double sp = std::log1p(std::exp(-std::abs(v))) + std::max(v, 0.0);
+        return scalarFloat(v * std::tanh(sp));
+      });
+    }
+
+    if (name == "kernels_rms_norm" || name == "kernels_layer_norm") {
+      expectArgs(2);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      nonEmpty(xs);
+      KernelScalar eps = requireNumber(args[1], "a numeric epsilon");
+      std::vector<KernelScalar> nums = numbersOf(xs);
+      if (name == "kernels_rms_norm") {
+        double ms = 0.0;
+        for (const KernelScalar& x : nums) ms += x.f * x.f;
+        ms /= static_cast<double>(nums.size());
+        const double inv = 1.0 / std::sqrt(ms + eps.f);
+        std::vector<Value> out;
+        out.reserve(nums.size());
+        for (const KernelScalar& x : nums) out.push_back(vFloat(x.f * inv));
+        return vArray(std::move(out));
+      }
+      double mean = 0.0;
+      for (const KernelScalar& x : nums) mean += x.f;
+      mean /= static_cast<double>(nums.size());
+      double var = 0.0;
+      for (const KernelScalar& x : nums) var += (x.f - mean) * (x.f - mean);
+      var /= static_cast<double>(nums.size());
+      const double inv = 1.0 / std::sqrt(var + eps.f);
+      std::vector<Value> out;
+      out.reserve(nums.size());
+      for (const KernelScalar& x : nums) out.push_back(vFloat((x.f - mean) * inv));
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_layer_norm_rows") {
+      expectArgs(2);
+      ArrayWindow mat = requireWindow(args[0], "a matrix (array of rows)");
+      KernelScalar eps = requireNumber(args[1], "a numeric epsilon");
+      std::vector<Value> out;
+      out.reserve(mat.length);
+      for (std::size_t r = 0; r < mat.length; ++r) {
+        ArrayWindow row = requireWindow((*mat.storage)[mat.offset + r], "a matrix row");
+        nonEmpty(row);
+        std::vector<KernelScalar> nums = numbersOf(row);
+        double mean = 0.0;
+        for (const KernelScalar& x : nums) mean += x.f;
+        mean /= static_cast<double>(nums.size());
+        double var = 0.0;
+        for (const KernelScalar& x : nums) var += (x.f - mean) * (x.f - mean);
+        var /= static_cast<double>(nums.size());
+        const double inv = 1.0 / std::sqrt(var + eps.f);
+        std::vector<Value> normed;
+        normed.reserve(nums.size());
+        for (const KernelScalar& x : nums) normed.push_back(vFloat((x.f - mean) * inv));
+        out.push_back(vArray(std::move(normed)));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_attention_scores" || name == "kernels_attention") {
+      expectArgs(name == "kernels_attention_scores" ? 2 : 3);
+      ArrayWindow q = requireWindow(args[0], "a query vector (array of numbers)");
+      nonEmpty(q);
+      ArrayWindow k = requireWindow(args[1], "a key matrix (array of rows)");
+      if (k.length == 0) fail(span, "'" + display + "' requires a non-empty key matrix.");
+      std::vector<KernelScalar> query = numbersOf(q);
+      const double scale = 1.0 / std::sqrt(static_cast<double>(q.length));
+      std::vector<ArrayWindow> keys;
+      std::vector<double> scores;
+      keys.reserve(k.length);
+      scores.reserve(k.length);
+      for (std::size_t r = 0; r < k.length; ++r) {
+        ArrayWindow row = requireWindow((*k.storage)[k.offset + r], "a key row");
+        if (row.length != q.length) {
+          fail(span, "'" + display + "' requires key rows to match the query length.");
+        }
+        std::vector<KernelScalar> key = numbersOf(row);
+        double dot = 0.0;
+        for (std::size_t i = 0; i < query.size(); ++i) dot += query[i].f * key[i].f;
+        scores.push_back(dot * scale);
+        keys.push_back(row);
+      }
+      double maxScore = *std::max_element(scores.begin(), scores.end());
+      double total = 0.0;
+      std::vector<double> weights;
+      weights.reserve(scores.size());
+      for (double s : scores) {
+        double e = std::exp(s - maxScore);
+        weights.push_back(e);
+        total += e;
+      }
+      for (double& w : weights) w /= total;
+      if (name == "kernels_attention_scores") {
+        std::vector<Value> out;
+        out.reserve(scores.size());
+        for (double s : scores) out.push_back(vFloat(s));
+        return vArray(std::move(out));
+      }
+      ArrayWindow v = requireWindow(args[2], "a value matrix (array of rows)");
+      if (v.length != k.length) {
+        fail(span, "'" + display + "' requires the value matrix to have one row per key.");
+      }
+      std::vector<std::size_t> valueCols;
+      std::vector<ArrayWindow> values;
+      values.reserve(v.length);
+      std::size_t cols = 0;
+      bool firstValue = true;
+      for (std::size_t r = 0; r < v.length; ++r) {
+        ArrayWindow row = requireWindow((*v.storage)[v.offset + r], "a value row");
+        if (firstValue) { cols = row.length; firstValue = false; }
+        else if (row.length != cols) fail(span, "'" + display + "' requires a rectangular value matrix.");
+        values.push_back(row);
+      }
+      std::vector<Value> out;
+      out.reserve(cols);
+      for (std::size_t c = 0; c < cols; ++c) {
+        double acc = 0.0;
+        for (std::size_t r = 0; r < values.size(); ++r) {
+          KernelScalar x = requireNumber((*values[r].storage)[values[r].offset + c], "a value element");
+          acc += weights[r] * x.f;
+        }
+        out.push_back(vFloat(acc));
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_conv1d" || name == "kernels_max_pool1d" || name == "kernels_avg_pool1d") {
+      const bool isConv = name == "kernels_conv1d";
+      expectArgs(3);
+      ArrayWindow input = requireWindow(args[0], "an input array of numbers");
+      nonEmpty(input);
+      ArrayWindow kernel;
+      std::size_t k = 0;
+      if (isConv) {
+        kernel = requireWindow(args[1], "a kernel array of numbers");
+        nonEmpty(kernel);
+        k = kernel.length;
+      } else {
+        KernelScalar size = requireNumber(args[1], "a numeric pool size");
+        if (size.isFloat || size.i <= 0) fail(span, "'" + display + "' requires a positive integer pool size.");
+        k = static_cast<std::size_t>(size.i);
+      }
+      KernelScalar strideS = requireNumber(args[2], "a numeric stride");
+      if (strideS.isFloat || strideS.i <= 0) fail(span, "'" + display + "' requires a positive integer stride.");
+      if (input.length < k) fail(span, "'" + display + "' requires input length >= kernel size.");
+      const std::size_t outLen = (input.length - k) / static_cast<std::size_t>(strideS.i) + 1;
+      std::vector<Value> out;
+      out.reserve(outLen);
+      for (std::size_t o = 0; o < outLen; ++o) {
+        const std::size_t start = o * static_cast<std::size_t>(strideS.i);
+        if (isConv) {
+          std::vector<KernelScalar> terms;
+          terms.reserve(k);
+          bool allInt = true;
+          for (std::size_t j = 0; j < k; ++j) {
+            KernelScalar x = requireNumber((*input.storage)[input.offset + start + j], "an input element");
+            KernelScalar w = requireNumber((*kernel.storage)[kernel.offset + j], "a kernel element");
+            terms.push_back(x);
+            terms.push_back(w);
+            allInt = allInt && !x.isFloat && !w.isFloat;
+          }
+          KernelScalar total = scalarInt(0);
+          if (allInt) {
+            for (std::size_t j = 0; j < k; ++j) {
+              KernelScalar x = requireNumber((*input.storage)[input.offset + start + j], "an input element");
+              KernelScalar w = requireNumber((*kernel.storage)[kernel.offset + j], "a kernel element");
+              std::int64_t product = 0;
+              intBinOp('*', x.i, w.i, product);
+              std::int64_t v = 0;
+              intBinOp('+', total.i, product, v);
+              total.i = v;
+            }
+          } else {
+            total.isFloat = true;
+            for (std::size_t j = 0; j < k; ++j) {
+              KernelScalar x = requireNumber((*input.storage)[input.offset + start + j], "an input element");
+              KernelScalar w = requireNumber((*kernel.storage)[kernel.offset + j], "a kernel element");
+              total.f += x.f * w.f;
+            }
+          }
+          out.push_back(kernelScalarValue(total));
+        } else if (name == "kernels_max_pool1d") {
+          KernelScalar best;
+          bool firstElem = true;
+          for (std::size_t j = 0; j < k; ++j) {
+            KernelScalar x = requireNumber((*input.storage)[input.offset + start + j], "an input element");
+            if (firstElem) { best = x; firstElem = false; }
+            else if (x.isFloat || best.isFloat ? x.f > best.f : x.i > best.i) best = x;
+          }
+          out.push_back(kernelScalarValue(best));
+        } else {
+          double total = 0.0;
+          for (std::size_t j = 0; j < k; ++j) {
+            KernelScalar x = requireNumber((*input.storage)[input.offset + start + j], "an input element");
+            total += x.f;
+          }
+          out.push_back(vFloat(total / static_cast<double>(k)));
+        }
+      }
+      return vArray(std::move(out));
+    }
+
+    if (name == "kernels_quantize_int8" || name == "kernels_dequantize_int8") {
+      expectArgs(2);
+      ArrayWindow xs = requireWindow(args[0], "an array of numbers");
+      KernelScalar scale = requireNumber(args[1], "a numeric scale");
+      if (!(scale.f > 0.0)) fail(span, "'" + display + "' requires a positive scale.");
+      std::vector<Value> out;
+      out.reserve(xs.length);
+      for (std::size_t i = 0; i < xs.length; ++i) {
+        KernelScalar x = requireNumber((*xs.storage)[xs.offset + i], "an array element");
+        if (name == "kernels_quantize_int8") {
+          long long q = std::llround(x.f / scale.f);
+          q = std::max(-128LL, std::min(127LL, q));
+          out.push_back(vInt(static_cast<std::int64_t>(q)));
+        } else {
+          out.push_back(vFloat(x.f * scale.f));
+        }
+      }
+      return vArray(std::move(out));
+    }
+
+    fail(span, "Internal error: unknown kernel builtin '" + name + "'.");
   }
 
   // ------------------------------------------------------------ terminal
