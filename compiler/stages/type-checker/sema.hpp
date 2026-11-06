@@ -278,6 +278,8 @@ class Sema {
   TypePtr checkFunctionCall(const FnSig& sig, CallExpr& call);
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkPrintCall(const std::string& name, CallExpr& call);
+  TypePtr checkIcCall(CallExpr& call);
+  std::string icContextString(Span span) const;
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);
 
   // flow narrowing (ty/pyrefly style): `if x != None:` refines `x: T?` to

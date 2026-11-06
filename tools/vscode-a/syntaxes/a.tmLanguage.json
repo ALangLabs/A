@@ -8,7 +8,6 @@
     { "include": "#comments" },
     { "include": "#strings" },
     { "include": "#characters" },
-    { "include": "#raw-strings" },
     { "include": "#numbers" },
     { "include": "#declarations" },
     { "include": "#types" },
@@ -48,9 +47,45 @@
     "strings": {
       "patterns": [
         {
+          "name": "string.quoted.triple.fstring.a",
+          "begin": "f\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            { "include": "#string-escapes" },
+            { "include": "#interpolation" },
+            { "include": "#string-content" }
+          ]
+        },
+        {
+          "name": "string.quoted.triple.raw.a",
+          "begin": "r\"\"\"",
+          "end": "\"\"\"",
+          "patterns": [
+            { "include": "#string-content" }
+          ]
+        },
+        {
           "name": "string.quoted.triple.a",
           "begin": "\"\"\"",
           "end": "\"\"\"",
+          "patterns": [
+            { "include": "#string-content" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.fstring.a",
+          "begin": "f\"",
+          "end": "\"",
+          "patterns": [
+            { "include": "#string-escapes" },
+            { "include": "#interpolation" },
+            { "include": "#string-content" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.raw.a",
+          "begin": "r\"",
+          "end": "\"",
           "patterns": [
             { "include": "#string-content" }
           ]
@@ -62,18 +97,6 @@
           "patterns": [
             { "include": "#string-escapes" },
             { "include": "#interpolation" },
-            { "include": "#string-content" }
-          ]
-        }
-      ]
-    },
-    "raw-strings": {
-      "patterns": [
-        {
-          "name": "string.quoted.triple.raw.a",
-          "begin": "\"\"\"",
-          "end": "\"\"\"",
-          "patterns": [
             { "include": "#string-content" }
           ]
         }
@@ -138,7 +161,7 @@
         },
         {
           "name": "constant.numeric.float.a",
-          "match": "\\b\\d[\\d_]*\\.[\\d_]+(?:[eE][+-]?[\\d_]+)?\\b|\\b\\d[\\d_]*(?:[eE][+-]?[\\d_]+)\\b"
+          "match": "\\b\\d[\\d_]*\\.[\\d_]+(?:[eE][+-]?[\\d_]+)?\\b|\\b\\d[\\d_]*(?:[eE][+-]?[\\d_]+)\\b|\\b\\.\\d[\\d_]*(?:[eE][+-]?[\\d_]+)?\\b"
         },
         {
           "name": "constant.numeric.integer.a",
@@ -149,30 +172,55 @@
     "declarations": {
       "patterns": [
         {
-          "name": "meta.struct.a",
-          "match": "\\b(struct)\\s+([A-Z][A-Za-z0-9_]*)\\s*:",
-          "captures": {
-            "1": { "name": "storage.modifier.a" },
-            "2": { "name": "entity.name.type.struct.a" }
-          }
-        },
-        {
           "name": "meta.class.a",
-          "match": "\\b(class|Class|metaclass|Metaclass)\\s+([A-Z][A-Za-z0-9_]*)\\s*(?:<([^>]*)>)?",
-          "captures": {
+          "begin": "\\b(class|Class|metaclass|Metaclass)\\s+([A-Z][A-Za-z0-9_]*)\\s*(?:\\(([^)]*)\\))?\\s*(?:<([^>]*)>)?\\s*:",
+          "end": "^(?=\\S)",
+          "beginCaptures": {
             "1": { "name": "storage.modifier.a" },
             "2": { "name": "entity.name.type.class.a" },
-            "3": { "name": "support.type.generic.a" }
-          }
+            "3": { "name": "entity.name.type.parent.a" },
+            "4": { "name": "support.type.generic.a" }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#declarations" },
+            { "include": "#keywords" },
+            { "include": "#self" },
+            { "include": "#types" },
+            { "include": "#numbers" },
+            { "include": "#strings" },
+            { "include": "#members" },
+            {
+              "name": "variable.other.property.a",
+              "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)(?=\\s*:)"
+            },
+            {
+              "name": "variable.other.property.a",
+              "match": "^\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*$"
+            },
+            { "include": "#operators" },
+            { "include": "#punctuation" }
+          ]
         },
         {
           "name": "meta.enum.a",
-          "match": "\\b(enum)\\s+([A-Z][A-Za-z0-9_]*)\\s*(?:<([^>]*)>)?",
-          "captures": {
+          "begin": "\\b(enum)\\s+([A-Z][A-Za-z0-9_]*)\\s*(<[^>]*>)?\\s*:",
+          "end": "^(?=\\S)",
+          "beginCaptures": {
             "1": { "name": "storage.modifier.a" },
             "2": { "name": "entity.name.type.enum.a" },
             "3": { "name": "support.type.generic.a" }
-          }
+          },
+          "patterns": [
+            { "include": "#comments" },
+            { "include": "#numbers" },
+            {
+              "name": "entity.name.type.enum-member.a",
+              "match": "\\b[A-Za-z_][A-Za-z0-9_]*\\b(?=\\s*[,=]|\\s*$)"
+            },
+            { "include": "#operators" },
+            { "include": "#punctuation" }
+          ]
         },
         {
           "name": "meta.trait.a",
@@ -200,6 +248,19 @@
           }
         },
         {
+          "name": "meta.function.test.a",
+          "begin": "\\b(fn)\\s+(test_[A-Za-z_][A-Za-z0-9_]*)\\s*(?:<([^>]*)>)?\\s*\\(",
+          "end": "\\)",
+          "captures": {
+            "1": { "name": "storage.type.function.a" },
+            "2": { "name": "entity.name.function.test.a" },
+            "3": { "name": "support.type.generic.a" }
+          },
+          "patterns": [
+            { "include": "#function-params" }
+          ]
+        },
+        {
           "name": "meta.function.a",
           "begin": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?:<([^>]*)>)?\\s*\\(",
           "end": "\\)",
@@ -213,12 +274,15 @@
           ]
         },
         {
-          "name": "meta.function.method.a",
-          "match": "\\b(fn)\\s+([a-z_][A-Za-z0-9_]*)\\s*\\(",
+          "name": "meta.lambda.a",
+          "begin": "\\b(fn)\\s*(?=\\()",
+          "end": "\\)",
           "captures": {
-            "1": { "name": "storage.type.function.a" },
-            "2": { "name": "entity.name.function.method.a" }
-          }
+            "1": { "name": "storage.type.function.a" }
+          },
+          "patterns": [
+            { "include": "#function-params" }
+          ]
         },
         {
           "name": "meta.from-import.a",
@@ -282,7 +346,7 @@
         },
         {
           "name": "support.type.primitive.a",
-          "match": "\\b(?:bool|char|str|String|int|float|void|Json|Allocator|Pointer|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\\b(\\?)?",
+          "match": "\\b(?:bool|char|str|String|int|float|void|Json|Allocator|Pointer|IO|i8|i16|i32|i64|u8|u16|u32|u64|f32|f64)\\b(\\?)?",
           "captures": {
             "1": { "name": "keyword.operator.optional.a" }
           }
@@ -317,6 +381,14 @@
         {
           "name": "constant.language.none.a",
           "match": "\\bNone\\b"
+        },
+        {
+          "name": "constant.language.io.a",
+          "match": "\\b(?:stdin|stdout|stderr)\\b"
+        },
+        {
+          "name": "variable.language.discard.a",
+          "match": "\\b_\\b"
         }
       ]
     },

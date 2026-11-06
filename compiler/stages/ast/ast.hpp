@@ -138,6 +138,7 @@ enum class BuiltinId : std::uint8_t {
   Panic,
   Assert,
   AssertEq,
+  Ic,
 };
 
 inline BuiltinId builtinIdForName(std::string_view name) {
@@ -166,6 +167,7 @@ inline BuiltinId builtinIdForName(std::string_view name) {
   if (name == "panic") return BuiltinId::Panic;
   if (name == "assert") return BuiltinId::Assert;
   if (name == "assert_eq") return BuiltinId::AssertEq;
+  if (name == "ic") return BuiltinId::Ic;
   return BuiltinId::None;
 }
 
@@ -298,7 +300,40 @@ struct CallExpr : Expr {
 
   // Set by Sema when the callee is a builtin that no local binding shadows.
   BuiltinId builtinId = BuiltinId::None;
+
+  // Populated by Sema for BuiltinId::Ic call sites: the call-site context
+  // ("file.a:3 in fn()") and one source-text label per argument, used by the
+  // interpreter and native emitters to render litprinter-style output.
+  std::string icContext;
+  std::vector<std::string> icArgLabels;
 };
+
+// `ic(...)` argument classification, shared by Sema (labels) and the
+// backends (layout). Mirrors litprinter: literals, strings and bare names
+// are "simple" enough to suppress call-site context; bare literals print
+// without an "expr:" label. Unary minus on a literal counts as a literal.
+inline bool icExprIsLiteralLike(const Expr& e) {
+  switch (e.kind) {
+    case ExprKind::IntLit:
+    case ExprKind::FloatLit:
+    case ExprKind::BoolLit:
+    case ExprKind::CharLit:
+    case ExprKind::StringLit:
+      return true;
+    case ExprKind::Unary: {
+      const auto& u = static_cast<const UnaryExpr&>(e);
+      return u.op == "-" && !u.postfix && icExprIsLiteralLike(*u.operand);
+    }
+    default:
+      return false;
+  }
+}
+
+inline bool icExprIsSimple(const Expr& e) {
+  return e.kind == ExprKind::Ident || icExprIsLiteralLike(e);
+}
+
+inline bool icExprIsBare(const Expr& e) { return icExprIsLiteralLike(e); }
 
 struct IndexExpr : Expr {
   IndexExpr() : Expr(ExprKind::Index) {}

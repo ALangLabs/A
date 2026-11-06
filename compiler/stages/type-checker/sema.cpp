@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "name-resolution/native_modules.hpp"
+#include "tooling/source_text.hpp"
 #include "type-checker/method_signatures.hpp"
 
 namespace a {
@@ -44,7 +45,7 @@ bool isKnownBuiltin(const std::string& name) {
        "arena_reset", "arena_used", "arena_total", "move", "copy",
        "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
        "unsafe_offset",
-       "Some",     "Ok",       "Err"};
+       "Some",     "Ok",       "Err",       "ic"};
   for (const char* n : names) {
     if (name == n) return true;
   }
@@ -81,6 +82,27 @@ TypePtr builtinConstantType(const std::string& name) {
 
 bool isBuiltinConstant(const std::string& name) {
   return builtinConstantType(name) != nullptr;
+}
+
+// Collapses every whitespace run in an `ic` argument's source slice to a
+// single space and trims the ends, so multi-line expressions stay on one
+// debug line.
+std::string collapseIcWhitespace(std::string_view text) {
+  std::string out;
+  out.reserve(text.size());
+  bool pendingSpace = false;
+  for (char c : text) {
+    if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f' || c == '\v') {
+      pendingSpace = !out.empty();
+      continue;
+    }
+    if (pendingSpace) {
+      out.push_back(' ');
+      pendingSpace = false;
+    }
+    out.push_back(c);
+  }
+  return out;
 }
 
 }  // namespace
@@ -3349,11 +3371,65 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
   return typeError();
 }
 
+TypePtr Sema::checkIcCall(CallExpr& call) {
+  TypePtr result = typeVoid();
+  for (auto& arg : call.args) {
+    if (!arg.name.empty()) {
+      sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
+      inferExpr(*arg.value);
+      continue;
+    }
+    TypePtr type = inferExpr(*arg.value);
+    if (resolveType(type)->kind == TypeKind::Void) {
+      sink_.error(arg.value->span, "Cannot inspect a void value with 'ic'.");
+    }
+    result = type;
+  }
+
+  // Capture the display metadata while source spans are available: the
+  // "file:line in fn()" context and one source-text label per argument.
+  call.icContext = icContextString(call.span);
+  call.icArgLabels.clear();
+  call.icArgLabels.reserve(call.args.size());
+  std::unordered_map<int, std::unique_ptr<tooling::SourceText>> sources;
+  for (auto& arg : call.args) {
+    const SourceFile* file = sink_.file(arg.value->span.fileId);
+    std::string label;
+    if (file && arg.value->span.valid()) {
+      auto& slot = sources[arg.value->span.fileId];
+      if (!slot) slot = std::make_unique<tooling::SourceText>(file->text());
+      label = collapseIcWhitespace(slot->slice(arg.value->span));
+    }
+    call.icArgLabels.push_back(std::move(label));
+  }
+  return result;
+}
+
+std::string Sema::icContextString(Span span) const {
+  std::string file = "<unknown>";
+  if (const SourceFile* source = sink_.file(span.fileId)) {
+    const std::string& path = source->path();
+    std::size_t slash = path.find_last_of("/\\");
+    file = slash == std::string::npos ? path : path.substr(slash + 1);
+  }
+  std::string context = file + ":" + std::to_string(span.line);
+  if (currentFunction_) {
+    std::string name = currentFunction_->name;
+    std::size_t sep = name.rfind("::");
+    if (sep != std::string::npos) name = name.substr(sep + 2);
+    context += " in " + name + "()";
+  }
+  return context;
+}
+
 TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   // print/eprint take *objects plus Python-style keyword options
   // (sep/end/file/flush); every other builtin stays positional-only.
   if (name == "print" || name == "eprint") {
     return checkPrintCall(name, call);
+  }
+  if (name == "ic") {
+    return checkIcCall(call);
   }
   for (auto& arg : call.args) {
     if (!arg.name.empty()) {
