@@ -24,11 +24,14 @@ help             show help
 | Option | Applies to | Description |
 |---|---|---|
 | `-o <file>` | `build`, `doc` | Output path (binary/LLVM IR output name context or doc output) |
+| `-c <code>` | `run` (or alone) | Run inline A source instead of a file |
 | `--emit-llvm` | `build` | Emit LLVM IR (`.ll`) instead of a native executable |
 | `-w, --write` | `fmt` | Rewrite source in place |
 | `--check` | `fmt` | Exit non-zero if file needs formatting |
 | `--indent <n>` | `fmt` | Indentation width (default 4, range 1-16) |
 | `--json` | `doc`, `check` | Structured JSON output |
+| `--parallel` | `check` | Check modules in parallel (same diagnostics) |
+| `-j <n>, --jobs <n>` | `check` | Parallel jobs (default: serial; `-j 0` = all cores) |
 | `--opt` | `ir` | Run optimization passes before printing IR |
 | `-I <dir>` | module loading | Add module search directory (repeatable) |
 | `--stdlib <dir>` | module loading | Override standard library directory |

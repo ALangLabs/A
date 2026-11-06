@@ -73,183 +73,47 @@ print(unwrap_or(divide(10, 0), -1))
 
 These names are recognized by the type checker/runtime as builtins or builtin constants (subject to shadowing rules). Some are also exposed via native modules.
 
-### 2.1 Core I/O and conversion
+Individual signatures, descriptions, and examples for every builtin live in the auto-generated reference (built from the same doc tables the type checker uses):
 
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `print` | `print(*objects, sep: String = " ", end: String = "\n", file: IO = stdout, flush: bool = false) -> void` | Write values to a stream, separated, with an ending |
-| `eprint` | `eprint(*objects, sep: String = " ", end: String = "\n", file: IO = stderr, flush: bool = false) -> void` | Write values to stderr (or `file`), separated, with an ending |
-| `open` | `open(path: String, mode: String = "w") -> IO` | Open a file (`"w"`, `"a"`, `"r"`) for `print(file=...)` |
-| `close` | `close(stream: IO)` | Close a handle returned by `open()` |
-| `stdout` / `stderr` | `stdout: IO`, `stderr: IO` | Stream handles usable as `print(file=stdout)` |
-| `input` | `input([prompt]) -> String` | Read a line from stdin |
-| `flush` | `flush()` | Flush stdout |
-| `len` | `len(value) -> i64` | Length of string/array/map/set (and supported containers) |
-| `str` | `str(value) -> String` | Convert value to string |
-| `int` | `int(value) -> i64` | Convert number/bool/numeric string to `i64` |
-| `float` | `float(value) -> f64` | Convert number/bool/numeric string to `f64` |
+- **[Built-in functions](builtins.md)** — every builtin function and constant, with examples (generated from `builtin_docs.hpp`).
+- **[Primitive type methods](methods.md)** — array/map/set/string methods (generated from `method_signatures.hpp`).
+
+Highlights:
+
+### 2.1 Core I/O and conversion
+`print`, `eprint`, `open`, `close`, `stdout`, `stderr`, `input`, `flush`, `len`, `str`, `int`, `float` (full signatures in the reference).
 
 ### 2.2 Math / numeric builtins
-
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `abs` | `abs(x) -> number` | Absolute value |
-| `min` | `min(a, b) -> number` | Smaller of two values |
-| `max` | `max(a, b) -> number` | Larger of two values |
-| `pow` | `pow(base, exponent) -> f64` | Power |
-| `sqrt` | `sqrt(x) -> f64` | Square root |
-| `sin/cos/tan` | `sin(x) -> f64` etc. | Trig (radians) |
-| `asin/acos/atan/atan2` | `atan2(y, x) -> f64` | Inverse trig / angle |
-| `exp/log/log2/log10` | `log(x) -> f64` etc. | Exponential/logarithms |
-| `floor/ceil/round/trunc` | `round(x) -> f64` etc. | Rounding |
-| `random` | `random() -> f64` | Pseudo-random float in `[0, 1)` |
-| `random_int` | `random_int(low, high) -> i64` | Inclusive pseudo-random integer |
-| `sum` | `sum(values) -> number` | Sum numeric array |
-
-Sized conversion builtins are recognized by the checker: `i8,i16,i32,i64,u8,u16,u32,u64,f32,f64`.
+`abs`, `min`, `max`, `pow`, `sqrt`, trig/log/rounding, `random`, `random_int`, `sum`.
 
 ### 2.3 Collection / functional builtins
-
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `join` | `join(values, separator) -> String` | Join array of strings |
-| `map` | `map(values, fn) -> array` | Apply function to elements |
-| `filter` | `filter(values, fn) -> array` | Keep elements matching predicate |
-| `reduce` | `reduce(values, initial, fn) -> value` | Left fold |
-| `any` | `any(values, fn) -> bool` | Any element matches |
-| `all` | `all(values, fn) -> bool` | All elements match |
-| `set` | `set(values) -> Set` | Build set from iterable-like values |
+`join`, `map`, `filter`, `reduce`, `any`, `all`, `set`.
 
 ### 2.4 Optionals / results / assertions / control helpers
-
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `Some` | `Some(value) -> T?` | Wrap in optional |
-| `Ok` | `Ok(value) -> Result` | Success result |
-| `Err` | `Err(error) -> Result` | Error result |
-| `panic` | `panic(message)` | Abort with message (exit status 2) |
-| `assert` | `assert(condition[, message])` | Runtime assertion |
-| `assert_eq` | `assert_eq(actual, expected[, message])` | Equality assertion |
+`Some`, `Ok`, `Err`, `panic`, `assert`, `assert_eq`, `ic` (debug inspection: prints `ic| label: value` + context to stderr and returns the value).
 
 ### 2.5 Memory / ownership / borrow / unsafe builtins
-
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `move` | `move(value) -> T` | Move ownership out of a binding (tracked semantics) |
-| `copy` | `copy(value) -> T` | Deep copy a value |
-| `borrow` | `borrow(variable)` | Immutable borrow (analyzer-tracked) |
-| `borrow_mut` | `borrow_mut(variable)` | Mutable borrow (analyzer-tracked) |
-| `unsafe_get` | `unsafe_get(array, index) -> T` | Unchecked element access |
-| `unsafe_set` | `unsafe_set(array, index, value)` | Unchecked element assignment |
-| `unsafe_address_of` | `unsafe_address_of(array, index) -> *T` | Raw pointer to element |
-| `unsafe_load` | `unsafe_load(pointer) -> T` | Load through raw pointer |
-| `unsafe_store` | `unsafe_store(pointer, value)` | Store through raw pointer |
-| `unsafe_offset` | `unsafe_offset(pointer, count) -> *T` | Pointer offset |
+`move`, `copy`, `borrow`, `borrow_mut`, `unsafe_get/set/address_of/load/store/offset` (full signatures in the reference).
 
 ### 2.6 Allocator / arena builtins
-
-| API | Signature (tooling) | Description |
-|---|---|---|
-| `arena_new` | `arena_new(capacity) -> Allocator` | Bump allocator |
-| `arena_pool` | `arena_pool(capacity) -> Allocator` | Pool allocator (reuses equal-size blocks) |
-| `arena_region` | `arena_region(capacity) -> Allocator` | Region allocator (reverse-order release) |
-| `arena_alloc` | `arena_alloc(allocator, size) -> i64` | Allocate bytes, returns handle |
-| `arena_release` | `arena_release(allocator, handle)` | Release allocation |
-| `arena_reset` | `arena_reset(allocator)` | Free all allocations |
-| `arena_used` | `arena_used(allocator) -> i64` | Bytes in use |
-| `arena_total` | `arena_total(allocator) -> i64` | Capacity |
+`arena_new/pool/region/alloc/release/reset/used/total`.
 
 ### 2.7 Builtin constants
-
-Recognized constants include (see `builtin_docs.hpp` / `sema.cpp`):
-
-```text
-PI, E
-I8_MIN, I8_MAX, I16_MIN, I16_MAX, I32_MIN, I32_MAX, I64_MIN, I64_MAX
-U8_MAX, U16_MAX, U32_MAX
-F32_MIN, F32_MAX, F64_MIN, F64_MAX
-```
+`PI`, `E`, the sized integer/string extrema (`I8_MIN`…`U64_MAX`, `F32_MIN`…, etc.), `stdout`, `stderr`, `None`.
 
 ## 3. Collection and primitive method API
 
 Method surfaces are defined in `compiler/stages/type-checker/method_signatures.hpp` and used by the type checker/LSP.
 
-### 3.1 Array methods
+Full reference (signatures and descriptions for every method, generated from
+those tables):
 
-| Method | Signature | Description |
-|---|---|---|
-| `append` | `append(v)` | Add element to end |
-| `extend` | `extend(xs)` | Append all elements from another array |
-| `insert` | `insert(i, v)` | Insert before index |
-| `remove_at` | `remove_at(i)` | Remove and return element at index |
-| `pop` | `pop([i])` | Remove/return last (or index) |
-| `remove` | `remove(v)` | Remove first occurrence |
-| `clear` | `clear()` | Remove all elements |
-| `copy` | `copy()` | Shallow copy |
-| `count` | `count(v)` | Count occurrences |
-| `index` | `index(v[, start[, end]])` | First index; error if absent |
-| `contains` | `contains(v)` | Membership test |
-| `sort` | `sort()` | Sort in place |
-| `reverse` | `reverse()` | Reverse in place |
-| `first` | `first()` | First element as optional |
-| `last` | `last()` | Last element as optional |
-| `join` | `join(sep)` | Join elements with separator |
+- **[Primitive type methods](methods.md)** — array/map/set/string methods.
 
-### 3.2 Map methods
-
-| Method | Signature | Description |
-|---|---|---|
-| `get` | `get(k[, default])` | Value for key, default or `None` |
-| `pop` | `pop(k[, default])` | Remove key and return value/default |
-| `contains` | `contains(k)` | Key membership |
-| `keys` | `keys()` | Keys array |
-| `values` | `values()` | Values array |
-| `items` | `items()` | Array of `(key, value)` tuples |
-| `update` | `update(other)` | Copy entries from another map |
-| `copy` | `copy()` | Shallow copy |
-| `clear` | `clear()` | Remove all entries |
-
-Indexing (`m[key]`) and assignment (`m[key] = value`) are also supported by the language/runtime.
-
-### 3.3 Set methods
-
-| Method | Signature | Description |
-|---|---|---|
-| `add` | `add(v)` | Insert value |
-| `remove` | `remove(v)` | Remove value; error if absent |
-| `discard` | `discard(v)` | Remove if present |
-| `contains` | `contains(v)` | Membership |
-| `union` | `union(s)` | Union |
-| `intersection` | `intersection(s)` | Intersection |
-| `difference` | `difference(s)` | Difference |
-| `issubset` | `issubset(s)` | Subset test |
-| `issuperset` | `issuperset(s)` | Superset test |
-| `copy` | `copy()` | Shallow copy |
-| `clear` | `clear()` | Remove all elements |
-
-### 3.4 String methods
-
-| Method | Signature | Description |
-|---|---|---|
-| `capitalize/casefold/lower/upper/swapcase/title` | `upper()` etc. | Case transforms |
-| `center/ljust/rjust/zfill` | `center(width[, fill])` | Padding/alignment |
-| `count` | `count(sub[, start[, end]])` | Count substring occurrences |
-| `find/rfind` | `find(sub[, start[, end]])` | Index or `-1` |
-| `index/rindex` | `index(sub[, start[, end]])` | Index or error |
-| `startswith/endswith` | `startswith(prefix[, start[, end]])` | Prefix/suffix tests |
-| `expandtabs` | `expandtabs([tabsize])` | Expand tabs |
-| `strip/lstrip/rstrip` | `strip([chars])` | Trim characters |
-| `partition/rpartition` | `partition(sep)` | Split once into 3-tuple |
-| `removeprefix/removesuffix` | `removeprefix(affix)` | Remove affix when present |
-| `replace` | `replace(old, new[, count])` | Replace occurrences |
-| `split/rsplit/splitlines` | `split([sep[, maxsplit]])` | Split into arrays |
-| `join` | `join(parts)` | Join array with string separator |
-| `isalnum/isalpha/isascii/isdecimal/isdigit/isidentifier/islower/isnumeric/isprintable/isspace/istitle/isupper` | `isdigit()` etc. | Character-class predicates |
-| `contains` | `contains(sub)` | Substring membership |
-| `repeat` | `repeat(n)` | Repeat string |
-| `chars` | `chars()` | Array of characters |
-
-Strings also support interpolation (`"{expr}"`), indexing/slicing operations as implemented by the runtime, and concatenation/operators where supported.
+Highlights: arrays are mutable with `append/pop/sort/reverse/copy` and the
+rich string method set (`split/strip/replace/startswith/is*` predicates)
+mirrors the Python surface; maps support `get/pop` + `m[k]` access;
+sets support `add/remove/discard/union/intersection/difference`.
 
 ## 4. Native modules (toolchain-backed)
 
@@ -340,8 +204,8 @@ Tooling signatures:
 | `json.as_*` | `json.as_str(doc) -> String?`, `as_int -> i64?`, `as_float -> f64?`, `as_bool -> bool?`, `as_array -> [Json]?`, `as_map -> {String: Json}?` |
 
 ```a
-import json
-doc = json.parse("{\"a\": 1, \"b\": [true, null]}")
+import std:json
+doc = json.parse("\{\"a\": 1, \"b\": [true, null]\}")
 print(json.kind(doc))
 print(json.stringify(doc))
 ```

@@ -7,6 +7,7 @@
 
 #include "name-resolution/native_modules.hpp"
 #include "tooling/source_text.hpp"
+#include "type-checker/debug/magic_identifiers.hpp"
 #include "type-checker/method_signatures.hpp"
 
 namespace a {
@@ -39,13 +40,15 @@ bool isKnownBuiltin(const std::string& name) {
       "remove_dir", "rename", "current_dir", "now", "sleep", "panic", "assert",
       "open", "close",
       "assert_eq", "map",  "filter",   "reduce",   "any",
-       "all",      "sum",      "join",      "random",   "random_int", "atan2",
-       "set",      "unsafe_get", "unsafe_set",
-       "arena_new", "arena_pool", "arena_region", "arena_alloc", "arena_release",
-       "arena_reset", "arena_used", "arena_total", "move", "copy",
-       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
-       "unsafe_offset",
-       "Some",     "Ok",       "Err",       "ic"};
+      "all",      "sum",      "join",      "random",   "random_int", "atan2",
+      "set",      "unsafe_get", "unsafe_set",
+      "arena_new", "arena_pool", "arena_region", "arena_alloc", "arena_release",
+      "arena_reset", "arena_used", "arena_total", "move", "copy",
+      "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
+      "unsafe_offset",
+      "Some", "Ok", "Err", "ic",
+      "__file__", "__line__", "__func__", "__function__", "__source_file__", "__source_line__",
+      "__repr__", "__debug_repr__", "__debug_time__", "__debug_context__", "__ic_format__"};
   for (const char* n : names) {
     if (name == n) return true;
   }
@@ -2139,6 +2142,7 @@ TypePtr Sema::inferStringLiteral(StringLitExpr& expr) {
 }
 
 TypePtr Sema::inferIdent(IdentExpr& expr) {
+  if (auto magic = debug_magic::inferMagicIdentifier(expr.name)) return *magic;
   if (VarSym* sym = lookupVar(expr.name)) {
     sym->used = true;
     return sym->type;
@@ -3414,20 +3418,14 @@ TypePtr Sema::checkIcCall(CallExpr& call) {
 }
 
 std::string Sema::icContextString(Span span) const {
-  std::string file = "<unknown>";
-  if (const SourceFile* source = sink_.file(span.fileId)) {
-    const std::string& path = source->path();
-    std::size_t slash = path.find_last_of("/\\");
-    file = slash == std::string::npos ? path : path.substr(slash + 1);
-  }
-  std::string context = file + ":" + std::to_string(span.line);
-  if (currentFunction_) {
-    std::string name = currentFunction_->name;
-    std::size_t sep = name.rfind("::");
-    if (sep != std::string::npos) name = name.substr(sep + 2);
-    context += " in " + name + "()";
-  }
-  return context;
+  return debug_magic::functionDisplayName(currentFunction_ ? currentFunction_->name : std::string()) == "<module>"
+             ? debug_magic::sourceFileName(sink_, span) + ":" + std::to_string(span.line)
+             : debug_magic::sourceFileName(sink_, span).substr(
+                       debug_magic::sourceFileName(sink_, span).find_last_of("/\\") == std::string::npos
+                           ? 0
+                           : debug_magic::sourceFileName(sink_, span).find_last_of("/\\") + 1) +
+                   ":" + std::to_string(span.line) + " in " +
+                   debug_magic::functionDisplayName(currentFunction_->name) + "()";
 }
 
 TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
@@ -3439,24 +3437,47 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   if (name == "ic") {
     return checkIcCall(call);
   }
-  for (auto& arg : call.args) {
-    if (!arg.name.empty()) {
-      sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
-      return typeError();
-    }
-  }
-
   auto inferArgs = [&]() {
     std::vector<TypePtr> types;
     types.reserve(call.args.size());
     for (auto& arg : call.args) types.push_back(inferExpr(*arg.value));
     return types;
   };
-
   auto arityError = [&](std::size_t expected) {
     sink_.error(call.span, "'" + name + "' expects " + std::to_string(expected) +
                                " argument(s), found " + std::to_string(call.args.size()) + ".");
   };
+  if (name == "__file__" || name == "__source_file__" || name == "__func__" ||
+      name == "__function__" || name == "__debug_time__" || name == "__debug_context__") {
+    if (!call.args.empty()) arityError(0);
+    inferArgs();
+    if (name == "__debug_time__") return typeString();
+    return typeString();
+  }
+  if (name == "__line__" || name == "__source_line__") {
+    if (!call.args.empty()) arityError(0);
+    inferArgs();
+    return typeInt(64, true);
+  }
+  if (name == "__repr__" || name == "__debug_repr__") {
+    if (call.args.size() != 1) arityError(1);
+    inferArgs();
+    return typeString();
+  }
+  if (name == "__ic_format__") {
+    if (call.args.size() < 1 || call.args.size() > 3) {
+      sink_.error(call.span, "'__ic_format__' expects context/label/value (1 to 3) arguments, found " +
+                                 std::to_string(call.args.size()) + ".");
+    }
+    inferArgs();
+    return typeString();
+  }
+  for (auto& arg : call.args) {
+    if (!arg.name.empty()) {
+      sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
+      return typeError();
+    }
+  }
 
   // Structured values (Json) are opaque; any non-void value may be serialized.
   auto inferAny = [&](std::size_t index, const std::string& context) {

@@ -283,6 +283,8 @@ class KGENExecutionEngine {
   // litprinter-style debug inspector: prints labeled values/context to stderr
   // and returns the inspected value(s).
   Value callIc(const CallExpr& expr, Env& env);
+  // Debug/source intrinsics exposed to A for std.debug/ic.
+  Value callDebugIntrinsic(BuiltinId id, const std::string& name, ArgList& args, Span span);
   // json/binary/testing/log/metrics/trace/net/http, implemented in
   // backend/stdlib/builtins.cpp.
   Value callStdlibBuiltin(const std::string& name, ArgList& args, Span span);
@@ -328,6 +330,7 @@ class KGENExecutionEngine {
   std::deque<Env> moduleEnvs_;
   int currentModule_ = -1;
   int callDepth_ = 0;
+  std::string currentFunctionName_ = "<module>";
 
   // Pending `return`. Statement lists and loops test this flag instead of
   // propagating a thrown signal, which made every call pay for unwinding.

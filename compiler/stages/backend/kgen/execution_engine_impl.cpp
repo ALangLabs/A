@@ -1,4 +1,5 @@
 #include "backend/kgen/execution_engine_impl.hpp"
+#include "backend/kgen/debug/intrinsics.hpp"
 #include "backend/kgen/python/python_interop.hpp"
 #include "backend/kgen/runtime/terminal.hpp"
 
@@ -1669,6 +1670,12 @@ Value KGENExecutionEngine::eval(const Expr& expr, Env& env) {
 }
 
 Value KGENExecutionEngine::evalIdentifier(const IdentExpr& expr, Env& env) {
+  if (expr.name == "__file__" || expr.name == "__source_file__")
+    return makeString(debug_intrinsics::sourceFile(sink_, expr.span));
+  if (expr.name == "__line__" || expr.name == "__source_line__")
+    return makeInt(debug_intrinsics::sourceLine(expr.span));
+  if (expr.name == "__func__" || expr.name == "__function__")
+    return makeString(debug_intrinsics::sourceFunction(currentFunctionName_));
   if (Binding* binding = env.find(expr.name)) return binding->value;
   if (expr.name == "None") return makeNone();
   Value constant;
@@ -2624,6 +2631,14 @@ Value KGENExecutionEngine::evalCall(const CallExpr& expr, Env& env) {
     if (expr.builtinId == BuiltinId::Ic) {
       return callIc(expr, env);
     }
+    if (expr.builtinId == BuiltinId::File || expr.builtinId == BuiltinId::Line ||
+        expr.builtinId == BuiltinId::Func || expr.builtinId == BuiltinId::DebugRepr ||
+        expr.builtinId == BuiltinId::DebugTime || expr.builtinId == BuiltinId::DebugContext ||
+        expr.builtinId == BuiltinId::IcFormat) {
+      if (hasNamedArgs(expr.args)) fail(expr.span, "Named arguments are not supported for this function.");
+      ArgList builtinArgs = evalPositionalArgs(expr.args, env);
+      return callDebugIntrinsic(expr.builtinId, ident->name, builtinArgs, expr.span);
+    }
     // Sema proved the callee is a builtin, not a variable: evaluate arguments
     // and dispatch on the resolved id instead of walking scopes and name maps.
     if (expr.builtinId != BuiltinId::None) {
@@ -2860,7 +2875,9 @@ Value KGENExecutionEngine::callFunction(const FnDecl& decl, ArgList args, Span s
   }
 
   int savedModule = currentModule_;
+  std::string savedFunction = currentFunctionName_;
   if (decl.moduleId >= 0) currentModule_ = decl.moduleId;
+  currentFunctionName_ = decl.name;
 
   Env frame;
   frame.parent = &moduleEnv(currentModule_);
@@ -2882,11 +2899,13 @@ Value KGENExecutionEngine::callFunction(const FnDecl& decl, ArgList args, Span s
   } catch (...) {
     runDestructors(frame, true);
     returning_ = outerReturning;
+    currentFunctionName_ = std::move(savedFunction);
     currentModule_ = savedModule;
     throw;
   }
   runDestructors(frame, false);
   returning_ = outerReturning;
+  currentFunctionName_ = std::move(savedFunction);
   currentModule_ = savedModule;
   return result;
 }
@@ -3126,6 +3145,44 @@ std::string joinValues(const std::vector<Value>& values, const std::string& sepa
 }
 
 }  // namespace
+
+Value KGENExecutionEngine::callDebugIntrinsic(BuiltinId id, const std::string& name, ArgList& args,
+                                               Span span) {
+  auto arity = [&](std::size_t expected) {
+    if (args.size() != expected)
+      fail(span, "'" + name + "' expects " + std::to_string(expected) + " argument(s), found " +
+                     std::to_string(args.size()) + ".");
+  };
+  switch (id) {
+    case BuiltinId::File: arity(0); return makeString(debug_intrinsics::sourceFile(sink_, span));
+    case BuiltinId::Line: arity(0); return makeInt(debug_intrinsics::sourceLine(span));
+    case BuiltinId::Func:
+      arity(0);
+      return makeString(debug_intrinsics::sourceFunction(currentFunctionName_));
+    case BuiltinId::DebugRepr:
+      arity(1);
+      return makeString(formatValue(args[0], true));
+    case BuiltinId::DebugTime:
+      arity(0);
+      return makeString(debugfmt::timeNow());
+    case BuiltinId::DebugContext:
+      arity(0);
+      return makeString(debug_intrinsics::debugContext(sink_, span, currentFunctionName_));
+    case BuiltinId::IcFormat: {
+      if (args.size() < 1 || args.size() > 3)
+        fail(span, "'__ic_format__' expects context/label/value (1 to 3) arguments.");
+      const std::string context = expectString(args[0], span, "The context passed to '__ic_format__'");
+      if (args.size() == 1) return makeString("ic| " + context + " - " + debugfmt::timeNow());
+      const std::string label = expectString(args[1], span, "The label passed to '__ic_format__'");
+      std::string body = label;
+      if (args.size() == 3) body += ": " + formatValue(args[2], true);
+      std::string head = "ic| [" + context + "] >>> ";
+      return makeString(head + debugfmt::alignContinuations(body, head.size()));
+    }
+    default:
+      fail(span, "Internal error: unsupported debug intrinsic.");
+  }
+}
 
 Value KGENExecutionEngine::callBuiltinFast(BuiltinId id, const std::string& name, ArgList& args,
                                    Span span) {

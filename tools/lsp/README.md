@@ -72,7 +72,27 @@ Set `A_LSP_LOG=1` to write lifecycle messages to stderr.
 - `analysis.hpp` / `analysis.cpp` — symbol index, scopes, definition/reference
   resolution, and compilation wrapper.
 - `json.hpp` / `json.cpp` — minimal JSON parser/serializer for LSP messages.
-- `server.cpp` — stdio JSON-RPC loop and LSP request handlers.
+- `server.hpp` — `LanguageServer` class declaration (`Document`, worker state,
+  `kServerVersion`); handler implementations are split across translation
+  units so each area can be updated without touching the others.
+- `server.cpp` — run loop, method dispatch, initialize/configuration.
+- `transport.cpp` — stdio Content-Length framing, replies/notifications.
+- `documents.cpp` — open-document store, `didOpen`/`didChange`/etc., token
+  lookup, docstring/doc-comment extraction.
+- `compiler_worker.cpp` — debounced background type checking (`ensureCompiled`).
+- `diagnostics.cpp` / `diagnostics.hpp` — diagnostic → LSP conversion shared
+  by async publish, sync publish, and pull diagnostics.
+- `handlers_navigation.cpp` — definition, references, rename, highlights,
+  builtin/method doc-table jumps.
+- `handlers_features.cpp` — hover, completion, signature help, symbols,
+  formatting, semantic tokens, inlay hints, code actions, folding/selection
+  ranges, code lens, monikers, document links.
+- `handlers_hierarchy.cpp` — call hierarchy and type hierarchy.
+- `text_utils.hpp` / `text_utils.cpp` — paths ↔ URIs, UTF-16 columns, LSP
+  Position/Range/Location builders, line diff.
+- `docs.hpp` / `docs.cpp` — signature formatting, doc-section rendering,
+  hover markdown, builtin/method table lookups, keywords.
+- `main.cpp` — entry point (`--version`/`--help`, stdio setup).
 - `smoke_test.py` — end-to-end protocol smoke test.
 
 ## CLI parallel checking

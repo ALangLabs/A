@@ -8,6 +8,9 @@ This documentation describes the **current implementation** of the A language an
 
 - [Language Specification](language-spec/README.md) — full syntax, semantics, and expression/statement reference
 - [Standard Library & Builtins API Reference](standard-library/README.md) — prelude, native modules, `std/*` packages, builtins, and method surfaces
+- [Keywords](keywords.md) — all 33 reserved keywords with examples
+- [Built-in functions](builtins.md) — auto-generated builtin function/constant reference
+- [Primitive type methods](methods.md) — auto-generated array/map/set/string method reference
 - [CLI Reference](cli/README.md) — `a` commands, flags, and workflows
 - [Compiler Internals](compiler-internals/README.md) — pipeline, KGEN/LLVM backend, module loading, and project layout
 

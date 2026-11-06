@@ -1718,9 +1718,13 @@ bool checkSupportedExpr(const Expr& expr) {
           name == "unsafe_load" || name == "unsafe_store" || name == "unsafe_offset") {
         return false;
       }
-      if (name == "print" || name == "eprint" || name == "ic") {
-        // print/eprint/ic have dynamic formatting, keyword/context semantics,
-        // and (for ic) Sema-captured metadata; keep them on the interpreter.
+      if (name == "print" || name == "eprint" || name == "ic" || name == "__file__" ||
+          name == "__line__" || name == "__func__" || name == "__function__" ||
+          name == "__source_file__" || name == "__source_line__" || name == "__repr__" ||
+          name == "__debug_repr__" || name == "__debug_time__" || name == "__debug_context__" ||
+          name == "__ic_format__") {
+        // print/eprint/ic/debug intrinsics have dynamic formatting/context semantics.
+        // Run the whole program in the interpreter.
         return false;
       }
       for (const auto& a : c.args) if (!checkSupportedExpr(*a.value)) return false;

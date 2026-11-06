@@ -57,6 +57,10 @@ class metaclass pass self true false and or not
 import from as match None enum do type trait where comptime impl
 ```
 
+See [Keywords](../keywords.md) for all 33 keywords with examples, and
+[Built-in functions](../builtins.md) for the full names available without
+an import.
+
 Notes:
 - `Class` and `Metaclass` are also accepted as keyword forms for `class`/`metaclass`.
 - `true`/`false` are boolean literals; `None` is the null/empty optional literal identifier.

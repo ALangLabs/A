@@ -87,7 +87,7 @@ A/
   issues. The PR template lists the checks — formatter/doc-generator or LSP
   behaviour changes should extend the golden cases or `smoke_test.py`.
 - **Versioning**: `CMakeLists.txt`, `compiler/stages/driver/version.hpp`,
-  `tools/lsp/server.cpp` (`kServerVersion`) and
+  `tools/lsp/server.hpp` (`kServerVersion`) and
   `tools/vscode-a/package.json` must agree; CI fails if they drift.
 - **Documentation**: new stdlib members need a row in
   `docs/standard-library/README.md`, an entry in `builtin_docs.hpp` (so the

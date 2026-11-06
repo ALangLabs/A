@@ -1,0 +1,36 @@
+# Debug helpers for A.
+#
+# `ic(...)` remains a compiler builtin for litprinter-style source-label capture.
+# This module exposes the primitives needed to build debug output in A.
+
+fn file():
+    return __file__()
+
+fn line():
+    return __line__()
+
+fn func():
+    return __func__()
+
+fn context():
+    return __debug_context__()
+
+fn time():
+    return __debug_time__()
+
+fn repr(value):
+    return __debug_repr__(value)
+
+fn format_breadcrumb(ctx):
+    return __ic_format__(ctx)
+
+fn format_value(ctx, label, value):
+    return __ic_format__(ctx, label, value)
+
+fn ic_value(ctx, label, value):
+    eprint(format_value(ctx, label, value))
+    return value
+
+fn ic_breadcrumb(ctx):
+    eprint(format_breadcrumb(ctx))
+    return None
