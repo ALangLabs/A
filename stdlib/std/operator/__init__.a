@@ -212,9 +212,15 @@ fn itemgetter(item):
     # Returns a callable fetching `item` from its operand (Python parity).
     return fn(obj) => obj[item]
 
+fn _itemgetter_all(obj, items):
+    out = []
+    for i in items:
+        out.append(obj[i])
+    return out
+
 fn itemgetter_all(items):
     # Multi-index variant of itemgetter; Python returns a tuple, A an array.
-    return fn(obj) => [obj[i] for i in items]
+    return fn(obj) => _itemgetter_all(obj, items)
 
 fn repeat_seq(a, n):
     # Sequence repetition `a * n` (Python has no operator.repeat; `*` is

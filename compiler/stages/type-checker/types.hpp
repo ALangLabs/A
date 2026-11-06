@@ -33,6 +33,10 @@ enum class TypeKind {
   // Opaque structured value produced by the json and binary modules. It has
   // no operators of its own; json.* and binary.* builtins inspect it.
   Json,
+  // Opaque file/stream handle produced by open(), stdout, and stderr. The
+  // runtime stores it as an integer handle; only print/eprint (via file=)
+  // and close() inspect it.
+  IO,
   Var,
 };
 
@@ -135,6 +139,7 @@ inline TypePtr typeSet(TypePtr elem) {
 
 inline TypePtr typeAllocator() { return makeType(TypeKind::Allocator); }
 inline TypePtr typeJson() { return makeType(TypeKind::Json); }
+inline TypePtr typeIO() { return makeType(TypeKind::IO); }
 
 inline TypePtr typePointer(TypePtr elem) {
   auto type = makeType(TypeKind::Pointer);
@@ -208,6 +213,7 @@ inline TypePtr builtinTypeByName(const std::string& name) {
   if (name == "void") return typeVoid();
   if (name == "Allocator") return typeAllocator();
   if (name == "Json") return typeJson();
+  if (name == "IO") return typeIO();
   if (name == "Pointer") return typePointer(typeError());
   if (name == "i8") return typeInt(8, true);
   if (name == "i16") return typeInt(16, true);
@@ -252,6 +258,7 @@ inline std::string typeName(const TypePtr& type) {
     case TypeKind::Allocator: return "Allocator";
     case TypeKind::Pointer: return "Pointer<" + typeName(t->elem) + ">";
     case TypeKind::Json: return "Json";
+    case TypeKind::IO: return "IO";
     case TypeKind::Tuple: {
       std::string s = "(";
       for (std::size_t i = 0; i < t->params.size(); ++i) {

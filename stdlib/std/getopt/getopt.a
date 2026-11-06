@@ -170,6 +170,7 @@ fn _do_shorts(opts, optstring: String, shortopts: String, args: [String]) -> [St
         opt = _char_at(optstring, 0)
         optstring = _slice(optstring, 1, len(optstring))
         has_arg = _short_has_arg(opt, shortopts)
+        optarg = ""
         if has_arg != 0:
             if optstring == "" and has_arg == 1:
                 if len(args) == 0:
@@ -178,8 +179,6 @@ fn _do_shorts(opts, optstring: String, shortopts: String, args: [String]) -> [St
                 args = args[1..]
             optarg = optstring
             optstring = ""
-        else:
-            optarg = ""
         opts.append(("-" + opt, optarg))
     return args
 
@@ -197,3 +196,4 @@ fn _short_has_arg(opt: String, shortopts: String) -> i64:
             return 1
         i = i + 1
     core.panic("option -" + opt + " not recognized")
+    return 0

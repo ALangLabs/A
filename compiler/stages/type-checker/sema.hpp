@@ -277,6 +277,7 @@ class Sema {
   bool enumNamespaceUse(ExprPtr& object, const std::string& enumQ);
   TypePtr checkFunctionCall(const FnSig& sig, CallExpr& call);
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
+  TypePtr checkPrintCall(const std::string& name, CallExpr& call);
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);
 
   // flow narrowing (ty/pyrefly style): `if x != None:` refines `x: T?` to

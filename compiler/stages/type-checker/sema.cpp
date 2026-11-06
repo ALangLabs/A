@@ -36,6 +36,7 @@ bool isKnownBuiltin(const std::string& name) {
       "read_file", "write_file",
       "append_file", "file_exists", "list_dir", "remove_file", "create_dir",
       "remove_dir", "rename", "current_dir", "now", "sleep", "panic", "assert",
+      "open", "close",
       "assert_eq", "map",  "filter",   "reduce",   "any",
        "all",      "sum",      "join",      "random",   "random_int", "atan2",
        "set",      "unsafe_get", "unsafe_set",
@@ -52,6 +53,7 @@ bool isKnownBuiltin(const std::string& name) {
 
 TypePtr builtinConstantType(const std::string& name) {
   if (name == "PI" || name == "E") return typeFloat(64);
+  if (name == "stdout" || name == "stderr") return typeIO();
   struct IntConstant {
     const char* name;
     int bits;
@@ -1195,9 +1197,37 @@ void Sema::registerImports(Module& module) {
             binding.kind = FromBinding::Kind::Value;
             binding.type = value->second;
           } else {
-            sink_.error(item.span, "Module '" + exports.name + "' has no exported member '" +
-                                       item.name + "'.");
-            continue;
+            // Value exports are only built by checkModule, which runs after
+            // registerImports for every module. Fall back to scanning the
+            // target module's top-level assignments so `from m import X`
+            // works for plain `X = ...` bindings; the type stays dynamic
+            // until the dependency's own checkModule refines it.
+            Module& target = graph_.at(from->moduleId);
+            bool found = false;
+            if (target.program) {
+              for (auto& stmt : target.program->statements) {
+                if (auto* asg = dynamic_cast<AssignStmt*>(stmt.get())) {
+                  if (auto* id = dynamic_cast<IdentExpr*>(asg->target.get())) {
+                    if (id->name == item.name) { found = true; break; }
+                  }
+                } else if (auto* dst = dynamic_cast<DestructureStmt*>(stmt.get())) {
+                  for (const auto& n : dst->names) {
+                    if (n == item.name) { found = true; break; }
+                  }
+                  if (found) break;
+                }
+              }
+            }
+            if (!found) {
+              sink_.error(item.span, "Module '" + exports.name + "' has no exported member '" +
+                                         item.name + "'.");
+              continue;
+            }
+            binding.kind = FromBinding::Kind::Value;
+            auto t = std::make_shared<Type>();
+            t->kind = TypeKind::Var;
+            t->allowUnresolved = true;
+            binding.type = t;
           }
         } else {
           continue;
@@ -3320,6 +3350,11 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
 }
 
 TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
+  // print/eprint take *objects plus Python-style keyword options
+  // (sep/end/file/flush); every other builtin stays positional-only.
+  if (name == "print" || name == "eprint") {
+    return checkPrintCall(name, call);
+  }
   for (auto& arg : call.args) {
     if (!arg.name.empty()) {
       sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
@@ -3349,15 +3384,39 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
     return type;
   };
 
-  if (name == "print" || name == "eprint") {
-    for (auto& arg : call.args) {
-      TypePtr type = inferExpr(*arg.value);
-      if (resolveType(type)->kind == TypeKind::Void) {
-        sink_.error(arg.value->span, "Cannot print a void value.");
+  if (name == "open") {
+    if (call.args.size() < 1 || call.args.size() > 2) {
+      sink_.error(call.span, "'open' expects 1 or 2 argument(s), found " +
+                                 std::to_string(call.args.size()) + ".");
+      inferArgs();
+      return typeError();
+    }
+    TypePtr path = inferExpr(*call.args[0].value);
+    if (!unify(path, typeString())) {
+      reportMismatch(path, typeString(), call.args[0].value->span, "in the path passed to 'open'");
+    }
+    if (call.args.size() == 2) {
+      TypePtr mode = inferExpr(*call.args[1].value);
+      if (!unify(mode, typeString())) {
+        reportMismatch(mode, typeString(), call.args[1].value->span, "in the mode passed to 'open'");
       }
+    }
+    return typeIO();
+  }
+
+  if (name == "close") {
+    if (call.args.size() != 1) {
+      arityError(1);
+      inferArgs();
+      return typeVoid();
+    }
+    TypePtr stream = inferExpr(*call.args[0].value);
+    if (!unify(stream, typeIO())) {
+      reportMismatch(stream, typeIO(), call.args[0].value->span, "in the stream passed to 'close'");
     }
     return typeVoid();
   }
+
 
   if (name == "input") {
     if (call.args.size() > 1) {
@@ -4669,6 +4728,46 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   }
 
   return typeError();
+}
+
+TypePtr Sema::checkPrintCall(const std::string& name, CallExpr& call) {
+  bool seenSep = false, seenEnd = false, seenFile = false, seenFlush = false;
+  bool seenNamed = false;
+  for (auto& arg : call.args) {
+    if (arg.name.empty()) {
+      if (seenNamed) {
+        sink_.error(arg.value->span, "Positional arguments must come before keyword arguments in '" + name + "'.");
+      }
+      TypePtr type = inferExpr(*arg.value);
+      if (resolveType(type)->kind == TypeKind::Void) {
+        sink_.error(arg.value->span, "Cannot print a void value.");
+      }
+      continue;
+    }
+    seenNamed = true;
+    TypePtr expected;
+    bool* seen = nullptr;
+    if (arg.name == "sep") { seen = &seenSep; expected = typeString(); }
+    else if (arg.name == "end") { seen = &seenEnd; expected = typeString(); }
+    else if (arg.name == "file") { seen = &seenFile; expected = typeIO(); }
+    else if (arg.name == "flush") { seen = &seenFlush; expected = typeBool(); }
+    if (seen == nullptr) {
+      sink_.error(arg.nameSpan, "'" + name + "() got an unexpected keyword argument '" + arg.name + "'.",
+                  "Accepted keywords: sep, end, file, flush.");
+      inferExpr(*arg.value);
+      continue;
+    }
+    if (*seen) {
+      sink_.error(arg.nameSpan, "Multiple values for keyword argument '" + arg.name + "' in '" + name + "'.");
+    }
+    *seen = true;
+    TypePtr type = inferExpr(*arg.value);
+    if (!unify(type, expected)) {
+      reportMismatch(type, expected, arg.value->span,
+                     "in the '" + arg.name + "' argument passed to '" + name + "'");
+    }
+  }
+  return typeVoid();
 }
 
 TypePtr Sema::inferIndex(IndexExpr& expr) {

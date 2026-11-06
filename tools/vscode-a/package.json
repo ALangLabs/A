@@ -26,6 +26,12 @@
   ],
   "activationEvents": [
     "onLanguage:a",
+    "onCommand:a.run",
+    "onCommand:a.build",
+    "onCommand:a.test",
+    "onCommand:a.check",
+    "onCommand:a.fmt",
+    "onCommand:a.showOutput",
     "onCommand:a.restartServer",
     "onTaskType:a",
     "onDebugInitialConfigurations",
