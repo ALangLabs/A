@@ -572,7 +572,7 @@ async function activate(context) {
     }
     function runInTerminal(doc) {
         const config = settings(vscode, doc.uri);
-        const command = argumentsFor('run', config).map(shellQuote).join(' ');
+        const command = [config.compiler, ...argumentsFor('run', config)].map(shellQuote).join(' ');
         if (!runTerminal || runTerminal.exitStatus !== undefined) {
             runTerminal = vscode.window.createTerminal({ name: 'A', cwd: config.cwd });
         }
@@ -595,6 +595,7 @@ async function activate(context) {
         vscode.workspace.onDidGrantWorkspaceTrust(() => { updateRunStatus(); updateCheckStatus(); void decide(); }),
         vscode.commands.registerCommand('a.showOutput', () => output.show()),
         vscode.commands.registerCommand('a.restartServer', async () => { await decide(true); vscode.window.showInformationMessage('A language server restarted.'); }),
+        vscode.commands.registerCommand('a.restart', async () => { await decide(true); vscode.window.showInformationMessage('A language server restarted.'); }),
         vscode.commands.registerCommand('a.check', async () => {
             const doc = await savedDocument(); if (!doc) return;
             if (server.status !== 'off') { await vscode.tasks.executeTask(makeTask({ type: 'a', action: 'check' }, doc.uri)); return; }

@@ -21,9 +21,16 @@ It reuses the compiler front end (`lexer`, `parser`, `module loader`, and
 | `textDocument/foldingRange` | foldable function, class, loop, match, and conditional bodies |
 | `textDocument/selectionRange` | identifier → enclosing indent block expansion |
 | `textDocument/semanticTokens/full`, `textDocument/semanticTokens/range` | semantic tokens (namespace/type/class/enum/function/method/parameter/variable/property/keyword/comment/string/number/operator) with declaration modifiers |
-| `textDocument/inlayHint` | inferred types (`: i32`) after unannotated variables |
+| `textDocument/inlayHint` | inferred types (`: i32`) after unannotated variables, parameter names at call sites (`a:`, `b:`) |
 | `textDocument/codeAction` | quick fixes: prefix unused variables with `_`, append `# a: ignore[CODE]` suppression |
 | `textDocument/signatureHelp` | declared signatures for functions, builtins, native modules, and primitive methods, with active parameter |
+| `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`, `callHierarchy/outgoingCalls` | call hierarchy for functions and methods (AST-based, works across modules) |
+| `textDocument/prepareTypeHierarchy`, `typeHierarchy/supertypes`, `typeHierarchy/subtypes` | type hierarchy for classes (`class(Base)`) and traits (`trait C(A)`) |
+| `textDocument/codeLens` | "N references" lens above functions, methods, classes, and enums (jump via `editor.action.showReferences`) |
+| `textDocument/rangeFormatting` | formats the requested range only (whole-document format + line diff, edits clipped to the range) |
+| `textDocument/diagnostic` | LSP 3.17 pull diagnostics (`kind: "full"`), same items as `publishDiagnostics` |
+| `textDocument/moniker` | document monikers (`scheme: "a"`, unique = canonical path) |
+| `textDocument/documentLink` | clickable `http(s)://` URLs inside comments |
 | `workspace/symbol` | top-level symbols in open A documents |
 
 Protocol handling runs on the main thread (JSON-RPC over stdin/stdout) while
@@ -82,7 +89,19 @@ serial checker; ordering of messages may differ for multi-module programs.
 - Type narrowing is limited to `Optional` None checks (`x != None` refines
   `x: T?` to `x: T` in the then-branch); full control-flow reachability and
   speculative-type materialisation from ty/pyrefly are not implemented.
-- Range formatting, call/type hierarchies, and code lens are not implemented.
+- `textDocument/references` honours `context.includeDeclaration`; rename still
+  operates on resolved identifiers only.
+- Call hierarchy covers named functions and methods; calls through function
+  values, lambdas assigned to variables, and builtin/native callees are not
+  linked. Top-level (module scope) calls have no enclosing callable and are
+  skipped.
+- Type hierarchy follows `class(Base)` inheritance and `trait` parents; it does
+  not yet model `impl Trait for Type` conformance as a subtype edge.
+- Range formatting diffs whole-document formatter output against the source
+  and emits only hunks fully inside the requested range; partially overlapping
+  hunks are skipped.
+- Code lens counts resolved references across all modules in the compilation;
+  it is computed per request (no caching).
 - Rename operates on resolved identifiers; module aliases and names that the
   front end cannot resolve are not renamed.
 - Member completion falls back to all known struct members when the receiver

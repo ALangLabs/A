@@ -33,6 +33,7 @@
     "onCommand:a.fmt",
     "onCommand:a.showOutput",
     "onCommand:a.restartServer",
+    "onCommand:a.restart",
     "onTaskType:a",
     "onDebugInitialConfigurations",
     "onDebugDynamicConfigurations:a"
@@ -42,7 +43,15 @@
     "untrustedWorkspaces": {
       "supported": "limited",
       "description": "Syntax highlighting, snippets and the outline work in Restricted Mode. Running the compiler requires a trusted workspace.",
-      "restrictedConfigurations": ["a.compilerPath", "a.entryFile", "a.stdlibPath", "a.modulePaths", "a.server.path", "a.server.args", "a.server.modulePaths"]
+      "restrictedConfigurations": [
+        "a.compilerPath",
+        "a.entryFile",
+        "a.stdlibPath",
+        "a.modulePaths",
+        "a.server.path",
+        "a.server.args",
+        "a.server.modulePaths"
+      ]
     },
     "virtualWorkspaces": {
       "supported": false,
@@ -132,6 +141,12 @@
         "title": "Restart Language Server",
         "category": "A",
         "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "a.restart",
+        "title": "Restart Language Server",
+        "category": "A",
+        "enablement": "isWorkspaceTrusted"
       }
     ],
     "menus": {
@@ -159,6 +174,12 @@
         "command": "a.run",
         "key": "f5",
         "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings && debugState == inactive"
+      },
+      {
+        "command": "a.restartServer",
+        "key": "ctrl+shift+[",
+        "mac": "cmd+shift+[",
+        "when": "isWorkspaceTrusted"
       }
     ],
     "debuggers": [
@@ -344,25 +365,76 @@
       }
     ],
     "semanticTokenTypes": [
-      { "id": "namespace", "description": "Module namespace" },
-      { "id": "type", "description": "Type name" },
-      { "id": "class", "description": "Class or struct" },
-      { "id": "enum", "description": "Enum" },
-      { "id": "function", "description": "Function" },
-      { "id": "method", "description": "Method" },
-      { "id": "parameter", "description": "Parameter" },
-      { "id": "variable", "description": "Variable" },
-      { "id": "property", "description": "Property or field" },
-      { "id": "keyword", "description": "Keyword" },
-      { "id": "comment", "description": "Comment" },
-      { "id": "string", "description": "String literal" },
-      { "id": "number", "description": "Number literal" },
-      { "id": "operator", "description": "Operator" }
+      {
+        "id": "namespace",
+        "description": "Module namespace"
+      },
+      {
+        "id": "type",
+        "description": "Type name"
+      },
+      {
+        "id": "class",
+        "description": "Class or struct"
+      },
+      {
+        "id": "enum",
+        "description": "Enum"
+      },
+      {
+        "id": "function",
+        "description": "Function"
+      },
+      {
+        "id": "method",
+        "description": "Method"
+      },
+      {
+        "id": "parameter",
+        "description": "Parameter"
+      },
+      {
+        "id": "variable",
+        "description": "Variable"
+      },
+      {
+        "id": "property",
+        "description": "Property or field"
+      },
+      {
+        "id": "keyword",
+        "description": "Keyword"
+      },
+      {
+        "id": "comment",
+        "description": "Comment"
+      },
+      {
+        "id": "string",
+        "description": "String literal"
+      },
+      {
+        "id": "number",
+        "description": "Number literal"
+      },
+      {
+        "id": "operator",
+        "description": "Operator"
+      }
     ],
     "semanticTokenModifiers": [
-      { "id": "declaration", "description": "Declaration" },
-      { "id": "readonly", "description": "Readonly" },
-      { "id": "static", "description": "Static" }
+      {
+        "id": "declaration",
+        "description": "Declaration"
+      },
+      {
+        "id": "readonly",
+        "description": "Readonly"
+      },
+      {
+        "id": "static",
+        "description": "Static"
+      }
     ],
     "configurationDefaults": {
       "[a]": {

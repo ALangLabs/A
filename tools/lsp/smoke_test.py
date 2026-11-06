@@ -500,11 +500,12 @@ def main() -> int:
         if actions is None:
             fail("codeAction returned null")
 
-        # Call hierarchy: prepare on `add`, incoming calls from `wrapper`,
-        # outgoing calls from `wrapper` back to `add`.
+        # Call hierarchy: prepare on the `add` declaration (the call-line
+        # column shifted by the incremental edit above), incoming calls from
+        # `wrapper`, outgoing calls from `wrapper` back to `add`.
         prep_call = client.request(
             "textDocument/prepareCallHierarchy",
-            {"textDocument": {"uri": uri}, "position": {"line": call_line, "character": call_column}},
+            {"textDocument": {"uri": uri}, "position": {"line": expected_line, "character": 3}},
         )["result"]
         if not prep_call or prep_call[0]["name"] != "add":
             fail(f"prepareCallHierarchy unexpected: {prep_call}")
