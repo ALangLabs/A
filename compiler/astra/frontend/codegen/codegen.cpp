@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -812,8 +813,7 @@ class Emitter {
       case StmtKind::Expr: {
         const ExprStmt& st = static_cast<const ExprStmt&>(*s);
         // Docstring: plain string literal statement.
-        std::string dummy;
-        if (plainStringText(st.expr, dummy)) return;
+        // Skip plain string expression statements (docstrings).
         std::string v = emitExpr(st.expr.get(), out);
         flushPre(out);
         out << "(void)(" << v << ");\n";
@@ -1960,6 +1960,9 @@ class AsmEmitter {
   std::vector<std::vector<const Stmt*>> deferStack_;
   std::vector<int> loopDeferDepth_;
   bool inFunction_ = false;
+  int curModuleId_ = -1;
+  std::vector<std::string> breakLabels_;
+  std::vector<std::string> continueLabels_;
 
   static constexpr uint64_t kTag = 0xFFFF000000000000ULL;
   static constexpr uint64_t kPayloadMask = 0x0000FFFFFFFFFFFFULL;
@@ -2049,6 +2052,156 @@ class AsmEmitter {
     loadSlot(sa, "%rdi");
     emit(std::string("lea ") + slotRef(slotB) + ", %rsi");
     emit(std::string("call ") + sym);
+  }
+
+  // ---- more helpers ---------------------------------------------------------
+  std::string lab() { return "__La" + std::to_string(labelCounter_++); }
+  void emitLab(const std::string& l) { emit(l + ":"); }
+  uint64_t mkintA(int64_t v) const {
+    uint64_t p = ((uint64_t)v << 1) | 1ULL;
+    return kTag | (p & kPayloadMask);
+  }
+  uint64_t dblBits(double d) const {
+    union { double d; uint64_t u; } c;
+    c.d = d;
+    return c.u;
+  }
+  void leaSlot(int s, const char* reg) {
+    emit(std::string("lea ") + slotRef(s) + ", " + reg);
+  }
+  int immSlot(uint64_t v) {
+    int s = allocSlot();
+    movImm(v, "%rcx");
+    emit("mov %rcx, " + slotRef(s));
+    return s;
+  }
+  // f(slotA) / f(slotA, slotB) / f(slotA, slotB, slotC) / f(a,b,c,d)
+  void call1slot(const char* sym, int a) {
+    loadSlot(a, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  void call2slot(const char* sym, int a, int b) {
+    loadSlot(b, "%rsi"); loadSlot(a, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  void call3slot(const char* sym, int a, int b, int c) {
+    loadSlot(c, "%rdx"); loadSlot(b, "%rsi"); loadSlot(a, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  void call4slot(const char* sym, int a, int b, int c, int d) {
+    loadSlot(d, "%rcx"); loadSlot(c, "%rdx"); loadSlot(b, "%rsi"); loadSlot(a, "%rdi");
+    emit(std::string("call ") + sym);
+  }
+  // argv array in consecutive slots; argv[k] lives at argvSlot(a,k).
+  struct Argv { int base = 0, n = 0; };
+  Argv allocArgv(int count) {
+    Argv a; a.base = slotCounter_; a.n = count;
+    for (int i = 0; i < count; ++i) allocSlot();
+    return a;
+  }
+  int argvSlot(const Argv& a, int k) const { return a.base + a.n - 1 - k; }
+  int argvPtr(const Argv& a) const { return argvSlot(a, 0); }
+  void argvStore(const Argv& a, int k, int valSlot) {
+    emit("mov " + slotRef(valSlot) + ", " + slotRef(argvSlot(a, k)));
+  }
+  void argvStoreImm(const Argv& a, int k, uint64_t v) {
+    movImm(v, "%rcx");
+    emit("mov %rcx, " + slotRef(argvSlot(a, k)));
+  }
+  // Emit a NUL-terminated or raw byte string into .rodata; returns its label.
+  std::string emitStrData(const std::string& bytes, bool nulTerm) {
+    std::string l = "__a_d" + std::to_string(counter_++);
+    rodata_ << "    .section .rodata\n    .align 1\n" << l << ":\n    .byte ";
+    for (unsigned char c : bytes) rodata_ << (int)c << ",";
+    if (nulTerm) rodata_ << "0,";
+    rodata_ << "\n";
+    return l;
+  }
+  // aval string literal -> fresh slot holding the aval.
+  int strLitSlot(const std::string& text) {
+    std::string l = emitStrData(text, false);
+    int s = allocSlot();
+    emit("    lea " + l + "(%rip), %rdi\n");
+    movImm(text.size(), "%rsi");
+    emit("    call a_str_new\n    mov %rax, " + slotRef(s) + "\n");
+    return s;
+  }
+  // dict[keyStrSlot] = valSlot helpers for struct/enum construction.
+  void dictSet(int dS, int kS, int vS) { call3slot("a_dict_set", dS, kS, vS); }
+  int dictNewSlot() {
+    int s = allocSlot();
+    emit("    call a_dict_new\n    mov %rax, " + slotRef(s) + "\n");
+    return s;
+  }
+  // Build the algebraic-enum variant dict ({__tag, __name}) into %rax.
+  void emitVariantDict(const EnumVariantInfo& ev, const std::string& name) {
+    int dS = dictNewSlot();
+    int kS = strLitSlot("__tag");
+    int vS = immSlot(mkintA(ev.tag));
+    dictSet(dS, kS, vS);
+    int k2 = strLitSlot("__name");
+    int v2 = strLitSlot(name);
+    dictSet(dS, k2, v2);
+    loadSlot(dS);
+  }
+  // Jump to `lab` when the aval condition in slot cS is truthy/falsy.
+  void condJump(int cS, const std::string& labIfTrue, bool jumpIfTrue) {
+    loadSlot(cS, "%rdi");
+    emit("    call a_truthy_raw_slow\n    test %rax, %rax\n");
+    emit(std::string(jumpIfTrue ? "    jnz " : "    jz ") + labIfTrue);
+  }
+  // Evaluate expr -> slot; null expr yields A_NONE slot.
+  int evalSlot(const Expr* e) {
+    if (!e) return immSlot(kTag | 0x2ULL);
+    emitExpr(e);
+    int s = allocSlot();
+    storeRax(s);
+    return s;
+  }
+  // Raw int64 of an aval slot -> fresh slot (via a_int_full).
+  int int64Slot(int avalS) {
+    int s = allocSlot();
+    loadSlot(avalS, "%rdi");
+    emit("    call a_int_full\n    mov %rax, " + slotRef(s) + "\n");
+    return s;
+  }
+  // Store aval in slot `vs` into the binding (local slot or global symbol).
+  void storeBinding(const ABinding& b, int vs) {
+    if (b.kind == BKind::Local || b.kind == BKind::Param) {
+      emit("    mov " + slotRef(vs) + ", " + slotRef(b.slot) + "\n");
+    } else if (b.kind == BKind::Global || b.kind == BKind::FnValue ||
+               b.kind == BKind::StructCtor || b.kind == BKind::EnumValue) {
+      loadSlot(vs);
+      emit("    mov %rax, " + b.sym + "(%rip)\n");
+    } else {
+      fail("unsupported assignment target");
+    }
+  }
+  // Leave the binding's aval value in %rax.
+  void emitBindingValue(const ABinding& b) {
+    if (b.kind == BKind::Local || b.kind == BKind::Param) {
+      loadSlot(b.slot);
+    } else if (b.kind == BKind::Global || b.kind == BKind::FnValue ||
+               b.kind == BKind::StructCtor || b.kind == BKind::EnumValue) {
+      emit("    mov " + b.sym + "(%rip), %rax\n");
+    } else if (b.kind == BKind::Builtin) {
+      movImm((uint64_t)b.builtinId, "%rdi");
+      emit("    call a_builtin\n");
+    } else {
+      fail("unsupported binding kind in expression");
+    }
+  }
+  static const char* binopSlow(const std::string& op) {
+    static const std::unordered_map<std::string, const char*> kMap = {
+        {"+", "a_add_slow"}, {"-", "a_sub_slow"}, {"*", "a_mul_slow"},
+        {"/", "a_div_slow"}, {"%", "a_mod_slow"}, {"**", "a_pow"},
+        {"==", "a_eq_slow"}, {"!=", "a_ne_slow"}, {"<", "a_lt_slow"},
+        {"<=", "a_le_slow"}, {">", "a_gt_slow"}, {">=", "a_ge_slow"},
+        {"&", "a_band_slow"}, {"|", "a_bor_slow"}, {"^", "a_bxor_slow"},
+        {"<<", "a_shl_slow"}, {">>", "a_shr_slow"},
+    };
+    auto it = kMap.find(op);
+    return it == kMap.end() ? nullptr : it->second;
   }
 
   // ---- registration (mirrors Emitter) --------------------------------------
@@ -2317,14 +2470,439 @@ class AsmEmitter {
     scopes_.clear();
   }
 
-  // ---- statements / expressions: implemented next -------------------------
-  void emitStmt(const Stmt* s) {
-    (void)s;
-    fail("statement emission not yet implemented");
+  // ---- helpers -------------------------------------------------------------
+  std::string newLabel(const std::string& pfx = "L") { return "__a_" + pfx + std::to_string(labelCounter_++); }
+  void emitLabel(const std::string& l) { emit(l + ":"); }
+  void jmp(const std::string& l) { emit("    jmp " + l); }
+  void je(const std::string& l)  { emit("    je " + l); }
+  void jne(const std::string& l) { emit("    jne " + l); }
+  void jle(const std::string& l) { emit("    jle " + l); }
+  void jge(const std::string& l) { emit("    jge " + l); }
+  void jl(const std::string& l)  { emit("    jl " + l); }
+  void jg(const std::string& l)  { emit("    jg " + l); }
+
+  uint64_t mkIntImm(int64_t v) { return kTag | (uint64_t)((v << 1) | 1); }
+  void emitIntLit(int64_t v) { movImm(mkIntImm(v), "%rax"); }
+  void emitDoubleLit(double d) {
+    uint64_t bits; std::memcpy(&bits, &d, 8);
+    movImm(bits, "%rdi");
+    emit("    call a_mkdouble");
   }
+  void emitStringLit(const std::string& text) {
+    std::string lbl = "__a_s_" + std::to_string(labelCounter_++);
+    rodata_ << "    .section .rodata\n" << lbl << ":\n    .ascii \"" << cEscape(text) << "\"\n";
+    emit("    lea " + lbl + "(%rip), %rdi");
+    movImm(text.size(), "%rsi");
+    emit("    call a_str_new");
+  }
+  std::vector<const Expr*> positionalArgsA(const CallExpr& call) {
+    std::vector<const Expr*> out;
+    for (auto& a : call.args) out.push_back(a.value.get());
+    return out;
+  }
+  void callWithArgs(const char* sym, const std::vector<const Expr*>& args) {
+    if (args.size() > 6) { fail("asm: >6 args not supported"); return; }
+    callN(sym, args);
+  }
+  void emitBiCall(int id, const std::vector<const Expr*>& args) {
+    // a_bi_call(id, n, argv)
+    int arr = allocSlot();
+    // store argv entries in consecutive slots
+    std::vector<int> aslots;
+    for (const Expr* a : args) { int s = allocSlot(); emitExpr(a); storeRax(s); aslots.push_back(s); }
+    movImm((uint64_t)id, "%rdi");
+    movImm(args.size(), "%rsi");
+    if (args.empty()) {
+      emit("    xor %edx, %edx");
+    } else {
+      // build argv on stack: place aslots[0] at a temp area? easier: pass pointer to first
+      // but slots aren't contiguous in general; build a contiguous argv.
+      int base = allocSlot();
+      for (std::size_t i = 1; i < args.size(); ++i) allocSlot(); // reserve
+      for (std::size_t i = 0; i < args.size(); ++i) {
+        loadSlot(aslots[i], "%rax");
+        emit("    mov %rax, " + slotRef(base + (int)i));
+      }
+      emit("    lea " + slotRef(base) + ", %rdx");
+    }
+    emit("    call a_bi_call");
+    (void)arr;
+  }
+  void emitACall(const Expr* callee, const std::vector<const Expr*>& args) {
+    int fnS = allocSlot();
+    emitExpr(callee); storeRax(fnS);
+    std::vector<int> aslots;
+    for (const Expr* a : args) { int s = allocSlot(); emitExpr(a); storeRax(s); aslots.push_back(s); }
+    int base = -1;
+    if (!args.empty()) {
+      base = allocSlot();
+      for (std::size_t i = 1; i < args.size(); ++i) allocSlot();
+      for (std::size_t i = 0; i < args.size(); ++i) {
+        loadSlot(aslots[i], "%rax");
+        emit("    mov %rax, " + slotRef(base + (int)i));
+      }
+    }
+    loadSlot(fnS, "%rdi");
+    movImm(args.size(), "%rsi");
+    if (args.empty()) emit("    xor %edx, %edx");
+    else emit("    lea " + slotRef(base) + ", %rdx");
+    emit("    call a_call");
+  }
+
+  // ---- statements ----------------------------------------------------------
+  void emitBody(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& s : stmts) { if (failed_) return; emitStmt(s.get()); }
+  }
+
+  void emitStmt(const Stmt* s) {
+    if (failed_ || !s) return;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        int sl = allocSlot();
+        if (st.init) emitExpr(st.init.get()); else movImm(kTag | 0x2, "%rax");
+        storeRax(sl);
+        bindLocal(st.name, sl);
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind == ExprKind::Ident) {
+          const std::string& nm = static_cast<const IdentExpr&>(*st.target.get()).name;
+          ABinding* b = lookup(nm);
+          if (!b) { int sl = allocSlot(); bindLocal(nm, sl); b = lookup(nm); }
+          if (st.op != "=") {
+            // compound: load cur, compute, store
+            std::string baseOp = st.op.substr(0, st.op.size() - 1);
+            emitExpr(st.target.get());
+            int curS = allocSlot(); storeRax(curS);
+            emitExpr(st.value.get());
+            int valS = allocSlot(); storeRax(valS);
+            loadSlot(valS, "%rsi"); loadSlot(curS, "%rdi");
+            emitBinaryOp(baseOp);
+          } else {
+            emitExpr(st.value.get());
+          }
+          if (b->kind == BKind::Local || b->kind == BKind::Param) storeRax(b->slot);
+          else if (b->kind == BKind::Global) emit("    mov %rax, " + b->sym + "(%rip)");
+          else fail("asm: unsupported assignment target");
+          return;
+        }
+        if (st.target->kind == ExprKind::Index) {
+          const IndexExpr& ix = static_cast<const IndexExpr&>(*st.target.get());
+          int os = allocSlot(), is = allocSlot(), vs = allocSlot();
+          emitExpr(ix.object.get()); storeRax(os);
+          emitExpr(ix.index.get()); storeRax(is);
+          emitExpr(st.value.get()); storeRax(vs);
+          loadSlot(vs, "%rdx"); loadSlot(is, "%rsi"); loadSlot(os, "%rdi");
+          emit("    call a_setitem");
+          return;
+        }
+        if (st.target->kind == ExprKind::Field) {
+          const FieldExpr& fx = static_cast<const FieldExpr&>(*st.target.get());
+          int os = allocSlot(), vs = allocSlot();
+          emitExpr(fx.object.get()); storeRax(os);
+          emitExpr(st.value.get()); storeRax(vs);
+          std::string lbl = "__a_fld_" + std::to_string(labelCounter_++);
+          rodata_ << "    .section .rodata\n" << lbl << ":\n    .string \"" << cEscape(fx.field) << "\"\n";
+          loadSlot(os, "%rdi");
+          emit("    lea " + lbl + "(%rip), %rsi");
+          loadSlot(vs, "%rdx");
+          emit("    call a_setattr");
+          return;
+        }
+        fail("asm: unsupported assignment target");
+        return;
+      }
+      case StmtKind::Expr: {
+        const ExprStmt& st = static_cast<const ExprStmt&>(*s);
+        // Skip plain string expression statements (docstrings).
+        emitExpr(st.expr.get());
+        return;
+      }
+      case StmtKind::Return: {
+        const ReturnStmt& st = static_cast<const ReturnStmt&>(*s);
+        if (st.value) emitExpr(st.value.get()); else movImm(kTag | 0x2, "%rax");
+        emit("    leave\n    ret");
+        return;
+      }
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        std::string endL = newLabel("ifend");
+        for (std::size_t i = 0; i < st.branches.size(); ++i) {
+          std::string nextL = newLabel("ifnext");
+          emitExpr(st.branches[i].cond.get());
+          emit("    mov %rax, %rdi");
+          emit("    call a_truthy_raw_slow");
+          emit("    test %rax, %rax");
+          je(nextL);
+          emitBody(st.branches[i].body);
+          if (!failed_) jmp(endL);
+          emitLabel(nextL);
+        }
+        if (!st.elseBody.empty()) emitBody(st.elseBody);
+        emitLabel(endL);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        std::string loopL = newLabel("while"), endL = newLabel("wend");
+        emitLabel(loopL);
+        emitExpr(st.cond.get());
+        emit("    mov %rax, %rdi");
+        emit("    call a_truthy_raw_slow");
+        emit("    test %rax, %rax");
+        je(endL);
+        loopBreak_.push_back(endL); loopCont_.push_back(loopL);
+        emitBody(st.body);
+        loopBreak_.pop_back(); loopCont_.pop_back();
+        jmp(loopL);
+        emitLabel(endL);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        // Native counted loop for `for x in lo..hi` / range
+        const Expr* loE = nullptr; const Expr* hiE = nullptr; const Expr* stE = nullptr;
+        const Expr* iter = st.iterable.get();
+        if (iter && iter->kind == ExprKind::Range) {
+          auto& re = static_cast<const RangeExpr&>(*iter);
+          loE = re.start.get(); hiE = re.end.get(); stE = re.step.get();
+        } else if (iter && iter->kind == ExprKind::Binary &&
+                   static_cast<const BinaryExpr&>(*iter).op == "..") {
+          auto& be = static_cast<const BinaryExpr&>(*iter);
+          loE = be.lhs.get(); hiE = be.rhs.get();
+        }
+        if (loE && hiE && !stE) {
+          int curS = allocSlot(), endS = allocSlot(), varS = allocSlot();
+          emitExpr(loE); emit("    mov %rax, %rdi"); emit("    call a_int_full"); emit("    mov %rax, " + slotRef(curS));
+          emitExpr(hiE); emit("    mov %rax, %rdi"); emit("    call a_int_full"); emit("    mov %rax, " + slotRef(endS));
+          std::string loopL = newLabel("for"), endL = newLabel("fend"), contL = newLabel("fcont");
+          emitLabel(loopL);
+          emit("    mov " + slotRef(curS) + ", %rax");
+          emit("    cmp " + slotRef(endS) + ", %rax");
+          jge(endL);
+          // var = a_i64n(cur)
+          emit("    mov " + slotRef(curS) + ", %rdi");
+          emit("    call a_i64n");
+          storeRax(varS);
+          pushScope(); bindLocal(st.var, varS);
+          loopBreak_.push_back(endL); loopCont_.push_back(contL);
+          emitBody(st.body);
+          loopBreak_.pop_back(); loopCont_.pop_back();
+          popScope();
+          emitLabel(contL);
+          emit("    addq $1, " + slotRef(curS));
+          jmp(loopL);
+          emitLabel(endL);
+          return;
+        }
+        // general iterator fallback via runtime
+        int itS = allocSlot(), varS = allocSlot();
+        emitExpr(st.iterable.get()); emit("    mov %rax, %rdi"); emit("    call a_iter_new"); storeRax(itS);
+        movImm(kTag | 0x2, "%rax"); storeRax(varS);
+        std::string loopL = newLabel("for"), endL = newLabel("fend"), contL = newLabel("fcont");
+        emitLabel(loopL);
+        loadSlot(itS, "%rdi");
+        emit("    lea " + slotRef(varS) + ", %rsi");
+        emit("    call a_iter_next");
+        emit("    test %rax, %rax");
+        je(endL);
+        pushScope(); bindLocal(st.var, varS);
+        loopBreak_.push_back(endL); loopCont_.push_back(contL);
+        emitBody(st.body);
+        loopBreak_.pop_back(); loopCont_.pop_back();
+        popScope();
+        emitLabel(contL);
+        jmp(loopL);
+        emitLabel(endL);
+        return;
+      }
+      case StmtKind::Break:
+        if (!loopBreak_.empty()) jmp(loopBreak_.back()); else fail("asm: break outside loop");
+        return;
+      case StmtKind::Continue:
+        if (!loopCont_.empty()) jmp(loopCont_.back()); else fail("asm: continue outside loop");
+        return;
+      case StmtKind::Import:
+      case StmtKind::FromImport:
+      case StmtKind::TypeAlias:
+      case StmtKind::TraitDecl:
+      case StmtKind::ImplDecl:
+      case StmtKind::FnDecl:
+      case StmtKind::StructDecl:
+      case StmtKind::EnumDecl:
+        return;
+      default:
+        fail("asm: unsupported statement");
+        return;
+    }
+  }
+
+  std::vector<std::string> loopBreak_;
+  std::vector<std::string> loopCont_;
+
+  void emitBinaryOp(const std::string& op) {
+    // args in %rdi,%rsi -> result in %rax
+    static const std::unordered_map<std::string, const char*> kSlow = {
+        {"+","a_add_slow"},{"-","a_sub_slow"},{"*","a_mul_slow"},{"/","a_div_slow"},
+        {"%","a_mod_slow"},{"==","a_eq_slow"},{"!=","a_eq_slow"},{"<","a_lt_slow"},
+        {"<=","a_lt_slow"},{">","a_lt_slow"},{">=","a_lt_slow"},
+    };
+    auto it = kSlow.find(op);
+    if (it == kSlow.end()) { fail("asm: unsupported op " + op); return; }
+    if (op == "!=") { emit("    call a_eq_slow"); emit("    mov %rax, %rdi"); emit("    call a_not"); return; }
+    if (op == "<=") { emit("    call a_gt_slow"); emit("    mov %rax, %rdi"); emit("    call a_not"); return; }
+    if (op == ">")  { /* swap */ emit("    mov %rdi, %rax"); emit("    mov %rsi, %rdi"); emit("    mov %rax, %rsi"); emit("    call a_lt_slow"); return; }
+    if (op == ">=") { /* swap */ emit("    mov %rdi, %rax"); emit("    mov %rsi, %rdi"); emit("    mov %rax, %rsi"); emit("    call a_lt_slow"); emit("    mov %rax, %rdi"); emit("    call a_not"); return; }
+    emit(std::string("    call ") + it->second);
+  }
+
+  // ---- expressions ---------------------------------------------------------
   void emitExpr(const Expr* e) {
-    (void)e;
-    fail("expression emission not yet implemented");
+    if (failed_ || !e) { movImm(kTag | 0x2, "%rax"); return; }
+    switch (e->kind) {
+      case ExprKind::IntLit:
+        emitIntLit(static_cast<const IntLitExpr*>(e)->value); return;
+      case ExprKind::FloatLit:
+        emitDoubleLit(static_cast<const FloatLitExpr*>(e)->value); return;
+      case ExprKind::BoolLit:
+        movImm(static_cast<const BoolLitExpr*>(e)->value ? (kTag | 0x6) : (kTag | 0x4), "%rax"); return;
+      case ExprKind::StringLit: {
+        auto& x = static_cast<const StringLitExpr&>(*e);
+        if (x.parts.size() == 1 && !x.parts[0].isExpr) { emitStringLit(x.parts[0].text); return; }
+        if (x.parts.empty()) { emitStringLit(""); return; }
+        fail("asm: interpolated strings not yet supported"); return;
+      }
+      case ExprKind::Ident: {
+        auto& x = static_cast<const IdentExpr&>(*e);
+        if (x.name == "None") { movImm(kTag | 0x2, "%rax"); return; }
+        if (x.name == "true" || x.name == "True") { movImm(kTag | 0x6, "%rax"); return; }
+        if (x.name == "false" || x.name == "False") { movImm(kTag | 0x4, "%rax"); return; }
+        ABinding* b = lookup(x.name);
+        if (!b) { fail("asm: undefined name '" + x.name + "'"); return; }
+        if (b->kind == BKind::Local || b->kind == BKind::Param) loadSlot(b->slot, "%rax");
+        else if (b->kind == BKind::Global || b->kind == BKind::FnValue ||
+                 b->kind == BKind::StructCtor || b->kind == BKind::EnumValue)
+          emit("    mov " + b->sym + "(%rip), %rax");
+        else { fail("asm: unsupported binding for '" + x.name + "'"); }
+        return;
+      }
+      case ExprKind::Unary: {
+        auto& x = static_cast<const UnaryExpr&>(*e);
+        emitExpr(x.operand.get());
+        if (x.op == "-") { emit("    mov %rax, %rdi"); emit("    call a_neg_slow"); return; }
+        if (x.op == "not" || x.op == "!") {
+          // ! could be unwrap postfix? check postfix flag if present
+          emit("    mov %rax, %rdi"); emit("    call a_not"); return;
+        }
+        fail("asm: unsupported unary " + x.op); return;
+      }
+      case ExprKind::Binary: {
+        auto& x = static_cast<const BinaryExpr&>(*e);
+        if (x.op == "and" || x.op == "or") {
+          std::string endL = newLabel("sc");
+          int ls = allocSlot();
+          emitExpr(x.lhs.get()); storeRax(ls);
+          loadSlot(ls, "%rdi"); emit("    call a_truthy_raw_slow");
+          emit("    test %rax, %rax");
+          if (x.op == "and") { je(endL); } else { jne(endL); }
+          emitExpr(x.rhs.get()); storeRax(ls); // reuse slot for result path join
+          emitLabel(endL);
+          loadSlot(ls, "%rax");
+          return;
+        }
+        int ls = allocSlot(), rs = allocSlot();
+        emitExpr(x.lhs.get()); storeRax(ls);
+        emitExpr(x.rhs.get()); storeRax(rs);
+        loadSlot(rs, "%rsi"); loadSlot(ls, "%rdi");
+        emitBinaryOp(x.op);
+        return;
+      }
+      case ExprKind::Call: {
+        auto& x = static_cast<const CallExpr&>(*e);
+        auto args = positionalArgsA(x);
+        // sema-resolved builtin
+        if (x.builtinId != BuiltinId::None) {
+          int id = builtinIdForBuiltin(x.builtinId);
+          if (id >= 0) { emitBiCall(id, args); return; }
+        }
+        if (x.callee->kind == ExprKind::Ident) {
+          const std::string& nm = static_cast<const IdentExpr*>(x.callee.get())->name;
+          ABinding* b = lookup(nm);
+          if (b && b->kind == BKind::FnValue && b->fn) {
+            if (args.size() > 6) { emitACall(x.callee.get(), args); return; }
+            // direct: pass argv ptr in %rdi
+            std::vector<int> aslots;
+            for (auto* a : args) { int s = allocSlot(); emitExpr(a); storeRax(s); aslots.push_back(s); }
+            int base = allocSlot(); for (std::size_t i = 1; i <= args.size(); ++i) allocSlot();
+            movImm(kTag | 0x2, "%rax"); emit("    mov %rax, " + slotRef(base)); // argv[0]=none/self placeholder
+            for (std::size_t i = 0; i < aslots.size(); ++i) { loadSlot(aslots[i], "%rax"); emit("    mov %rax, " + slotRef(base + 1 + (int)i)); }
+            emit("    lea " + slotRef(base) + ", %rdi");
+            emit("    call " + b->fn->cname);
+            return;
+          }
+          if (b && b->kind == BKind::Builtin) { emitBiCall(b->builtinId, args); return; }
+          int bid = builtinRuntimeId(nm);
+          if (bid >= 0) { emitBiCall(bid, args); return; }
+        }
+        if (x.callee->kind == ExprKind::Field) {
+          auto& fx = static_cast<const FieldExpr&>(*x.callee.get());
+          // try module.builtin
+          if (fx.object->kind == ExprKind::Ident) {
+            int bid = builtinRuntimeId(fx.field);
+            if (bid >= 0) { emitBiCall(bid, args); return; }
+          }
+          // method call: a_method(obj, name, n, argv)
+          int os = allocSlot(); emitExpr(fx.object.get()); storeRax(os);
+          std::vector<int> aslots;
+          for (auto* a : args) { int s = allocSlot(); emitExpr(a); storeRax(s); aslots.push_back(s); }
+          int base = -1;
+          if (!args.empty()) { base = allocSlot(); for (std::size_t i = 1; i < args.size(); ++i) allocSlot();
+            for (std::size_t i = 0; i < aslots.size(); ++i) { loadSlot(aslots[i], "%rax"); emit("    mov %rax, " + slotRef(base + (int)i)); } }
+          std::string lbl = "__a_mn_" + std::to_string(labelCounter_++);
+          rodata_ << "    .section .rodata\n" << lbl << ":\n    .string \"" << cEscape(fx.field) << "\"\n";
+          loadSlot(os, "%rdi");
+          emit("    lea " + lbl + "(%rip), %rsi");
+          movImm(args.size(), "%rdx");
+          if (args.empty()) emit("    xor %ecx, %ecx");
+          else emit("    lea " + slotRef(base) + ", %rcx");
+          emit("    call a_method");
+          return;
+        }
+        emitACall(x.callee.get(), args);
+        return;
+      }
+      case ExprKind::Index: {
+        auto& x = static_cast<const IndexExpr&>(*e);
+        call2("a_getitem", x.object.get(), x.index.get()); return;
+      }
+      case ExprKind::Field: {
+        auto& x = static_cast<const FieldExpr&>(*e);
+        int os = allocSlot(); emitExpr(x.object.get()); storeRax(os);
+        std::string lbl = "__a_fld_" + std::to_string(labelCounter_++);
+        rodata_ << "    .section .rodata\n" << lbl << ":\n    .string \"" << cEscape(x.field) << "\"\n";
+        loadSlot(os, "%rdi");
+        emit("    lea " + lbl + "(%rip), %rsi");
+        emit("    call a_getattr");
+        return;
+      }
+      case ExprKind::Ternary: {
+        auto& x = static_cast<const TernaryExpr&>(*e);
+        std::string elseL = newLabel("tern"), endL = newLabel("tend");
+        int rs = allocSlot();
+        emitExpr(x.cond.get()); emit("    mov %rax, %rdi"); emit("    call a_truthy_raw_slow");
+        emit("    test %rax, %rax"); je(elseL);
+        emitExpr(x.thenValue.get()); storeRax(rs); jmp(endL);
+        emitLabel(elseL);
+        emitExpr(x.elseValue.get()); storeRax(rs);
+        emitLabel(endL); loadSlot(rs, "%rax"); return;
+      }
+      default:
+        fail("asm: unsupported expression");
+        movImm(kTag | 0x2, "%rax");
+        return;
+    }
   }
 };
 
