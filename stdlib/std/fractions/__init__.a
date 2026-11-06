@@ -1,0 +1,198 @@
+# std.fractions — port of CPython 3.14 Lib/fractions.py (Fraction class).
+#
+# Exact rational arithmetic: numerator/denominator kept normalised
+# (denominator > 0, gcd-reduced). Python raises exceptions; here contract
+# violations are core.panic. `Fraction(v)` accepts i64, f64 (exact binary
+# ratio via Fraction_from_float) and "n/d" strings are NOT parsed (A has no
+# string->number split API need; use Fraction_new).
+import math
+import core
+import json
+
+fn _gcd_i(a: i64, b: i64) -> i64:
+    x = a < 0 ? -a : a
+    y = b < 0 ? -b : b
+    while y != 0:
+        t = x % y
+        x = y
+        y = t
+    return x == 0 ? 1 : x
+
+fn _floor_div(a: i64, b: i64) -> i64:
+    q = a / b
+    r = a % b
+    if r != 0 and ((r < 0) != (b < 0)):
+        q = q - 1
+    return q
+
+fn _pow2i(n: i64) -> i64:
+    r = 1
+    i = 0
+    while i < n:
+        r = r * 2
+        i = i + 1
+    return r
+
+## Fraction: exact rational n/d (fields public like CPython's ._numerator).
+struct Fraction:
+    n
+    d
+
+    fn numerator(self):
+        return self.n
+
+    fn denominator(self):
+        return self.d
+
+    fn add(self, other):
+        return _mk(self.n * other.d + other.n * self.d, self.d * other.d)
+
+    fn sub(self, other):
+        return _mk(self.n * other.d - other.n * self.d, self.d * other.d)
+
+    fn mul(self, other):
+        return _mk(self.n * other.n, self.d * other.d)
+
+    fn truediv(self, other):
+        if other.n == 0:
+            core.panic("Fraction: division by zero")
+        return _mk(self.n * other.d, self.d * other.n)
+
+    fn neg(self):
+        return Fraction(-self.n, self.d)
+
+    fn abs(self):
+        return Fraction(self.n < 0 ? -self.n : self.n, self.d)
+
+    fn eq(self, other):
+        return self.n == other.n and self.d == other.d
+
+    fn lt(self, other):
+        return self.n * other.d < other.n * self.d
+
+    fn le(self, other):
+        return self.n * other.d <= other.n * self.d
+
+    fn gt(self, other):
+        return self.n * other.d > other.n * self.d
+
+    fn ge(self, other):
+        return self.n * other.d >= other.n * self.d
+
+    fn floor(self):
+        return _floor_div(self.n, self.d)
+
+    fn ceil(self):
+        return -_floor_div(-self.n, self.d)
+
+    fn trunc(self):
+        q = self.n / self.d
+        r = self.n % self.d
+        if r != 0 and ((r < 0) != (self.d < 0)):
+            q = q + 1
+        return q
+
+    fn round(self):
+        fl = _floor_div(self.n, self.d)
+        rem = self.n - fl * self.d
+        twice = rem * 2
+        if twice < self.d:
+            return fl
+        if twice > self.d:
+            return fl + 1
+        if fl % 2 == 0:
+            return fl
+        return fl + 1
+
+    fn limit_denominator(self, max_denominator: i64):
+        if max_denominator < 1:
+            core.panic("max_denominator should be at least 1")
+        if self.d <= max_denominator:
+            return self
+        p0 = 0
+        q0 = 1
+        p1 = 1
+        q1 = 0
+        nn = self.n
+        dd = self.d
+        while dd != 0:
+            a = nn / dd
+            q2 = q0 + a * q1
+            if q2 > max_denominator:
+                break
+            np1 = a * p1 + p0
+            p0 = p1
+            q0 = q1
+            p1 = np1
+            q1 = q2
+            t = nn
+            nn = dd
+            dd = t % dd
+        k = (max_denominator - q0) / q1
+        b1 = _mk(p0 + k * p1, q0 + k * q1)
+        b2 = _mk(p1, q1)
+        d1 = b1.sub(self).abs()
+        d2 = b2.sub(self).abs()
+        if d1.le(d2):
+            return b1
+        return b2
+
+    fn to_float(self):
+        return float(self.n) / float(self.d)
+
+    fn to_string(self):
+        if self.d == 1:
+            return str(self.n)
+        return str(self.n) + "/" + str(self.d)
+
+fn _mk(n, d):
+    if d == 0:
+        core.panic("Fraction: denominator is zero")
+    if d < 0:
+        n = -n
+        d = -d
+    g = _gcd_i(n, d)
+    return Fraction(n / g, d / g)
+
+## Fraction_new(n, d) -> normalised Fraction (ints).
+fn Fraction_new(n: i64, d: i64):
+    return _mk(n, d)
+
+## Fraction_from_int(v) -> v/1.
+fn Fraction_from_int(v: i64):
+    return _mk(v, 1)
+
+## Fraction_from_float(f) -> exact binary ratio of the double f.
+fn Fraction_from_float(f: f64):
+    if f == 0.0:
+        return _mk(0, 1)
+    sign = 1
+    x = f
+    if x < 0:
+        sign = -1
+        x = -x
+    e = 0
+    while x >= 1.0:
+        x = x / 2.0
+        e = e + 1
+    while x < 0.5:
+        x = x * 2.0
+        e = e - 1
+    m = int(x * 9007199254740992.0)
+    shift = e - 53
+    if shift >= 0:
+        return _mk(sign * m * _pow2i(shift), 1)
+    return _mk(sign * m, _pow2i(-shift))
+
+## _as_fraction(v) -> Fraction for Fraction/i64/f64 inputs (Json dispatch).
+fn _as_fraction(v):
+    k = json.kind(v)
+    if k == "number":
+        i = json.as_int(v)
+        if i != None:
+            return _mk(i, 1)
+        f = json.as_float(v)!
+        return Fraction_from_float(f)
+    if k == "null":
+        core.panic("Fraction: unsupported operand type")
+    return _mk(0, 1)

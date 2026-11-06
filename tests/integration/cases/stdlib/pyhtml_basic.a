@@ -1,0 +1,7 @@
+import html
+
+print(html.escape("<a href=\"x\">&'</a>", true))
+print(html.escape("plain <b>", false))
+print(html.unescape("&lt;tag&gt; &amp; &quot;q&quot; &#65; &#x42;"))
+print(html.unescape("&amp &copy &notit &bogus; &amp;"))
+print(html.unescape("fish &amp chips"))

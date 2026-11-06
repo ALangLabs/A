@@ -124,3 +124,17 @@ Python sources of truth: local `/usr/lib/python3.14/` (CPython 3.14) or
   `ctest --test-dir build -R integration --output-on-failure` (or the suite
   script `tests/integration/run_tests.sh build/a`).
 - Modules must also pass `build/a check`.
+
+## Status (ported so far)
+
+Done + tested: heapq, graphlib, functools, colorsys, keyword, token, types,
+reprlib, pprint, collections (classes), operator*, bisect*, shlex*,
+bytes (new util pkg), html, fractions.
+(* = partial/in-progress by other workers — verify before relying)
+
+Queued: struct, hashlib/hmac, uuid, calendar, ipaddress, urllib.parse,
+statistics, fnmatch/glob, sched, csv, difflib, base64/binascii/quopri,
+string, numbers, copy trio, codecs, configparser, argparse, getopt,
+textwrap, datetime, abc, pyenum (keyword-blocked name), pickle, tomllib.
+Hard tier (needs runtime primitives): re, os/io/pathlib, threading,
+subprocess, asyncio, tkinter, importlib machinery.

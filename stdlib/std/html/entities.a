@@ -328,8 +328,7 @@ fn html5() -> {String:String}:
         "NegativeVeryThinSpace;": "​",
         "NestedGreaterGreater;": "≫",
         "NestedLessLess;": "≪",
-        "NewLine;": "
-",
+        "NewLine;": "\n",
         "Nfr;": "𝔑",
         "NoBreak;": "⁠",
         "NonBreakingSpace;": " ",
@@ -533,7 +532,7 @@ fn html5() -> {String:String}:
         "TRADE;": "™",
         "TSHcy;": "Ћ",
         "TScy;": "Ц",
-        "Tab;": "	",
+        "Tab;": "\t",
         "Tau;": "Τ",
         "Tcaron;": "Ť",
         "Tcedil;": "Ţ",

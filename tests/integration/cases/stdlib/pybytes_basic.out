@@ -1,0 +1,13 @@
+Some(65)
+Some(128512)
+Some("A")
+Some("é")
+Some("😀")
+None
+None
+11
+héllo 😀
+plain ascii
+None
+héllo
+[97, 98, 99]

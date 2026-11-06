@@ -1,0 +1,17 @@
+import fractions
+
+f = fractions.Fraction_new(1, 3)
+g = fractions.Fraction_new(1, 6)
+print(f.add(g).to_string())
+print(f.mul(g).to_string())
+print(f.truediv(g).to_string())
+print(f.to_float())
+print(fractions.Fraction_new(-7, 3).floor())
+print(fractions.Fraction_new(-7, 3).ceil())
+print(fractions.Fraction_new(1, 2).round())
+print(fractions.Fraction_new(3, 2).round())
+print(fractions.Fraction_new(355, 113).limit_denominator(10).to_string())
+print(fractions.Fraction_new(2, 4).to_string())
+print(fractions.Fraction_new(6, -8).to_string())
+print(fractions.Fraction_from_float(0.5).to_string())
+print(fractions.Fraction_from_int(-5).to_string())

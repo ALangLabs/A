@@ -56,16 +56,11 @@ fn _is_name_char(c):
 
 ## _digits_value(cs, base) -> integer value of digit chars, -1 on bad digit.
 fn _digits_value(cs, base):
+    digits = "0123456789abcdef"
     v = 0
     for c in cs.chars():
-        d = -1
-        s = str(c)
-        if s >= "0" and s <= "9":
-            d = bytes.ord(s.chars()[0]) - bytes.ord("0".chars()[0])
-        elif base == 16 and s >= "a" and s <= "f":
-            d = 10 + bytes.ord(s.chars()[0]) - bytes.ord("a".chars()[0])
-        elif base == 16 and s >= "A" and s <= "F":
-            d = 10 + bytes.ord(s.chars()[0]) - bytes.ord("A".chars()[0])
+        s = str(c).lower()
+        d = digits.find(s)
         if d < 0 or d >= base:
             return -1
         v = v * base + d
@@ -114,24 +109,31 @@ fn unescape(s: String):
                     done = true
             if not done and len(name_chars) > 1 and str(name_chars[0]) == "#":
                 # numeric character reference &#123; / &#x1F;
-                digs = name_chars[1..]
+                start = 1
                 hexform = false
-                if len(digs) > 0 and (str(digs[0]) == "x" or str(digs[0]) == "X"):
+                if str(name_chars[1]) == "x" or str(name_chars[1]) == "X":
                     hexform = true
-                    digs = digs[1..]
-                v = _digits_value(_join_chars(digs), hexform ? 16 : 10)
+                    start = 2
+                digs = ""
+                di = start
+                while di < len(name_chars):
+                    digs = digs + str(name_chars[di])
+                    di = di + 1
+                v = _digits_value(digs, hexform ? 16 : 10)
                 if v >= 0 and v <= 1114111 and not (v >= 55296 and v <= 57343):
-                    ch = bytes.chr(v)
-                    if ch != None:
-                        out = out + str(ch!)
-                        i = semi + 1
-                        done = true
+                    out = out + (bytes.chr(v) ?? "")
+                    i = semi + 1
+                    done = true
         if not done and len(name_chars) > 0:
             # legacy entity without ';': longest prefix that is a key
             table = html5()
             k = len(name_chars)
             while k > 0:
-                cand = _join_chars(name_chars[0..k])
+                cand = ""
+                ci = 0
+                while ci < k:
+                    cand = cand + str(name_chars[ci])
+                    ci = ci + 1
                 if cand in table:
                     out = out + table[cand]
                     i = i + 1 + k

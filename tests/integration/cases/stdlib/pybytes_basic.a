@@ -1,0 +1,22 @@
+import bytes
+
+# ord / chr round-trip
+print(bytes.ord("A".chars()[0]))
+print(bytes.ord("\u{1F600}".chars()[0]))
+print(bytes.chr(65))
+print(bytes.chr(233))
+print(bytes.chr(0x1F600))
+print(bytes.chr(1114112))
+print(bytes.chr(-1))
+
+# UTF-8 encode/decode
+s = "héllo 😀"
+b = bytes.utf8_encode(s)
+print(len(b))
+print(bytes.utf8_decode(b))
+print(bytes.utf8_decode(bytes.utf8_encode("plain ascii")))
+print(bytes.utf8_decode([0xFF]))
+
+# Latin-1 helpers
+print(bytes.b2s([104, 233, 108, 108, 111]))
+print(bytes.s2b("abc"))
