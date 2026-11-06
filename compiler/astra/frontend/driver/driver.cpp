@@ -7,15 +7,27 @@
 #include <utility>
 #include <vector>
 #include <iostream>
+#include <algorithm>
+#include <cerrno>
+#include <chrono>
+#include <csignal>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include "diagnostics/diagnostics.hpp"
 #include "pipeline/pipeline.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "tooling/docgen.hpp"
 #include "tooling/formatter.hpp"
 #include <filesystem>
+#if defined(__unix__) || defined(__APPLE__)
+#include <unistd.h>
+#endif
 namespace a {
 namespace {
-PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; return p; }
+PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; return p; }
 bool readAll(const std::string& path,std::string& t,std::ostream& e){ std::ifstream f(path,std::ios::binary); if(!f){e<<"error: cannot open '"<<path<<"'\n"; return false;} std::ostringstream b; b<<f.rdbuf(); t=b.str(); return true; }
 }
 int runSource(const std::string& n,std::string s,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return executePipeline(n,std::move(s),toP(c),i,o,e); }
@@ -58,7 +70,42 @@ bool replInputComplete(const std::string& text){
   return parens<=0&&squares<=0&&braces<=0&&pendingColonIndent<0&&!inString;
 }
 }
+#if defined(__unix__) || defined(__APPLE__)
+// Locates the self-hosted A REPL (stdlib/std/repl/main.a): $A_STDLIB, then
+// paths relative to this executable (build/a -> ../stdlib), then cwd.
+std::string findReplMain(const DriverConfig& c){
+  std::vector<std::string> roots;
+  if(!c.stdlibRoot.empty()) roots.push_back(c.stdlibRoot);
+  if(const char* e=std::getenv("A_STDLIB"); e&&*e) roots.push_back(e);
+  char exe[4096];
+  ssize_t n=::readlink("/proc/self/exe",exe,sizeof(exe)-1);
+  if(n>0){
+    exe[n]='\0';
+    std::string dir=exe; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
+    roots.push_back(dir+"/../stdlib");
+    roots.push_back(dir+"/../../stdlib");
+  }
+  roots.push_back("stdlib");
+  roots.push_back(".");
+  for(const auto& r:roots){
+    for(const char* rel: {"/std/repl/main.a","/repl/main.a"}){
+      std::string p=r+rel; std::error_code ec;
+      if(std::filesystem::exists(p,ec)) return p;
+    }
+  }
+  return "";
+}
+#endif
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
+#if defined(__unix__) || defined(__APPLE__)
+  // On a TTY, `a repl` runs the self-hosted IPython-style shell written in A
+  // (stdlib/std/repl/main.a). Piped stdin keeps the simple line REPL below.
+  if(isatty(STDIN_FILENO)){
+    std::string main=findReplMain(c);
+    if(!main.empty()) return runFile(main,c,in,o,e);
+    e<<"warning: could not locate stdlib/std/repl/main.a; using line REPL\n";
+  }
+#endif
   // Line-based REPL: each complete input is compiled and run by Astra as a
   // fresh process (top-level bindings do not persist between inputs).
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";

@@ -1738,6 +1738,65 @@ void gen_opi(int op)
         opc = 1;
         goto gen_op8;
     case '*':
+        /* LLVM-style strength reduction on constant multipliers:
+           x*1 -> x, x*0 -> 0, x*2^k -> shl $k, x*{3,5,9} -> lea,
+           other small constants -> imul r, r, imm (no constant load). */
+        if (cc) {
+            uint64_t mc = ll ? (uint64_t)vtop->c.i
+                             : (uint64_t)(uint32_t)vtop->c.i;
+            int pow2 = -1;  /* shift amount for x*2^k, -1 = not pow2 */
+            if (mc == 1) pow2 = 0;
+            else if (mc && !(mc & (mc - 1))) {
+                pow2 = 0;
+                while (((uint64_t)1 << pow2) < mc) ++pow2;
+            }
+            /* imm32 (sign-extended for 64-bit) covers every 32-bit
+               multiplier and small 64-bit ones. */
+            int immFits = !ll || mc <= 0x7fffffffULL ||
+                          mc >= 0xffffffff80000000ULL;
+            if (mc == 0 || pow2 >= 0 || immFits) {
+                int rv;
+                vswap();
+                rv = gv(RC_INT);
+                vswap();
+                int rbits = REG_VALUE(rv);
+                if (mc == 0) {
+                    orex(0, rv, rv, 0x31); /* xor rv, rv */
+                    o(0xc0 + rbits * 9);
+                } else if (pow2 > 0) {
+                    orex(ll, rv, 0, 0xc1); /* shl $k, rv */
+                    o(0xe0 | rbits);
+                    g(pow2 & (ll ? 63 : 31));
+                } else if (pow2 == 0) {
+                    /* x*1: rv already holds x */
+                } else if (immFits && (mc == 3 || mc == 5 || mc == 9) &&
+                           rbits != 4 && rbits != 5) {
+                    /* lea (rv,rv,scale), rv — SIB can't encode rsp/r12
+                       as index or rbp/r13 as base with mod=00. */
+                    int sc = mc == 3 ? 1 : (mc == 5 ? 2 : 3);
+                    int rex = 0x40 | (ll << 3) | (REX_BASE(rv) << 2) |
+                              (REX_BASE(rv) << 1) | REX_BASE(rv);
+                    if (rex != 0x40) o(rex);
+                    o(0x8d);
+                    o(0x04 | (rbits << 3));
+                    o((sc << 6) | (rbits << 3) | rbits);
+                } else if (immFits) {
+                    /* imul rv, rv, imm — 0x6b for imm8, 0x69 for imm32 */
+                    if ((int64_t)(int8_t)mc == (int64_t)mc) {
+                        orex(ll, rv, rv, 0x6b);
+                        o(0xc0 | (rbits << 3) | rbits);
+                        g((unsigned char)mc);
+                    } else {
+                        orex(ll, rv, rv, 0x69);
+                        o(0xc0 | (rbits << 3) | rbits);
+                        gen_le32((uint32_t)mc);
+                    }
+                }
+                /* pow2 == 0 (x*1): nothing to emit, rv already holds x */
+                vtop--;
+                break;
+            }
+        }
         gv2(RC_INT, RC_INT);
         r = vtop[-1].r;
         fr = vtop[0].r;

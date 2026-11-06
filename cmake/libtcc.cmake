@@ -136,9 +136,17 @@ endif()
 file(COPY "${TCC_SRC}/include/" DESTINATION "${TCC_STAGE}/include")
 # A runtime (compiler/astra/runtime/): the frontend's emitted C includes
 # a_runtime.h and links a_runtime.c; stage both next to the support archive
-# so `astra` can compile emitted C standalone.
-file(COPY "${TCC_SRC}/runtime/a_runtime.h" "${TCC_SRC}/runtime/a_runtime.c"
-     DESTINATION "${TCC_STAGE}")
+# so `astra` can compile emitted C standalone. Copied by a build-time custom
+# command (not file(COPY)) so runtime edits are picked up on rebuild.
+foreach(rt_file a_runtime.h a_runtime.c)
+    add_custom_command(
+        OUTPUT "${TCC_STAGE}/${rt_file}"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${TCC_SRC}/runtime/${rt_file}" "${TCC_STAGE}/${rt_file}"
+        DEPENDS "${TCC_SRC}/runtime/${rt_file}"
+        COMMENT "stage ${rt_file} -> tcclib"
+        VERBATIM)
+endforeach()
 if(WIN32)
     set(tcc_libdir "${TCC_STAGE}/lib")
     # Bundled Windows headers and the .def files naming system DLL
@@ -216,6 +224,7 @@ add_custom_command(OUTPUT "${tcc_libdir}/runmain.o"
     VERBATIM)
 
 add_custom_target(tcc_runtime ALL
-    DEPENDS "${tcc_libdir}/libtcc1.a" "${tcc_libdir}/runmain.o")
+    DEPENDS "${tcc_libdir}/libtcc1.a" "${tcc_libdir}/runmain.o"
+            "${TCC_STAGE}/a_runtime.h" "${TCC_STAGE}/a_runtime.c")
 
 message(STATUS "libtcc: native backend (${tcc_version}) for ${tcc_arch}")

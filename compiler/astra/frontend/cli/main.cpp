@@ -41,6 +41,9 @@ void printUsage(std::ostream& os) {
      << "  --json           structured JSON (doc, check)\n"
      << "  --parallel       check modules in parallel (async type checking; same diagnostics)\n"
      << "  -j <n>, --jobs <n>  parallel jobs (default: serial; -j 0 = all cores)\n"
+     << "  -O0/-O1/-O2/-O3/-Os/-Oz/-Ofast  optimization level (clang style)\n"
+     << "  --opt-level=N  optimization level 0..3 (alias of -O)\n"
+     << "  --optnone    disable all optimizations (LLVM optnone attribute)\n"
      << "  --opt            run optimization passes (ir)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
      << "  --stdlib <dir>   override standard library directory\n"
@@ -69,6 +72,9 @@ struct Options {
   bool writeInPlace = false;
   bool jsonOutput = false;
   bool optimize = false;
+  bool optnone = false;
+  bool optFlagSet = false;
+  int optimizationLevel = 2;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;
 };
@@ -78,11 +84,43 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   bool colorDisabled = false;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
-    if (arg == "--no-color") colorDisabled = true;
-    else if (arg == "--check") options.checkOnly = true;
-    else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
-    else if (arg == "--json") options.jsonOutput = true;
-    else if (arg == "--opt") options.optimize = true;
+  // LLVM/clang-style optimization levels: -O0..-O3, -Os, -Oz, -Ofast.
+  auto parseOptFlag = [&](const std::string& value, bool& ok) {
+    ok = true;
+    options.optFlagSet = true;
+    if (value == "O0" || value == "-O0") options.optimizationLevel = 0;
+    else if (value == "O1" || value == "-O1") options.optimizationLevel = 1;
+    else if (value == "O2" || value == "-O2") options.optimizationLevel = 2;
+    else if (value == "O3" || value == "-O3") options.optimizationLevel = 3;
+    else if (value == "Os" || value == "-Os") options.optimizationLevel = 1;
+    else if (value == "Oz" || value == "-Oz") options.optimizationLevel = 1;
+    else if (value == "Ofast" || value == "-Ofast") options.optimizationLevel = 3;
+    else if (value.rfind("--opt-level=", 0) == 0) {
+      try {
+        int n = std::stoi(value.substr(12));
+        if (n < 0) n = 0;
+        if (n > 3) n = 3;
+        options.optimizationLevel = n;
+      } catch (...) { ok = false; }
+    } else if (value == "--opt-level") {
+      ok = false;  // requires =N form
+    } else {
+      ok = false;
+    }
+    return ok;
+  };
+  bool isOptFlag = (arg == "-O0" || arg == "-O1" || arg == "-O2" || arg == "-O3" ||
+                    arg == "-Os" || arg == "-Oz" || arg == "-Ofast" ||
+                    arg.rfind("--opt-level=", 0) == 0 || arg == "--opt-level");
+  if (arg == "--optnone") options.optnone = true;
+  else if (isOptFlag) {
+    bool ok = false;
+    if (!parseOptFlag(arg, ok)) { err << "error: invalid optimization level '" << arg << "'\n"; return false; }
+  } else if (arg == "--no-color") colorDisabled = true;
+  else if (arg == "--check") options.checkOnly = true;
+  else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
+  else if (arg == "--json") options.jsonOutput = true;
+  else if (arg == "--opt") options.optimize = true;
     else if (arg == "--parallel") options.jobs = 0;
     else if (arg == "--jobs" || arg == "-j") {
       if (i + 1 >= argc) { err << "error: '--jobs' requires a number\n"; return false; }
@@ -161,6 +199,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   if (options.command != "doc" && options.command != "check" && options.jsonOutput) {
     err << "error: '--json' is only valid with 'doc' or 'check'\n"; return false;
   }
+  if (options.optnone) options.optimizationLevel = 0;
+  // `a ir -O<level>` implies `a ir --opt` (clang-style: the level selects the
+  // pipeline); `a run`/`a build -O` only forwards to the C backend.
+  if (options.command == "ir" && options.optFlagSet) options.optimize = true;
   if (options.command != "ir" && options.optimize) { err << "error: '--opt' is only valid with 'ir'\n"; return false; }
   if (options.writeInPlace && options.checkOnly) { err << "error: '--write' and '--check' cannot be combined\n"; return false; }
   options.useColor = isTerminal() && !colorDisabled;
@@ -171,6 +213,13 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
 
 int main(int argc, char** argv) {
   if (argc <= 1) { printUsage(std::cerr); return kExitUsage; }
+#if defined(__unix__) || defined(__APPLE__)
+  // Let compiled programs (e.g. repl.eval in the self-hosted REPL) locate
+  // this toolchain binary regardless of the caller's PATH/cwd.
+  char exeBuf[4096];
+  ssize_t exeLen = ::readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
+  if (exeLen > 0) { exeBuf[exeLen] = '\0'; ::setenv("A_A_BIN", exeBuf, 1); }
+#endif
   Options options;
   if (!parseOptions(argc, argv, options, std::cerr)) return kExitUsage;
   a::DriverConfig config;
@@ -179,6 +228,7 @@ int main(int argc, char** argv) {
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
   config.backend = "llvm"; // single backend (LLVM pipeline)
   config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count
+  config.optimizationLevel = options.optimizationLevel;
   if (const char* env = std::getenv("A_JOBS")) {
     try { if (options.jobs == 1) config.jobs = std::stoi(env); } catch (...) {}
   }

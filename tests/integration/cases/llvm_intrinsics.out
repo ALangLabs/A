@@ -1,0 +1,8 @@
+ctz: 3 64 clz: 63 popcount: 3
+bswap: 72057594037927936 rotl: 16 rotr: 1
+fma: 10.0 fabs: 2.5 copysign: -3.0
+smin/smax: 3 7 umin/umax: 2 -1
+sadd_overflow: 9223372036854775807 true
+smul_overflow: -9223372036854775808 true
+umul_overflow: 0 true
+expect: true true false

@@ -744,6 +744,8 @@ struct TCCState {
     unsigned char znodelete; /* Set DF_1_NODELETE in dynamic section */
     unsigned char filetype; /* file type for compilation (NONE,C,ASM) */
     unsigned char optimize; /* only to #define __OPTIMIZE__ */
+    unsigned char optimize_size; /* -Os/-Oz: define __OPTIMIZE_SIZE__ (Clang parity) */
+    unsigned char optimize_fast; /* -Ofast: aggressive (maps to -O3) */
     unsigned char option_pthread; /* -pthread option */
     unsigned char enable_new_dtags; /* -Wl,--enable-new-dtags */
     unsigned int  cversion; /* supported C ISO version, 199901 (the default), 201112, ... */

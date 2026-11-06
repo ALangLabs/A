@@ -210,6 +210,43 @@ void collectAssignedExpr(const Expr& expr, std::set<std::string>& names) {
   }
 }
 
+// LLVM cast family: maps a source/destination type pair to the LLVM cast
+// opcode ("" when the pair needs no cast, e.g. identical types).
+std::string castKindFor(const TypePtr& srcIn, const TypePtr& dstIn) {
+  TypePtr src = defaultType(resolveType(srcIn));
+  TypePtr dst = defaultType(resolveType(dstIn));
+  if (!src || !dst) return "";
+  if (src->kind == TypeKind::Int && dst->kind == TypeKind::Int) {
+    if (src->bits > dst->bits) return "trunc";
+    if (src->bits < dst->bits) return src->isSigned ? "sext" : "zext";
+    return src->isSigned == dst->isSigned ? "" : "bitcast";
+  }
+  if (src->kind == TypeKind::Int && dst->kind == TypeKind::Float) {
+    return src->isSigned ? "sitofp" : "uitofp";
+  }
+  if (src->kind == TypeKind::Float && dst->kind == TypeKind::Int) {
+    return dst->isSigned ? "fptosi" : "fptoui";
+  }
+  if (src->kind == TypeKind::Float && dst->kind == TypeKind::Float) {
+    if (src->bits > dst->bits) return "fptrunc";
+    if (src->bits < dst->bits) return "fpext";
+    return "";
+  }
+  return "";
+}
+
+// Numeric conversion builtins lower to LLVM `cast` instructions when the
+// operand/result types are known; anything else stays a runtime call.
+bool isConversionName(const std::string& name) {
+  static const char* names[] = {"i8",  "i16", "i32", "i64", "u8",
+                                "u16", "u32", "u64", "f32", "f64",
+                                "int", "float"};
+  for (const char* n : names) {
+    if (name == n) return true;
+  }
+  return false;
+}
+
 class Builder {
  public:
   explicit Builder(Function& function) : fn_(function) {}
@@ -1008,6 +1045,25 @@ class Builder {
         return lowerCall(static_cast<const CallExpr&>(expr));
       case ExprKind::Index: {
         const auto& index = static_cast<const IndexExpr&>(expr);
+        // LLVM getelementptr: a[i][j] flattens into one multi-index op.
+        std::vector<const IndexExpr*> chain;
+        const Expr* base = &expr;
+        while (base->kind == ExprKind::Index) {
+          const auto* node = static_cast<const IndexExpr*>(base);
+          chain.push_back(node);
+          base = node->object.get();
+        }
+        if (chain.size() > 1) {
+          Inst inst;
+          inst.op = Op::GetElementPtr;
+          inst.type = defaultType(expr.inferredType);
+          inst.span = expr.span;
+          inst.operands.push_back(lowerExpr(*base));
+          for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            inst.operands.push_back(lowerExpr(*(*it)->index));
+          }
+          return emit(std::move(inst));
+        }
         Inst inst;
         inst.op = Op::Index;
         inst.type = defaultType(expr.inferredType);
@@ -1226,6 +1282,22 @@ class Builder {
     Inst inst;
     inst.span = call.span;
     inst.type = defaultType(call.inferredType);
+    if (call.callee->kind == ExprKind::Ident && call.args.size() == 1) {
+      const auto& callee = static_cast<const IdentExpr&>(*call.callee);
+      if (lookup(callee.name) < 0 && isConversionName(callee.name)) {
+        int arg = lowerExpr(*call.args[0].value);
+        std::string kind = castKindFor(typeOf(arg), builtinTypeByName(callee.name));
+        if (!kind.empty()) {
+          Inst cast;
+          cast.op = Op::Cast;
+          cast.text = std::move(kind);
+          cast.type = inst.type;
+          cast.operands = {arg};
+          cast.span = call.span;
+          return emit(std::move(cast));
+        }
+      }
+    }
     if (call.callee->kind == ExprKind::Ident) {
       const auto& callee = static_cast<const IdentExpr&>(*call.callee);
       if (lookup(callee.name) < 0) {
@@ -1300,8 +1372,10 @@ void printInst(std::ostream& os, const Inst& inst) {
     case Op::Binary: os << inst.text; break;
     case Op::Unary: os << inst.text; break;
     case Op::Select: os << "select"; break;
-    case Op::Call: os << "call " << inst.text; break;
-    case Op::CallValue: os << "call_value"; break;
+    case Op::Call:
+      os << (inst.tailCall ? "tail call " : "call ") << inst.text;
+      break;
+    case Op::CallValue: os << (inst.tailCall ? "tail call_value" : "call_value"); break;
     case Op::Index: os << "index"; break;
     case Op::Slice: os << "slice"; break;
     case Op::Field: os << "field " << inst.text; break;
@@ -1320,6 +1394,11 @@ void printInst(std::ostream& os, const Inst& inst) {
     case Op::Global: os << "global " << inst.text; break;
     case Op::FuncRef: os << "func " << inst.text; break;
     case Op::Lambda: os << "lambda"; break;
+    case Op::Cast: os << "cast " << inst.text; break;
+    case Op::GetElementPtr: os << "getelementptr"; break;
+    case Op::ExtractValue: os << "extractvalue " << inst.intValue; break;
+    case Op::InsertValue: os << "insertvalue " << inst.intValue; break;
+    case Op::Freeze: os << "freeze"; break;
     case Op::Opaque: os << inst.text; break;
   }
   if (inst.op == Op::Phi) {
@@ -1376,6 +1455,11 @@ const char* opName(Op op) {
     case Op::Global: return "global";
     case Op::FuncRef: return "func";
     case Op::Lambda: return "lambda";
+    case Op::Cast: return "cast";
+    case Op::GetElementPtr: return "getelementptr";
+    case Op::ExtractValue: return "extractvalue";
+    case Op::InsertValue: return "insertvalue";
+    case Op::Freeze: return "freeze";
     case Op::Opaque: return "opaque";
   }
   return "?";

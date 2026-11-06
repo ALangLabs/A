@@ -50,6 +50,18 @@ enum class Op {
   Global,
   FuncRef,
   Lambda,
+  // LLVM LangRef-style ops. `Cast` covers the LLVM cast family; `text`
+  // holds the cast opcode (trunc, zext, sext, fptrunc, fpext, fptosi,
+  // fptoui, sitofp, uitofp, bitcast, ptrtoint, inttoptr). `GetElementPtr`
+  // is the LLVM gep analog for multi-level indexing: operands are the base
+  // value followed by one index per level. `ExtractValue`/`InsertValue`
+  // are the LLVM aggregate ops (`intValue` is the element index);
+  // `Freeze` is llvm.freeze. `tailCall` on a Call marks a `tail call`.
+  Cast,
+  GetElementPtr,
+  ExtractValue,
+  InsertValue,
+  Freeze,
   Opaque,
 };
 
@@ -68,6 +80,7 @@ struct Inst {
   std::vector<int> operands;
   std::vector<int> incomingBlocks;  // Phi only, parallel to `operands`
   Span span;
+  bool tailCall = false;  // Call only: LLVM `tail call` marker
 
   bool producesValue() const { return id >= 0; }
 };

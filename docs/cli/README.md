@@ -32,6 +32,9 @@ help             show help
 | `--parallel` | `check` | Check modules in parallel (same diagnostics) |
 | `-j <n>, --jobs <n>` | `check` | Parallel jobs (default: serial; `-j 0` = all cores) |
 | `--opt` | `ir` | Run optimization passes before printing IR |
+| `-O0`/`-O1`/`-O2`/`-O3`/`-Os`/`-Oz`/`-Ofast` | `run`, `build`, `ir` | LLVM/clang-style optimization level (for `ir` it selects the pass pipeline; for `run`/`build` it is forwarded to the Astra backend) |
+| `--opt-level=N` | `run`, `build`, `ir` | Alias of `-O`, with `N` in 0..3 |
+| `--optnone` | `run`, `build`, `ir` | Disable all optimizations (LLVM `optnone` attribute) |
 | `-I <dir>` | module loading | Add module search directory (repeatable) |
 | `--stdlib <dir>` | module loading | Override standard library directory |
 | `--backend <name>` / `--backend=<name>` | compatibility | Accepted for compatibility; A v2 uses the Astra backend |

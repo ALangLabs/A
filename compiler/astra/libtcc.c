@@ -2193,7 +2193,26 @@ PUB_FUNC int tcc_parse_args(TCCState *s, int *pargc, char ***pargv)
             s->filetype = x | (s->filetype & ~AFF_TYPE_MASK);
             break;
         case TCC_OPTION_O:
-            s->optimize = isnum(optarg[0]) ? optarg[0]-'0' : 1 /* -O -Os */;
+            /* LLVM/Clang parity: -O0..-O3, -Os, -Oz, -Ofast.
+               Astra/TinyCC only defines __OPTIMIZE__ (no real codegen change);
+               size/fast variants are recorded for macro parity. */
+            if (isnum(optarg[0])) {
+                s->optimize = optarg[0]-'0';
+                s->optimize_size = 0;
+                s->optimize_fast = 0;
+            } else if (optarg[0] == 's' || optarg[0] == 'z') { /* -Os / -Oz */
+                s->optimize = 1;
+                s->optimize_size = 1;
+                s->optimize_fast = 0;
+            } else if (optarg[0] == 'f') { /* -Ofast */
+                s->optimize = 3;
+                s->optimize_size = 0;
+                s->optimize_fast = 1;
+            } else {
+                s->optimize = 1 /* -O */;
+                s->optimize_size = 0;
+                s->optimize_fast = 0;
+            }
             break;
 #if defined TCC_TARGET_MACHO
         case TCC_OPTION_dynamiclib:

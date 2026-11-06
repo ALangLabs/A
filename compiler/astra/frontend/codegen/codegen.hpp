@@ -10,15 +10,11 @@ namespace a {
 struct ModuleGraph;
 struct SemaResult;
 
-// Emits a complete C translation unit (including `int main`) for a checked
-// program. Returns false and fills `error` on unsupported constructs.
-// In test mode, `main` discovers and runs top-level `fn test_*()` functions.
-bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
-           std::string& error, bool testMode = false);
-
 // Emits x86-64 assembly (AT&T syntax) for astra to assemble directly to
-// machine code — no C intermediate. Returns false on constructs the asm
-// backend does not cover yet so callers can fall back to emitC.
+// machine code — the only codegen backend (A -> asm -> machine code).
+// In test mode, `main` discovers and runs top-level `fn test_*()` functions
+// through the runtime a_test_main harness. Returns false on constructs the
+// asm backend does not cover.
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
-             std::string& error);
+             std::string& error, bool testMode = false);
 }  // namespace a

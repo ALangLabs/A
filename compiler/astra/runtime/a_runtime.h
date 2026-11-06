@@ -90,6 +90,31 @@ enum {
     A_BI_ISINSTANCE, A_BI_JOIN, A_BI_SORTED, A_BI_REVERSED, A_BI_ENUMERATE,
     A_BI_ZIP, A_BI_REDUCE, A_BI_LOG2, A_BI_LOG10, A_BI_ATAN2, A_BI_FLUSH,
     A_BI_I8, A_BI_I16, A_BI_I32, A_BI_U8, A_BI_U16, A_BI_U32, A_BI_F32,
+    /* LLVM-style intrinsics: bit ops (ctz/clz/popcount/bswap/rotl/rotr),
+       float ops (fma/fabs/copysign), integer min/max (smin/smax/umin/umax),
+       overflowing arithmetic, and branch-hint expect/likely/unlikely. */
+    A_BI_CTZ, A_BI_CLZ, A_BI_POPCOUNT, A_BI_BSWAP, A_BI_ROTL, A_BI_ROTR,
+    A_BI_FMA, A_BI_FABS, A_BI_COPYSIGN,
+    A_BI_SMIN, A_BI_SMAX, A_BI_UMIN, A_BI_UMAX,
+    A_BI_SADD_OVF, A_BI_SSUB_OVF, A_BI_SMUL_OVF,
+    A_BI_UADD_OVF, A_BI_USUB_OVF, A_BI_UMUL_OVF,
+    A_BI_EXPECT, A_BI_LIKELY, A_BI_UNLIKELY,
+    /* native-module members with no core builtin equivalent */
+    A_BI_ENV_GET,
+    /* time module */
+    A_BI_TIME_NOW, A_BI_TIME_SLEEP,
+    /* terminal module (POSIX only) */
+    A_BI_TERMINAL_ISATTY, A_BI_TERMINAL_RAW_MODE, A_BI_TERMINAL_READ_CHAR,
+    A_BI_TERMINAL_READ_CHAR_MS, A_BI_TERMINAL_WRITE, A_BI_TERMINAL_FLUSH,
+    A_BI_TERMINAL_SIZE, A_BI_TERMINAL_HOME,
+    /* repl.eval: evaluate A source through the `a` toolchain (A_REPL_DEPTH
+       guards against nested evaluation; A_A_BIN locates the driver). */
+    A_BI_REPL_EVAL,
+    /* json module: JSON text <-> aval values (dict/list/str/num/bool/none) */
+    A_BI_JSON_PARSE, A_BI_JSON_STRINGIFY, A_BI_JSON_PRETTY, A_BI_JSON_IS_VALID,
+    A_BI_JSON_GET, A_BI_JSON_AT, A_BI_JSON_LEN, A_BI_JSON_HAS, A_BI_JSON_KEYS,
+    A_BI_JSON_TYPE, A_BI_JSON_AS_STR, A_BI_JSON_AS_INT, A_BI_JSON_AS_FLOAT,
+    A_BI_JSON_AS_BOOL, A_BI_JSON_AS_ARRAY, A_BI_JSON_AS_MAP,
     A_BI_COUNT
 };
 
@@ -289,6 +314,7 @@ static inline aval a_ge(aval l, aval r) {
 }
 aval a_contains(aval cont, aval item);
 aval a_in_range(aval v, aval lo, aval hi); /* lo <= v < hi */
+aval a_in_range_inclusive(aval v, aval lo, aval hi); /* lo <= v <= hi */
 
 /* bitwise / shifts (with header fast paths) */
 aval a_band_slow(aval l, aval r);
@@ -380,6 +406,11 @@ aval a_try_result(aval v);                      /* helper for err propagation */
 /* builtins */
 aval a_builtin(uint64_t id);                    /* materialize builtin FNON */
 aval a_bi_call(uint64_t id, uint64_t n, aval *argv); /* direct builtin dispatch */
+
+/* `a test` harness: runs each (name, fn) pair in a forked child so a panic
+   in one test does not stop the suite. Returns 0 when all pass. */
+typedef aval (*a_test_fn)(aval *argv);
+int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns);
 int64_t a_int_full(aval v);                     /* unbox any int aval */
 uint64_t a_builtin_count(void);
 const char *a_builtin_name(uint64_t id);

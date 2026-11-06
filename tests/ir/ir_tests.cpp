@@ -151,6 +151,105 @@ print(total)
   check(contains(main, "const 7"), "licm: hoisted constant remains in the preheader");
 }
 
+void testStrengthReduction() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn shiftme(x: int) -> int:
+    return x * 4
+print(shiftme(3))
+)",
+                                pipeline);
+  check(ok, "strength-reduction: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::algebraicSimplify(pipeline.program);
+  check(stats.operationsSimplified >= 1, "strength-reduction: multiply simplified to shift");
+  const std::string fn = functionByName(pipeline.program, "shiftme");
+  check(contains(fn, "<<"), "strength-reduction: x * 4 becomes x << 2");
+  check(contains(fn, "const 2"), "strength-reduction: shift amount is 2");
+  check(!contains(fn, "*"), "strength-reduction: original multiply is gone");
+}
+
+void testCommonSubexpressionElimination() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn dup(x: int) -> int:
+    a = x + 1
+    b = x + 1
+    return a + b
+print(dup(3))
+)",
+                                pipeline);
+  check(ok, "cse: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::commonSubexpressionElimination(pipeline.program);
+  check(stats.subexpressionsEliminated >= 1, "cse: duplicate x + 1 eliminated");
+  const std::string fn = functionByName(pipeline.program, "dup");
+  check(contains(fn, "copy"), "cse: duplicate becomes a copy");
+}
+
+void testBranchFolding() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn f() -> int:
+    if true:
+        return 10
+    return 20
+print(f())
+)",
+                                pipeline);
+  check(ok, "branch-fold: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::branchFolding(pipeline.program);
+  check(stats.branchesFolded >= 1, "branch-fold: branch on constant folded to jump");
+}
+
+void testDeadStoreElimination() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn store_me() -> int:
+    xs = [0, 0]
+    xs[0] = 1
+    xs[0] = 2
+    return xs[0]
+print(store_me())
+)",
+                                pipeline);
+  check(ok, "dse: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::deadStoreElimination(pipeline.program);
+  check(stats.deadStoresEliminated >= 1, "dse: overwritten store removed");
+  const std::string fn = functionByName(pipeline.program, "store_me");
+  check(contains(fn, "store_index"), "dse: surviving store still present");
+}
+
+void testOptLevels() {
+  // -O0 is optnone: nothing inlined or folded yet.
+  Pipeline off;
+  const bool offOk = buildProgram(R"(
+fn add(a: int, b: int) -> int:
+    return a + b
+print(add(1, 2))
+)",
+                                    off);
+  check(offOk, "opt-level: program analyzes");
+  if (!offOk) return;
+  a::ir::runOptPipeline(off.program, a::ir::OptLevel::O0);
+  check(contains(functionByName(off.program, "main"), "call add"),
+        "opt-level: O0 leaves calls untouched");
+
+  // parseOptLevel mirrors clang spellings.
+  a::ir::OptLevel level = a::ir::OptLevel::O0;
+  check(a::ir::parseOptLevel("-O3", level) && level == a::ir::OptLevel::O3,
+        "opt-level: -O3 parses");
+  check(a::ir::parseOptLevel("-Os", level) && level == a::ir::OptLevel::Os,
+        "opt-level: -Os parses");
+  check(!a::ir::parseOptLevel("-OX", level), "opt-level: bogus flag rejected");
+}
+
 void testRunAll() {
   Pipeline pipeline;
   const bool ok = buildProgram(R"(
@@ -175,6 +274,66 @@ print(total)
   check(!contains(main, "call double"), "runAll: helper call inlined");
 }
 
+void testLlvmStyleOps() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+xs = [[1, 2], [3, 4]]
+v = xs[0][1]
+f = f64(3)
+g = i32(2.5)
+)",
+                                pipeline);
+  check(ok, "llvm-ops: program analyzes");
+  if (!ok) return;
+
+  const std::string main = functionByName(pipeline.program, "main");
+  check(contains(main, "getelementptr"), "llvm-ops: nested index lowers to getelementptr");
+  check(contains(main, "cast sitofp"), "llvm-ops: int->float lowers to sitofp");
+  check(contains(main, "cast fptosi") || contains(main, "cast fptoui"),
+        "llvm-ops: float->int lowers to fptosi/fptoui");
+}
+
+void testInstCombine() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn pick(x: int) -> int:
+    a = x & x
+    b = x | x
+    c = x ^ x
+    return a - b + c
+)",
+                                pipeline);
+  check(ok, "instcombine: program analyzes");
+  if (!ok) return;
+
+  a::ir::instCombine(pipeline.program);
+  const std::string fn = functionByName(pipeline.program, "pick");
+  check(!contains(fn, "&"), "instcombine: x & x folded to x");
+  check(!contains(fn, "|"), "instcombine: x | x folded to x");
+  check(contains(fn, "const 0"), "instcombine: x ^ x folded to 0");
+}
+
+void testConditionalConstantPropagation() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+x = 2 + 3
+y = 0
+if x == 5:
+    y = 10
+else:
+    y = 20
+print(y)
+)",
+                                pipeline);
+  check(ok, "sccp: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::conditionalConstantPropagation(pipeline.program);
+  check(stats.branchesFolded >= 1, "sccp: constant branch folded");
+  const std::string main = functionByName(pipeline.program, "main");
+  check(!contains(main, "branch"), "sccp: no conditional branch remains");
+}
+
 }  // namespace
 
 int main() {
@@ -183,6 +342,14 @@ int main() {
   testDeadCodeElimination();
   testInlining();
   testLoopInvariantMotion();
+  testLlvmStyleOps();
+  testInstCombine();
+  testConditionalConstantPropagation();
+  testStrengthReduction();
+  testCommonSubexpressionElimination();
+  testBranchFolding();
+  testDeadStoreElimination();
+  testOptLevels();
   testRunAll();
 
   if (failures == 0) {

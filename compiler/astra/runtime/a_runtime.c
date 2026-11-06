@@ -4,6 +4,7 @@
  * API in a_runtime.h; all object layouts below are private to this file.
  */
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE 1
 #include "a_runtime.h"
 
 #include <ctype.h>
@@ -19,8 +20,13 @@ static const char *type_name_cstr(aval v);
 
 #if !defined(_WIN32)
 #include <dirent.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #endif
 
@@ -1181,6 +1187,20 @@ aval a_in_range(aval v, aval lo, aval hi) {
     if (is_num(v) && is_num(lo) && is_num(hi)) {
         double x = num_to_double(v), a = num_to_double(lo), b = num_to_double(hi);
         return bool_aval(a <= x && x < b);
+    }
+    panicf("unsupported operand type(s) for in: '%s' and 'range'",
+           type_name_cstr(v));
+    return A_NONE;
+}
+
+aval a_in_range_inclusive(aval v, aval lo, aval hi) {
+    if (is_int_val(v) && is_int_val(lo) && is_int_val(hi)) {
+        int64_t x = int_val_full(v), a = int_val_full(lo), b = int_val_full(hi);
+        return bool_aval(a <= x && x <= b);
+    }
+    if (is_num(v) && is_num(lo) && is_num(hi)) {
+        double x = num_to_double(v), a = num_to_double(lo), b = num_to_double(hi);
+        return bool_aval(a <= x && x <= b);
     }
     panicf("unsupported operand type(s) for in: '%s' and 'range'",
            type_name_cstr(v));
@@ -3338,6 +3358,873 @@ static aval bi_u16(uint64_t n, aval *argv) { want_args("u16", n, 1, 1); return m
 static aval bi_u32(uint64_t n, aval *argv) { want_args("u32", n, 1, 1); return mkint_full((uint32_t)int_val_full(a_int(argv[0]))); }
 static aval bi_f32(uint64_t n, aval *argv) { want_args("f32", n, 1, 1); return a_mkdouble((float)num_to_double(argv[0])); }
 
+/* ---- LLVM-style intrinsics (bit ops, min/max, overflow, branch hints) -- */
+
+/* Portable bit scans (the Astra backend has no __builtin_ctz family). */
+static int a_ctz64(uint64_t x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & UINT64_C(0xFFFFFFFF))) { n += 32; x >>= 32; }
+    if (!(x & UINT64_C(0xFFFF))) { n += 16; x >>= 16; }
+    if (!(x & UINT64_C(0xFF))) { n += 8; x >>= 8; }
+    if (!(x & UINT64_C(0xF))) { n += 4; x >>= 4; }
+    if (!(x & UINT64_C(0x3))) { n += 2; x >>= 2; }
+    if (!(x & UINT64_C(0x1))) { n += 1; }
+    return n;
+}
+static int a_clz64(uint64_t x) {
+    if (!x) return 64;
+    int n = 0;
+    if (!(x & UINT64_C(0xFFFFFFFF00000000))) { n += 32; x <<= 32; }
+    if (!(x & UINT64_C(0xFFFF000000000000))) { n += 16; x <<= 16; }
+    if (!(x & UINT64_C(0xFF00000000000000))) { n += 8; x <<= 8; }
+    if (!(x & UINT64_C(0xF000000000000000))) { n += 4; x <<= 4; }
+    if (!(x & UINT64_C(0xC000000000000000))) { n += 2; x <<= 2; }
+    if (!(x & UINT64_C(0x8000000000000000))) { n += 1; }
+    return n;
+}
+static int a_popcount64(uint64_t x) {
+    x -= (x >> 1) & UINT64_C(0x5555555555555555);
+    x = (x & UINT64_C(0x3333333333333333)) + ((x >> 2) & UINT64_C(0x3333333333333333));
+    x = (x + (x >> 4)) & UINT64_C(0x0F0F0F0F0F0F0F0F);
+    return (int)((x * UINT64_C(0x0101010101010101)) >> 56);
+}
+
+static aval bi_ctz(uint64_t n, aval *argv) {
+    want_args("ctz", n, 1, 1);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "ctz() argument");
+    return mkint_full(a_ctz64(x));
+}
+static aval bi_clz(uint64_t n, aval *argv) {
+    want_args("clz", n, 1, 1);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "clz() argument");
+    return mkint_full(a_clz64(x));
+}
+static aval bi_popcount(uint64_t n, aval *argv) {
+    want_args("popcount", n, 1, 1);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "popcount() argument");
+    return mkint_full(a_popcount64(x));
+}
+static aval bi_bswap(uint64_t n, aval *argv) {
+    want_args("bswap", n, 1, 1);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "bswap() argument");
+    x = ((x & UINT64_C(0x00000000000000FF)) << 56) |
+        ((x & UINT64_C(0x000000000000FF00)) << 40) |
+        ((x & UINT64_C(0x0000000000FF0000)) << 24) |
+        ((x & UINT64_C(0x00000000FF000000)) << 8) |
+        ((x & UINT64_C(0x000000FF00000000)) >> 8) |
+        ((x & UINT64_C(0x0000FF0000000000)) >> 24) |
+        ((x & UINT64_C(0x00FF000000000000)) >> 40) |
+        ((x & UINT64_C(0xFF00000000000000)) >> 56);
+    return mkint_full((int64_t)x);
+}
+static aval bi_rotl(uint64_t n, aval *argv) {
+    want_args("rotl", n, 2, 2);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "rotl() value");
+    uint64_t k = (uint64_t)(expect_int64(argv[1], "rotl() amount") & 63);
+    return mkint_full((int64_t)(k ? ((x << k) | (x >> (64 - k))) : x));
+}
+static aval bi_rotr(uint64_t n, aval *argv) {
+    want_args("rotr", n, 2, 2);
+    uint64_t x = (uint64_t)expect_int64(argv[0], "rotr() value");
+    uint64_t k = (uint64_t)(expect_int64(argv[1], "rotr() amount") & 63);
+    return mkint_full((int64_t)(k ? ((x >> k) | (x << (64 - k))) : x));
+}
+
+static aval bi_fma(uint64_t n, aval *argv) {
+    want_args("fma", n, 3, 3);
+    double a = math_arg(argv[0], "fma");
+    double b = math_arg(argv[1], "fma");
+    double c = math_arg(argv[2], "fma");
+    return mkdouble(fma(a, b, c));
+}
+static aval bi_fabs(uint64_t n, aval *argv) {
+    want_args("fabs", n, 1, 1);
+    return mkdouble(fabs(math_arg(argv[0], "fabs")));
+}
+static aval bi_copysign(uint64_t n, aval *argv) {
+    want_args("copysign", n, 2, 2);
+    return mkdouble(copysign(math_arg(argv[0], "copysign"),
+                            math_arg(argv[1], "copysign")));
+}
+
+static aval bi_smin(uint64_t n, aval *argv) {
+    want_args("smin", n, 2, 2);
+    int64_t a = expect_int64(argv[0], "smin() argument");
+    int64_t b = expect_int64(argv[1], "smin() argument");
+    return mkint_full(a < b ? a : b);
+}
+static aval bi_smax(uint64_t n, aval *argv) {
+    want_args("smax", n, 2, 2);
+    int64_t a = expect_int64(argv[0], "smax() argument");
+    int64_t b = expect_int64(argv[1], "smax() argument");
+    return mkint_full(a > b ? a : b);
+}
+static aval bi_umin(uint64_t n, aval *argv) {
+    want_args("umin", n, 2, 2);
+    uint64_t a = (uint64_t)expect_int64(argv[0], "umin() argument");
+    uint64_t b = (uint64_t)expect_int64(argv[1], "umin() argument");
+    return mkint_full((int64_t)(a < b ? a : b));
+}
+static aval bi_umax(uint64_t n, aval *argv) {
+    want_args("umax", n, 2, 2);
+    uint64_t a = (uint64_t)expect_int64(argv[0], "umax() argument");
+    uint64_t b = (uint64_t)expect_int64(argv[1], "umax() argument");
+    return mkint_full((int64_t)(a > b ? a : b));
+}
+
+/* Overflow builtins return (wrapped result, overflowed?) like the LLVM
+   *.with.overflow intrinsics. */
+static aval ovf_result(const char *name, int64_t r, int ovf) {
+    aval pair[2];
+    pair[0] = mkint_full(r);
+    pair[1] = bool_aval(ovf);
+    return a_tuple_new(2, pair);
+}
+
+static aval bi_sadd_ovf(uint64_t n, aval *argv) {
+    want_args("sadd_overflow", n, 2, 2);
+    int64_t a = expect_int64(argv[0], "sadd_overflow() argument");
+    int64_t b = expect_int64(argv[1], "sadd_overflow() argument");
+    int64_t r = (int64_t)((uint64_t)a + (uint64_t)b);
+    int ovf = (b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b);
+    return ovf_result("sadd_overflow", r, ovf);
+}
+static aval bi_ssub_ovf(uint64_t n, aval *argv) {
+    want_args("ssub_overflow", n, 2, 2);
+    int64_t a = expect_int64(argv[0], "ssub_overflow() argument");
+    int64_t b = expect_int64(argv[1], "ssub_overflow() argument");
+    int64_t r = (int64_t)((uint64_t)a - (uint64_t)b);
+    int ovf = (b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b);
+    return ovf_result("ssub_overflow", r, ovf);
+}
+static aval bi_smul_ovf(uint64_t n, aval *argv) {
+    want_args("smul_overflow", n, 2, 2);
+    int64_t a = expect_int64(argv[0], "smul_overflow() argument");
+    int64_t b = expect_int64(argv[1], "smul_overflow() argument");
+    int64_t r = (int64_t)((uint64_t)a * (uint64_t)b);
+    int ovf;
+    if (a == 0 || b == 0) ovf = 0;
+    else if (a == -1) ovf = (b == INT64_MIN);
+    else if (b == -1) ovf = (a == INT64_MIN);
+    else {
+        int64_t q = r / a;
+        ovf = (q != b);
+    }
+    return ovf_result("smul_overflow", r, ovf);
+}
+static aval bi_uadd_ovf(uint64_t n, aval *argv) {
+    want_args("uadd_overflow", n, 2, 2);
+    uint64_t a = (uint64_t)expect_int64(argv[0], "uadd_overflow() argument");
+    uint64_t b = (uint64_t)expect_int64(argv[1], "uadd_overflow() argument");
+    uint64_t r = a + b;
+    return ovf_result("uadd_overflow", (int64_t)r, r < a);
+}
+static aval bi_usub_ovf(uint64_t n, aval *argv) {
+    want_args("usub_overflow", n, 2, 2);
+    uint64_t a = (uint64_t)expect_int64(argv[0], "usub_overflow() argument");
+    uint64_t b = (uint64_t)expect_int64(argv[1], "usub_overflow() argument");
+    uint64_t r = a - b;
+    return ovf_result("usub_overflow", (int64_t)r, r > a);
+}
+static aval bi_umul_ovf(uint64_t n, aval *argv) {
+    want_args("umul_overflow", n, 2, 2);
+    uint64_t a = (uint64_t)expect_int64(argv[0], "umul_overflow() argument");
+    uint64_t b = (uint64_t)expect_int64(argv[1], "umul_overflow() argument");
+    uint64_t r = a * b;
+    int ovf = (a != 0 && r / a != b) || (a == 0 && b != 0 && r != 0);
+    return ovf_result("umul_overflow", (int64_t)r, ovf);
+}
+
+/* llvm.expect analog: a branch-hint wrapper; the runtime ignores the hint
+   and returns the condition unchanged. */
+static aval bi_expect(uint64_t n, aval *argv) {
+    want_args("expect", n, 1, 2);
+    (void)argv;
+    return argv[0];
+}
+static aval bi_likely(uint64_t n, aval *argv) {
+    want_args("likely", n, 1, 1);
+    return argv[0];
+}
+static aval bi_unlikely(uint64_t n, aval *argv) {
+    want_args("unlikely", n, 1, 1);
+    return argv[0];
+}
+static aval bi_env_get(uint64_t n, aval *argv) {
+    want_args("env_get", n, 1, 1);
+    const char *name = path_arg(argv[0], "name");
+    const char *v = getenv(name);
+    if (!v) return A_NONE;
+    return a_str_new(v, strlen(v));
+}
+
+/* ------------------------------------------------------------------ */
+/* time module                                                         */
+/* ------------------------------------------------------------------ */
+
+static aval bi_time_now(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("now", n, 0, 0);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return mkint_full((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+
+static aval bi_time_sleep(uint64_t n, aval *argv) {
+    want_args("sleep", n, 1, 1);
+    int64_t ms = int_val_full(argv[0]);
+    if (ms < 0) ms = 0;
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+    return A_NONE;
+}
+
+/* ------------------------------------------------------------------ */
+/* terminal module (POSIX TTY primitives used by the self-hosted REPL) */
+/* ------------------------------------------------------------------ */
+
+#if !defined(_WIN32)
+static struct termios g_repl_termios;
+static int g_repl_termios_saved = 0;
+
+static aval bi_terminal_isatty(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("isatty", n, 0, 0);
+    return isatty(STDIN_FILENO) ? A_TRUE : A_FALSE;
+}
+
+static aval bi_terminal_raw_mode(uint64_t n, aval *argv) {
+    want_args("raw_mode", n, 1, 1);
+    int on = (argv[0] == A_TRUE);
+    if (on) {
+        if (tcgetattr(STDIN_FILENO, &g_repl_termios) != 0) return A_FALSE;
+        g_repl_termios_saved = 1;
+        struct termios raw = g_repl_termios;
+        cfmakeraw(&raw);
+        /* Keep output post-processing (NL -> CR-NL) enabled: the REPL and any
+         * child processes it spawns (repl.eval) share this tty, and without
+         * OPOST every '\n' they print staircases instead of returning to
+         * column 0. Input stays raw. */
+        raw.c_oflag |= OPOST;
+        return tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == 0 ? A_TRUE : A_FALSE;
+    }
+    if (!g_repl_termios_saved) return A_TRUE;
+    int ok = tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_repl_termios) == 0;
+    g_repl_termios_saved = 0;
+    return ok ? A_TRUE : A_FALSE;
+}
+
+static aval bi_terminal_read_char(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("read_char", n, 0, 0);
+    char c;
+    ssize_t r;
+    do { r = read(STDIN_FILENO, &c, 1); } while (r < 0 && errno == EINTR);
+    if (r <= 0) return A_NONE;
+    return a_str_new(&c, 1);
+}
+
+static aval bi_terminal_read_char_ms(uint64_t n, aval *argv) {
+    want_args("read_char_ms", n, 1, 1);
+    int64_t ms = int_val_full(argv[0]);
+    if (ms < 0) ms = 0;
+    struct pollfd pfd;
+    pfd.fd = STDIN_FILENO;
+    pfd.events = POLLIN;
+    int pr;
+    do { pr = poll(&pfd, 1, (int)ms); } while (pr < 0 && errno == EINTR);
+    if (pr <= 0) return A_NONE;
+    char c;
+    ssize_t r;
+    do { r = read(STDIN_FILENO, &c, 1); } while (r < 0 && errno == EINTR);
+    if (r <= 0) return A_NONE;
+    return a_str_new(&c, 1);
+}
+
+static aval bi_terminal_write(uint64_t n, aval *argv) {
+    want_args("write", n, 1, 1);
+    uint64_t len;
+    const char *p = str_data(argv[0], &len);
+    if (len && fwrite(p, 1, (size_t)len, stdout) != len)
+        panicf("terminal.write: write failed");
+    return A_NONE;
+}
+
+static aval bi_terminal_flush(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("flush", n, 0, 0);
+    fflush(stdout);
+    return A_NONE;
+}
+
+static aval bi_terminal_size(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("size", n, 0, 0);
+    struct winsize ws;
+    memset(&ws, 0, sizeof(ws));
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0 || ws.ws_col == 0) {
+        ws.ws_col = 80;
+        ws.ws_row = 24;
+    }
+    aval arr[2];
+    arr[0] = a_mkint((int64_t)ws.ws_col);
+    arr[1] = a_mkint((int64_t)ws.ws_row);
+    return list_from_vec(arr, 2, 0);
+}
+
+static aval bi_terminal_home(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("home", n, 0, 0);
+    const char *h = getenv("HOME");
+    if (!h || !*h) h = ".";
+    return a_str_new(h, strlen(h));
+}
+#else
+static aval bi_terminal_unsupported(uint64_t n, aval *argv) {
+    (void)n; (void)argv;
+    panicf("terminal module is not supported on this platform");
+    return A_NONE;
+}
+#define bi_terminal_isatty bi_terminal_unsupported
+#define bi_terminal_raw_mode bi_terminal_unsupported
+#define bi_terminal_read_char bi_terminal_unsupported
+#define bi_terminal_read_char_ms bi_terminal_unsupported
+#define bi_terminal_write bi_terminal_unsupported
+#define bi_terminal_flush bi_terminal_unsupported
+#define bi_terminal_size bi_terminal_unsupported
+#define bi_terminal_home bi_terminal_unsupported
+#endif
+
+/* ------------------------------------------------------------------ */
+/* repl.eval: run A source through the `a` toolchain as a child process. */
+/* ------------------------------------------------------------------ */
+
+#if !defined(_WIN32)
+static aval bi_repl_eval(uint64_t n, aval *argv) {
+    want_args("repl_eval", n, 1, 1);
+    if (kind_of(argv[0]) != K_STR) panicf("repl.eval() source must be str");
+    /* Nested evaluation is rejected: the child `a run` inherits
+       A_REPL_DEPTH, so a repl.eval inside evaluated code returns 3. */
+    const char *depth = getenv("A_REPL_DEPTH");
+    if (depth && *depth) return a_mkint(3);
+    const char *aBin = getenv("A_A_BIN");
+    if (!aBin || !*aBin) aBin = "a";
+    uint64_t len;
+    const char *src = str_data(argv[0], &len);
+    char tmpl[] = "/tmp/a_repl_XXXXXX";
+    int fd = mkstemp(tmpl);
+    if (fd < 0) panicf("repl.eval: cannot create temp file");
+    ssize_t wr = write(fd, src, (size_t)len);
+    close(fd);
+    if (wr != (ssize_t)len) {
+        unlink(tmpl);
+        panicf("repl.eval: temp file write failed");
+    }
+    setenv("A_REPL_DEPTH", "1", 1);
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(aBin, "a", "run", tmpl, (char *)NULL);
+        execlp("a", "a", "run", tmpl, (char *)NULL);
+        _exit(127);
+    }
+    unsetenv("A_REPL_DEPTH");
+    if (pid < 0) {
+        unlink(tmpl);
+        panicf("repl.eval: fork failed");
+    }
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) break;
+    }
+    unlink(tmpl);
+    if (WIFEXITED(status)) {
+        int rc = WEXITSTATUS(status);
+        if (rc == 0) return a_mkint(0);
+        if (rc == 1) return a_mkint(1);   /* compile error (kCErr) */
+        return a_mkint(2);                /* runtime error / signal death */
+    }
+    return a_mkint(2);
+}
+#else
+static aval bi_repl_eval(uint64_t n, aval *argv) {
+    (void)n; (void)argv;
+    panicf("repl.eval is not supported on this platform");
+    return A_NONE;
+}
+#endif
+
+/* ------------------------------------------------------------------ */
+/* json module: JSON text <-> aval values.                              */
+/* JSON objects map to dicts, arrays to lists, strings to str, numbers  */
+/* to int/float, true/false to bool, null to None.                      */
+/* ------------------------------------------------------------------ */
+
+static aval json_unwrap(aval v) {
+    AObj *o = obj_of(v);
+    if (o && o->type == T_RESULT && ((AResult *)o)->is_option)
+        return ((AResult *)o)->value;
+    return v;
+}
+
+static const char *json_kind_of(aval v) {
+    v = json_unwrap(v);
+    if (a_is_none(v)) return "null";
+    if (v == A_TRUE || v == A_FALSE) return "bool";
+    if (is_int_val(v) || a_is_double(v)) return "number";
+    AObj *o = obj_of(v);
+    if (!o) return "unknown";
+    switch (o->type) {
+        case T_STR: case T_CHAR: return "string";
+        case T_LIST: case T_TUPLE: case T_SET: return "array";
+        case T_DICT: return "object";
+        default: return "unknown";
+    }
+}
+
+typedef struct { const char *p, *end; int err; } JParser;
+
+static void jws(JParser *ps) {
+    while (ps->p < ps->end &&
+           (*ps->p == ' ' || *ps->p == '\t' || *ps->p == '\n' || *ps->p == '\r'))
+        ++ps->p;
+}
+static int jpeek(JParser *ps) {
+    jws(ps);
+    return ps->p < ps->end ? (unsigned char)*ps->p : -1;
+}
+static int jexpect(JParser *ps, char c) {
+    if (jpeek(ps) == c) { ++ps->p; return 1; }
+    ps->err = 1;
+    return 0;
+}
+
+static void jutf8(Buf *b, uint32_t cp) {
+    if (cp < 0x80) {
+        buf_addc(b, (char)cp);
+    } else if (cp < 0x800) {
+        buf_addc(b, (char)(0xC0 | (cp >> 6)));
+        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        buf_addc(b, (char)(0xE0 | (cp >> 12)));
+        buf_addc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
+    } else {
+        buf_addc(b, (char)(0xF0 | (cp >> 18)));
+        buf_addc(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
+        buf_addc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
+        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
+    }
+}
+
+static int jhex4(JParser *ps) {
+    if (ps->end - ps->p < 4) { ps->err = 1; return 0; }
+    int v = 0;
+    for (int i = 0; i < 4; ++i) {
+        char c = *ps->p++;
+        v <<= 4;
+        if (c >= '0' && c <= '9') v |= c - '0';
+        else if (c >= 'a' && c <= 'f') v |= c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') v |= c - 'A' + 10;
+        else { ps->err = 1; return 0; }
+    }
+    return v;
+}
+
+static aval jstring(JParser *ps) {
+    if (!jexpect(ps, '"')) return A_NONE;
+    Buf b;
+    buf_init(&b);
+    while (ps->p < ps->end) {
+        unsigned char c = (unsigned char)*ps->p++;
+        if (c == '"') return buf_take(&b);
+        if (c == '\\') {
+            if (ps->p >= ps->end) break;
+            char e = *ps->p++;
+            switch (e) {
+                case '"': buf_addc(&b, '"'); break;
+                case '\\': buf_addc(&b, '\\'); break;
+                case '/': buf_addc(&b, '/'); break;
+                case 'b': buf_addc(&b, '\b'); break;
+                case 'f': buf_addc(&b, '\f'); break;
+                case 'n': buf_addc(&b, '\n'); break;
+                case 'r': buf_addc(&b, '\r'); break;
+                case 't': buf_addc(&b, '\t'); break;
+                case 'u': {
+                    uint32_t cp = (uint32_t)jhex4(ps);
+                    if (ps->err) break;
+                    if (cp >= 0xD800 && cp <= 0xDBFF &&
+                        ps->end - ps->p >= 6 && ps->p[0] == '\\' && ps->p[1] == 'u') {
+                        ps->p += 2;
+                        uint32_t lo = (uint32_t)jhex4(ps);
+                        if (ps->err) break;
+                        if (lo >= 0xDC00 && lo <= 0xDFFF)
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                    }
+                    jutf8(&b, cp);
+                    break;
+                }
+                default: ps->err = 1; break;
+            }
+        } else {
+            buf_addc(&b, (char)c);
+        }
+        if (ps->err) break;
+    }
+    free(b.p);
+    ps->err = 1;
+    return A_NONE;
+}
+
+static aval jnumber(JParser *ps) {
+    const char *start = ps->p;
+    if (ps->p < ps->end && *ps->p == '-') ++ps->p;
+    int isDouble = 0;
+    while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
+    if (ps->p < ps->end && *ps->p == '.') {
+        isDouble = 1;
+        ++ps->p;
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
+    }
+    if (ps->p < ps->end && (*ps->p == 'e' || *ps->p == 'E')) {
+        isDouble = 1;
+        ++ps->p;
+        if (ps->p < ps->end && (*ps->p == '+' || *ps->p == '-')) ++ps->p;
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
+    }
+    if (ps->p == start || (isDouble == 0 && ps->p == start + 1 && *start == '-')) {
+        ps->err = 1;
+        return A_NONE;
+    }
+    char tmp[64];
+    size_t n = (size_t)(ps->p - start);
+    if (n >= sizeof(tmp)) { ps->err = 1; return A_NONE; }
+    memcpy(tmp, start, n);
+    tmp[n] = '\0';
+    if (isDouble) return mkdouble(strtod(tmp, NULL));
+    errno = 0;
+    long long v = strtoll(tmp, NULL, 10);
+    if (errno == ERANGE) return mkdouble(strtod(tmp, NULL));
+    return mkint_full(v);
+}
+
+static aval jvalue(JParser *ps);
+
+static aval jobject(JParser *ps) {
+    jexpect(ps, '{');
+    aval d = a_dict_new();
+    if (jpeek(ps) == '}') { ++ps->p; return d; }
+    for (;;) {
+        if (jpeek(ps) != '"') { ps->err = 1; break; }
+        aval k = jstring(ps);
+        if (ps->err) break;
+        if (!jexpect(ps, ':')) break;
+        aval v = jvalue(ps);
+        if (ps->err) break;
+        dict_put(dict_of(d, "json"), k, v);
+        int c = jpeek(ps);
+        if (c == ',') { ++ps->p; continue; }
+        if (c == '}') { ++ps->p; break; }
+        ps->err = 1;
+        break;
+    }
+    if (ps->err) return A_NONE;
+    return d;
+}
+
+static aval jarray(JParser *ps) {
+    jexpect(ps, '[');
+    aval a = a_list_new(0, NULL);
+    AArr *arr = arr_of(a, "json");
+    if (jpeek(ps) == ']') { ++ps->p; return a; }
+    for (;;) {
+        aval v = jvalue(ps);
+        if (ps->err) return A_NONE;
+        arr_push(arr, v);
+        int c = jpeek(ps);
+        if (c == ',') { ++ps->p; continue; }
+        if (c == ']') { ++ps->p; break; }
+        ps->err = 1;
+        break;
+    }
+    return ps->err ? A_NONE : a;
+}
+
+static aval jvalue(JParser *ps) {
+    int c = jpeek(ps);
+    if (c < 0) { ps->err = 1; return A_NONE; }
+    if (c == '"') return jstring(ps);
+    if (c == '{') return jobject(ps);
+    if (c == '[') return jarray(ps);
+    if (c == 't') {
+        if (ps->end - ps->p >= 4 && memcmp(ps->p, "true", 4) == 0) {
+            ps->p += 4; jws(ps); return A_TRUE;
+        }
+        ps->err = 1; return A_NONE;
+    }
+    if (c == 'f') {
+        if (ps->end - ps->p >= 5 && memcmp(ps->p, "false", 5) == 0) {
+            ps->p += 5; jws(ps); return A_FALSE;
+        }
+        ps->err = 1; return A_NONE;
+    }
+    if (c == 'n') {
+        if (ps->end - ps->p >= 4 && memcmp(ps->p, "null", 4) == 0) {
+            ps->p += 4; jws(ps); return A_NONE;
+        }
+        ps->err = 1; return A_NONE;
+    }
+    if (c == '-' || (c >= '0' && c <= '9')) return jnumber(ps);
+    ps->err = 1;
+    return A_NONE;
+}
+
+/* ---- JSON serializer ---- */
+
+static void json_escape_str(Buf *b, aval v) {
+    uint64_t n;
+    const char *s = str_data(v, &n);
+    buf_addc(b, '"');
+    for (uint64_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '"': buf_adds(b, "\\\""); break;
+            case '\\': buf_adds(b, "\\\\"); break;
+            case '\b': buf_adds(b, "\\b"); break;
+            case '\f': buf_adds(b, "\\f"); break;
+            case '\n': buf_adds(b, "\\n"); break;
+            case '\r': buf_adds(b, "\\r"); break;
+            case '\t': buf_adds(b, "\\t"); break;
+            default:
+                if (c < 0x20) {
+                    char tmp[8];
+                    snprintf(tmp, sizeof(tmp), "\\u%04x", c);
+                    buf_adds(b, tmp);
+                } else {
+                    buf_addc(b, (char)c);
+                }
+        }
+    }
+    buf_addc(b, '"');
+}
+
+static void json_write(Buf *b, aval v, int pretty, int depth);
+
+static void json_indent(Buf *b, int pretty, int depth) {
+    if (!pretty) return;
+    buf_addc(b, '\n');
+    for (int i = 0; i < depth; ++i) buf_adds(b, "  ");
+}
+
+static void json_write(Buf *b, aval v, int pretty, int depth) {
+    v = json_unwrap(v);
+    if (a_is_none(v)) { buf_adds(b, "null"); return; }
+    if (v == A_TRUE) { buf_adds(b, "true"); return; }
+    if (v == A_FALSE) { buf_adds(b, "false"); return; }
+    if (is_int_val(v)) { buf_addi64(b, int_val_full(v)); return; }
+    if (a_is_double(v)) {
+        double d = a_double_val(v);
+        if (!isfinite(d)) { buf_adds(b, "null"); return; }
+        char tmp[40];
+        snprintf(tmp, sizeof(tmp), "%.17g", d);
+        buf_adds(b, tmp);
+        return;
+    }
+    AObj *o = obj_of(v);
+    if (!o) panicf("json: value is not serializable");
+    switch (o->type) {
+        case T_STR: case T_CHAR:
+            json_escape_str(b, v);
+            return;
+        case T_LIST: case T_TUPLE: case T_SET: {
+            AArr *a = (AArr *)o;
+            buf_addc(b, '[');
+            for (uint32_t i = 0; i < a->h.len; ++i) {
+                if (i) buf_adds(b, pretty ? "," : ", ");
+                json_indent(b, pretty, depth + 1);
+                json_write(b, a->items[i], pretty, depth + 1);
+            }
+            if (a->h.len) json_indent(b, pretty, depth);
+            buf_addc(b, ']');
+            return;
+        }
+        case T_DICT: {
+            ADict *d = (ADict *)o;
+            buf_addc(b, '{');
+            for (uint32_t i = 0; i < d->h.len; ++i) {
+                if (i) buf_adds(b, pretty ? "," : ", ");
+                json_indent(b, pretty, depth + 1);
+                aval k = d->pairs[i].k;
+                if (kind_of(k) == K_STR || kind_of(k) == K_CHAR) {
+                    json_escape_str(b, k);
+                } else {
+                    aval ks = a_str(k);
+                    json_escape_str(b, ks);
+                }
+                buf_adds(b, pretty ? ": " : ": ");
+                json_write(b, d->pairs[i].v, pretty, depth + 1);
+            }
+            if (d->h.len) json_indent(b, pretty, depth);
+            buf_addc(b, '}');
+            return;
+        }
+        default:
+            panicf("json: value of type '%s' is not serializable", type_name_cstr(v));
+    }
+}
+
+static aval bi_json_dump(uint64_t n, aval *argv, int pretty) {
+    want_args(pretty ? "json.pretty" : "json.stringify", n, 1, 1);
+    Buf b;
+    buf_init(&b);
+    json_write(&b, argv[0], pretty, 0);
+    return buf_take(&b);
+}
+static aval bi_json_stringify(uint64_t n, aval *argv) { return bi_json_dump(n, argv, 0); }
+static aval bi_json_pretty(uint64_t n, aval *argv) { return bi_json_dump(n, argv, 1); }
+
+static aval bi_json_parse(uint64_t n, aval *argv) {
+    want_args("json.parse", n, 1, 1);
+    uint64_t len;
+    const char *s = str_data(argv[0], &len);
+    JParser ps = { s, s + len, 0 };
+    aval v = jvalue(&ps);
+    jws(&ps);
+    if (ps.err || ps.p != ps.end)
+        panicf("json.parse: invalid JSON");
+    return v;
+}
+
+static aval bi_json_is_valid(uint64_t n, aval *argv) {
+    want_args("json.is_valid", n, 1, 1);
+    uint64_t len;
+    const char *s = str_data(argv[0], &len);
+    JParser ps = { s, s + len, 0 };
+    (void)jvalue(&ps);
+    jws(&ps);
+    return bool_aval(!ps.err && ps.p == ps.end);
+}
+
+static aval bi_json_kind(uint64_t n, aval *argv) {
+    want_args("json.kind", n, 1, 1);
+    return a_str_new(json_kind_of(argv[0]), strlen(json_kind_of(argv[0])));
+}
+
+static aval bi_json_get(uint64_t n, aval *argv) {
+    want_args("json.get", n, 2, 2);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (!o || o->type != T_DICT) return A_NONE;
+    int64_t i = dict_find((ADict *)o, argv[1]);
+    return i >= 0 ? a_some_new(((ADict *)o)->pairs[i].v) : A_NONE;
+}
+
+static aval bi_json_at(uint64_t n, aval *argv) {
+    want_args("json.at", n, 2, 2);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (!o || (o->type != T_LIST && o->type != T_TUPLE)) return A_NONE;
+    AArr *a = (AArr *)o;
+    int64_t idx = expect_int64(argv[1], "json.at index");
+    if (idx < 0) idx += (int64_t)a->h.len;
+    if (idx < 0 || (uint64_t)idx >= a->h.len) return A_NONE;
+    return a_some_new(a->items[idx]);
+}
+
+static aval bi_json_len(uint64_t n, aval *argv) {
+    want_args("json.len", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET ||
+              o->type == T_DICT))
+        return mkint_full((int64_t)o->len);
+    if (o && (o->type == T_STR || o->type == T_CHAR)) {
+        uint64_t sl;
+        const char *sp = str_data(v, &sl);
+        return mkint_full((int64_t)u8_count(sp, sl));
+    }
+    return mkint_full(0);
+}
+
+static aval bi_json_has(uint64_t n, aval *argv) {
+    want_args("json.has", n, 2, 2);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (!o || o->type != T_DICT) return A_FALSE;
+    return bool_aval(dict_find((ADict *)o, argv[1]) >= 0);
+}
+
+static aval bi_json_keys(uint64_t n, aval *argv) {
+    want_args("json.keys", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    aval out = a_list_new(0, NULL);
+    if (o && o->type == T_DICT) {
+        ADict *d = (ADict *)o;
+        AArr *arr = arr_of(out, "json.keys");
+        for (uint32_t i = 0; i < d->h.len; ++i) {
+            aval k = d->pairs[i].k;
+            if (kind_of(k) != K_STR && kind_of(k) != K_CHAR) k = a_str(k);
+            arr_push(arr, k);
+        }
+    }
+    return out;
+}
+
+static aval bi_json_as_str(uint64_t n, aval *argv) {
+    want_args("json.as_str", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (o && (o->type == T_STR || o->type == T_CHAR)) return a_some_new(v);
+    return A_NONE;
+}
+
+static aval bi_json_as_int(uint64_t n, aval *argv) {
+    want_args("json.as_int", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    if (is_int_val(v)) return a_some_new(mkint_full(int_val_full(v)));
+    if (a_is_double(v)) {
+        double d = a_double_val(v);
+        if (isfinite(d) && d == floor(d) && d >= -9.0e18 && d <= 9.0e18)
+            return a_some_new(mkint_full((int64_t)d));
+    }
+    return A_NONE;
+}
+
+static aval bi_json_as_float(uint64_t n, aval *argv) {
+    want_args("json.as_float", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    if (is_int_val(v)) return a_some_new(mkdouble((double)int_val_full(v)));
+    if (a_is_double(v)) return a_some_new(v);
+    return A_NONE;
+}
+
+static aval bi_json_as_bool(uint64_t n, aval *argv) {
+    want_args("json.as_bool", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    if (v == A_TRUE || v == A_FALSE) return a_some_new(v);
+    return A_NONE;
+}
+
+static aval bi_json_as_array(uint64_t n, aval *argv) {
+    want_args("json.as_array", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET))
+        return a_some_new(v);
+    return A_NONE;
+}
+
+static aval bi_json_as_map(uint64_t n, aval *argv) {
+    want_args("json.as_map", n, 1, 1);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (o && o->type == T_DICT) return a_some_new(v);
+    return A_NONE;
+}
+
 /* builtin table: order must match the enum in a_runtime.h */
 static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT] = {
     { "print", bi_print }, { "eprint", bi_eprint }, { "len", bi_len },
@@ -3364,7 +4251,35 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "enumerate", bi_enumerate }, { "zip", bi_zip }, { "reduce", bi_reduce },
     { "log2", bi_log2 }, { "log10", bi_log10 }, { "atan2", bi_atan2 }, { "flush", bi_flush },
     { "i8", bi_i8 }, { "i16", bi_i16 }, { "i32", bi_i32 }, { "u8", bi_u8 },
-    { "u16", bi_u16 }, { "u32", bi_u32 }, { "f32", bi_f32 }
+    { "u16", bi_u16 }, { "u32", bi_u32 }, { "f32", bi_f32 },
+    { "ctz", bi_ctz }, { "clz", bi_clz }, { "popcount", bi_popcount },
+    { "bswap", bi_bswap }, { "rotl", bi_rotl }, { "rotr", bi_rotr },
+    { "fma", bi_fma }, { "fabs", bi_fabs }, { "copysign", bi_copysign },
+    { "smin", bi_smin }, { "smax", bi_smax }, { "umin", bi_umin },
+    { "umax", bi_umax },
+    { "sadd_overflow", bi_sadd_ovf }, { "ssub_overflow", bi_ssub_ovf },
+    { "smul_overflow", bi_smul_ovf }, { "uadd_overflow", bi_uadd_ovf },
+    { "usub_overflow", bi_usub_ovf }, { "umul_overflow", bi_umul_ovf },
+    { "expect", bi_expect }, { "likely", bi_likely }, { "unlikely", bi_unlikely },
+    { "env_get", bi_env_get },
+    { "now", bi_time_now }, { "sleep", bi_time_sleep },
+    { "terminal_isatty", bi_terminal_isatty },
+    { "terminal_raw_mode", bi_terminal_raw_mode },
+    { "terminal_read_char", bi_terminal_read_char },
+    { "terminal_read_char_ms", bi_terminal_read_char_ms },
+    { "terminal_write", bi_terminal_write },
+    { "terminal_flush", bi_terminal_flush },
+    { "terminal_size", bi_terminal_size },
+    { "terminal_home", bi_terminal_home },
+    { "repl_eval", bi_repl_eval },
+    { "json_parse", bi_json_parse }, { "json_stringify", bi_json_stringify },
+    { "json_pretty", bi_json_pretty }, { "json_is_valid", bi_json_is_valid },
+    { "json_get", bi_json_get }, { "json_at", bi_json_at },
+    { "json_len", bi_json_len }, { "json_has", bi_json_has },
+    { "json_keys", bi_json_keys }, { "json_type", bi_json_kind },
+    { "json_as_str", bi_json_as_str }, { "json_as_int", bi_json_as_int },
+    { "json_as_float", bi_json_as_float }, { "json_as_bool", bi_json_as_bool },
+    { "json_as_array", bi_json_as_array }, { "json_as_map", bi_json_as_map }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -3458,3 +4373,46 @@ aval a_setattr(aval obj, const char *name, aval v) {
     panicf("'%s' object has no attribute '%s'", type_name_cstr(obj), name);
     return A_NONE;
 }
+
+#if !defined(_WIN32)
+/* `a test` harness: fork per test so assertion panics don't stop the suite.
+   Mirrors the protocol the C codegen used to emit inline. */
+int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
+    int passed = 0, failed = 0;
+    for (uint64_t i = 0; i < n; ++i) {
+        int pfd[2];
+        if (pipe(pfd) != 0) { perror("pipe"); return 1; }
+        fflush(stdout);
+        pid_t pid = fork();
+        if (pid == 0) {
+            close(pfd[0]); dup2(pfd[1], 2); close(pfd[1]);
+            int dn = open("/dev/null", 1);
+            if (dn >= 0) { dup2(dn, 1); close(dn); }
+            aval argv[1]; argv[0] = A_NONE;
+            fns[i](argv);
+            fflush(stdout); fflush(stderr); _exit(0);
+        }
+        close(pfd[1]);
+        char msg[4096];
+        ssize_t rn = read(pfd[0], msg, sizeof(msg) - 1);
+        if (rn < 0) rn = 0;
+        msg[rn] = 0;
+        close(pfd[0]);
+        int st = 0;
+        waitpid(pid, &st, 0);
+        if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
+            printf("ok %s\n", names[i]);
+            ++passed;
+        } else {
+            char *m = (char *)msg;
+            if (strncmp(m, "error: ", 7) == 0) m += 7;
+            size_t ml = strlen(m);
+            while (ml > 0 && (m[ml-1] == '\n' || m[ml-1] == '\r')) m[--ml] = 0;
+            printf("FAILED %s: %s\n", names[i], m);
+            ++failed;
+        }
+    }
+    printf("\n%d passed, %d failed\n", passed, failed);
+    return failed ? 1 : 0;
+}
+#endif

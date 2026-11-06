@@ -169,6 +169,10 @@ Immutable borrow tracked by the analyzer.
 
 Mutable borrow tracked by the analyzer.
 
+### `bswap(x) -> i64`
+
+Byte-swaps the 64-bit value.
+
 ### `ceil(x) -> f64`
 
 Rounds up to the nearest integer value.
@@ -185,9 +189,17 @@ Example:
 
 See also: `open`
 
+### `clz(x) -> i64`
+
+Count of leading zero bits (64 for 0).
+
 ### `copy(value) -> T`
 
 Deep-copies a value.
+
+### `copysign(x, y) -> f64`
+
+Magnitude of x with the sign of y.
 
 ### `cos(x) -> f64`
 
@@ -204,6 +216,10 @@ Example:
 ```
 
 See also: `remove_dir`
+
+### `ctz(x) -> i64`
+
+Count of trailing zero bits (64 for 0).
 
 ### `current_dir() -> String`
 
@@ -241,6 +257,14 @@ Wraps a value as a failed result.
 ### `exp(x) -> f64`
 
 e raised to the x.
+
+### `expect(cond, hint?) -> value`
+
+Branch hint (llvm.expect analog); returns cond.
+
+### `fabs(x) -> f64`
+
+Absolute value as f64.
 
 ### `file_exists(path) -> bool`
 
@@ -285,6 +309,10 @@ Example:
 ```a
 >>> flush()
 ```
+
+### `fma(a, b, c) -> f64`
+
+Fused multiply-add: a*b+c with a single rounding.
 
 ### `http.get(url) -> (i64, {String: String}, String)`
 
@@ -496,6 +524,10 @@ Example:
 
 See also: `str`
 
+### `likely(cond) -> value`
+
+Marks a condition as likely; returns it unchanged.
+
 ### `list_dir(path) -> [String]`
 
 Sorted entry names of a directory.
@@ -702,6 +734,10 @@ See also: `close`, `print`
 
 Aborts with exit status 2 and the message.
 
+### `popcount(x) -> i64`
+
+Number of set bits.
+
 ### `pow(base, exponent) -> f64`
 
 Raises base to the exponent.
@@ -803,9 +839,21 @@ See also: `remove_file`
 
 Evaluates A source in the persistent REPL session; 0 ok, 1 compile error, 2 runtime error.
 
+### `rotl(x, k) -> i64`
+
+Rotates left by k bits (k taken mod 64).
+
+### `rotr(x, k) -> i64`
+
+Rotates right by k bits (k taken mod 64).
+
 ### `round(x) -> f64`
 
 Rounds to the nearest integer value.
+
+### `sadd_overflow(a, b) -> (i64, bool)`
+
+Signed addition; returns (wrapped result, overflowed).
 
 ### `set(values) -> Set`
 
@@ -828,6 +876,18 @@ Sine of x, in radians.
 
 Pauses for a non-negative duration.
 
+### `smax(a, b) -> i64`
+
+Signed maximum.
+
+### `smin(a, b) -> i64`
+
+Signed minimum.
+
+### `smul_overflow(a, b) -> (i64, bool)`
+
+Signed multiplication; returns (wrapped result, overflowed).
+
 ### `Some(value) -> T?`
 
 Wraps a value in an optional.
@@ -845,6 +905,10 @@ Example:
 ```
 
 See also: `floor`, `ceil`, `round`
+
+### `ssub_overflow(a, b) -> (i64, bool)`
+
+Signed subtraction; returns (wrapped result, overflowed).
 
 ### `str(value) -> String`
 
@@ -974,6 +1038,26 @@ Begins a span nested under the active one; returns its id.
 
 Truncates toward zero.
 
+### `uadd_overflow(a, b) -> (i64, bool)`
+
+Unsigned addition; returns (wrapped result, overflowed).
+
+### `umax(a, b) -> i64`
+
+Unsigned maximum (bit-pattern compare).
+
+### `umin(a, b) -> i64`
+
+Unsigned minimum (bit-pattern compare).
+
+### `umul_overflow(a, b) -> (i64, bool)`
+
+Unsigned multiplication; returns (wrapped result, overflowed).
+
+### `unlikely(cond) -> value`
+
+Marks a condition as unlikely; returns it unchanged.
+
 ### `unsafe_address_of(array, index) -> *T`
 
 Raw pointer to an array element.
@@ -997,6 +1081,10 @@ Unchecked element assignment; no bounds check.
 ### `unsafe_store(pointer, value)`
 
 Writes through a raw pointer.
+
+### `usub_overflow(a, b) -> (i64, bool)`
+
+Unsigned subtraction; returns (wrapped result, overflowed).
 
 ### `write_file(path, text)`
 

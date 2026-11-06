@@ -140,107 +140,46 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   std::ofstream f(p, std::ios::binary | std::ios::trunc);
   if (!f) { err << "error: cannot write temp source '" << p << "'\n"; return ""; }
   f << source;
+  if (const char* dbg = std::getenv("A_DEBUG_SRC"); dbg && *dbg) {
+    std::error_code ec;
+    std::filesystem::copy_file(p, dbg, std::filesystem::copy_options::overwrite_existing, ec);
+  }
   return p;
 }
-std::string stageC(const std::string& source, std::ostream& err) {
-  return stageSrc(source, ".c", err);
-}
-
-// Compiles emitted C (plus the runtime) with astra into outPath.
-int astraBuildC(const std::string& cPath, const std::string& outPath, std::ostream& err) {
+// Compiles emitted assembly (plus the runtime) with astra into outPath.
+// optimizationLevel maps to the clang-style -O flag (Astra/TinyCC honors it).
+int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostream& err, int optimizationLevel = 2) {
   std::string astra = findAstra();
   std::string runtimeC, runtimeDir;
   if (!findRuntime(astra, runtimeC, runtimeDir)) {
     err << "error: cannot locate A runtime (compiler/astra/runtime/a_runtime.c); set A_RUNTIME_C\n";
     return 1;
   }
-  // Host headers for libc (sys/wait.h, unistd.h, ... used by the test
-  // runner in generated C); TinyCC's staged headers alone are not enough.
-  int rc = runAstra({"-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
+  std::string optFlag = "-O" + std::to_string(optimizationLevel < 0 ? 0 : (optimizationLevel > 3 ? 3 : optimizationLevel));
+  int rc = runAstra({optFlag, "-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
                      "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include",
-                     cPath, runtimeC, "-o", outPath});
-  if (rc != 0) { err << "error: astra failed to compile '" << cPath << "'\n"; return 1; }
+                     srcPath, runtimeC, "-o", outPath});
+  if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
   return 0;
 }
 
-// Locates an executable on PATH; "" when absent.
-std::string findOnPath(const char* name){
-  const char* path=std::getenv("PATH");
-  if(!path||!*path) return "";
-  std::stringstream ss(path);
-  std::string dir;
-  while(std::getline(ss,dir,':')){
-    if(dir.empty()) continue;
-    std::string c=dir+"/"+name;
-    if(access(c.c_str(),X_OK)==0) return c;
-  }
-  return "";
-}
-
-// Locates a system C compiler for optimized `a build` output: $A_CC, then
-// the usual names on PATH. "" when none is available.
-std::string findCc(){
-  if(const char* e=std::getenv("A_CC"); e&&*e) return e;
-  for(const char* c: {"cc","gcc","clang"}){
-    std::string p=findOnPath(c);
-    if(!p.empty()) return p;
-  }
-  return "";
-}
-
-// Compiles emitted C (plus the runtime) with a system C compiler at -O2.
-// Returns 0 on success, 2 when no system compiler exists, 1 on failure.
-int ccBuildC(const std::string& cPath, const std::string& outPath, std::ostream& err) {
-  std::string cc=findCc();
-  if(cc.empty()) return 2;
-  std::string astra = findAstra();
-  std::string runtimeC, runtimeDir;
-  if (!findRuntime(astra, runtimeC, runtimeDir)) {
-    err << "error: cannot locate A runtime (compiler/astra/runtime/a_runtime.c); set A_RUNTIME_C\n";
-    return 1;
-  }
-  int rc = runChild(cc,{"-O2","-I"+runtimeDir,cPath,runtimeC,"-lm","-o",outPath});
-  if (rc != 0) { err << "error: " << cc << " failed to compile '" << cPath << "'\n"; return 1; }
-  return 0;
-}
-
-// Emits C for a checked program, compiles it with astra, and runs the
-// resulting binary. Returns the program's exit code.
+// Emits assembly for a checked program, assembles+links it with astra, and
+// runs the resulting binary. Returns the program's exit code.
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
-                  bool testMode = false) {
+                  bool testMode = false, int optimizationLevel = 2) {
   (void)in; (void)out;
-  if (!testMode) {
-    // Preferred path: emit assembly and let astra assemble+link it —
-    // A -> .s -> machine code with no C intermediate. Falls through to the
-    // C emitter for constructs the asm backend does not cover yet.
-    std::string sSource, sError;
-    if (emitAsm(*m.graph, *m.sema, sSource, sError)) {
-      std::string sPath = stageSrc(sSource, ".s", err);
-      if (sPath.empty()) return kCErr;
-      std::string bin = tempPath("bin");
-      int rc = astraBuildC(sPath, bin, err);
-      std::error_code ec;
-      std::filesystem::remove(sPath, ec);
-      if (rc != 0) { std::filesystem::remove(bin, ec); return kCErr; }
-      rc = runBinary(bin);
-      std::filesystem::remove(bin, ec);
-      return rc < 0 ? kCErr : rc;
-    }
-  }
-  std::string cSource, codegenError;
-  if (!emitC(*m.graph, *m.sema, cSource, codegenError, testMode)) {
-    err << "error: code generation failed: " << codegenError << "\n";
+  // A -> asm -> machine code: the asm backend is the only codegen path.
+  std::string sSource, sError;
+  if (!emitAsm(*m.graph, *m.sema, sSource, sError, testMode)) {
+    err << "error: asm code generation failed: " << sError << "\n";
     return kCErr;
   }
-  std::string cPath = stageC(cSource, err);
-  if (cPath.empty()) return kCErr;
-  if (const char* dbg = std::getenv("A_DEBUG_C"); dbg && *dbg) {
-    std::error_code dec; std::filesystem::copy_file(cPath, dbg, std::filesystem::copy_options::overwrite_existing, dec);
-  }
+  std::string sPath = stageSrc(sSource, ".s", err);
+  if (sPath.empty()) return kCErr;
   std::string bin = tempPath("bin");
-  int rc = astraBuildC(cPath, bin, err);
+  int rc = astraBuild(sPath, bin, err, optimizationLevel);
   std::error_code ec;
-  std::filesystem::remove(cPath, ec);
+  std::filesystem::remove(sPath, ec);
   if (rc != 0) { std::filesystem::remove(bin, ec); return kCErr; }
   rc = runBinary(bin);
   std::filesystem::remove(bin, ec);
@@ -260,45 +199,37 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
   // Execution: the frontend emits C, Astra compiles it to a binary, and the
   // binary runs as a child process.
-  return compileAndRun(m,in,out,err);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,out,err); if(!m.ok) return kCErr;
   // `a test`: discover and run top-level `fn test_*()` functions.
-  return compileAndRun(m,in,out,err,true);
+  return compileAndRun(m,in,out,err,true,config.optimizationLevel);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
+  // `a build`: A -> asm -> machine code via astra (the only backend).
   std::string sSource, sError;
-  if(emitAsm(*m.graph,*m.sema,sSource,sError)){
-    std::string sPath=stageSrc(sSource,".s",err); if(sPath.empty()) return kCErr;
-    int rc=astraBuildC(sPath,outputPath,err);
-    std::error_code ec; std::filesystem::remove(sPath,ec);
-    return rc;
+  if(!emitAsm(*m.graph,*m.sema,sSource,sError)){
+    err<<"error: asm code generation failed: "<<sError<<"\n"; return kCErr;
   }
-  std::string cSource, codegenError;
-  if(!emitC(*m.graph,*m.sema,cSource,codegenError)){ err<<"error: code generation failed: "<<codegenError<<"\n"; return kCErr; }
-  std::string cPath=stageC(cSource,err); if(cPath.empty()) return kCErr;
-  // `a build` prefers an optimizing system C compiler; astra (TinyCC) is the
-  // fallback for machines without cc/gcc/clang and for `a run`/`a test`.
-  int rc=ccBuildC(cPath,outputPath,err);
-  if(rc!=0){
-    if(rc==1) err<<"note: falling back to astra backend\n";
-    rc=astraBuildC(cPath,outputPath,err);
-  }
-  std::error_code ec; std::filesystem::remove(cPath,ec);
+  std::string sPath=stageSrc(sSource,".s",err); if(sPath.empty()) return kCErr;
+  int rc=astraBuild(sPath,outputPath,err,config.optimizationLevel);
+  std::error_code ec; std::filesystem::remove(sPath,ec);
   return rc;
 }
 int emitIRPipeline(const std::string& path,const PipelineConfig& config,bool optimize,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn; DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  ir::Program p=ir::lowerProgram(*m.graph,*m.sema); if(optimize) a::ir::runAll(p); out<<ir::printProgram(p); return kOk;
+  ir::Program p=ir::lowerProgram(*m.graph,*m.sema);
+  if(optimize){ ir::OptLevel level = ir::OptLevel::O2; ir::optLevelFromInt(config.optimizationLevel, level); a::ir::runOptPipeline(p, level); }
+  out<<ir::printProgram(p); return kOk;
 }
 ReplSession::~ReplSession() = default;
 int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   (void)session;
   DiagnosticSink sink; auto m=runFrontendPipeline("<repl>",source,config,sink,out,err); if(!m.ok) return 1;
-  return compileAndRun(m,in,out,err);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel);
 }
 }

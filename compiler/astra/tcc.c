@@ -104,6 +104,7 @@ static const char help2[] =
     "  -P -P1                        with -E: no/alternative #line output\n"
     "  -dD -dM                       with -E: output #define directives\n"
     "  -pthread                      same as -D_REENTRANT and -lpthread\n"
+    "  -O0/-O1/-O2/-O3/-Os/-Oz/-Ofast  LLVM-style optimization levels (defines __OPTIMIZE__ / __OPTIMIZE_SIZE__)\n"
     "  -On                           same as -D__OPTIMIZE__ for n > 0\n"
     "  -Wp,-opt                      same as -opt\n"
     "  -include file                 include 'file' above each input file\n"

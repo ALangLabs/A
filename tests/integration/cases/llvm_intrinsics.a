@@ -1,0 +1,14 @@
+# LLVM-style intrinsics: bit ops, float ops, min/max, overflow, hints.
+print("ctz:", ctz(8), ctz(0), "clz:", clz(1), "popcount:", popcount(7))
+print("bswap:", bswap(1), "rotl:", rotl(1, 4), "rotr:", rotr(16, 4))
+print("fma:", fma(2.0, 3.0, 4.0), "fabs:", fabs(-2.5), "copysign:", copysign(3.0, -1.0))
+print("smin/smax:", smin(3, 7), smax(3, 7), "umin/umax:", umin(-1, 2), umax(-1, 2))
+# INT64_MIN built via rotl (large literals are limited in A).
+min_val = rotl(1, 63)
+(v, o) = sadd_overflow(min_val, -1)
+print("sadd_overflow:", v, o)
+(v2, o2) = smul_overflow(min_val, -1)
+print("smul_overflow:", v2, o2)
+(v3, o3) = umul_overflow(4294967296, 4294967296)
+print("umul_overflow:", v3, o3)
+print("expect:", expect(1 < 2), likely(true), unlikely(false))
