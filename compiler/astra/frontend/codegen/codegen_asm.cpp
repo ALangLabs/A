@@ -684,17 +684,117 @@ class AsmEmitter {
     emit("    lea " + l + "(%rip), %rdi\n    call a_panic_msg\n");
   }
 
-  // Double*double arithmetic defers to the slow runtime path: the bundled
-  // tcc-fork assembler accepts only a subset of SSE (pxor/andpd parse, but
-  // xorpd/ucomisd/addsd/subsd/mulsd/divsd are rejected as unknown opcodes),
-  // so scalar-double instructions cannot be emitted. The runtime helpers
-  // implement the full arith_int_double semantics (incl. the div-by-zero
-  // panic and NaN canonicalization).
+  // ---- double (SSE2) fast paths --------------------------------------------
+  // Doubles are stored inline in the aval word as raw IEEE-754 bits
+  // (a_mkdouble); any bit pattern whose top 16 bits are NOT 0xFFFF is an
+  // untagged double (a_is_double == !A_IS_TAGGED). Arithmetic results are
+  // canonicalized with a_double_canon/mkdouble: every NaN becomes the
+  // positive quiet NaN 0x7FF8000000000000, which also guarantees the result
+  // can never collide with the tagged aval space (a negative-NaN pattern
+  // WOULD have top16 == 0xFFFF and be misread as a tagged value).
+
+  static constexpr uint64_t kCanonNaN = 0x7FF8000000000000ULL;
+
+  // Emits the a_is_double test for both operand slots: each aval must be an
+  // untagged double (top16 != 0xFFFF). Jumps to slowL otherwise, so mixed
+  // int/double and non-numeric operands keep the exact runtime semantics.
+  void emitDoublePairCheck(int ls, int rs, const std::string& slowL) {
+    for (int s : {ls, rs}) {
+      loadSlot(s, "%rcx");
+      emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
+           "\n");
+    }
+  }
+
+  // Stores the low 64 bits of %xmm0 into %rax, canonicalizing a NaN result
+  // to kCanonNaN (ucomisd with itself sets PF iff the value is unordered,
+  // i.e. NaN — 2 instructions to detect, matching a_double_canon exactly).
+  void emitXmm0ToAval(int scratch, const std::string& doneL) {
+    std::string nanL = newLabel("dnan");
+    emit("    ucomisd %xmm0, %xmm0\n    jp " + nanL + "\n"
+         "    movsd %xmm0, " + slotRef(scratch) + "\n"
+         "    mov " + slotRef(scratch) + ", %rax\n"
+         "    jmp " + doneL + "\n");
+    emitLabel(nanL);
+    movImm(kCanonNaN);
+    emit("    jmp " + doneL + "\n");
+  }
+
+  // Double*double arithmetic with inline SSE2: both operands must be
+  // untagged doubles (checked via emitDoublePairCheck), then addsd/subsd/
+  // mulsd/divsd compute the IEEE result. Division by zero (either sign of
+  // zero) jumps to the shared divzL panic block — identical to the
+  // a_div/a_div_slow check `b == 0.0`. % / ** / mixed types stay on the
+  // slow path (fmod/pow semantics and mixed-type promotion live there).
   void emitDoubleArith(const std::string& op, int ls, int rs,
                        const std::string& slowL, const std::string& doneL,
                        const std::string& divzL) {
-    (void)op; (void)ls; (void)rs; (void)doneL; (void)divzL;
-    jmp(slowL);
+    static const std::unordered_map<std::string, const char*> kSse = {
+        {"+", "addsd"}, {"-", "subsd"}, {"*", "mulsd"}, {"/", "divsd"}};
+    auto it = kSse.find(op);
+    if (it == kSse.end()) {
+      jmp(slowL);
+      return;
+    }
+    rawInvAll();  // direct slotRef/slot traffic below bypasses the reg cache
+    emitDoublePairCheck(ls, rs, slowL);
+    if (op == "/") {
+      // x + x == 0 (mod 2^64) iff x is +0.0 or -0.0; C `b == 0.0` is true
+      // for both zero signs, matching the runtime panic condition.
+      loadSlot(rs, "%rcx");
+      emit("    add %rcx, %rcx\n    jz " + divzL + "\n");
+    }
+    int t = allocSlot();
+    emit("    movsd " + slotRef(ls) + ", %xmm0\n"
+         "    movsd " + slotRef(rs) + ", %xmm1\n"
+         "    " + std::string(it->second) + " %xmm1, %xmm0\n");
+    emitXmm0ToAval(t, doneL);
+  }
+
+  // Double*double comparisons with inline ucomisd. ucomisd sets
+  // CF/ZF/PF with PF=1 on unordered (NaN) operands; the cc sequences below
+  // reproduce the C semantics used by a_lt/a_le/a_gt/a_ge/a_eq/a_ne:
+  // every ordered comparison involving NaN is false, != is true, and
+  // -0.0 == +0.0. Operand order is chosen per op so a single setcc (plus a
+  // parity fixup for ==/!=) excludes the unordered case. Non-double
+  // operands (incl. mixed int/double, which the runtime promotes) jump to
+  // slowL.
+  void emitDoubleCmp(const std::string& op, int ls, int rs,
+                     const std::string& slowL, const std::string& doneL) {
+    static const std::set<std::string> kDCmp = {
+        "==", "!=", "<", "<=", ">", ">="};
+    if (!kDCmp.count(op)) {
+      jmp(slowL);
+      return;
+    }
+    rawInvAll();
+    emitDoublePairCheck(ls, rs, slowL);
+    emit("    movsd " + slotRef(ls) + ", %xmm0\n"
+         "    movsd " + slotRef(rs) + ", %xmm1\n"
+         "    xor %eax, %eax\n");
+    if (op == "==" || op == "!=") {
+      // ucomisd %xmm1,%xmm0 compares lhs(xmm0) vs rhs(xmm1): unordered
+      // sets ZF=PF=1, so == needs setnp&sete and != needs setp|setne.
+      emit("    ucomisd %xmm1, %xmm0\n");
+      if (op == "==") {
+        emit("    setnp %cl\n    sete %al\n    and %cl, %al\n");
+      } else {
+        emit("    setp %cl\n    setne %al\n    or %cl, %al\n");
+      }
+    } else {
+      // For </<= compare rhs vs lhs (`ucomisd %xmm0,%xmm1`) so that
+      // "above"/"above-or-equal" on the swapped operands yields the
+      // desired ordered relation while staying false on NaN.
+      const bool swap = op == "<" || op == "<=";
+      emit(std::string("    ucomisd ") +
+           (swap ? "%xmm0, %xmm1" : "%xmm1, %xmm0") + "\n");
+      emit(std::string("    ") +
+           (op == "<" || op == ">" ? "seta" : "setae") + " %al\n");
+    }
+    // rax is 0/1; rdx = kTagInt so lea 0x3(rdx,rax,2) yields A_FALSE/A_TRUE
+    // (same materialization as the int compare path).
+    movImm(kTagInt, "%rdx");
+    emit("    lea 0x3(%rdx,%rax,2), %rax\n    jmp " + doneL + "\n");
   }
 
   // Binary arith/compare with inline int64 (and double*double) fast paths.
@@ -772,7 +872,7 @@ class AsmEmitter {
     if (isArith) {
       emitDoubleArith(op, ls, rs, slowL, doneL, divzL);
     } else {
-      emit("    jmp " + slowL + "\n");
+      emitDoubleCmp(op, ls, rs, slowL, doneL);
     }
     if (!divzL.empty()) {
       emitLabel(divzL);
@@ -5131,9 +5231,43 @@ class AsmEmitter {
     return true;
   }
 
+  // sqrt(x) fast path for an already-evaluated argument slot: untagged
+  // doubles compute via sqrtsd instead of the a_bi_call dispatch. The
+  // domain check `x < 0.0` is done with ucomisd so NaN behaves exactly like
+  // the runtime (C `x < 0.0` is false for NaN, and sqrt(NaN) canonicalizes
+  // via mkdouble). Negative inputs panic with the same "math domain error"
+  // message; non-double avals (ints, wrong types) fall back to a_bi_call.
+  void tryEmitSqrtSlot(int id, int s) {
+    std::string slowL = newLabel("sqs"), domL = newLabel("sqd"),
+            doneL = newLabel("sqf");
+    rawInvAll();  // direct slotRef traffic below bypasses the reg cache
+    loadSlot(s, "%rcx");
+    emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
+         "\n");
+    int t = allocSlot();
+    emit("    movsd " + slotRef(s) + ", %xmm0\n"
+         "    xorpd %xmm1, %xmm1\n"
+         // ucomisd %xmm0,%xmm1 compares 0.0(xmm1) vs x(xmm0): `ja` (above,
+         // ordered) means 0.0 > x i.e. x < 0.0. NaN leaves CF=ZF=1 so the
+         // jump is not taken — matching C semantics for the domain check.
+         "    ucomisd %xmm0, %xmm1\n    ja " + domL + "\n"
+         "    sqrtsd %xmm0, %xmm0\n");
+    emitXmm0ToAval(t, doneL);
+    emitLabel(domL);
+    emitPanicStr("math domain error");
+    emitLabel(slowL);
+    emitBiCallSlots(id, {s});
+    emitLabel(doneL);
+  }
+
   void emitBiCall(int id, const CallExpr& call) {
     if (id == 2 && call.args.size() == 1 && call.args[0].name.empty() &&
         tryEmitFastLen(call.args[0].value.get())) {
+      return;
+    }
+    if (id == 12 && call.args.size() == 1 && call.args[0].name.empty()) {
+      int s = evalSlot(call.args[0].value.get());
+      tryEmitSqrtSlot(id, s);
       return;
     }
     std::vector<const Expr*> args = positionalArgs(call);
@@ -5653,10 +5787,38 @@ class AsmEmitter {
           return;
         }
         emitExpr(x.operand.get());
-        emit("    mov %rax, %rdi\n");
         if (x.op == "-") {
-          emit("    call a_neg_slow");
-        } else if (x.op == "~") {
+          // Untagged-double aval: negate by flipping the sign bit inline,
+          // then canonicalize NaN exactly like mkdouble(-x) (a_neg_slow
+          // routes doubles through mkdouble, which maps every NaN to the
+          // canonical positive QNaN). Inline ints, boxed ints, and bad
+          // operand types keep the a_neg_slow call (incl. its panic).
+          int s = allocSlot();
+          storeRax(s);
+          std::string slowL = newLabel("ngs"), finL = newLabel("ngf"),
+                  endL = newLabel("nge");
+          rawInvAll();
+          loadSlot(s, "%rcx");
+          emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
+               "\n");
+          loadSlot(s);  // %rax = aval bits
+          emit("    btc $63, %rax\n");
+          // NaN iff exponent is all ones and the mantissa is nonzero.
+          emit("    mov %rax, %rcx\n    shr $52, %rcx\n    and $0x7FF, %ecx\n"
+               "    cmp $0x7FF, %ecx\n    jne " + finL + "\n"
+               "    mov %rax, %rcx\n    shl $12, %rcx\n    jz " + finL +
+               "\n");
+          movImm(kCanonNaN);
+          emitLabel(finL);
+          emit("    jmp " + endL + "\n");
+          emitLabel(slowL);
+          loadSlot(s, "%rdi");
+          emit("    call a_neg_slow\n");
+          emitLabel(endL);
+          return;
+        }
+        emit("    mov %rax, %rdi\n");
+        if (x.op == "~") {
           emit("    call a_bnot_slow");
         } else if (x.op == "not") {
           emit("    call a_not");
