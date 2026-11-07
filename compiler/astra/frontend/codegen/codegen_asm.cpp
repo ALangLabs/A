@@ -146,6 +146,60 @@ class AsmEmitter {
   static constexpr int kMaxRawDepth = 4;
   static constexpr int kMaxRawCalls = 256;
 
+  // Raw-int register cache (mem2reg-style store forwarding, confined to
+  // raw-expression regions): while rawRegDepth_ > 0 the slot helpers below
+  // track which frame slots currently have their bits in a register
+  // (rawRegOf_[slot] = register code), so a store immediately followed by
+  // a load of the same slot forwards the register instead of reloading.
+  // Facts are bit-level ("reg == slot contents"), maintained only by the
+  // helpers; every emit site that can clobber registers outside them must
+  // call rawInvAll()/rawDropReg() or run under RawRegSuspend. Outside raw
+  // regions (rawRegDepth_ == 0) the helpers behave exactly as before.
+  int rawRegDepth_ = 0;
+  std::unordered_map<int, int> rawRegOf_;
+  enum RawReg : int {
+    kRRax, kRRcx, kRRdx, kRRsi, kRRdi, kRR8, kRR9, kRR10, kRR11
+  };
+  static constexpr const char* kRawRegNames[9] = {
+      "%rax", "%rcx", "%rdx", "%rsi", "%rdi", "%r8", "%r9", "%r10", "%r11"};
+  bool rawRegOn() const { return rawRegDepth_ > 0; }
+  int rawRegCode(const char* reg) const {
+    for (int i = 0; i < 9; ++i)
+      if (std::strcmp(reg, kRawRegNames[i]) == 0) return i;
+    return -1;
+  }
+  // Register r was overwritten: forget every slot->r claim.
+  void rawDropReg(int r) {
+    if (!rawRegOn()) return;
+    for (auto it = rawRegOf_.begin(); it != rawRegOf_.end();) {
+      if (it->second == r) it = rawRegOf_.erase(it);
+      else ++it;
+    }
+  }
+  void rawInvAll() { rawRegOf_.clear(); }
+  // Slot's memory now holds the bits in register r; drop the slot's stale
+  // claims in other registers (its old contents are gone).
+  void rawLearn(int slot, int r) {
+    if (!rawRegOn()) return;
+    rawRegOf_.erase(slot);
+    rawRegOf_[slot] = r;
+  }
+  // Suspend the reg cache while emitting code it cannot model: arbitrary
+  // expr/call sequences contain raw emits that clobber registers in ways
+  // the helpers do not track. Depth and cache are restored on scope exit.
+  struct RawRegSuspend {
+    AsmEmitter* e_;
+    int saved_;
+    explicit RawRegSuspend(AsmEmitter* e) : e_(e), saved_(e->rawRegDepth_) {
+      e_->rawRegDepth_ = 0;
+      e_->rawRegOf_.clear();
+    }
+    ~RawRegSuspend() {
+      e_->rawRegDepth_ = saved_;
+      e_->rawRegOf_.clear();
+    }
+  };
+
   struct InlineInfo {
     bool safe = false;
     bool raw = false;
@@ -208,9 +262,31 @@ class AsmEmitter {
   }
   void movImm(uint64_t v, const char* reg = "%rax") {
     emit(std::string("    mov $") + u64s(v) + ", " + reg);
+    if (rawRegOn()) {
+      int c = rawRegCode(reg);
+      if (c >= 0) rawDropReg(c);
+    }
   }
-  void storeRax(int slot) { emit("    mov %rax, " + slotRef(slot)); }
+  void storeRax(int slot) {
+    emit("    mov %rax, " + slotRef(slot));
+    rawLearn(slot, kRRax);  // %rax still holds the stored bits
+  }
   void loadSlot(int slot, const char* reg = "%rax") {
+    if (rawRegOn()) {
+      int want = rawRegCode(reg);
+      if (want >= 0) {
+        auto it = rawRegOf_.find(slot);
+        if (it != rawRegOf_.end() && it->second == want) return;
+        if (it != rawRegOf_.end()) {
+          emit(std::string("    mov ") + kRawRegNames[it->second] + ", " + reg);
+        } else {
+          emit(std::string("    mov ") + slotRef(slot) + ", " + reg);
+        }
+        rawDropReg(want);
+        rawLearn(slot, want);
+        return;
+      }
+    }
     emit(std::string("    mov ") + slotRef(slot) + ", " + reg);
   }
   void leaSlot(int slot, const char* reg) {
@@ -218,7 +294,20 @@ class AsmEmitter {
   }
   // mem -> mem is impossible on x86; route slot copies through %rcx.
   void copySlot(int from, int to) {
-    emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
+    if (!rawRegOn()) {
+      emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
+      return;
+    }
+    rawDropReg(kRRcx);  // %rcx is rewritten below
+    auto it = rawRegOf_.find(from);
+    if (it != rawRegOf_.end()) {
+      emit(std::string("    mov ") + kRawRegNames[it->second] + ", %rcx\n    mov %rcx, " +
+           slotRef(to));
+    } else {
+      emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
+      rawRegOf_[from] = kRRcx;  // %rcx now holds `from`'s bits as well
+    }
+    rawLearn(to, kRRcx);
   }
   uint64_t dblBits(double d) const {
     uint64_t u;
@@ -619,10 +708,16 @@ class AsmEmitter {
       auto it = kJcc.find(b.op);
       if (it != kJcc.end() && rawCmpOk(b)) {
         int ls = allocSlot(), rs = allocSlot();
+        // One shared reg-cache region for both operands + the compare
+        // loads, so rhs results forward straight into %rcx.
+        ++rawRegDepth_;
+        rawRegOf_.clear();
         emitRawExpr(b.lhs.get(), ls);
         emitRawExpr(b.rhs.get(), rs);
         loadSlot(ls);
         loadSlot(rs, "%rcx");
+        --rawRegDepth_;
+        rawRegOf_.clear();
         emit("    cmp %rcx, %rax\n");
         static const std::unordered_map<std::string, const char*> kInv = {
             {"je", "jne"}, {"jne", "je"}, {"jl", "jge"}, {"jle", "jg"},
@@ -635,8 +730,12 @@ class AsmEmitter {
     }
     if (!exprIsInt(cond) || !rawSafeExpr(cond)) return false;
     int s = allocSlot();
+    ++rawRegDepth_;
+    rawRegOf_.clear();
     emitRawExpr(cond, s);
-    loadSlot(s);
+    loadSlot(s);  // usually forwards: %rax already holds the result
+    --rawRegDepth_;
+    rawRegOf_.clear();
     emit(std::string("    test %rax, %rax\n    ") +
          (jumpIfTrue ? "jnz " : "jz ") + label + "\n");
     return true;
@@ -2339,7 +2438,20 @@ class AsmEmitter {
            rawSafeExpr(b.rhs.get());
   }
 
+  // Raw-expression entry point. Each top-level call opens a fresh
+  // register-cache region; nested calls (rawRegDepth_ > 0) share the
+  // caller's cache so intermediates forward through the whole tree. The
+  // cache is dropped on exit so no facts leak into unmodeled code.
   bool emitRawExpr(const Expr* e, int out) {
+    if (rawRegDepth_ == 0) rawRegOf_.clear();
+    ++rawRegDepth_;
+    bool ok = emitRawExprImpl(e, out);
+    --rawRegDepth_;
+    if (rawRegDepth_ == 0) rawRegOf_.clear();
+    return ok;
+  }
+
+  bool emitRawExprImpl(const Expr* e, int out) {
     if (!e || failed_) return false;
     if (e->kind == ExprKind::IntLit) {
       std::int64_t v = static_cast<const IntLitExpr&>(*e).value;
@@ -2349,9 +2461,10 @@ class AsmEmitter {
       } else {
         // Preserve the generic literal encoding exactly (including its
         // range behaviour) by materializing the aval and unboxing it.
-        emitExpr(e);
+        { RawRegSuspend sus(this); emitExpr(e); }
         emit("    mov %rax, %rdi\n");
         emitAvalToI64();
+        rawInvAll();
         storeRax(out);
       }
       return true;
@@ -2369,9 +2482,10 @@ class AsmEmitter {
         copySlot(b->slot, out);
         return true;
       }
-      emitExpr(e);
+      { RawRegSuspend sus(this); emitExpr(e); }
       emit("    mov %rax, %rdi\n");
       emitAvalToI64();
+      rawInvAll();
       storeRax(out);
       return true;
     }
@@ -2385,6 +2499,7 @@ class AsmEmitter {
       if (!emitRawExpr(u.operand.get(), os)) return false;
       loadSlot(os);
       emit("    not %rax\n");
+      rawDropReg(kRRax);
       storeRax(out);
       return true;
     }
@@ -2413,13 +2528,15 @@ class AsmEmitter {
           emitRawExpr(c.args[i].value.get(), rs);
           loadSlot(rs);
           emitBoxInt64();
+          rawInvAll();
           int vs = allocSlot();
           storeRax(vs);
           ps[i] = vs;
         }
-        emitDirectCall(f->cname.c_str(), ps);
+        { RawRegSuspend sus(this); emitDirectCall(f->cname.c_str(), ps); }
         emit("    mov %rax, %rdi\n");
         emitAvalToI64();
+        rawInvAll();
         storeRax(out);
         return true;
       }
@@ -2447,6 +2564,7 @@ class AsmEmitter {
       loadSlot(rs, "%rcx");
       emit(std::string("    ") + (op == "&" ? "and" : op == "|" ? "or" : "xor") +
            " %rcx, %rax\n");
+      rawDropReg(kRRax);  // only %rax is rewritten; %rcx and friends survive
       storeRax(out);
       return;
     }
@@ -2467,7 +2585,11 @@ class AsmEmitter {
       emit("    xor %eax, %eax\n    jmp " + doneL + "\n");
       emitLabel(modzL);
       emitPanicStr("Remainder by zero.\n  = help: Check the divisor before dividing.");
+      // Join point: register contents differ per incoming path (idiv
+      // clobbers %rdx:%rax, the panic path clobbers everything), so only
+      // the %rax result stored below is certain on all paths.
       emitLabel(doneL);
+      rawInvAll();
       storeRax(out);
       return;
     }
@@ -2484,25 +2606,30 @@ class AsmEmitter {
          "    cmp $63, %rcx\n    ja " + slowL + "\n");
     loadSlot(ls, "%rax");
     emit(std::string("    ") + (op == "<<" ? "shl" : "sar") + " %cl, %rax\n");
-    storeRax(out);
+    rawDropReg(kRRax);  // the shift rewrites %rax; %rcx keeps the count
     emit("    jmp " + doneL + "\n");
     emitLabel(slowL);
     // Invalid shift amount: reproduce the runtime path exactly (it panics
     // for out-of-range amounts). Box both operands and call the slow helper.
     loadSlot(ls);
     emitBoxInt64();
+    rawInvAll();
     int lBox = allocSlot();
     storeRax(lBox);
     loadSlot(rs);
     emitBoxInt64();
+    rawInvAll();
     int rBox = allocSlot();
     storeRax(rBox);
     loadSlot(rBox, "%rsi");
     loadSlot(lBox, "%rdi");
     emit(std::string("    call ") + slowSym + "\n"
          "    mov %rax, %rdi\n    call a_int_full\n");
-    storeRax(out);
+    rawInvAll();
+    // Join point: %rax holds the raw int64 result on both paths, nothing
+    // else is certain (the slow path called out).
     emitLabel(doneL);
+    storeRax(out);
   }
 
   // argsRaw: argSlots already hold raw int64 (skip the aval->int64 unbox).
@@ -2521,6 +2648,7 @@ class AsmEmitter {
       } else {
         loadSlot(argSlots[i], "%rdi");
         emitAvalToI64();
+        rawInvAll();
         storeRax(rs);
       }
       rawVars_[fn->params[i].name] = rs;
@@ -2550,7 +2678,10 @@ class AsmEmitter {
         int rs = allocSlot();
         emitRawExpr(static_cast<const ReturnStmt&>(*s).value.get(), rs);
         loadSlot(rs);
-        if (!keepRaw) emitBoxInt64();
+        if (!keepRaw) {
+          emitBoxInt64();
+          rawInvAll();
+        }
       }
     }
     rawVars_ = std::move(savedRawVars);
@@ -4479,10 +4610,14 @@ class AsmEmitter {
     // this path.
     if (rawBinFastOk(x)) {
       int ls = allocSlot(), rs = allocSlot(), out = allocSlot();
+      ++rawRegDepth_;
+      rawRegOf_.clear();
       emitRawExpr(x.lhs.get(), ls);
       emitRawExpr(x.rhs.get(), rs);
       emitRawBin(op, ls, rs, out);
-      loadSlot(out);
+      loadSlot(out);  // usually forwards: %rax already holds the result
+      --rawRegDepth_;
+      rawRegOf_.clear();
       emitBoxInt64();
       return;
     }
