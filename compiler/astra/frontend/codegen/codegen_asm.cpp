@@ -2998,8 +2998,8 @@ class AsmEmitter {
     bool savedInFn = inFunction_;
     curModuleId_ = f->moduleId;
     inFunction_ = true;
-    // The inlined body is a different function: its locals must not see this
-    // function's promotion set.
+    // The inlined body is a different function: swap in its own promotion
+    // set (computed below for the generic path; raw bodies don't need it).
     auto savedPromote = std::move(promoteNames_);
     promoteNames_.clear();
 
@@ -3012,6 +3012,7 @@ class AsmEmitter {
         b.slot = argSlots[i];
         scopes_.back()[f->paramNames[i]] = b;
       }
+      computePromoteSet(f->decl);  // promote the callee's own locals
       int resultSlot = allocSlot();
       int savedDepth = inlineDepth_;
       std::string savedLabel = inlineReturnLabel_;
