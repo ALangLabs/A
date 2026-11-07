@@ -46,6 +46,63 @@ struct ABinding {
   bool rawInt = false;
 };
 
+// ---- int64 range analysis domain -----------------------------------------
+// Conservative interval used to prove that '+', '-', '*' on raw int64 slots
+// cannot overflow (overflow yields a *double* aval, which a raw slot cannot
+// represent — see arith_int_int in runtime/value.c). `known == false` is the
+// top element ("any value, possibly non-int"); a known range always describes
+// int64 values only, so proofs built on it are sound when ranges only ever
+// over-approximate. Bounds are __int128 so interval arithmetic never wraps;
+// the type is a GCC/Clang extension, allowed locally via pragma.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+struct ARange {
+  bool known = false;
+  __int128 lo = 0;
+  __int128 hi = 0;
+};
+
+// Scope-stack environment for the range dataflow: mirrors the lexical scopes
+// emission uses (one map per emitBody/block level). Lookups walk innermost to
+// outermost; assignments update the innermost binding and ignore names that
+// resolve outside the function (globals/outer bindings stay unknown).
+struct ARangeEnv {
+  std::vector<std::unordered_map<std::string, ARange>> scopes;
+
+  ARange find(const std::string& n) const {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+      auto f = it->find(n);
+      if (f != it->end()) return f->second;
+    }
+    return ARange{};
+  }
+  // Update the innermost scope binding `n`; false when unbound here (global).
+  bool assign(const std::string& n, const ARange& r) {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+      auto f = it->find(n);
+      if (f != it->end()) {
+        f->second = r;
+        return true;
+      }
+    }
+    return false;
+  }
+  void bindTop(const std::string& n, const ARange& r) {
+    if (scopes.empty()) scopes.emplace_back();
+    scopes.back()[n] = r;
+  }
+  void setUnknown(const std::string& n) {
+    for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
+      auto f = it->find(n);
+      if (f != it->end()) {
+        f->second = ARange{};
+        return;
+      }
+    }
+  }
+};
+#pragma GCC diagnostic pop
+
 class AsmEmitter {
  public:
   AsmEmitter(const ModuleGraph& graph, const SemaResult& sema, bool testMode = false)
@@ -145,6 +202,27 @@ class AsmEmitter {
   bool promoteHot_ = false;
   static constexpr int kMaxRawDepth = 4;
   static constexpr int kMaxRawCalls = 256;
+
+  // Phase 5b range analysis: nameRanges_ maps each local name to the union
+  // (over every program point of the function being analyzed) of its
+  // conservative int64 interval — an over-approximation valid at *any* read,
+  // which is what the raw '+', '-', '*' overflow proofs consume. It is
+  // computed by computeNameRanges inside computePromoteSet and saved /
+  // restored together with promoteNames_ (inlined callees get their own).
+  std::unordered_map<std::string, ARange> nameRanges_;
+  int rangeFreeze_ = 0;    // >0 suppresses acc recording (loop fixpoint)
+  int rangeBudget_ = 0;    // stmt-processing budget; exhaustion -> prove nothing
+  bool rangeAbort_ = false;
+  struct RangeLoopCtx {
+    ARangeEnv* head = nullptr;   // loop-head env (fixpoint state)
+    ARangeEnv* cont = nullptr;   // accumulated continue-exit envs
+    ARangeEnv* brk = nullptr;    // accumulated break-exit envs
+    int headDepth = 0;           // scopes kept for continue states
+    int postDepth = 0;           // scopes kept for post-loop / break states
+    bool* hasCont = nullptr;
+    bool* hasBrk = nullptr;
+  };
+  std::vector<RangeLoopCtx> rangeLoops_;
 
   // Raw-int register cache (mem2reg-style store forwarding, confined to
   // raw-expression regions): while rawRegDepth_ > 0 the slot helpers below
@@ -1211,10 +1289,13 @@ class AsmEmitter {
       }
     }
     auto savedPromote = std::move(promoteNames_);
+    auto savedRanges = std::move(nameRanges_);
     promoteNames_.clear();
+    nameRanges_.clear();
     computePromoteSet(f->decl);
     emitBody(f->decl->body);
     promoteNames_ = std::move(savedPromote);
+    nameRanges_ = std::move(savedRanges);
     emit("    mov $" + u64s(kNone) + ", %rax\n    leave\n    ret\n");
     int frame = frameBytes();
     std::ostringstream emitted;
@@ -1361,6 +1442,7 @@ class AsmEmitter {
         }
       }
       promoteNames_.clear();  // top-level bindings are globals, never raw
+      nameRanges_.clear();
       emitBody(mod.program->statements, true);
       }
       curModuleId_ = savedModule;
@@ -1693,6 +1775,218 @@ class AsmEmitter {
     emitLabel(nextL);
   }
 
+  // ---- LICM / bounds-check-elimination support ------------------------------
+  // Conservative purity scan shared by the array-iteration LICM (emitForArray)
+  // and the counted-loop bounds-check elimination (emitFor range path). An
+  // expression/statement is "pure" when evaluating it cannot mutate a heap
+  // object or run unknown code: no calls (builtins included — they reach the
+  // runtime), no lambdas (they capture values and may be invoked later), and
+  // no non-Ident assignment targets (index/slice/field writes). Plain
+  // `name = v` / `name op= v` only rebinds a name — it cannot mutate the
+  // object a `for` loop snapshotted — so it stays pure; `writes` optionally
+  // collects every bound name (lets, assigns, destructure/for vars, ++/--
+  // targets) so callers can prove specific bindings are never reassigned.
+  // Any doubt -> not pure.
+  bool scanExprPure(const Expr* e, std::unordered_set<std::string>* writes) {
+    if (!e) return true;
+    switch (e->kind) {
+      case ExprKind::Call:
+      case ExprKind::Lambda:
+        return false;
+      case ExprKind::Ident:
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+        return true;
+      case ExprKind::StringLit:
+        for (const StringPart& p :
+             static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr && !scanExprPure(p.expr.get(), writes)) return false;
+        return true;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if ((u.op == "++" || u.op == "--") && u.operand &&
+            u.operand->kind == ExprKind::Ident && writes)
+          writes->insert(static_cast<const IdentExpr&>(*u.operand).name);
+        return scanExprPure(u.operand.get(), writes);
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        return scanExprPure(b.lhs.get(), writes) &&
+               scanExprPure(b.rhs.get(), writes);
+      }
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        return scanExprPure(x.object.get(), writes) &&
+               scanExprPure(x.index.get(), writes);
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        return scanExprPure(x.object.get(), writes) &&
+               scanExprPure(x.start.get(), writes) &&
+               scanExprPure(x.end.get(), writes) &&
+               scanExprPure(x.step.get(), writes);
+      }
+      case ExprKind::Field:
+        return scanExprPure(static_cast<const FieldExpr&>(*e).object.get(),
+                            writes);
+      case ExprKind::SafeNav:
+        return scanExprPure(static_cast<const SafeNavExpr&>(*e).object.get(),
+                            writes);
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple:
+      case ExprKind::SetLit: {
+        const auto& els = e->kind == ExprKind::ArrayLit
+            ? static_cast<const ArrayLitExpr&>(*e).elements
+            : e->kind == ExprKind::SetLit
+                ? static_cast<const SetLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els)
+          if (!scanExprPure(el.get(), writes)) return false;
+        return true;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv :
+             static_cast<const MapLitExpr&>(*e).entries)
+          if (!scanExprPure(kv.first.get(), writes) ||
+              !scanExprPure(kv.second.get(), writes))
+            return false;
+        return true;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        return scanExprPure(r.start.get(), writes) &&
+               scanExprPure(r.end.get(), writes) &&
+               scanExprPure(r.step.get(), writes);
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        return scanExprPure(t.cond.get(), writes) &&
+               scanExprPure(t.thenValue.get(), writes) &&
+               scanExprPure(t.elseValue.get(), writes);
+      }
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        return scanExprPure(c.element.get(), writes) &&
+               scanExprPure(c.iterable.get(), writes) &&
+               scanExprPure(c.condition.get(), writes);
+      }
+      case ExprKind::Match: {
+        const MatchExpr& m = static_cast<const MatchExpr&>(*e);
+        if (!scanExprPure(m.subject.get(), writes)) return false;
+        for (const MatchArm& arm : m.arms) {
+          if (!scanPatternPure(arm.pattern, writes)) return false;
+          if (!scanExprPure(arm.guard.get(), writes) ||
+              !scanExprPure(arm.result.get(), writes))
+            return false;
+        }
+        return true;
+      }
+      case ExprKind::Try:
+        return scanExprPure(static_cast<const TryExpr&>(*e).operand.get(),
+                            writes);
+    }
+    return false;  // unknown kind -> doubt
+  }
+
+  bool scanPatternPure(const Pattern& p,
+                       std::unordered_set<std::string>* writes) {
+    if ((p.value && !scanExprPure(p.value.get(), writes)) ||
+        (p.rangeStart && !scanExprPure(p.rangeStart.get(), writes)) ||
+        (p.rangeEnd && !scanExprPure(p.rangeEnd.get(), writes)) ||
+        (p.ctor && !scanExprPure(p.ctor.get(), writes)))
+      return false;
+    for (const Pattern& sub : p.subpatterns)
+      if (!scanPatternPure(sub, writes)) return false;
+    return true;
+  }
+
+  bool scanStmtsPure(const std::vector<StmtPtr>& stmts,
+                     std::unordered_set<std::string>* writes) {
+    for (const StmtPtr& s : stmts)
+      if (!scanStmtPure(s.get(), writes)) return false;
+    return true;
+  }
+
+  bool scanStmtPure(const Stmt* s,
+                    std::unordered_set<std::string>* writes) {
+    if (!s) return true;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        if (writes) writes->insert(st.name);
+        return scanExprPure(st.init.get(), writes);
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        // Only a bare `name = v` / `name op= v` rebinds; index/slice/field
+        // targets write through to a heap object -> not pure.
+        if (st.target->kind != ExprKind::Ident) return false;
+        if (writes)
+          writes->insert(static_cast<const IdentExpr&>(*st.target).name);
+        return scanExprPure(st.value.get(), writes);
+      }
+      case StmtKind::Expr:
+        return scanExprPure(static_cast<const ExprStmt&>(*s).expr.get(),
+                            writes);
+      case StmtKind::Destructure: {
+        const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
+        if (writes)
+          for (const std::string& nm : st.names)
+            if (nm != "_") writes->insert(nm);
+        return scanExprPure(st.value.get(), writes);
+      }
+      case StmtKind::Return:
+        return scanExprPure(static_cast<const ReturnStmt&>(*s).value.get(),
+                            writes);
+      case StmtKind::Break:
+      case StmtKind::Continue:
+        return true;
+      case StmtKind::Defer:
+        return scanStmtPure(static_cast<const DeferStmt&>(*s).body.get(),
+                            writes);
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          if (!scanExprPure(br.cond.get(), writes)) return false;
+          if (!scanStmtsPure(br.body, writes)) return false;
+        }
+        return scanStmtsPure(st.elseBody, writes);
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        return scanExprPure(st.cond.get(), writes) &&
+               scanStmtsPure(st.body, writes);
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        return scanStmtsPure(st.body, writes) &&
+               scanExprPure(st.cond.get(), writes);
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        if (writes) writes->insert(st.var);
+        return scanExprPure(st.iterable.get(), writes) &&
+               scanStmtsPure(st.body, writes);
+      }
+      case StmtKind::Loop:
+        return scanStmtsPure(static_cast<const LoopStmt&>(*s).body, writes);
+      default:
+        return true;  // decls/imports emit nothing inside a body
+    }
+  }
+
+  // Bounds-check elimination context: one entry per enclosing
+  // `for i in lo..len(arr)` loop (lo a non-negative literal, step 1, pure
+  // body that never writes i or arr). The Index fast path skips its bounds
+  // check when both the object and index bindings match — binding pointers
+  // make shadowing/rebinding fall back to the checked path automatically.
+  struct BceCtx {
+    ABinding* varBind = nullptr;  // loop variable binding
+    ABinding* arrBind = nullptr;  // array binding named in len(arr)
+  };
+  std::vector<BceCtx> bceLoops_;
+
   void emitFor(const ForStmt& st) {
     // Fast path: `for x in lo..hi[..step]` as a native counted int64 loop.
     const Expr* loE = nullptr;
@@ -1765,10 +2059,45 @@ class AsmEmitter {
         ABinding* vb = lookup(st.var);
         if (vb) vb->rawInt = true;
       }
+      // Bounds-check elimination: `for i in <nonneg-const>..len(arr)` with
+      // step 1 and a pure body that never writes i or arr proves every i in
+      // [0, len(arr)), so xs[i] on that same binding can skip its bounds
+      // check (see the Index fast path). Anything doubtful -> no entry.
+      bool bcePush = false;
+      {
+        std::unordered_set<std::string> writes;
+        const bool pure = scanStmtsPure(st.body, &writes);
+        if (pure && !writes.count(st.var) &&
+            (stE == nullptr ||
+             (stE->kind == ExprKind::IntLit &&
+              static_cast<const IntLitExpr*>(stE)->value == 1)) &&
+            loE->kind == ExprKind::IntLit &&
+            static_cast<const IntLitExpr*>(loE)->value >= 0 &&
+            hiE->kind == ExprKind::Call) {
+          const CallExpr& hc = static_cast<const CallExpr&>(*hiE);
+          if (hc.builtinId == BuiltinId::Len && hc.args.size() == 1 &&
+              hc.args[0].name.empty() &&
+              hc.args[0].value->kind == ExprKind::Ident) {
+            const std::string& an =
+                static_cast<const IdentExpr&>(*hc.args[0].value).name;
+            TypePtr at = resolveType(hc.args[0].value->inferredType);
+            if (an != st.var && at && at->kind == TypeKind::Array &&
+                !writes.count(an)) {
+              ABinding* ab = lookup(an);
+              ABinding* vb2 = lookup(st.var);
+              if (ab && vb2) {
+                bceLoops_.push_back({vb2, ab});
+                bcePush = true;
+              }
+            }
+          }
+        }
+      }
       loopBreak_.push_back(endL);
       loopCont_.push_back(contL);
       loopDeferDepth_.push_back((int)deferStack_.size());
       emitBody(st.body);
+      if (bcePush) bceLoops_.pop_back();
       loopDeferDepth_.pop_back();
       loopBreak_.pop_back();
       loopCont_.pop_back();
@@ -1845,6 +2174,20 @@ class AsmEmitter {
          "    cmp $5, %eax\n    je " + fastL + "\n"
          "    jmp " + slowL + "\n");
     emitLabel(fastL);
+    // LICM: when the body cannot mutate any heap object (no calls, lambdas,
+    // or index/slice/field writes — scanStmtPure), h.len and the items
+    // pointer are loop-invariant, so load them once here. %rcx still holds
+    // the untagged object pointer from the kind check above. The fallback
+    // keeps reloading both every pass, which is what makes mutation during
+    // iteration (e.g. append) observable — preserved exactly.
+    const bool hoist = scanStmtsPure(st.body, nullptr);
+    int lenS = -1, itemsS = -1;
+    if (hoist) {
+      lenS = allocSlot();
+      itemsS = allocSlot();
+      emit("    mov 4(%rcx), %edx\n    mov %rdx, " + slotRef(lenS) + "\n"
+           "    mov 16(%rcx), %rcx\n    mov %rcx, " + slotRef(itemsS) + "\n");
+    }
     int iS = allocSlot();
     movImm(0, "%rcx");
     emit("    mov %rcx, " + slotRef(iS));
@@ -1852,14 +2195,24 @@ class AsmEmitter {
     std::string loopL = newLabel("for");
     std::string contL = newLabel("forc");
     emitLabel(loopL);
-    // obj aval -> rcx = object pointer; rdx = len (u32); rax = index.
-    emit("    mov " + slotRef(objS) + ", %rax\n"
-         "    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
-         "    mov 4(%rcx), %edx\n"
-         "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
-         fastEndL + "\n");
-    emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
-         "    mov %rax, " + slotRef(varS) + "\n");
+    if (hoist) {
+      // iS = index; lenS/itemsS hoisted. Same load as the reload path but
+      // without re-untagging the object or re-reading h.len/items.
+      emit("    mov " + slotRef(iS) + ", %rax\n"
+           "    mov " + slotRef(lenS) + ", %rdx\n    cmp %rdx, %rax\n    jae " +
+           fastEndL + "\n"
+           "    mov " + slotRef(itemsS) + ", %rcx\n    mov (%rcx,%rax,8), %rax\n"
+           "    mov %rax, " + slotRef(varS) + "\n");
+    } else {
+      // obj aval -> rcx = object pointer; rdx = len (u32); rax = index.
+      emit("    mov " + slotRef(objS) + ", %rax\n"
+           "    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
+           "    mov 4(%rcx), %edx\n"
+           "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
+           fastEndL + "\n");
+      emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
+           "    mov %rax, " + slotRef(varS) + "\n");
+    }
     pushScope();
     bindLocal(st.var, varS);
     loopBreak_.push_back(fastEndL);
@@ -2413,12 +2766,28 @@ class AsmEmitter {
         return true;
       case ExprKind::Unary: {
         const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
-        return u.op == "~" && rawSafeExpr(u.operand.get());
+        if (u.op == "~") return rawSafeExpr(u.operand.get());
+        // Unary minus is int-safe only when the operand range proves the
+        // result cannot be -INT64_MIN (which yields a double aval).
+        if (u.op == "-" && !u.postfix && exprIsInt(e) &&
+            rawSafeExpr(u.operand.get())) {
+          ARange o = exprRangeFlat(u.operand.get());
+          return o.known && o.lo > rngI64Min();
+        }
+        return false;
       }
       case ExprKind::Binary: {
         const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
-        return rawSafeBinOp(b.op) && rawSafeExpr(b.lhs.get()) &&
-               rawSafeExpr(b.rhs.get());
+        if (rawSafeBinOp(b.op))
+          return rawSafeExpr(b.lhs.get()) && rawSafeExpr(b.rhs.get());
+        // '+', '-', '*' are raw-safe only where range analysis proves the
+        // int64 result cannot overflow (overflow produces a double aval).
+        if ((b.op == "+" || b.op == "-" || b.op == "*") &&
+            exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
+            rawSafeExpr(b.lhs.get()) && rawSafeExpr(b.rhs.get()))
+          return arithFits(exprRangeFlat(b.lhs.get()),
+                           exprRangeFlat(b.rhs.get()), b.op);
+        return false;
       }
       case ExprKind::Call: {
         const CallExpr& c = static_cast<const CallExpr&>(*e);
@@ -2436,9 +2805,8 @@ class AsmEmitter {
   // int64 materializable. Kept in sync with the emitBinary call site and the
   // promotion coverage scan.
   bool rawBinFastOk(const BinaryExpr& b) {
-    return rawSafeBinOp(b.op) && exprIsInt(b.lhs.get()) &&
-           exprIsInt(b.rhs.get()) && rawSafeExpr(b.lhs.get()) &&
-           rawSafeExpr(b.rhs.get());
+    return exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
+           rawSafeExpr(&b);
   }
 
   // Raw-expression entry point. Each top-level call opens a fresh
@@ -2494,6 +2862,17 @@ class AsmEmitter {
     }
     if (e->kind == ExprKind::Unary) {
       const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+      if (u.op == "-" && !u.postfix) {
+        // rawSafeExpr proved operand range excludes INT64_MIN, so neg cannot
+        // produce the overflow double.
+        int os = allocSlot();
+        if (!emitRawExpr(u.operand.get(), os)) return false;
+        loadSlot(os);
+        emit("    neg %rax\n");
+        rawDropReg(kRRax);
+        storeRax(out);
+        return true;
+      }
       if (u.op != "~") {
         fail("unsupported raw int unary operator '" + u.op + "'");
         return false;
@@ -2562,6 +2941,18 @@ class AsmEmitter {
   }
 
   void emitRawBin(const std::string& op, int ls, int rs, int out) {
+    if (op == "+" || op == "-" || op == "*") {
+      // Only reachable when rawSafeExpr's range proof showed the int64
+      // result cannot overflow (overflow must yield a double aval, which a
+      // raw slot cannot hold), so a plain add/sub/imul is exact — no jo.
+      loadSlot(ls, "%rax");
+      loadSlot(rs, "%rcx");
+      emit(std::string("    ") + (op == "+" ? "add" : op == "-" ? "sub" : "imul") +
+           " %rcx, %rax\n");
+      rawDropReg(kRRax);  // only %rax is rewritten; %rcx and friends survive
+      storeRax(out);
+      return;
+    }
     if (op == "&" || op == "|" || op == "^") {
       loadSlot(ls, "%rax");
       loadSlot(rs, "%rcx");
@@ -2715,6 +3106,854 @@ class AsmEmitter {
     }
     return true;
   }
+
+  // ---- Phase 5b: int64 range analysis --------------------------------------
+  // Dataflow that computes nameRanges_ (union of each local's interval over
+  // all program points). Straight-line code is precise; control-flow merges
+  // union intervals; loops iterate to a fixpoint (monotone union, capped —
+  // non-converging loop-carried variables are poisoned to unknown). Anything
+  // the walk cannot model (++/--, defer bodies, lambda captures, destructure,
+  // non-range for-vars, globals) yields unknown, so proofs only ever fire on
+  // genuinely bounded values.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+  static __int128 rngI64Min() { return -(((__int128)1) << 63); }
+  static __int128 rngI64Max() { return (((__int128)1) << 63) - 1; }
+
+  static ARange rngSpan(__int128 lo, __int128 hi) {
+    const __int128 kMin = rngI64Min(), kMax = rngI64Max();
+    if (lo < kMin) lo = kMin;
+    if (hi > kMax) hi = kMax;
+    if (lo > kMax) lo = kMax;
+    if (hi < kMin) hi = kMin;
+    ARange r;
+    r.known = true;
+    if (lo > hi) {  // empty intersection: keep it sound with the full domain
+      r.lo = kMin;
+      r.hi = kMax;
+    } else {
+      r.lo = lo;
+      r.hi = hi;
+    }
+    return r;
+  }
+
+  static void rngJoin(ARange& a, const ARange& b) {
+    if (!a.known) {
+      a = b;
+      return;
+    }
+    if (!b.known) {
+      a.known = false;
+      return;
+    }
+    if (b.lo < a.lo) a.lo = b.lo;
+    if (b.hi > a.hi) a.hi = b.hi;
+  }
+
+  static bool rngIsConst(const ARange& r, __int128 v) {
+    return r.known && r.lo == v && r.hi == v;
+  }
+
+  // Overflow proof shared by rawSafeExpr and rangeBinOp: the mathematical
+  // result of a+b / a-b / a*b must fit int64 for EVERY value in the operand
+  // intervals (interval arithmetic is exact for these bilinear ops, so the
+  // corners decide).
+  static bool arithFits(const ARange& a, const ARange& b,
+                        const std::string& op) {
+    if (!a.known || !b.known) return false;
+    const __int128 kMin = rngI64Min(), kMax = rngI64Max();
+    if (op == "+") return a.lo + b.lo >= kMin && a.hi + b.hi <= kMax;
+    if (op == "-") return a.lo - b.hi >= kMin && a.hi - b.lo <= kMax;
+    __int128 p1 = a.lo * b.lo, p2 = a.lo * b.hi;
+    __int128 p3 = a.hi * b.lo, p4 = a.hi * b.hi;
+    __int128 mn = p1 < p2 ? p1 : p2;
+    if (p3 < mn) mn = p3;
+    if (p4 < mn) mn = p4;
+    __int128 mx = p1 > p2 ? p1 : p2;
+    if (p3 > mx) mx = p3;
+    if (p4 > mx) mx = p4;
+    return mn >= kMin && mx <= kMax;
+  }
+
+  // Interval of a binary op's int64 result, or unknown. Only ops that always
+  // yield int64-or-panic are modeled (mirrors rawSafeBinOp plus the proven
+  // arith ops); anything else is unknown.
+  ARange rangeBinOp(const std::string& op, const ARange& l,
+                    const ARange& r) const {
+    if (op == "+" || op == "-" || op == "*") {
+      if (!arithFits(l, r, op)) return ARange{};
+      if (op == "+") return rngSpan(l.lo + r.lo, l.hi + r.hi);
+      if (op == "-") return rngSpan(l.lo - r.hi, l.hi - r.lo);
+      __int128 ps[4] = {l.lo * r.lo, l.lo * r.hi, l.hi * r.lo, l.hi * r.hi};
+      __int128 mn = ps[0], mx = ps[0];
+      for (int i = 1; i < 4; ++i) {
+        if (ps[i] < mn) mn = ps[i];
+        if (ps[i] > mx) mx = ps[i];
+      }
+      return rngSpan(mn, mx);
+    }
+    if (op == "%") {
+      // |x % d| < |d|; bounded whenever the divisor's magnitude is.
+      if (!r.known) return ARange{};
+      __int128 am = r.lo < 0 ? -r.lo : r.lo;
+      __int128 ah = r.hi < 0 ? -r.hi : r.hi;
+      if (ah > am) am = ah;
+      if (am <= 0) return ARange{};  // always panics; no value produced
+      return rngSpan(-(am - 1), am - 1);
+    }
+    if (op == "&") {
+      // x & C with C >= 0 yields [0, C] regardless of x (bits subset of C).
+      if (r.known && r.lo == r.hi && r.lo >= 0) return rngSpan(0, r.hi);
+      if (l.known && l.lo == l.hi && l.lo >= 0) return rngSpan(0, l.hi);
+      if (l.known && r.known && l.lo >= 0 && r.lo >= 0)
+        return rngSpan(0, l.hi < r.hi ? l.hi : r.hi);
+      return ARange{};
+    }
+    if (op == "|") {
+      if (rngIsConst(r, 0)) return l;  // x | 0 == x
+      if (rngIsConst(l, 0)) return r;
+      if (l.known && r.known && l.lo >= 0 && r.lo >= 0)
+        return rngSpan(l.lo > r.lo ? l.lo : r.lo, l.hi + r.hi);
+      return ARange{};
+    }
+    if (op == "^") {
+      if (l.known && r.known && l.lo == l.hi && r.lo == r.hi)
+        return rngSpan(l.lo ^ r.lo, l.lo ^ r.lo);
+      if (l.known && r.known && l.lo >= 0 && r.lo >= 0)
+        return rngSpan(0, l.hi + r.hi);
+      return ARange{};
+    }
+    if (op == "<<" || op == ">>") {
+      // Both wrap/stay in int64 (shl is mod 2^64, sar stays int64; out-of-range
+      // amounts panic), so a tight range only when no wrap/trap is possible.
+      if (!l.known || !r.known) return ARange{};
+      if (op == "<<") {
+        if (l.lo >= 0 && r.lo >= 0 && r.hi <= 62) {
+          __int128 mx = l.hi << (int)r.hi;
+          if (mx <= rngI64Max())
+            return rngSpan(l.lo << (int)r.lo, mx);
+        }
+        return ARange{};
+      }
+      // sar: monotone in operand; extremes at the shift-amount corners.
+      __int128 slo = r.lo < 0 ? 0 : r.lo;
+      __int128 shi = r.hi > 63 ? 63 : r.hi;
+      if (slo > shi) return ARange{};  // every amount panics
+      __int128 c[4] = {l.lo >> (int)shi, l.hi >> (int)shi,
+                       l.lo >> (int)slo, l.hi >> (int)slo};
+      __int128 mn = c[0], mx = c[0];
+      for (int i = 1; i < 4; ++i) {
+        if (c[i] < mn) mn = c[i];
+        if (c[i] > mx) mx = c[i];
+      }
+      return rngSpan(mn, mx);
+    }
+    return ARange{};
+  }
+
+  // Interval of an expression's int64 value under lookup `lk` (name -> range).
+  // Only exprs whose evaluation provably yields int64 (or panics) get a known
+  // range; everything else is unknown.
+  template <typename Lookup>
+  ARange exprRangeIn(const Expr* e, Lookup&& lk) const {
+    if (!e) return ARange{};
+    switch (e->kind) {
+      case ExprKind::IntLit: {
+        __int128 v = static_cast<const IntLitExpr&>(*e).value;
+        return rngSpan(v, v);
+      }
+      case ExprKind::Ident:
+        return lk(static_cast<const IdentExpr&>(*e).name);
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if (u.op != "~" && !(u.op == "-" && !u.postfix)) return ARange{};
+        ARange o = exprRangeIn(u.operand.get(), lk);
+        if (!o.known) return ARange{};
+        if (u.op == "~") return rngSpan(-o.hi - 1, -o.lo - 1);
+        if (o.lo > rngI64Min()) return rngSpan(-o.hi, -o.lo);
+        return ARange{};  // -INT64_MIN overflows to a double
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        return rangeBinOp(b.op, exprRangeIn(b.lhs.get(), lk),
+                          exprRangeIn(b.rhs.get(), lk));
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        ARange a = exprRangeIn(t.thenValue.get(), lk);
+        ARange b = exprRangeIn(t.elseValue.get(), lk);
+        rngJoin(a, b);
+        return a;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        // len(x) is always a non-negative int.
+        if (c.builtinId == BuiltinId::Len && c.args.size() == 1)
+          return rngSpan(0, rngI64Max());
+        return ARange{};
+      }
+      default:
+        return ARange{};
+    }
+  }
+
+  // Emit-time/proof-time lookup: the union range recorded for a name.
+  ARange exprRangeFlat(const Expr* e) const {
+    return exprRangeIn(e, [this](const std::string& n) -> ARange {
+      auto it = nameRanges_.find(n);
+      return it == nameRanges_.end() ? ARange{} : it->second;
+    });
+  }
+
+  // ---- range dataflow -------------------------------------------------------
+  void rangeJoinInto(ARangeEnv& dst, const ARangeEnv& src) {
+    if (dst.scopes.size() != src.scopes.size()) return;  // caller bug; stay safe
+    for (std::size_t i = 0; i < src.scopes.size(); ++i) {
+      for (const auto& kv : src.scopes[i]) {
+        auto f = dst.scopes[i].find(kv.first);
+        if (f == dst.scopes[i].end())
+          dst.scopes[i][kv.first] = kv.second;
+        else
+          rngJoin(f->second, kv.second);
+      }
+    }
+  }
+
+  ARangeEnv rangeTruncate(const ARangeEnv& env, int depth) const {
+    ARangeEnv t;
+    t.scopes.assign(env.scopes.begin(),
+                    env.scopes.begin() + std::min<int>(depth, env.scopes.size()));
+    return t;
+  }
+
+  bool rangeEnvEq(const ARangeEnv& a, const ARangeEnv& b) const {
+    if (a.scopes.size() != b.scopes.size()) return false;
+    for (std::size_t i = 0; i < a.scopes.size(); ++i) {
+      if (a.scopes[i].size() != b.scopes[i].size()) return false;
+      for (const auto& kv : a.scopes[i]) {
+        auto f = b.scopes[i].find(kv.first);
+        if (f == b.scopes[i].end()) return false;
+        const ARange& x = kv.second;
+        const ARange& y = f->second;
+        if (x.known != y.known || x.lo != y.lo || x.hi != y.hi) return false;
+      }
+    }
+    return true;
+  }
+
+  void rangeRecord(const ARangeEnv& env) {
+    if (rangeFreeze_ > 0 || rangeAbort_) return;
+    for (const auto& sc : env.scopes)
+      for (const auto& kv : sc) rngJoin(nameRanges_[kv.first], kv.second);
+  }
+
+  // Expr side effects that can change a local's value outside the stmt-level
+  // writes: ++/-- targets and names captured by lambdas (a stored lambda may
+  // run later). Everything else in an expr is range-neutral.
+  void rangePoisonExpr(const Expr* e, ARangeEnv& env) {
+    if (!e || rangeAbort_) return;
+    switch (e->kind) {
+      case ExprKind::Ident:
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+        return;
+      case ExprKind::StringLit:
+        for (const StringPart& p : static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr) rangePoisonExpr(p.expr.get(), env);
+        return;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if ((u.op == "++" || u.op == "--") &&
+            u.operand->kind == ExprKind::Ident)
+          env.setUnknown(static_cast<const IdentExpr&>(*u.operand).name);
+        rangePoisonExpr(u.operand.get(), env);
+        return;
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        rangePoisonExpr(b.lhs.get(), env);
+        rangePoisonExpr(b.rhs.get(), env);
+        return;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        rangePoisonExpr(c.callee.get(), env);
+        for (const CallArg& a : c.args) rangePoisonExpr(a.value.get(), env);
+        return;
+      }
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        rangePoisonExpr(x.object.get(), env);
+        rangePoisonExpr(x.index.get(), env);
+        return;
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        rangePoisonExpr(x.object.get(), env);
+        rangePoisonExpr(x.start.get(), env);
+        rangePoisonExpr(x.end.get(), env);
+        rangePoisonExpr(x.step.get(), env);
+        return;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv : static_cast<const MapLitExpr&>(*e).entries) {
+          rangePoisonExpr(kv.first.get(), env);
+          rangePoisonExpr(kv.second.get(), env);
+        }
+        return;
+      case ExprKind::SetLit:
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple: {
+        const auto& els = e->kind == ExprKind::SetLit
+            ? static_cast<const SetLitExpr&>(*e).elements
+            : e->kind == ExprKind::ArrayLit
+                ? static_cast<const ArrayLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els) rangePoisonExpr(el.get(), env);
+        return;
+      }
+      case ExprKind::Field:
+        rangePoisonExpr(static_cast<const FieldExpr&>(*e).object.get(), env);
+        return;
+      case ExprKind::SafeNav:
+        rangePoisonExpr(static_cast<const SafeNavExpr&>(*e).object.get(), env);
+        return;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        rangePoisonExpr(r.start.get(), env);
+        rangePoisonExpr(r.end.get(), env);
+        rangePoisonExpr(r.step.get(), env);
+        return;
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        rangePoisonExpr(t.cond.get(), env);
+        rangePoisonExpr(t.thenValue.get(), env);
+        rangePoisonExpr(t.elseValue.get(), env);
+        return;
+      }
+      case ExprKind::Lambda: {
+        const LambdaExpr& l = static_cast<const LambdaExpr&>(*e);
+        for (const ParamDecl& p : l.params) env.setUnknown(p.name);
+        std::set<std::string> ids;
+        collectIdents(l.body.get(), ids);
+        for (const std::string& nm : ids) env.setUnknown(nm);
+        return;
+      }
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        rangePoisonExpr(c.element.get(), env);
+        rangePoisonExpr(c.iterable.get(), env);
+        rangePoisonExpr(c.condition.get(), env);
+        return;
+      }
+      case ExprKind::Match: {
+        const MatchExpr& m = static_cast<const MatchExpr&>(*e);
+        rangePoisonExpr(m.subject.get(), env);
+        for (const MatchArm& arm : m.arms) {
+          rangePoisonPattern(arm.pattern, env);
+          rangePoisonExpr(arm.guard.get(), env);
+          rangePoisonExpr(arm.result.get(), env);
+        }
+        return;
+      }
+      case ExprKind::Try:
+        rangePoisonExpr(static_cast<const TryExpr&>(*e).operand.get(), env);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void rangePoisonPattern(const Pattern& p, ARangeEnv& env) {
+    if (p.value) rangePoisonExpr(p.value.get(), env);
+    if (p.rangeStart) rangePoisonExpr(p.rangeStart.get(), env);
+    if (p.rangeEnd) rangePoisonExpr(p.rangeEnd.get(), env);
+    if (p.ctor) rangePoisonExpr(p.ctor.get(), env);
+    for (const Pattern& sub : p.subpatterns) rangePoisonPattern(sub, env);
+  }
+
+  // A `defer` body runs at scope exit, not at its lexical position: any name
+  // it assigns must be unknown for everything after the defer statement.
+  void rangePoisonDefer(const Stmt* s, ARangeEnv& env) {
+    if (!s || rangeAbort_) return;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        rangePoisonExpr(st.init.get(), env);  // let is defer-local: no write
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind == ExprKind::Ident)
+          env.setUnknown(static_cast<const IdentExpr&>(*st.target).name);
+        else
+          rangePoisonExpr(st.target.get(), env);
+        rangePoisonExpr(st.value.get(), env);
+        return;
+      }
+      case StmtKind::Expr:
+        rangePoisonExpr(static_cast<const ExprStmt&>(*s).expr.get(), env);
+        return;
+      case StmtKind::Destructure:
+        rangePoisonExpr(static_cast<const DestructureStmt&>(*s).value.get(), env);
+        return;
+      case StmtKind::Return:
+        rangePoisonExpr(static_cast<const ReturnStmt&>(*s).value.get(), env);
+        return;
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          rangePoisonExpr(br.cond.get(), env);
+          for (const StmtPtr& b : br.body) rangePoisonDefer(b.get(), env);
+        }
+        for (const StmtPtr& b : st.elseBody) rangePoisonDefer(b.get(), env);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        rangePoisonExpr(st.cond.get(), env);
+        for (const StmtPtr& b : st.body) rangePoisonDefer(b.get(), env);
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) rangePoisonDefer(b.get(), env);
+        rangePoisonExpr(st.cond.get(), env);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        rangePoisonExpr(st.iterable.get(), env);
+        for (const StmtPtr& b : st.body) rangePoisonDefer(b.get(), env);
+        return;
+      }
+      case StmtKind::Loop:
+        for (const StmtPtr& b : static_cast<const LoopStmt&>(*s).body)
+          rangePoisonDefer(b.get(), env);
+        return;
+      case StmtKind::Defer:
+        rangePoisonDefer(static_cast<const DeferStmt&>(*s).body.get(), env);
+        return;
+      default:
+        return;
+      }
+    }
+
+  // Names assigned anywhere inside a stmt list (recursive) — used to poison
+  // non-converged loop-carried variables.
+  void rangeCollectAssigns(const Stmt* s, std::unordered_set<std::string>& out) {
+    if (!s) return;
+    switch (s->kind) {
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind == ExprKind::Ident)
+          out.insert(static_cast<const IdentExpr&>(*st.target).name);
+        return;
+      }
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        out.insert(st.name);  // conservative: may shadow an outer binding
+        return;
+      }
+      case StmtKind::Destructure: {
+        const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
+        for (const std::string& n : st.names)
+          if (n != "_") out.insert(n);
+        return;
+      }
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches)
+          for (const StmtPtr& b : br.body) rangeCollectAssigns(b.get(), out);
+        for (const StmtPtr& b : st.elseBody) rangeCollectAssigns(b.get(), out);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) rangeCollectAssigns(b.get(), out);
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) rangeCollectAssigns(b.get(), out);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        out.insert(st.var);
+        for (const StmtPtr& b : st.body) rangeCollectAssigns(b.get(), out);
+        return;
+      }
+      case StmtKind::Loop:
+        for (const StmtPtr& b : static_cast<const LoopStmt&>(*s).body)
+          rangeCollectAssigns(b.get(), out);
+        return;
+      case StmtKind::Defer:
+        rangeCollectAssigns(static_cast<const DeferStmt&>(*s).body.get(), out);
+        return;
+      default:
+        return;
+      }
+    }
+
+  void rangeBlock(const std::vector<StmtPtr>& stmts, ARangeEnv& env) {
+    env.scopes.emplace_back();
+    for (const StmtPtr& s : stmts) {
+      if (failed_ || rangeAbort_) break;
+      if (--rangeBudget_ < 0) {
+        rangeAbort_ = true;
+        break;
+      }
+      rangeStmt(s.get(), env);
+      rangeRecord(env);
+    }
+    env.scopes.pop_back();
+  }
+
+  // Loop fixpoint: `head` is the env at the loop head (includes the for-var
+  // scope for counted/iterable fors). Iterates the body until ranges
+  // stabilize; continue/break exits are accumulated into cont/brk and joined
+  // into the head/post envs so mid-body states are never lost. Non-converged
+  // variables are poisoned to unknown before the recording pass.
+  void rangeLoop(const std::vector<StmtPtr>& body, const std::string* varName,
+                 const ARange* varRange, ARangeEnv& env) {
+    static constexpr int kMaxRangeIter = 8;
+    const int postDepth = (int)env.scopes.size();
+    if (varName) {
+      env.scopes.emplace_back();
+      env.scopes.back()[*varName] = varRange ? *varRange : ARange{};
+    }
+    const int headDepth = (int)env.scopes.size();
+    ARangeEnv head = env;
+    ARangeEnv cont, brk;
+    bool hasCont = false, hasBrk = false;
+    rangeLoops_.push_back({&head, &cont, &brk, headDepth, postDepth,
+                           &hasCont, &hasBrk});
+    // Prescan: poison ++/-- targets and lambda captures once up front so the
+    // fixpoint starts from the same env every iteration would produce.
+    for (const StmtPtr& s : body) rangePrescanStmt(s.get(), head);
+    // Fixpoint with widening: head grows monotonically (joins only union), so
+    // it either stabilizes or some variable's interval keeps expanding. On
+    // non-convergence, poison the variables that moved in the last step and
+    // re-run — unknown is the top element, so each round strictly reduces the
+    // known set and the cascade of dependent unknowns propagates. A final
+    // fallback poisons every assigned name.
+    bool converged = false;
+    ++rangeFreeze_;
+    for (int round = 0; round < 6 && !converged && !rangeAbort_; ++round) {
+      ARangeEnv prev;
+      for (int it = 0; it < kMaxRangeIter && !rangeAbort_; ++it) {
+        prev = head;
+        ARangeEnv bodyEnv = head;
+        rangeBlock(body, bodyEnv);
+        rangeJoinInto(head, bodyEnv);
+        if (hasCont) rangeJoinInto(head, cont);
+        if (varName && varRange)
+          head.scopes[postDepth][*varName] = *varRange;  // rebound each iter
+        if (rangeEnvEq(head, prev)) {
+          converged = true;
+          break;
+        }
+      }
+      if (converged || rangeAbort_) break;
+      // Widen: poison the names whose interval moved in the last step, then
+      // re-run so dependents collapse to unknown too. Unknown is top, so each
+      // round strictly shrinks the known set and this terminates.
+      bool any = false;
+      for (std::size_t i = 0; i < head.scopes.size() && i < prev.scopes.size();
+           ++i) {
+        for (const auto& kv : head.scopes[i]) {
+          auto f = prev.scopes[i].find(kv.first);
+          const bool moved =
+              f == prev.scopes[i].end() || f->second.known != kv.second.known ||
+              f->second.lo != kv.second.lo || f->second.hi != kv.second.hi;
+          if (moved && kv.second.known) {
+            head.scopes[i][kv.first] = ARange{};
+            any = true;
+          }
+        }
+      }
+      if (varName && varRange)
+        head.scopes[postDepth][*varName] = *varRange;
+      if (!any) converged = true;  // nothing left that can still move
+    }
+    if (!converged && !rangeAbort_) {
+      // Last resort: poison every name assigned in the body, then propagate
+      // once more so dependents collapse. Reads of unassigned names keep
+      // their (input) ranges, which are unaffected by the loop.
+      std::unordered_set<std::string> writes;
+      for (const StmtPtr& s : body) rangeCollectAssigns(s.get(), writes);
+      for (const std::string& nm : writes) head.setUnknown(nm);
+      if (varName && varRange)
+        head.scopes[postDepth][*varName] = *varRange;
+      for (int it = 0; it < kMaxRangeIter && !rangeAbort_; ++it) {
+        ARangeEnv prev = head;
+        ARangeEnv bodyEnv = head;
+        rangeBlock(body, bodyEnv);
+        rangeJoinInto(head, bodyEnv);
+        if (hasCont) rangeJoinInto(head, cont);
+        if (varName && varRange)
+          head.scopes[postDepth][*varName] = *varRange;
+        if (rangeEnvEq(head, prev)) break;
+      }
+    }
+    --rangeFreeze_;
+    rangeLoops_.pop_back();
+    if (rangeAbort_) {
+      env.scopes.clear();
+      return;
+    }
+    rangeRecord(head);
+    // Recording pass: process the body once more with the converged head so
+    // acc sees the states reads inside the loop actually observe.
+    {
+      ARangeEnv fin = head;
+      rangeBlock(body, fin);
+    }
+    // Post-loop env: head states (truncated to pre-loop depth) joined with
+    // break exits. The for-var scope is dropped.
+    ARangeEnv post = rangeTruncate(head, postDepth);
+    if (hasBrk) rangeJoinInto(post, brk);
+    env.scopes = std::move(post.scopes);
+  }
+
+  // Prescan equivalent of rangePoisonExpr over a stmt list (no env writes,
+  // only poison side effects on `env`).
+  void rangePrescanStmt(const Stmt* s, ARangeEnv& env) {
+    if (!s || rangeAbort_) return;
+    switch (s->kind) {
+      case StmtKind::Let:
+        rangePoisonExpr(static_cast<const LetStmt&>(*s).init.get(), env);
+        return;
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        rangePoisonExpr(st.target.get(), env);
+        rangePoisonExpr(st.value.get(), env);
+        return;
+      }
+      case StmtKind::Expr:
+        rangePoisonExpr(static_cast<const ExprStmt&>(*s).expr.get(), env);
+        return;
+      case StmtKind::Destructure:
+        rangePoisonExpr(static_cast<const DestructureStmt&>(*s).value.get(), env);
+        return;
+      case StmtKind::Return:
+        rangePoisonExpr(static_cast<const ReturnStmt&>(*s).value.get(), env);
+        return;
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          rangePoisonExpr(br.cond.get(), env);
+          for (const StmtPtr& b : br.body) rangePrescanStmt(b.get(), env);
+        }
+        for (const StmtPtr& b : st.elseBody) rangePrescanStmt(b.get(), env);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        rangePoisonExpr(st.cond.get(), env);
+        for (const StmtPtr& b : st.body) rangePrescanStmt(b.get(), env);
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) rangePrescanStmt(b.get(), env);
+        rangePoisonExpr(st.cond.get(), env);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        rangePoisonExpr(st.iterable.get(), env);
+        for (const StmtPtr& b : st.body) rangePrescanStmt(b.get(), env);
+        return;
+      }
+      case StmtKind::Loop:
+        for (const StmtPtr& b : static_cast<const LoopStmt&>(*s).body)
+          rangePrescanStmt(b.get(), env);
+        return;
+      case StmtKind::Defer:
+        rangePoisonDefer(static_cast<const DeferStmt&>(*s).body.get(), env);
+        return;
+      default:
+        return;
+      }
+    }
+
+  void rangeStmt(const Stmt* s, ARangeEnv& env) {
+    if (!s || rangeAbort_) return;
+    auto lk = [&env](const std::string& n) -> ARange { return env.find(n); };
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        rangePoisonExpr(st.init.get(), env);
+        ARange r = st.init ? exprRangeIn(st.init.get(), lk) : ARange{};
+        env.bindTop(st.name, r);
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        rangePoisonExpr(st.value.get(), env);
+        if (st.target->kind == ExprKind::Ident) {
+          const std::string& nm =
+              static_cast<const IdentExpr&>(*st.target).name;
+          ARange r;
+          if (st.op == "=") {
+            r = exprRangeIn(st.value.get(), lk);
+          } else {
+            // x <op>= v  ==  x = x <op> v; unknown when unprovable (the
+            // write may produce a double aval).
+            std::string base = st.op.substr(0, st.op.size() - 1);
+            r = rangeBinOp(base, env.find(nm), exprRangeIn(st.value.get(), lk));
+          }
+          env.assign(nm, r);
+        } else {
+          rangePoisonExpr(st.target.get(), env);
+        }
+        return;
+      }
+      case StmtKind::Expr:
+        rangePoisonExpr(static_cast<const ExprStmt&>(*s).expr.get(), env);
+        return;
+      case StmtKind::Destructure: {
+        const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
+        rangePoisonExpr(st.value.get(), env);
+        for (const std::string& n : st.names)
+          if (n != "_") env.bindTop(n, ARange{});
+        return;
+      }
+      case StmtKind::Return:
+        rangePoisonExpr(static_cast<const ReturnStmt&>(*s).value.get(), env);
+        return;
+      case StmtKind::Break: {
+        if (!rangeLoops_.empty()) {
+          RangeLoopCtx& c = rangeLoops_.back();
+          ARangeEnv t = rangeTruncate(env, c.postDepth);
+          if (!*c.hasBrk) {
+            *c.brk = t;
+            *c.hasBrk = true;
+          } else {
+            rangeJoinInto(*c.brk, t);
+          }
+        }
+        return;
+      }
+      case StmtKind::Continue: {
+        if (!rangeLoops_.empty()) {
+          RangeLoopCtx& c = rangeLoops_.back();
+          ARangeEnv t = rangeTruncate(env, c.headDepth);
+          if (!*c.hasCont) {
+            *c.cont = t;
+            *c.hasCont = true;
+          } else {
+            rangeJoinInto(*c.cont, t);
+          }
+        }
+        return;
+      }
+      case StmtKind::Defer:
+        rangePoisonDefer(static_cast<const DeferStmt&>(*s).body.get(), env);
+        return;
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches)
+          rangePoisonExpr(br.cond.get(), env);
+        ARangeEnv join = env;
+        for (const IfStmt::Branch& br : st.branches) {
+          ARangeEnv eb = env;
+          rangeBlock(br.body, eb);
+          rangeJoinInto(join, eb);
+        }
+        if (!st.elseBody.empty()) {
+          ARangeEnv ee = env;
+          rangeBlock(st.elseBody, ee);
+          rangeJoinInto(join, ee);
+        }
+        env.scopes = std::move(join.scopes);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        rangePoisonExpr(st.cond.get(), env);
+        rangeLoop(st.body, nullptr, nullptr, env);
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        rangePoisonExpr(st.cond.get(), env);
+        rangeLoop(st.body, nullptr, nullptr, env);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        rangePoisonExpr(st.iterable.get(), env);
+        // Counted range `lo..hi[..step]` (RangeExpr or `..` binary): the var
+        // takes values in [lo, hi) for positive step, (hi, lo] for negative.
+        const Expr* loE = nullptr;
+        const Expr* hiE = nullptr;
+        const Expr* stE = nullptr;
+        const Expr* it = st.iterable.get();
+        if (it && it->kind == ExprKind::Range) {
+          const RangeExpr& re = static_cast<const RangeExpr&>(*it);
+          loE = re.start.get();
+          hiE = re.end.get();
+          stE = re.step.get();
+        } else if (it && it->kind == ExprKind::Binary &&
+                   static_cast<const BinaryExpr&>(*it).op == "..") {
+          const BinaryExpr& be = static_cast<const BinaryExpr&>(*it);
+          loE = be.lhs.get();
+          hiE = be.rhs.get();
+        }
+        ARange vr;
+        bool haveVar = false;
+        if (loE && hiE) {
+          ARange lo = exprRangeIn(loE, lk);
+          ARange hi = exprRangeIn(hiE, lk);
+          ARange stp = stE ? exprRangeIn(stE, lk) : rngSpan(1, 1);
+          if (lo.known && hi.known && stp.known) {
+            if (stp.lo > 0) {
+              __int128 h = hi.hi - 1;
+              if (h < lo.lo) h = lo.lo;  // empty loop: any range is sound
+              vr = rngSpan(lo.lo, h);
+              haveVar = true;
+            } else if (stp.hi < 0) {
+              __int128 l = hi.lo + 1;
+              if (l > lo.hi) l = lo.hi;
+              vr = rngSpan(l, lo.hi);
+              haveVar = true;
+            }
+          }
+        }
+        rangeLoop(st.body, &st.var, haveVar ? &vr : nullptr, env);
+        return;
+      }
+      case StmtKind::Loop: {
+        const LoopStmt& st = static_cast<const LoopStmt&>(*s);
+        rangeLoop(st.body, nullptr, nullptr, env);
+        return;
+      }
+      default:
+        return;  // decls/imports are not executed as body statements
+      }
+    }
+
+  void computeNameRanges(const FnDecl* fn) {
+    nameRanges_.clear();
+    rangeAbort_ = false;
+    rangeFreeze_ = 0;
+    rangeLoops_.clear();
+    rangeBudget_ = 60000;
+    if (!fn) return;
+    ARangeEnv env;
+    env.scopes.emplace_back();
+    for (const ParamDecl& p : fn->params) env.scopes.back()[p.name] = ARange{};
+    rangeBlock(fn->body, env);
+    if (rangeAbort_) nameRanges_.clear();  // incomplete walk: prove nothing
+  }
+#pragma GCC diagnostic pop
 
   // ---- Phase 5: scalar-promotion analysis ----------------------------------
   // A local may keep a raw int64 in its frame slot only when every write
@@ -3175,7 +4414,9 @@ class AsmEmitter {
 
   void computePromoteSet(const FnDecl* fn) {
     promoteNames_.clear();
+    nameRanges_.clear();
     if (!fn) return;
+    computeNameRanges(fn);  // range proofs feed rawSafeExpr's + - * gate
     PromoteScan ps;
     promoteWriteStmts(fn->body, ps);
     for (const std::string& nm : ps.safe)
@@ -3235,7 +4476,9 @@ class AsmEmitter {
     // The inlined body is a different function: swap in its own promotion
     // set (computed below for the generic path; raw bodies don't need it).
     auto savedPromote = std::move(promoteNames_);
+    auto savedRanges = std::move(nameRanges_);
     promoteNames_.clear();
+    nameRanges_.clear();
 
     if (rawOk) {
       emitRawBody(f, argSlots, argsRaw, false);
@@ -3268,6 +4511,7 @@ class AsmEmitter {
     }
 
     promoteNames_ = std::move(savedPromote);
+    nameRanges_ = std::move(savedRanges);
     curModuleId_ = savedModule;
     inFunction_ = savedInFn;
     endInlineScope(savedScopes);
@@ -3893,7 +5137,39 @@ class AsmEmitter {
       case ExprKind::Index: {
         auto& x = static_cast<const IndexExpr&>(*e);
         int os = evalSlot(x.object.get());
-        int is = evalSlot(x.index.get());
+        // Raw int64 index: a promoted (rawInt) ident already holds int64 in
+        // its slot; any other raw-safe int expr with a proven range can be
+        // materialized raw. Both feed %r8 directly, skipping the box+unbox
+        // round-trip the aval path would pay per access. Anything else
+        // keeps the generic evalSlot + emitUnboxInt path.
+        int isRaw = -1;
+        int is = -1;
+        if (x.index && x.index->kind == ExprKind::Ident) {
+          ABinding* ib =
+              lookup(static_cast<const IdentExpr&>(*x.index).name);
+          if (ib && ib->rawInt) isRaw = ib->slot;
+        }
+        if (isRaw < 0 && x.index && exprIsInt(x.index.get()) &&
+            rawSafeExpr(x.index.get()) &&
+            exprRangeFlat(x.index.get()).known) {
+          isRaw = allocSlot();
+          ++rawRegDepth_;
+          rawRegOf_.clear();
+          emitRawExpr(x.index.get(), isRaw);
+          --rawRegDepth_;
+          rawRegOf_.clear();
+        }
+        if (isRaw < 0) is = evalSlot(x.index.get());
+        // Fallback paths need the index as an aval slot; box the raw int64
+        // on demand (only emitted where the slow path actually runs).
+        auto avalIndex = [&]() -> int {
+          if (isRaw < 0) return is;
+          int bs = allocSlot();
+          loadSlot(isRaw);
+          emitBoxInt64();
+          storeRax(bs);
+          return bs;
+        };
         // xs[i] on an array-typed object: unbox the index inline, verify
         // the receiver is an AArr-backed object (T_LIST/T_TUPLE), bounds
         // check against h.len (with negative-index wraparound, matching
@@ -3902,12 +5178,41 @@ class AsmEmitter {
         // a_getitem.
         TypePtr ot = resolveType(x.object->inferredType);
         if (ot && ot->kind == TypeKind::Array) {
+          // BCE: an enclosing `for i in lo..len(arr)` (lo >= 0 literal,
+          // step 1, pure body that never writes i or arr — see emitFor)
+          // proves i is in [0, len(arr)) here, so the negative-wrap and
+          // bounds check can be skipped. Matching is by binding identity,
+          // so shadowing or rebinding either name falls back to the check.
+          bool bceHit = false;
+          if (!bceLoops_.empty() && x.object->kind == ExprKind::Ident &&
+              x.index->kind == ExprKind::Ident) {
+            ABinding* ob =
+                lookup(static_cast<const IdentExpr&>(*x.object).name);
+            ABinding* ib =
+                lookup(static_cast<const IdentExpr&>(*x.index).name);
+            if (ob && ib) {
+              for (auto it = bceLoops_.rbegin(); it != bceLoops_.rend(); ++it) {
+                if (it->varBind == ib && it->arrBind == ob) {
+                  bceHit = true;
+                  break;
+                }
+              }
+            }
+          }
           std::string slowL = newLabel("gis"), fastL = newLabel("gif"),
-                  panicL = newLabel("gip"), doneL = newLabel("gid"),
-                  negL = newLabel("gin");
+                  doneL = newLabel("gid");
+          std::string panicL, negL;
+          if (!bceHit) {
+            panicL = newLabel("gip");
+            negL = newLabel("gin");
+          }
           movImm(kTagInt, "%rdx");
-          loadSlot(is, "%rdi");
-          emitUnboxInt("%r8", slowL);  // r8 = index int64
+          if (isRaw >= 0) {
+            loadSlot(isRaw, "%r8");  // already int64; no unbox needed
+          } else {
+            loadSlot(is, "%rdi");
+            emitUnboxInt("%r8", slowL);  // r8 = index int64
+          }
           loadSlot(os, "%rdi");
           emit("    mov %rdi, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
                "    jne " + slowL + "\n");
@@ -3917,22 +5222,28 @@ class AsmEmitter {
                "    cmp $3, %eax\n    je " + fastL + "\n"
                "    jmp " + slowL + "\n");
           emitLabel(fastL);
-          emit("    mov 4(%rcx), %edx\n");  // rdx = len (u32, zero-extended)
-          emit("    test %r8, %r8\n    jns " + negL + "_p\n"
-               "    add %rdx, %r8\n");
-          emitLabel(negL + "_p");
-          emit("    cmp %rdx, %r8\n    jae " + panicL + "\n");
-          emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
-               "    jmp " + doneL + "\n");
-          emitLabel(panicL);
-          emitPanicStr("index out of range");
-          emit("    jmp " + doneL + "\n");
+          if (bceHit) {
+            // i >= 0 and i < len(arr): load items[i] directly.
+            emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
+                 "    jmp " + doneL + "\n");
+          } else {
+            emit("    mov 4(%rcx), %edx\n");  // rdx = len (u32, zero-extended)
+            emit("    test %r8, %r8\n    jns " + negL + "_p\n"
+                 "    add %rdx, %r8\n");
+            emitLabel(negL + "_p");
+            emit("    cmp %rdx, %r8\n    jae " + panicL + "\n");
+            emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
+                 "    jmp " + doneL + "\n");
+            emitLabel(panicL);
+            emitPanicStr("index out of range");
+            emit("    jmp " + doneL + "\n");
+          }
           emitLabel(slowL);
-          call2slot("a_getitem", os, is);
+          call2slot("a_getitem", os, avalIndex());
           emitLabel(doneL);
           return;
         }
-        call2slot("a_getitem", os, is);
+        call2slot("a_getitem", os, avalIndex());
         return;
       }
       case ExprKind::Slice: {
@@ -4382,6 +5693,7 @@ class AsmEmitter {
     bool savedInFn = inFunction_;
     inFunction_ = true;
     promoteNames_.clear();  // lambda bodies are expressions; no raw locals
+    nameRanges_.clear();
     emitExpr(x.body.get());
     emit("    leave\n    ret\n");
     int frame = frameBytes();
