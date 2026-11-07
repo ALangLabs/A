@@ -9,7 +9,7 @@
 #
 # Supported arity: 0..8 call arguments / cache-key arguments. Larger arities
 # are a runtime error (documented deviation from Python, which is unbounded).
-import core
+import std:core
 
 fn _call0(f):
     return f()
@@ -38,9 +38,11 @@ fn _call7(f, args):
 fn _call8(f, args):
     return f(args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7])
 
-## _apply(f, args) -> calls function value `f` with the elements of `args`.
-## `args` must be an array built dynamically (e.g. via `append`) when it mixes
-## types; array literals require homogeneous element types.
+"""
+_apply(f, args) -> calls function value `f` with the elements of `args`.
+`args` must be an array built dynamically (e.g. via `append`) when it mixes
+types; array literals require homogeneous element types.
+"""
 fn _apply(f, args):
     n = len(args)
     if n == 0:
@@ -95,9 +97,11 @@ fn _key7(args):
 fn _key8(args):
     return (8, (args[0], args[1], args[2], args[3], args[4], args[5], args[6], args[7]))
 
-## _key(args) -> map key uniquely identifying the argument list.
-## Requires hashable arguments (scalars, strings, tuples thereof); composite
-## arguments such as arrays key by identity and will simply never hit.
+"""
+_key(args) -> map key uniquely identifying the argument list.
+Requires hashable arguments (scalars, strings, tuples thereof); composite
+arguments such as arrays key by identity and will simply never hit.
+"""
 fn _key(args):
     n = len(args)
     if n == 0:

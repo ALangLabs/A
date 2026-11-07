@@ -8,12 +8,14 @@
 # in the html5 table (same rule Python uses); numeric character references
 # are handled by unescape_num below.
 from "entities.a" import html5
-import bytes
-import core
+import std:bytes
+import std:core
 
-## escape(s, quote) -> HTML-escaped string (Python html.escape parity):
-## & -> &amp;, < -> &lt;, > -> &gt;, and with quote=true also
-## " -> &quot; and ' -> &#x27;.
+"""
+escape(s, quote) -> HTML-escaped string (Python html.escape parity):
+& -> &amp;, < -> &lt;, > -> &gt;, and with quote=true also
+" -> &quot; and ' -> &#x27;.
+"""
 fn escape(s: String, quote: bool):
     out = ""
     for c in s.chars():
@@ -32,29 +34,31 @@ fn escape(s: String, quote: bool):
             out = out + cs
     return out
 
-## _join_chars(cs) -> String from an array of chars.
+"""_join_chars(cs) -> String from an array of chars."""
 fn _join_chars(cs):
     out = ""
     for c in cs:
         out = out + str(c)
     return out
 
-## _table_get(name) -> entity replacement or "" when absent.
-## `name` is the entity text WITHOUT '&' and WITH any trailing ';'.
+"""
+_table_get(name) -> entity replacement or "" when absent.
+`name` is the entity text WITHOUT '&' and WITH any trailing ';'.
+"""
 fn _table_get(name: String):
     table = html5()
     if name in table:
         return table[name]
     return ""
 
-## _is_name_char(c) -> entity-name characters are ASCII alnum plus '#'.
+"""_is_name_char(c) -> entity-name characters are ASCII alnum plus '#'."""
 fn _is_name_char(c):
     cs = str(c)
     if cs.isalnum():
         return true
     return cs == "#"
 
-## _digits_value(cs, base) -> integer value of digit chars, -1 on bad digit.
+"""_digits_value(cs, base) -> integer value of digit chars, -1 on bad digit."""
 fn _digits_value(cs, base):
     digits = "0123456789abcdef"
     v = 0
@@ -66,8 +70,10 @@ fn _digits_value(cs, base):
         v = v * base + d
     return v
 
-## unescape(s) -> string with HTML entities replaced (Python html.unescape
-## parity for named, legacy-semicolonless, decimal and hex references).
+"""
+unescape(s) -> string with HTML entities replaced (Python html.unescape
+parity for named, legacy-semicolonless, decimal and hex references).
+"""
 fn unescape(s: String):
     cs = s.chars()
     n = len(cs)

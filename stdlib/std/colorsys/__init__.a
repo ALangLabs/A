@@ -20,10 +20,12 @@ TWO_THIRD = 2.0 / 3.0
 
 # -- internal helpers ---------------------------------------------------------
 
-## _posmod(x, m): Python-style modulo for a positive modulus `m`.
-## A's `%` keeps the sign of the dividend (fmod); Python's keeps the sign
-## of the divisor. All callers pass m > 0, so a single conditional add
-## reproduces `x % m` from Python.
+"""
+_posmod(x, m): Python-style modulo for a positive modulus `m`.
+A's `%` keeps the sign of the dividend (fmod); Python's keeps the sign
+of the divisor. All callers pass m > 0, so a single conditional add
+reproduces `x % m` from Python.
+"""
 fn _posmod(x, m):
     r = x % m
     if r < 0:

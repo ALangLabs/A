@@ -6,15 +6,19 @@
 # API that plain maps lack: `popitem(last)`, `move_to_end`, and
 # order-sensitive `eq`. Plain dict API (`get`/`set`/`pop`/`update`/...) is
 # re-exposed for a drop-in feel.
-import core
+import std:core
 
-## OrderedDict: insertion-ordered key/value map.
-## `data` is public for interop with plain-map helpers.
+"""
+OrderedDict: insertion-ordered key/value map.
+`data` is public for interop with plain-map helpers.
+"""
 class OrderedDict:
     data
 
-    ## at(k) -> value for k; runtime error when absent
-    ## (Python raises KeyError).
+    """
+    at(k) -> value for k; runtime error when absent
+    (Python raises KeyError).
+    """
     fn at(self, k):
         if k in self.data:
             return self.data[k]
@@ -27,27 +31,29 @@ class OrderedDict:
     fn get_or(self, k, default):
         return self.data.get(k, default)
 
-    ## set(k, v) -> insert or update (Python `od[k] = v`).
+    """set(k, v) -> insert or update (Python `od[k] = v`)."""
     fn set(self, k, v):
         self.data[k] = v
 
-    ## contains(k) -> true when the key exists.
+    """contains(k) -> true when the key exists."""
     fn contains(self, k):
         return k in self.data
 
-    ## pop(k) -> remove k and return its value; runtime error when absent.
+    """pop(k) -> remove k and return its value; runtime error when absent."""
     fn pop(self, k):
         if k not in self.data:
             core.panic("OrderedDict has no key '" + str(k) + "'")
         return self.data.pop(k)
 
-    ## pop_or(k, default) -> remove k and return its value or default.
+    """pop_or(k, default) -> remove k and return its value or default."""
     fn pop_or(self, k, default):
         return self.data.pop(k, default)
 
-    ## popitem(last) -> remove and return the (key, value) pair.
-    ## last=true removes the most recently inserted pair (Python default);
-    ## last=false removes the oldest (FIFO, `popitem(last=False)`).
+    """
+    popitem(last) -> remove and return the (key, value) pair.
+    last=true removes the most recently inserted pair (Python default);
+    last=false removes the oldest (FIFO, `popitem(last=False)`).
+    """
     fn popitem(self, last):
         ks = self.data.keys()
         if len(ks) == 0:
@@ -59,9 +65,11 @@ class OrderedDict:
         self.data.pop(k)
         return (k, v)
 
-    ## move_to_end(k, last) -> move an existing key to the end
-    ## (last=true, Python default) or to the front (last=false).
-    ## Runtime error when k is absent (Python raises KeyError).
+    """
+    move_to_end(k, last) -> move an existing key to the end
+    (last=true, Python default) or to the front (last=false).
+    Runtime error when k is absent (Python raises KeyError).
+    """
     fn move_to_end(self, k, last):
         if k not in self.data:
             core.panic("OrderedDict has no key '" + str(k) + "'")
@@ -77,8 +85,10 @@ class OrderedDict:
                 rebuilt[other] = self.data[other]
             self.data = rebuilt
 
-    ## move_to_front(k) -> move an existing key to the front
-    ## (Python `move_to_end(k, last=False)`).
+    """
+    move_to_front(k) -> move an existing key to the front
+    (Python `move_to_end(k, last=False)`).
+    """
     fn move_to_front(self, k):
         self.move_to_end(k, false)
 
@@ -103,8 +113,10 @@ class OrderedDict:
     fn size(self):
         return len(self.data)
 
-    ## reversed() -> keys in reverse insertion order
-    ## (Python `reversed(od)`).
+    """
+    reversed() -> keys in reverse insertion order
+    (Python `reversed(od)`).
+    """
     fn reversed(self):
         ks = self.data.keys()
         out = []
@@ -114,9 +126,11 @@ class OrderedDict:
             i = i - 1
         return out
 
-    ## eq(other) -> true when both have the same keys in the same order
-    ## with equal values (Python OrderedDict.__eq__ is order-sensitive
-    ## against other OrderedDicts).
+    """
+    eq(other) -> true when both have the same keys in the same order
+    with equal values (Python OrderedDict.__eq__ is order-sensitive
+    against other OrderedDicts).
+    """
     fn eq(self, other):
         if len(self.data) != len(other.data):
             return false
@@ -131,8 +145,10 @@ class OrderedDict:
             i = i + 1
         return true
 
-## ordered_dict_fromkeys(keys, value) -> OrderedDict with every key in
-## `keys` mapped to `value` (Python `OrderedDict.fromkeys`).
+"""
+ordered_dict_fromkeys(keys, value) -> OrderedDict with every key in
+`keys` mapped to `value` (Python `OrderedDict.fromkeys`).
+"""
 fn ordered_dict_fromkeys(keys, value):
     od = OrderedDict({})
     for k in keys:

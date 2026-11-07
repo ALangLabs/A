@@ -3,7 +3,7 @@
 # here is scalar emulation: real fixed-width SIMD codegen needs a vector backend
 # and is tracked in TODO.md.
 import prelude
-import math
+import std:math
 
 # --- Vec8: eight typed i64 lanes ---
 

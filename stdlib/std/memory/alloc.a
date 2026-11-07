@@ -1,4 +1,4 @@
-import arena
+import std:arena
 
 fn arena_new(capacity):
     return arena.new(capacity)

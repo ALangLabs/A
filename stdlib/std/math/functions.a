@@ -1,4 +1,4 @@
-import math
+import std:math
 
 fn sqrt(x):
     return math.sqrt(x)

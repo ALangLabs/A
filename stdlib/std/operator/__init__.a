@@ -14,8 +14,8 @@
 #   * `== None` inside a function body miscompiles under the native backend,
 #     so None is detected via `str(x) == "None"` (the string "None" itself is
 #     indistinguishable — documented deviation).
-import math
-import core
+import std:math
+import std:core
 
 # -- comparisons ---------------------------------------------------------------
 

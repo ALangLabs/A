@@ -4,7 +4,7 @@
 # A has no default parameters, so Python's `lo=0, hi=len(a)` defaults are
 # split into 2-argument convenience functions and `*_range` functions that
 # take explicit bounds. The `key=` parameter is unsupported (see README).
-import core
+import std:core
 
 fn _check_lo(lo):
     if lo < 0:

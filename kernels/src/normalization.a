@@ -1,4 +1,4 @@
-import math
+import std:math
 
 fn normalize(xs):
     # L2-normalize; a zero vector stays zero (no division by zero).

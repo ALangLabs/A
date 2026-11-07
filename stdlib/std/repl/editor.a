@@ -1,7 +1,7 @@
 # Interactive line editor for the A REPL — the `_pyrepl`/`prompt_toolkit`
 # analog. Handles keys, history, tab completion, reverse-i-search, ghost
 # autosuggest, and ANSI-highlighted multiline rendering.
-import terminal
+import std:terminal
 import "highlight.a"
 import "complete.a"
 import "history.a"

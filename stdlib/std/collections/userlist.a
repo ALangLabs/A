@@ -4,13 +4,15 @@
 # API. `data` is a public `[T]` field; this class adds the Python method
 # surface (`at`/`set`/`pop`/`remove`/`index`/`count`/...). Indexing `l[i]`
 # cannot be overloaded in A, so `at(i)`/`set(i, v)` are the equivalents.
-import core
+import std:core
 
 class UserList<T>:
     data: [T]
 
-    ## at(i) -> element at index i (negative indexes from the end);
-    ## runtime error when out of range (Python raises IndexError).
+    """
+    at(i) -> element at index i (negative indexes from the end);
+    runtime error when out of range (Python raises IndexError).
+    """
     fn at(self, i):
         n = len(self.data)
         idx = i
@@ -20,8 +22,10 @@ class UserList<T>:
             core.panic("UserList index out of range")
         return self.data[idx]
 
-    ## set(i, v) -> assign element at index i; runtime error when out of
-    ## range (Python `ul[i] = v` raises IndexError).
+    """
+    set(i, v) -> assign element at index i; runtime error when out of
+    range (Python `ul[i] = v` raises IndexError).
+    """
     fn set(self, i, v):
         n = len(self.data)
         idx = i
@@ -40,13 +44,17 @@ class UserList<T>:
     fn insert(self, i, v):
         self.data.insert(i, v)
 
-    ## pop() -> remove and return the LAST element; runtime error when
-    ## empty (Python `ul.pop()`).
+    """
+    pop() -> remove and return the LAST element; runtime error when
+    empty (Python `ul.pop()`).
+    """
     fn pop(self):
         return self.data.pop()
 
-    ## pop_at(i) -> remove and return the element at index i
-    ## (Python `ul.pop(i)`).
+    """
+    pop_at(i) -> remove and return the element at index i
+    (Python `ul.pop(i)`).
+    """
     fn pop_at(self, i):
         n = len(self.data)
         idx = i
@@ -56,8 +64,10 @@ class UserList<T>:
             core.panic("UserList index out of range")
         return self.data.pop(idx)
 
-    ## remove(v) -> remove the first occurrence of v; runtime error when
-    ## absent (Python `ul.remove(v)` raises ValueError).
+    """
+    remove(v) -> remove the first occurrence of v; runtime error when
+    absent (Python `ul.remove(v)` raises ValueError).
+    """
     fn remove(self, v):
         self.data.remove(v)
 
@@ -67,16 +77,18 @@ class UserList<T>:
     fn copy(self):
         return UserList(self.data.copy())
 
-    ## count(v) -> number of occurrences of v.
+    """count(v) -> number of occurrences of v."""
     fn count(self, v):
         return self.data.count(v)
 
-    ## index(v) -> first index of v; runtime error when absent
-    ## (Python raises ValueError).
+    """
+    index(v) -> first index of v; runtime error when absent
+    (Python raises ValueError).
+    """
     fn index(self, v):
         return self.data.index(v)
 
-    ## index_from(v, start) -> first index of v at or after `start`.
+    """index_from(v, start) -> first index of v at or after `start`."""
     fn index_from(self, v, start):
         return self.data.index(v, start)
 
@@ -92,22 +104,22 @@ class UserList<T>:
     fn size(self):
         return len(self.data)
 
-    ## to_list() -> the underlying list copy (Python iteration analogue).
+    """to_list() -> the underlying list copy (Python iteration analogue)."""
     fn to_list(self):
         return self.data.copy()
 
-    ## first() -> first element as an optional (None when empty).
+    """first() -> first element as an optional (None when empty)."""
     fn first(self):
         return self.data.first()
 
-    ## last() -> last element as an optional (None when empty).
+    """last() -> last element as an optional (None when empty)."""
     fn last(self):
         return self.data.last()
 
-## user_list() -> empty UserList.
+"""user_list() -> empty UserList."""
 fn user_list():
     return UserList([])
 
-## user_list_of(xs) -> UserList wrapping an existing list.
+"""user_list_of(xs) -> UserList wrapping an existing list."""
 fn user_list_of(xs):
     return UserList(xs)

@@ -3,8 +3,8 @@
 # is tracked in TODO.md) and real traits. This module keeps the runtime helpers
 # that remain useful: value tags for dispatch and constant-range builders.
 import prelude
-import core
-import json
+import std:core
+import std:json
 
 fn comptime_version() -> str:
     return "0.0.1"

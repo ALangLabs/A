@@ -4,17 +4,21 @@
 # (Python `defaultdict(default_factory)`). Python's `d[k]` auto-vivifies;
 # A's `m[k]` errors on missing keys, so the equivalent is `dd.at(k)`.
 # `dd.data` stays a plain map for direct access.
-import core
+import std:core
 
-## DefaultDict<T>: map with a default factory.
-## `factory` is a `fn() -> T` called once per missing key (the value is
-## then stored, like Python).
+"""
+DefaultDict<T>: map with a default factory.
+`factory` is a `fn() -> T` called once per missing key (the value is
+then stored, like Python).
+"""
 class DefaultDict<T>:
     factory: fn() -> T
     data
 
-    ## at(k) -> value for k, inserting factory() when absent
-    ## (Python `dd[k]`).
+    """
+    at(k) -> value for k, inserting factory() when absent
+    (Python `dd[k]`).
+    """
     fn at(self, k):
         if k in self.data:
             return self.data[k]
@@ -22,36 +26,42 @@ class DefaultDict<T>:
         self.data[k] = v
         return v
 
-    ## get(k) -> value for k or None when absent; does NOT call the
-    ## factory and does NOT insert (Python `dd.get(k)`).
+    """
+    get(k) -> value for k or None when absent; does NOT call the
+    factory and does NOT insert (Python `dd.get(k)`).
+    """
     fn get(self, k):
         return self.data.get(k)
 
-    ## get_or(k, default) -> value for k or `default` when absent
-    ## (Python `dd.get(k, default)`).
+    """
+    get_or(k, default) -> value for k or `default` when absent
+    (Python `dd.get(k, default)`).
+    """
     fn get_or(self, k, default):
         return self.data.get(k, default)
 
-    ## setdefault(k, v) -> value for k, inserting v when absent
-    ## (Python `dd.setdefault(k, v)`; unlike `at` this does not use the
-    ## factory).
+    """
+    setdefault(k, v) -> value for k, inserting v when absent
+    (Python `dd.setdefault(k, v)`; unlike `at` this does not use the
+    factory).
+    """
     fn setdefault(self, k, v):
         if k in self.data:
             return self.data[k]
         self.data[k] = v
         return v
 
-    ## set(k, v) -> insert or update (Python `dd[k] = v`).
+    """set(k, v) -> insert or update (Python `dd[k] = v`)."""
     fn set(self, k, v):
         self.data[k] = v
 
-    ## remove(k) -> delete k; runtime error when absent (Python `del dd[k]`).
+    """remove(k) -> delete k; runtime error when absent (Python `del dd[k]`)."""
     fn remove(self, k):
         if k not in self.data:
             core.panic("DefaultDict has no key '" + str(k) + "'")
         self.data.pop(k)
 
-    ## pop(k) -> remove k and return its value; runtime error when absent.
+    """pop(k) -> remove k and return its value; runtime error when absent."""
     fn pop(self, k):
         if k not in self.data:
             core.panic("DefaultDict has no key '" + str(k) + "'")
@@ -81,8 +91,10 @@ class DefaultDict<T>:
     fn size(self):
         return len(self.data)
 
-## defaultdict(factory) -> empty DefaultDict.
-## `factory` is a zero-argument function returning the default value,
-## e.g. `defaultdict(fn() -> i64 => 0)` or `defaultdict(fn() -> [i64] => [])`.
+"""
+defaultdict(factory) -> empty DefaultDict.
+`factory` is a zero-argument function returning the default value,
+e.g. `defaultdict(fn() -> i64 => 0)` or `defaultdict(fn() -> [i64] => [])`.
+"""
 fn defaultdict<T>(factory: fn() -> T) -> DefaultDict<T>:
     return DefaultDict(factory, {})

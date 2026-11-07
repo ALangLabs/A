@@ -18,11 +18,11 @@
 #     for Python's `None`; string indents are not supported.
 #   * `maxfrozenset`/`maxdeque`/`maxarray` fields exist for signature
 #     parity; A has no frozenset/deque/array.array equivalents.
-import json
-import binary
-import core
+import std:json
+import std:binary
+import std:core
 
-## _slice(s, start, end) -> substring s[start:end] (chars, end exclusive).
+"""_slice(s, start, end) -> substring s[start:end] (chars, end exclusive)."""
 fn _slice(s, start, end):
     cs = s.chars()
     out = ""
@@ -32,29 +32,33 @@ fn _slice(s, start, end):
         i = i + 1
     return out
 
-## _floordiv(a, b) -> floor(a / b) for b > 0.
+"""_floordiv(a, b) -> floor(a / b) for b > 0."""
 fn _floordiv(a, b):
     q = a / b
     if a < 0 and a % b != 0:
         q = q - 1
     return q
 
-## _max(a, b) -> larger of two ints.
+"""_max(a, b) -> larger of two ints."""
 fn _max(a: i64, b: i64) -> i64:
     if a > b:
         return a
     return b
 
-## _is_container_opt(v) -> true when a `json.as_array`/`as_map` probe
-## result is Some. Container optionals (`[Json]?`, `map<String,Json>?`)
-## cannot be compared to None in A, so we probe with a string sentinel
-## and check the runtime kind instead.
+"""
+_is_container_opt(v) -> true when a `json.as_array`/`as_map` probe
+result is Some. Container optionals (`[Json]?`, `map<String,Json>?`)
+cannot be compared to None in A, so we probe with a string sentinel
+and check the runtime kind instead.
+"""
 fn _is_container_opt(v):
     return json.kind(v) != "string"
 
-## _py_str_repr(s) -> Python-style repr of a string (single quotes,
-## escapes for backslash, the quote char, \n, \t, \r). Non-ASCII and other
-## control characters pass through literally (documented deviation).
+"""
+_py_str_repr(s) -> Python-style repr of a string (single quotes,
+escapes for backslash, the quote char, \n, \t, \r). Non-ASCII and other
+control characters pass through literally (documented deviation).
+"""
 fn _py_str_repr(s):
     quote = "'"
     if s.contains("'") and not s.contains("\""):
@@ -77,9 +81,11 @@ fn _py_str_repr(s):
     out = out + quote
     return out
 
-## _seq_kind(x) -> "set" | "tuple" | "other" for kind=="array" values that
-## are not plain lists. Uses the `str` prefix ('{' for sets, '(' for
-## tuples) — cheap and avoids `binary.encode`.
+"""
+_seq_kind(x) -> "set" | "tuple" | "other" for kind=="array" values that
+are not plain lists. Uses the `str` prefix ('{' for sets, '(' for
+tuples) — cheap and avoids `binary.encode`.
+"""
 fn _seq_kind(x):
     s = str(x)
     if s.startswith("\{"):
@@ -88,8 +94,10 @@ fn _seq_kind(x):
         return "tuple"
     return "other"
 
-## _items(x) -> [Json] element list for native sets and tuples via the
-## binary codec (sets/tuples cannot be iterated/indexed uniformly in A).
+"""
+_items(x) -> [Json] element list for native sets and tuples via the
+binary codec (sets/tuples cannot be iterated/indexed uniformly in A).
+"""
 fn _items(x):
     d = binary.decode(binary.encode(x))
     probe = d ?? "NONE"
@@ -97,8 +105,10 @@ fn _items(x):
         return []
     return (json.as_array(d!) ?? [])
 
-## _middle_truncate(s, limit, fill) -> s with its middle replaced by `fill`
-## when len(s) > limit (Python repr_str/repr_int/repr_instance pattern).
+"""
+_middle_truncate(s, limit, fill) -> s with its middle replaced by `fill`
+when len(s) > limit (Python repr_str/repr_int/repr_instance pattern).
+"""
 fn _middle_truncate(s, limit: i64, fill):
     if len(s) <= limit:
         return s
@@ -110,12 +120,14 @@ fn _middle_truncate(s, limit: i64, fill):
     tail = _slice(s, tail_start, n)
     return head + fill + tail
 
-## Repr — repr with limits (Python `reprlib.Repr`).
-##
-## Field order matches the Python __init__ signature (positional):
-##   maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
-##   maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent
-## `indent < 0` means Python `indent=None`.
+"""
+Repr — repr with limits (Python `reprlib.Repr`).
+
+Field order matches the Python __init__ signature (positional):
+maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
+maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent
+`indent < 0` means Python `indent=None`.
+"""
 class Repr:
     maxlevel: i64
     maxtuple: i64
@@ -131,11 +143,11 @@ class Repr:
     fillvalue
     indent: i64
 
-    ## repr(self, x) -> limited repr of x at top level.
+    """repr(self, x) -> limited repr of x at top level."""
     fn repr(self, x):
         return self.repr1(x, self.maxlevel)
 
-    ## repr1(self, x, level) -> dispatch on runtime tag.
+    """repr1(self, x, level) -> dispatch on runtime tag."""
     fn repr1(self, x, level):
         kind = json.kind(x)
         if kind == "string":
@@ -167,7 +179,7 @@ class Repr:
         # null, unknown (ranges, closures, results): repr_instance fallback.
         return self.repr_instance(x, level)
 
-    ## _join(self, pieces, level) -> Python Repr._join (indent-aware).
+    """_join(self, pieces, level) -> Python Repr._join (indent-aware)."""
     fn _join(self, pieces: [String], level):
         if len(pieces) == 0:
             return ""
@@ -183,9 +195,11 @@ class Repr:
             return _slice(joined, 1, n)
         return _slice(joined, 1, _max(1, n - self.indent))
 
-    ## _repr_iterable(self, elems, level, left, right, maxiter, trail)
-    ## -> '[left]e1, e2, ...[right]' with fillvalue past maxiter.
-    ## elems are [Json]; trail is the extra ',' for 1-tuples.
+    """
+    _repr_iterable(self, elems, level, left, right, maxiter, trail)
+    -> '[left]e1, e2, ...[right]' with fillvalue past maxiter.
+    elems are [Json]; trail is the extra ',' for 1-tuples.
+    """
     fn _repr_iterable(self, elems, level, left, right, maxiter: i64, trail):
         n = len(elems)
         if level <= 0 and n > 0:
@@ -207,25 +221,25 @@ class Repr:
             r = trail + right
         return left + s + r
 
-    ## repr_tuple is not provided: A tuples cannot be iterated or indexed,
-    ## and `binary.decode` round-trips them to an opaque TupleValue, so
-    ## tuple elements are unreachable. Tuples render via repr_instance
-    ## (str()), matching Python's '(a, b)' shape but without recursion
-    ## into elements — documented deviation.
+    #repr_tuple is not provided: A tuples cannot be iterated or indexed,
+    #and `binary.decode` round-trips them to an opaque TupleValue, so
+    #tuple elements are unreachable. Tuples render via repr_instance
+    #(str()), matching Python's '(a, b)' shape but without recursion
+    #into elements — documented deviation.
 
-    ## repr_list(self, x, level) -> '[a, b]' (elements are [Json]).
+    """repr_list(self, x, level) -> '[a, b]' (elements are [Json])."""
     fn repr_list(self, x, level):
         elems = (json.as_array(x))!
         return self._repr_iterable(elems, level, "[", "]", self.maxlist, "")
 
-    ## repr_set(self, x, level) -> '{a, b}' / 'set()' (elements via codec).
+    """repr_set(self, x, level) -> '{a, b}' / 'set()' (elements via codec)."""
     fn repr_set(self, x, level):
         elems = _items(x)
         if len(elems) == 0:
             return "set()"
         return self._repr_iterable(elems, level, "\{", "\}", self.maxset, "")
 
-    ## repr_dict(self, x, level) -> '{k: v, ...}' over as_map keys.
+    """repr_dict(self, x, level) -> '{k: v, ...}' over as_map keys."""
     fn repr_dict(self, x, level):
         mm = (json.as_map(x))!
         ks = []
@@ -250,8 +264,10 @@ class Repr:
             pieces.append(self.fillvalue)
         return "\{" + self._join(pieces, level) + "\}"
 
-    ## repr_str(self, s, level) -> quoted, maxstring-truncated repr.
-    ## `s` is a plain String (extracted via json.as_str by repr1).
+    """
+    repr_str(self, s, level) -> quoted, maxstring-truncated repr.
+    `s` is a plain String (extracted via json.as_str by repr1).
+    """
     fn repr_str(self, s, level):
         cs = s.chars()
         take = self.maxstring
@@ -291,19 +307,19 @@ class Repr:
             out = left + self.fillvalue + right
         return out
 
-    ## repr_int(self, x, level) -> digits, maxlong-truncated.
+    """repr_int(self, x, level) -> digits, maxlong-truncated."""
     fn repr_int(self, x, level):
         return _middle_truncate(str(x), self.maxlong, self.fillvalue)
 
-    ## repr_instance(self, x, level) -> fallback repr, maxother-truncated.
+    """repr_instance(self, x, level) -> fallback repr, maxother-truncated."""
     fn repr_instance(self, x, level):
         return _middle_truncate(str(x), self.maxother, self.fillvalue)
 
-## aRepr — shared default Repr (Python `reprlib.aRepr`).
-## Field order: maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
-## maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent.
+#aRepr — shared default Repr (Python `reprlib.aRepr`).
+#Field order: maxlevel, maxtuple, maxlist, maxarray, maxdict, maxset,
+#maxfrozenset, maxdeque, maxstring, maxlong, maxother, fillvalue, indent.
 aRepr = Repr(6, 6, 6, 5, 4, 6, 6, 6, 30, 40, 30, "...", -1)
 
-## repr(x) -> limited repr using the shared aRepr (Python `reprlib.repr`).
+"""repr(x) -> limited repr using the shared aRepr (Python `reprlib.repr`)."""
 fn repr(x):
     return aRepr.repr(x)

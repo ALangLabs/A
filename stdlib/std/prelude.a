@@ -5,7 +5,7 @@
 # `prelude.*`, so no global name clashes. Native modules (`math`, `io`,
 # `fs`, `strings`, `collections`, `core`, `time`, `json`, `binary`,
 # `testing`, `log`, `metrics`, `trace`, `net`, `http`) are untouched.
-import core
+import std:core
 
 fn prelude_version():
     return "0.0.1"

@@ -10,11 +10,13 @@
 #
 # Field access is via `p.field("x")` / `p.at(0)` / `p.asdict()` because
 # `p.x` cannot be synthesized. See README.md for the full deviation list.
-import core
+import std:core
 
-## A namedtuple value: an immutable record keyed by field name.
-## Mirrors the Python namedtuple instance API (`_fields`, `_asdict`,
-## `_replace`, `count`, `index`, tuple-style positional access via `at`).
+"""
+A namedtuple value: an immutable record keyed by field name.
+Mirrors the Python namedtuple instance API (`_fields`, `_asdict`,
+`_replace`, `count`, `index`, tuple-style positional access via `at`).
+"""
 class NamedTuple:
     _typename
     _fields
@@ -23,26 +25,30 @@ class NamedTuple:
     fn typename(self):
         return self._typename
 
-    ## field(name) -> value; runtime error when the field does not exist
-    ## (Python raises AttributeError).
+    """
+    field(name) -> value; runtime error when the field does not exist
+    (Python raises AttributeError).
+    """
     fn field(self, name):
         if name in self._values:
             return self._values[name]
         core.panic("namedtuple '" + self._typename + "' has no field '" + name + "'")
         return None
 
-    ## field_or(name, default) -> value or default when absent.
+    """field_or(name, default) -> value or default when absent."""
     fn field_or(self, name, default):
         if name in self._values:
             return self._values[name]
         return default
 
-    ## has(name) -> true when the record has this field.
+    """has(name) -> true when the record has this field."""
     fn has(self, name):
         return name in self._values
 
-    ## at(i) -> value at positional index i (negative indexes from the end);
-    ## runtime error when out of range (Python raises IndexError/TypeError).
+    """
+    at(i) -> value at positional index i (negative indexes from the end);
+    runtime error when out of range (Python raises IndexError/TypeError).
+    """
     fn at(self, i):
         n = len(self._fields)
         idx = i
@@ -53,27 +59,33 @@ class NamedTuple:
             return None
         return self._values[self._fields[idx]]
 
-    ## fields() -> copy of the field-name list, in definition order.
+    """fields() -> copy of the field-name list, in definition order."""
     fn fields(self):
         return self._fields.copy()
 
-    ## asdict() -> shallow copy of the field-name -> value map.
-    ## (Python `_asdict`; returns a real {K:V} map here.)
+    """
+    asdict() -> shallow copy of the field-name -> value map.
+    (Python `_asdict`; returns a real {K:V} map here.)
+    """
     fn asdict(self):
         return self._values.copy()
 
-    ## values_list() -> field values as a list in definition order
-    ## (the tuple analogue; A tuples cannot be indexed).
+    """
+    values_list() -> field values as a list in definition order
+    (the tuple analogue; A tuples cannot be indexed).
+    """
     fn values_list(self):
         out = []
         for f in self._fields:
             out.append(self._values[f])
         return out
 
-    ## replace(name, value) -> new NamedTuple with one field updated.
-    ## (Python `_replace(**kwargs)`; A has no keyword arguments, so this
-    ## replaces a single named field. For multi-field updates, copy
-    ## `asdict()`, edit the map, and call `Spec.make_map`.)
+    """
+    replace(name, value) -> new NamedTuple with one field updated.
+    (Python `_replace(**kwargs)`; A has no keyword arguments, so this
+    replaces a single named field. For multi-field updates, copy
+    `asdict()`, edit the map, and call `Spec.make_map`.)
+    """
     fn replace(self, name, value):
         if name not in self._values:
             core.panic("namedtuple '" + self._typename + "' has no field '" + name + "'")
@@ -81,7 +93,7 @@ class NamedTuple:
         nt._values[name] = value
         return nt
 
-    ## count(v) -> occurrences of v among field values.
+    """count(v) -> occurrences of v among field values."""
     fn count(self, v):
         n = 0
         for f in self._fields:
@@ -89,8 +101,10 @@ class NamedTuple:
                 n = n + 1
         return n
 
-    ## index(v) -> first positional index of v; runtime error when absent
-    ## (Python raises ValueError).
+    """
+    index(v) -> first positional index of v; runtime error when absent
+    (Python raises ValueError).
+    """
     fn index(self, v):
         i = 0
         for f in self._fields:
@@ -100,8 +114,10 @@ class NamedTuple:
         core.panic("value not in namedtuple '" + self._typename + "'")
         return -1
 
-    ## eq(other) -> structural equality (Python `==` on tuples).
-    ## A `==` on structs compares identity, so namedtuples compare via this.
+    """
+    eq(other) -> structural equality (Python `==` on tuples).
+    A `==` on structs compares identity, so namedtuples compare via this.
+    """
     fn eq(self, other):
         if self._typename != other._typename:
             return false
@@ -114,9 +130,11 @@ class NamedTuple:
                 return false
         return true
 
-## NamedTupleSpec is what `namedtuple()` returns: the "class" analogue.
-## `make(values)` is the `_make` classmethod analogue (takes an
-## ordered list of values); `make_map(d)` is the kwargs constructor.
+"""
+NamedTupleSpec is what `namedtuple()` returns: the "class" analogue.
+`make(values)` is the `_make` classmethod analogue (takes an
+ordered list of values); `make_map(d)` is the kwargs constructor.
+"""
 class NamedTupleSpec:
     _typename
     _fields
@@ -133,8 +151,10 @@ class NamedTupleSpec:
             i = i + 1
         return nt
 
-    ## make_map(d) -> NamedTuple built from a {field: value} map;
-    ## every declared field must be present (kwargs analogue).
+    """
+    make_map(d) -> NamedTuple built from a {field: value} map;
+    every declared field must be present (kwargs analogue).
+    """
     fn make_map(self, d):
         nt = NamedTuple(self._typename, self._fields.copy(), {})
         for f in self._fields:
@@ -143,15 +163,17 @@ class NamedTupleSpec:
             nt._values[f] = d[f]
         return nt
 
-    ## field_names() -> the field-name list.
+    """field_names() -> the field-name list."""
     fn field_names(self):
         return self._fields.copy()
 
-## namedtuple(typename, field_names) -> NamedTupleSpec.
-## `field_names` is a [str] of field names (Python also accepts a single
-## space/comma-separated string; pass a list here). Validates that names
-## are unique and non-empty; Python's identifier/rkeyword checks are not
-## enforced (documented deviation).
+"""
+namedtuple(typename, field_names) -> NamedTupleSpec.
+`field_names` is a [str] of field names (Python also accepts a single
+space/comma-separated string; pass a list here). Validates that names
+are unique and non-empty; Python's identifier/rkeyword checks are not
+enforced (documented deviation).
+"""
 fn namedtuple(typename: str, field_names) -> NamedTupleSpec:
     if typename == "":
         core.panic("namedtuple typename must not be empty")

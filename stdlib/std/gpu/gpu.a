@@ -3,7 +3,7 @@
 # and kernel codegen require a device backend (see TODO.md); `available` is
 # false so callers can branch instead of silently assuming a GPU.
 import prelude
-import core
+import std:core
 
 class Kernel:
     name: str

@@ -12,8 +12,8 @@
 #   * `median_grouped`, `multimode`, `quantiles`, covariance/correlation,
 #     linear regression are not implemented.
 
-import math
-import core
+import std:math
+import std:core
 
 fn _check_nonempty(data, name):
     if len(data) < 1:

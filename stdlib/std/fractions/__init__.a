@@ -5,9 +5,9 @@
 # violations are core.panic. `Fraction(v)` accepts i64, f64 (exact binary
 # ratio via Fraction_from_float) and "n/d" strings are NOT parsed (A has no
 # string->number split API need; use Fraction_new).
-import math
-import core
-import json
+import std:math
+import std:core
+import std:json
 
 fn _gcd_i(a: i64, b: i64) -> i64:
     x = a < 0 ? -a : a
@@ -33,7 +33,7 @@ fn _pow2i(n: i64) -> i64:
         i = i + 1
     return r
 
-## Fraction: exact rational n/d (fields public like Python's ._numerator).
+"""Fraction: exact rational n/d (fields public like Python's ._numerator)."""
 class Fraction:
     n
     d
@@ -154,15 +154,15 @@ fn _mk(n, d):
     g = _gcd_i(n, d)
     return Fraction(n / g, d / g)
 
-## Fraction_new(n, d) -> normalised Fraction (ints).
+"""Fraction_new(n, d) -> normalised Fraction (ints)."""
 fn Fraction_new(n: i64, d: i64):
     return _mk(n, d)
 
-## Fraction_from_int(v) -> v/1.
+"""Fraction_from_int(v) -> v/1."""
 fn Fraction_from_int(v: i64):
     return _mk(v, 1)
 
-## Fraction_from_float(f) -> exact binary ratio of the double f.
+"""Fraction_from_float(f) -> exact binary ratio of the double f."""
 fn Fraction_from_float(f: f64):
     if f == 0.0:
         return _mk(0, 1)
@@ -184,7 +184,7 @@ fn Fraction_from_float(f: f64):
         return _mk(sign * m * _pow2i(shift), 1)
     return _mk(sign * m, _pow2i(-shift))
 
-## _as_fraction(v) -> Fraction for Fraction/i64/f64 inputs (Json dispatch).
+"""_as_fraction(v) -> Fraction for Fraction/i64/f64 inputs (Json dispatch)."""
 fn _as_fraction(v):
     k = json.kind(v)
     if k == "number":

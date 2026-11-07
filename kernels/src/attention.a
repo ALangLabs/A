@@ -1,7 +1,7 @@
 #
 # Self-hosted: scaled dot-product attention in A —
 # scores = softmax(Q.K^T / sqrt(d)); output = scores.V.
-import math
+import std:math
 
 fn _scores(q, k):
     # Scaled dot-product scores of query q against each key row.

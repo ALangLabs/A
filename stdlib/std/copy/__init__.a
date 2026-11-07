@@ -8,7 +8,7 @@
 #   * Behavior may differ from CPython for identity-sensitive or
 #     non-JSON-native A values.
 
-import json
+import std:json
 
 fn copy(x):
     "Copy common values; deep-copies JSON-compatible containers via stringify/parse."

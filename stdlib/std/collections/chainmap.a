@@ -3,10 +3,12 @@
 # A ChainMap groups several maps into one lookup scope: reads scan the maps
 # in order and writes always go to the first map. Iterators are
 # materialized to lists per the porting guide.
-import core
+import std:core
 
-## ChainMap: a list of maps searched front-to-back.
-## `maps` is public (Python exposes `.maps` too).
+"""
+ChainMap: a list of maps searched front-to-back.
+`maps` is public (Python exposes `.maps` too).
+"""
 class ChainMap:
     maps
 
@@ -15,23 +17,27 @@ class ChainMap:
             self.maps.append({})
         return self.maps[0]
 
-    ## get(k) -> value from the first map containing k, else None
-    ## (Python `cm.get(k)`).
+    """
+    get(k) -> value from the first map containing k, else None
+    (Python `cm.get(k)`).
+    """
     fn get(self, k):
         for m in self.maps:
             if k in m:
                 return m[k]
         return None
 
-    ## get_or(k, default) -> value or default when absent in all maps.
+    """get_or(k, default) -> value or default when absent in all maps."""
     fn get_or(self, k, default):
         for m in self.maps:
             if k in m:
                 return m[k]
         return default
 
-    ## at(k) -> value from the first map containing k; runtime error when
-    ## absent everywhere (Python `cm[k]` raises KeyError).
+    """
+    at(k) -> value from the first map containing k; runtime error when
+    absent everywhere (Python `cm[k]` raises KeyError).
+    """
     fn at(self, k):
         for m in self.maps:
             if k in m:
@@ -39,19 +45,21 @@ class ChainMap:
         core.panic("ChainMap has no key '" + str(k) + "'")
         return None
 
-    ## set(k, v) -> write into the FIRST map only (Python `cm[k] = v`).
+    """set(k, v) -> write into the FIRST map only (Python `cm[k] = v`)."""
     fn set(self, k, v):
         self._first()[k] = v
 
-    ## contains(k) -> true when any map holds k.
+    """contains(k) -> true when any map holds k."""
     fn contains(self, k):
         for m in self.maps:
             if k in m:
                 return true
         return false
 
-    ## new_child(m) -> new ChainMap with `m` prepended
-    ## (Python `cm.new_child(m)`).
+    """
+    new_child(m) -> new ChainMap with `m` prepended
+    (Python `cm.new_child(m)`).
+    """
     fn new_child(self, m):
         out = []
         out.append(m)
@@ -59,17 +67,21 @@ class ChainMap:
             out.append(other)
         return ChainMap(out)
 
-    ## parents() -> ChainMap over all maps except the first
-    ## (Python `cm.parents`).
+    """
+    parents() -> ChainMap over all maps except the first
+    (Python `cm.parents`).
+    """
     fn parents(self):
         return ChainMap(self.maps[1..])
 
-    ## maps_list() -> the list of maps (Python `.maps` attribute).
+    """maps_list() -> the list of maps (Python `.maps` attribute)."""
     fn maps_list(self):
         return self.maps
 
-    ## keys() -> union of keys in lookup order (first map's keys, then
-    ## keys first seen in later maps).
+    """
+    keys() -> union of keys in lookup order (first map's keys, then
+    keys first seen in later maps).
+    """
     fn keys(self):
         out = []
         seen = {}
@@ -80,20 +92,24 @@ class ChainMap:
                     out.append(k)
         return out
 
-    ## items() -> (key, value) pairs for the union of keys, values
-    ## resolved by lookup order.
+    """
+    items() -> (key, value) pairs for the union of keys, values
+    resolved by lookup order.
+    """
     fn items(self):
         out = []
         for k in self.keys():
             out.append((k, self.get(k)))
         return out
 
-    ## size() -> number of distinct keys across all maps.
+    """size() -> number of distinct keys across all maps."""
     fn size(self):
         return len(self.keys())
 
-    ## pop(k) -> remove k from the first map that holds it and return its
-    ## value; runtime error when absent everywhere (Python `cm.pop(k)`).
+    """
+    pop(k) -> remove k from the first map that holds it and return its
+    value; runtime error when absent everywhere (Python `cm.pop(k)`).
+    """
     fn pop(self, k):
         for m in self.maps:
             if k in m:
@@ -101,9 +117,11 @@ class ChainMap:
         core.panic("ChainMap has no key '" + str(k) + "'")
         return None
 
-    ## popitem() -> remove and return an arbitrary (key, value) pair from
-    ## the first map (Python `cm.popitem()`); runtime error when the first
-    ## map is empty.
+    """
+    popitem() -> remove and return an arbitrary (key, value) pair from
+    the first map (Python `cm.popitem()`); runtime error when the first
+    map is empty.
+    """
     fn popitem(self):
         first = self._first()
         ks = first.keys()
@@ -114,25 +132,31 @@ class ChainMap:
         first.pop(k)
         return (k, v)
 
-    ## clear() -> remove every key from the FIRST map only
-    ## (Python `cm.clear()`).
+    """
+    clear() -> remove every key from the FIRST map only
+    (Python `cm.clear()`).
+    """
     fn clear(self):
         self._first().clear()
 
-    ## update(other) -> copy every entry of `other` into the first map
-    ## (Python `cm.update(other)`).
+    """
+    update(other) -> copy every entry of `other` into the first map
+    (Python `cm.update(other)`).
+    """
     fn update(self, other):
         self._first().update(other)
 
-    ## copy() -> shallow copy: new ChainMap over the same map objects
-    ## (Python `cm.copy()`).
+    """
+    copy() -> shallow copy: new ChainMap over the same map objects
+    (Python `cm.copy()`).
+    """
     fn copy(self):
         return ChainMap(self.maps.copy())
 
-## chain_map() -> empty ChainMap with one empty map.
+"""chain_map() -> empty ChainMap with one empty map."""
 fn chain_map():
     return ChainMap([{}])
 
-## chain_map_of(maps) -> ChainMap over an existing list of maps.
+"""chain_map_of(maps) -> ChainMap over an existing list of maps."""
 fn chain_map_of(maps):
     return ChainMap(maps)

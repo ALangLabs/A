@@ -5,59 +5,67 @@
 # `data` is a public map field; this class adds the Python method surface
 # (`at`/`get_or`/`pop_or`/`setdefault`/`remove`/`popitem`/...).
 # Iterators are materialized to lists per the porting guide.
-import core
+import std:core
 
-## UserDict: dict wrapper with the MutableMapping-style API.
-## Construct with `UserDict({...})` or `user_dict()` for an empty one.
+"""
+UserDict: dict wrapper with the MutableMapping-style API.
+Construct with `UserDict({...})` or `user_dict()` for an empty one.
+"""
 class UserDict:
     data
 
-    ## at(k) -> value for k; runtime error when absent
-    ## (Python `ud[k]` raises KeyError).
+    """
+    at(k) -> value for k; runtime error when absent
+    (Python `ud[k]` raises KeyError).
+    """
     fn at(self, k):
         if k in self.data:
             return self.data[k]
         core.panic("UserDict has no key '" + str(k) + "'")
         return None
 
-    ## get(k) -> value or None when absent (Python `ud.get(k)`).
+    """get(k) -> value or None when absent (Python `ud.get(k)`)."""
     fn get(self, k):
         return self.data.get(k)
 
-    ## get_or(k, default) -> value or default when absent.
+    """get_or(k, default) -> value or default when absent."""
     fn get_or(self, k, default):
         return self.data.get(k, default)
 
-    ## set(k, v) -> insert or update (Python `ud[k] = v`).
+    """set(k, v) -> insert or update (Python `ud[k] = v`)."""
     fn set(self, k, v):
         self.data[k] = v
 
-    ## setdefault(k, v) -> value for k, inserting v when absent.
+    """setdefault(k, v) -> value for k, inserting v when absent."""
     fn setdefault(self, k, v):
         if k in self.data:
             return self.data[k]
         self.data[k] = v
         return v
 
-    ## remove(k) -> delete k; runtime error when absent
-    ## (Python `del ud[k]`).
+    """
+    remove(k) -> delete k; runtime error when absent
+    (Python `del ud[k]`).
+    """
     fn remove(self, k):
         if k not in self.data:
             core.panic("UserDict has no key '" + str(k) + "'")
         self.data.pop(k)
 
-    ## pop(k) -> remove k and return its value; runtime error when absent.
+    """pop(k) -> remove k and return its value; runtime error when absent."""
     fn pop(self, k):
         if k not in self.data:
             core.panic("UserDict has no key '" + str(k) + "'")
         return self.data.pop(k)
 
-    ## pop_or(k, default) -> remove k and return its value or default.
+    """pop_or(k, default) -> remove k and return its value or default."""
     fn pop_or(self, k, default):
         return self.data.pop(k, default)
 
-    ## popitem() -> remove and return the last-inserted (key, value)
-    ## pair (Python `ud.popitem()`).
+    """
+    popitem() -> remove and return the last-inserted (key, value)
+    pair (Python `ud.popitem()`).
+    """
     fn popitem(self):
         ks = self.data.keys()
         if len(ks) == 0:
@@ -91,14 +99,14 @@ class UserDict:
     fn size(self):
         return len(self.data)
 
-    ## eq(other) -> true when both wrap equal maps (Python `==`).
+    """eq(other) -> true when both wrap equal maps (Python `==`)."""
     fn eq(self, other):
         return self.data == other.data
 
-## user_dict() -> empty UserDict (Python `UserDict()`).
+"""user_dict() -> empty UserDict (Python `UserDict()`)."""
 fn user_dict():
     return UserDict({})
 
-## user_dict_of(d) -> UserDict wrapping an existing map.
+"""user_dict_of(d) -> UserDict wrapping an existing map."""
 fn user_dict_of(d):
     return UserDict(d)

@@ -1,5 +1,5 @@
 # linalg/layout analog). Self-hosted pure A: triple-loop matmul with
-import math
+import std:math
 
 fn dot(a, b):
     total = 0

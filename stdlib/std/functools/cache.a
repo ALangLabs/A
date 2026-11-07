@@ -21,16 +21,20 @@
 #   * `cache_parameters()` is not provided.
 from "_apply.a" import _apply, _key
 
-## CacheInfo mirrors the fields of Python's `functools._CacheInfo`
-## namedtuple: (hits, misses, maxsize, currsize).
+"""
+CacheInfo mirrors the fields of Python's `functools._CacheInfo`
+namedtuple: (hits, misses, maxsize, currsize).
+"""
 class CacheInfo:
     hits
     misses
     maxsize
     currsize
 
-## LRUCache memoizes calls to `func`. Fields are public so advanced users can
-## inspect/reset state; prefer the methods.
+"""
+LRUCache memoizes calls to `func`. Fields are public so advanced users can
+inspect/reset state; prefer the methods.
+"""
 class LRUCache:
     func
     cache      # {key: value}
@@ -39,7 +43,7 @@ class LRUCache:
     hits: i64
     misses: i64
 
-    ## call(self, args) -> memoized `func(args...)`.
+    """call(self, args) -> memoized `func(args...)`."""
     fn call(self, args):
         key = _key(args)
         if self.cache.contains(key):
@@ -58,20 +62,22 @@ class LRUCache:
         self.order.append(key)
         return value
 
-    ## cache_clear(self) -> drop all cached values (hits/misses kept).
+    """cache_clear(self) -> drop all cached values (hits/misses kept)."""
     fn cache_clear(self):
         self.cache = {}
         self.order = []
 
-    ## cache_info(self) -> CacheInfo snapshot (hits, misses, maxsize, currsize).
+    """cache_info(self) -> CacheInfo snapshot (hits, misses, maxsize, currsize)."""
     fn cache_info(self):
         return CacheInfo(self.hits, self.misses, self.maxsize, len(self.cache))
 
-## lru_cache(func, maxsize) -> LRUCache wrapping `func`.
-## `maxsize <= 0` gives an unbounded cache (Python `maxsize=None`).
+"""
+lru_cache(func, maxsize) -> LRUCache wrapping `func`.
+`maxsize <= 0` gives an unbounded cache (Python `maxsize=None`).
+"""
 fn lru_cache(func, maxsize):
     return LRUCache(func, {}, [], maxsize, 0, 0)
 
-## cache(func) -> unbounded memoizing wrapper (Python `functools.cache`).
+"""cache(func) -> unbounded memoizing wrapper (Python `functools.cache`)."""
 fn cache(func):
     return LRUCache(func, {}, [], 0, 0, 0)

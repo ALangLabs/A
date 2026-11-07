@@ -1,10 +1,10 @@
-## Traits describe behaviour; structs opt in with `impl Trait for Type`.
+"""Traits describe behaviour; structs opt in with `impl Trait for Type`."""
 trait Equatable:
-    ## Equality against another value of the same type.
+    """Equality against another value of the same type."""
     fn eq(self, other) -> bool
 
 trait Hashable(Equatable):
-    ## A stable integer hash.
+    """A stable integer hash."""
     fn hash(self) -> i64
 
 class Point:

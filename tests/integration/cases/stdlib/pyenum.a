@@ -1,0 +1,87 @@
+import std:pyenum
+from std:pyenum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_enum_basic():
+    Color = Enum("Color", ["RED", "GREEN", "BLUE"])
+    assert_eq(Color.typename(), "Color")
+    assert_eq(Color.size(), 3)
+    assert_eq(Color.names(), ["RED", "GREEN", "BLUE"])
+    assert_eq(Color.values(), [1, 2, 3])
+    r = Color.at("RED")
+    assert_eq(r.name, "RED")
+    assert_eq(r.value, 1)
+    assert_eq(r.label(), "Color.RED")
+    assert_eq(r.text(), "Color.RED")
+    assert_eq(r.repr(), "<Color.RED: 1>")
+    assert_eq(r.typename(), "Color")
+    assert_eq(Color.has("BLUE"), true)
+    assert_eq(Color.has("NOPE"), false)
+    assert_eq(Color.get("NOPE") == None, true)
+    g = Color.get("GREEN")
+    if g != None:
+        assert_eq(g.label(), "Color.GREEN")
+    assert_eq(Color.value_of(2).label(), "Color.GREEN")
+    assert_eq(Color.find_value(9) == None, true)
+    assert_eq(Color.members_map().keys(), ["RED", "GREEN", "BLUE"])
+
+fn test_enum_string_and_map_specs():
+    Word = Enum("Word", "ALPHA BETA")
+    assert_eq(Word.values(), [1, 2])
+    Shade = Enum("Shade", {"LIGHT": 10, "DARK": 20})
+    assert_eq(Shade.value_of(20).label(), "Shade.DARK")
+
+fn test_enum_auto_and_aliases():
+    mix = {}
+    mix["LIGHT"] = 10
+    mix["DARK"] = auto()
+    mix["AUTO2"] = auto()
+    Shade = Enum("Shade", mix)
+    assert_eq(Shade.values(), [10, 11, 12])
+    Alias = Enum("Alias", {"A": 1, "B": 1, "C": 2})
+    assert_eq(Alias.size(), 2)
+    assert_eq(Alias.names(), ["A", "C"])
+    assert_eq(Alias.at("B").label(), "Alias.A")
+    assert_eq(Alias.members_map().keys(), ["A", "B", "C"])
+
+fn test_intenum_strenum():
+    Num = IntEnum("Num", ["ONE", "TWO"])
+    n = Num.at("TWO")
+    assert_eq(n.text(), "2")
+    assert_eq(n.label(), "Num.TWO")
+    assert_eq(n.value + 1, 3)
+    W = StrEnum("Word", ["HI", "BYE"])
+    w = W.at("HI")
+    assert_eq(w.text(), "1")
+    assert_eq(w.value, 1)
+
+fn test_flag_ops():
+    Perm = Flag("Perm", {"R": 1, "W": 2, "X": 4})
+    R = Perm.at("R")
+    W = Perm.at("W")
+    X = Perm.at("X")
+    rw = Perm.union(R, W)
+    assert_eq(rw.label(), "Perm.R|W")
+    assert_eq(rw.value, 3)
+    assert_eq(rw.text(), "Perm.R|W")
+    rwx = Perm.union(rw, X)
+    assert_eq(rwx.label(), "Perm.R|W|X")
+    assert_eq(Perm.intersection(rwx, Perm.union(R, X)).label(), "Perm.R|X")
+    assert_eq(Perm.symmetric_difference(rwx, R).label(), "Perm.W|X")
+    assert_eq(Perm.difference(rwx, W).label(), "Perm.R|X")
+    assert_eq(Perm.invert(R).label(), "Perm.W|X")
+    assert_eq(Perm.contains_flag(rwx, W), true)
+    assert_eq(Perm.contains_flag(R, rw), false)
+    assert_eq(Perm.value_of(3).label(), "Perm.R|W")
+    assert_eq(Perm.value_of(8).label(), "Perm.8")
+    assert_eq(Perm.find_value(0).label(), "Perm.0")
+    assert_eq(Perm.value_of(3).eq(rw), true)
+
+fn test_intflag_auto():
+    IPerm = IntFlag("IPerm", ["READ", "WRITE", "EXEC"])
+    assert_eq(IPerm.values(), [1, 2, 4])
+    both = IPerm.union(IPerm.at("READ"), IPerm.at("WRITE"))
+    assert_eq(both.value, 3)
+    assert_eq(both.text(), "3")

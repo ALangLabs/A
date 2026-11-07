@@ -1,0 +1,8 @@
+ok test_enum_auto_and_aliases
+ok test_enum_basic
+ok test_enum_string_and_map_specs
+ok test_flag_ops
+ok test_intenum_strenum
+ok test_intflag_auto
+
+6 passed, 0 failed

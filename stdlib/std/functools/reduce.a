@@ -6,11 +6,13 @@
 # `reduce(array, init, fn)`; these wrappers restore the Python argument
 # order. There is no exception mechanism, so the empty-iterable contract
 # violation is a runtime `panic` (matching stdlib style).
-import core
+import std:core
 
-## reduce(function, xs) -> fold `xs` left-to-right with `function(acc, x)`,
-## seeded by the first element. Panics on an empty `xs` (Python raises
-## TypeError).
+"""
+reduce(function, xs) -> fold `xs` left-to-right with `function(acc, x)`,
+seeded by the first element. Panics on an empty `xs` (Python raises
+TypeError).
+"""
 fn reduce(function, xs):
     if len(xs) == 0:
         core.panic("reduce() of empty iterable with no initial value")
@@ -21,8 +23,10 @@ fn reduce(function, xs):
         i = i + 1
     return acc
 
-## reduce_init(function, xs, init) -> fold `xs` left-to-right with
-## `function(acc, x)`, seeded by `init`. Works on empty `xs` (returns init).
+"""
+reduce_init(function, xs, init) -> fold `xs` left-to-right with
+`function(acc, x)`, seeded by `init`. Works on empty `xs` (returns init).
+"""
 fn reduce_init(function, xs, init):
     acc = init
     for x in xs:

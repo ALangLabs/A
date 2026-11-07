@@ -1,4 +1,4 @@
-import core
+import std:core
 
 passed = 0
 failed = 0

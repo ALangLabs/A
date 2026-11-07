@@ -16,11 +16,13 @@
 #     "unknown" (they have no JSON/binary representation to inspect).
 #   * A `struct` instance reports its struct name (parsed from `str(x)`),
 #     matching Python's `cls.__name__` behaviour for user classes.
-import json
+import std:json
 
-## _slice(s, start, end) -> substring s[start:end] (chars, end exclusive).
-## A strings have no slice syntax; this is the minimal helper used across
-## the Python-port modules.
+"""
+_slice(s, start, end) -> substring s[start:end] (chars, end exclusive).
+A strings have no slice syntax; this is the minimal helper used across
+the Python-port modules.
+"""
 fn _slice(s, start, end):
     cs = s.chars()
     out = ""
@@ -30,19 +32,21 @@ fn _slice(s, start, end):
         i = i + 1
     return out
 
-## type_tag(x) -> Python-style type name for any A value.
-##
-## Mapping (Python `type(x).__name__` analog):
-##   None            -> "NoneType"
-##   bool            -> "bool"
-##   int / float     -> "int" / "float"
-##   string / char   -> "str"
-##   list, Json list -> "list"
-##   set             -> "set"
-##   tuple           -> "tuple"
-##   dict, Json obj  -> "dict"
-##   struct instance -> the struct name (e.g. "Point")
-##   range, fn, Ok/Err, other opaque -> "unknown"
+"""
+type_tag(x) -> Python-style type name for any A value.
+
+Mapping (Python `type(x).__name__` analog):
+None            -> "NoneType"
+bool            -> "bool"
+int / float     -> "int" / "float"
+string / char   -> "str"
+list, Json list -> "list"
+set             -> "set"
+tuple           -> "tuple"
+dict, Json obj  -> "dict"
+struct instance -> the struct name (e.g. "Point")
+range, fn, Ok/Err, other opaque -> "unknown"
+"""
 fn type_tag(x) -> str:
     kind = json.kind(x)
     if kind == "null":
@@ -77,7 +81,7 @@ fn type_tag(x) -> str:
         return "object"
     return "unknown"
 
-## type_name(x) -> alias for type_tag(x), mirroring `type(x).__name__`.
+"""type_name(x) -> alias for type_tag(x), mirroring `type(x).__name__`."""
 fn type_name(x) -> str:
     return type_tag(x)
 
@@ -88,54 +92,54 @@ fn type_name(x) -> str:
 # vocabulary is kept for parity with `types.__all__`-style imports.
 # ---------------------------------------------------------------------------
 
-## types.NoneType — tag for None (JSON null).
+#types.NoneType — tag for None (JSON null).
 NoneType = "NoneType"
 
-## types.FunctionType / LambdaType — user-defined function tag.
+#types.FunctionType / LambdaType — user-defined function tag.
 FunctionType = "function"
 LambdaType = "function"
 
-## types.BuiltinFunctionType — native/builtin function tag.
+#types.BuiltinFunctionType — native/builtin function tag.
 BuiltinFunctionType = "builtin_function_or_method"
 
-## types.MethodType — bound method tag.
+#types.MethodType — bound method tag.
 MethodType = "method"
 
-## types.ModuleType — imported module tag.
+#types.ModuleType — imported module tag.
 ModuleType = "module"
 
-## types.CodeType — compiled code object tag.
+#types.CodeType — compiled code object tag.
 CodeType = "code"
 
-## types.TracebackType — exception traceback tag (A has no exceptions).
+#types.TracebackType — exception traceback tag (A has no exceptions).
 TracebackType = "traceback"
 
-## types.FrameType — execution frame tag.
+#types.FrameType — execution frame tag.
 FrameType = "frame"
 
-## types.GeneratorType — generator tag (A has no generators).
+#types.GeneratorType — generator tag (A has no generators).
 GeneratorType = "generator"
 
-## types.CoroutineType — coroutine tag (A has no async).
+#types.CoroutineType — coroutine tag (A has no async).
 CoroutineType = "coroutine"
 
-## types.AsyncGeneratorType — async generator tag.
+#types.AsyncGeneratorType — async generator tag.
 AsyncGeneratorType = "async_generator"
 
-## types.CellType — closure cell tag.
+#types.CellType — closure cell tag.
 CellType = "cell"
 
-## types.MappingProxyType — read-only mapping proxy tag.
+#types.MappingProxyType — read-only mapping proxy tag.
 MappingProxyType = "mappingproxy"
 
-## types.GenericAlias — `list[int]`-style alias tag (A generics erase at runtime).
+#types.GenericAlias — `list[int]`-style alias tag (A generics erase at runtime).
 GenericAlias = "GenericAlias"
 
-## types.UnionType — `int | str` union tag.
+#types.UnionType — `int | str` union tag.
 UnionType = "UnionType"
 
-## types.EllipsisType — `...` literal tag.
+#types.EllipsisType — `...` literal tag.
 EllipsisType = "ellipsis"
 
-## types.NotImplementedType — `NotImplemented` singleton tag.
+#types.NotImplementedType — `NotImplemented` singleton tag.
 NotImplementedType = "NotImplementedType"

@@ -15,24 +15,28 @@
 #   * partial objects are not themselves callable values.
 from "_apply.a" import _apply
 
-## Partial is the A analogue of a `functools.partial` object.
-## `func` is the wrapped callable; `bound` is the array of pre-bound
-## positional arguments. Call the remaining arguments with `.call(args)`.
+"""
+Partial is the A analogue of a `functools.partial` object.
+`func` is the wrapped callable; `bound` is the array of pre-bound
+positional arguments. Call the remaining arguments with `.call(args)`.
+"""
 class Partial:
     func
     bound
 
-    ## call(self, args) -> result of `func(bound..., args...)`.
+    """call(self, args) -> result of `func(bound..., args...)`."""
     fn call(self, args):
         return _apply(self.func, self.bound + args)
 
-## partial(func, bound) -> Partial binding the positional arguments in the
-## `bound` array. Build heterogeneous `bound` arrays with `[]` + `append`
-## (array literals require homogeneous element types).
+"""
+partial(func, bound) -> Partial binding the positional arguments in the
+`bound` array. Build heterogeneous `bound` arrays with `[]` + `append`
+(array literals require homogeneous element types).
+"""
 fn partial(func, bound):
     return Partial(func, bound)
 
-## Convenience constructors for the common small-arity cases.
+"""Convenience constructors for the common small-arity cases."""
 fn partial1(func, a):
     bound = []
     bound.append(a)

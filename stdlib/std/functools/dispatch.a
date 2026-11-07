@@ -23,7 +23,7 @@
 #     of 8 arguments); dispatch is on the tag of `args[0]`.
 #   * `singledispatchmethod`, annotation-based `register`, and `dispatch`
 #     caching are not provided.
-import json
+import std:json
 from "_apply.a" import _apply
 
 fn _type_tag(x) -> str:
@@ -34,31 +34,35 @@ fn _type_tag(x) -> str:
         return "int"
     return kind
 
-## Dispatcher is the A analogue of a `functools.singledispatch` object.
-## `func` is the default implementation; `registry` maps tag strings to
-## registered function values.
+"""
+Dispatcher is the A analogue of a `functools.singledispatch` object.
+`func` is the default implementation; `registry` maps tag strings to
+registered function values.
+"""
 class Dispatcher:
     func
     registry
 
-    ## register(self, tag, registered) -> stores `registered` for dispatch tag `tag`
-    ## (e.g. "int", "string", "array"); returns `registered`.
+    """
+    register(self, tag, registered) -> stores `registered` for dispatch tag `tag`
+    (e.g. "int", "string", "array"); returns `registered`.
+    """
     fn register(self, tag, registered):
         self.registry[tag] = registered
         return registered
 
-    ## dispatch(self, tag) -> registered function for `tag`, or the default.
+    """dispatch(self, tag) -> registered function for `tag`, or the default."""
     fn dispatch(self, tag):
         return self.registry.get(tag, self.func)
 
-    ## dispatch_value(self, x) -> registered function for `x`'s runtime tag.
+    """dispatch_value(self, x) -> registered function for `x`'s runtime tag."""
     fn dispatch_value(self, x):
         return self.dispatch(_type_tag(x))
 
-    ## call(self, args) -> dispatches on the tag of `args[0]` and invokes the
+    """call(self, args) -> dispatches on the tag of `args[0]` and invokes the"""
     fn call(self, args):
         return _apply(self.dispatch_value(args[0]), args)
 
-## singledispatch(func) -> Dispatcher with `func` as the default registered.
+"""singledispatch(func) -> Dispatcher with `func` as the default registered."""
 fn singledispatch(func):
     return Dispatcher(func, {})

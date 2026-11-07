@@ -9,11 +9,13 @@
 #
 # `maxlen` follows Python: a non-negative bound discards from the
 # opposite end on overflow; -1 means unbounded (Python `maxlen=None`).
-import core
+import std:core
 
-## `left` holds the left portion reversed (its last element is the
-## deque's leftmost); `right` holds the right portion with `roff` live
-## elements skipped at the front. Both are internal — use the methods.
+"""
+`left` holds the left portion reversed (its last element is the
+deque's leftmost); `right` holds the right portion with `roff` live
+elements skipped at the front. Both are internal — use the methods.
+"""
 class Deque<T>:
     left: [T]
     right: [T]
@@ -26,8 +28,10 @@ class Deque<T>:
     fn _len(self) -> i64:
         return len(self.left) + self._live_right()
 
-    ## _enforce_maxlen(side) -> drop elements from the opposite end when
-    ## over maxlen. side is "left" or "right" (which end grew).
+    """
+    _enforce_maxlen(side) -> drop elements from the opposite end when
+    over maxlen. side is "left" or "right" (which end grew).
+    """
     fn _enforce_maxlen(self, side):
         if self.maxlen >= 0:
             while self._len() > self.maxlen:
@@ -62,42 +66,50 @@ class Deque<T>:
             return self.right.pop()
         core.panic("pop from an empty deque")
 
-    ## append(x) -> add x at the right end (Python `append`).
+    """append(x) -> add x at the right end (Python `append`)."""
     fn append(self, x):
         self.right.append(x)
         self._enforce_maxlen("right")
 
-    ## appendleft(x) -> add x at the left end (Python `appendleft`).
+    """appendleft(x) -> add x at the left end (Python `appendleft`)."""
     fn appendleft(self, x):
         self.left.append(x)
         self._enforce_maxlen("left")
 
-    ## extend(xs) -> append every element of xs at the right end.
+    """extend(xs) -> append every element of xs at the right end."""
     fn extend(self, xs):
         for x in xs:
             self.right.append(x)
         self._enforce_maxlen("right")
 
-    ## extendleft(xs) -> append every element of xs at the left end,
-    ## iterating in order (Python `extendleft`; equivalent to calling
-    ## `appendleft` for each element, so xs ends up reversed at the left).
+    """
+    extendleft(xs) -> append every element of xs at the left end,
+    iterating in order (Python `extendleft`; equivalent to calling
+    `appendleft` for each element, so xs ends up reversed at the left).
+    """
     fn extendleft(self, xs):
         for x in xs:
             self.left.append(x)
         self._enforce_maxlen("left")
 
-    ## pop() -> remove and return the rightmost element; runtime error
-    ## when empty (Python raises IndexError).
+    """
+    pop() -> remove and return the rightmost element; runtime error
+    when empty (Python raises IndexError).
+    """
     fn pop(self) -> T:
         return self._pop_right()
 
-    ## popleft() -> remove and return the leftmost element; runtime error
-    ## when empty.
+    """
+    popleft() -> remove and return the leftmost element; runtime error
+    when empty.
+    """
     fn popleft(self) -> T:
         return self._pop_left()
 
-    ## rotate(n) -> rotate the deque n steps to the right; negative n
-    ## rotates left (Python `rotate`). O(n).
+    """
+    rotate(n) -> rotate the deque n steps to the right; negative n
+    rotates left (Python `rotate`). O(n).
+    """
     fn rotate(self, n):
         total = self._len()
         if total > 0:
@@ -115,17 +127,17 @@ class Deque<T>:
                 for x in head:
                     self.append(x)
 
-    ## clear() -> remove all elements (Python `clear`).
+    """clear() -> remove all elements (Python `clear`)."""
     fn clear(self):
         self.left = []
         self.right = []
         self.roff = 0
 
-    ## copy() -> shallow copy of the deque.
+    """copy() -> shallow copy of the deque."""
     fn copy(self):
         return Deque(self.left.copy(), self.right.copy(), self.roff, self.maxlen)
 
-    ## reverse() -> reverse the deque in place (Python `reverse`).
+    """reverse() -> reverse the deque in place (Python `reverse`)."""
     fn reverse(self):
         xs = self.to_list()
         xs.reverse()
@@ -133,7 +145,7 @@ class Deque<T>:
         for x in xs:
             self.append(x)
 
-    ## count(x) -> number of occurrences of x.
+    """count(x) -> number of occurrences of x."""
     fn count(self, x):
         n = 0
         for v in self.to_list():
@@ -141,8 +153,10 @@ class Deque<T>:
                 n = n + 1
         return n
 
-    ## index(x) -> index of the first occurrence of x; runtime error when
-    ## absent (Python raises ValueError).
+    """
+    index(x) -> index of the first occurrence of x; runtime error when
+    absent (Python raises ValueError).
+    """
     fn index(self, x):
         xs = self.to_list()
         i = 0
@@ -153,8 +167,10 @@ class Deque<T>:
         core.panic("value not in deque")
         return -1
 
-    ## index_from(x, start) -> index of first occurrence at or after
-    ## `start` (Python `index(x[, start[, stop]])`; `stop` unsupported).
+    """
+    index_from(x, start) -> index of first occurrence at or after
+    `start` (Python `index(x[, start[, stop]])`; `stop` unsupported).
+    """
     fn index_from(self, x, start):
         xs = self.to_list()
         i = start
@@ -167,8 +183,10 @@ class Deque<T>:
         core.panic("value not in deque")
         return -1
 
-    ## remove(x) -> remove the first occurrence of x; runtime error when
-    ## absent (Python `remove` raises ValueError).
+    """
+    remove(x) -> remove the first occurrence of x; runtime error when
+    absent (Python `remove` raises ValueError).
+    """
     fn remove(self, x):
         xs = self.to_list()
         idx = -1
@@ -187,15 +205,17 @@ class Deque<T>:
                 self.append(xs[j])
             j = j + 1
 
-    ## contains(x) -> true when x is in the deque (Python `x in d`).
+    """contains(x) -> true when x is in the deque (Python `x in d`)."""
     fn contains(self, x):
         for v in self.to_list():
             if v == x:
                 return true
         return false
 
-    ## at(i) -> element at index i (negative indexes from the end);
-    ## runtime error when out of range (Python raises IndexError).
+    """
+    at(i) -> element at index i (negative indexes from the end);
+    runtime error when out of range (Python raises IndexError).
+    """
     fn at(self, i) -> T:
         xs = self.to_list()
         n = len(xs)
@@ -206,7 +226,7 @@ class Deque<T>:
             core.panic("deque index out of range")
         return xs[idx]
 
-    ## first() -> leftmost element as an optional (None when empty).
+    """first() -> leftmost element as an optional (None when empty)."""
     fn first(self):
         if len(self.left) > 0:
             return self.left[len(self.left) - 1]
@@ -214,7 +234,7 @@ class Deque<T>:
             return self.right[self.roff]
         return None
 
-    ## last() -> rightmost element as an optional (None when empty).
+    """last() -> rightmost element as an optional (None when empty)."""
     fn last(self):
         if self._live_right() > 0:
             return self.right[len(self.right) - 1]
@@ -222,15 +242,15 @@ class Deque<T>:
             return self.left[0]
         return None
 
-    ## size() -> number of elements (Python `len(d)`).
+    """size() -> number of elements (Python `len(d)`)."""
     fn size(self):
         return self._len()
 
-    ## maxlen_value() -> the configured maxlen (-1 = unbounded).
+    """maxlen_value() -> the configured maxlen (-1 = unbounded)."""
     fn maxlen_value(self):
         return self.maxlen
 
-    ## to_list() -> all elements in order (Python iteration materialized).
+    """to_list() -> all elements in order (Python iteration materialized)."""
     fn to_list(self) -> [T]:
         out = []
         # left portion reversed back into sequence order.
@@ -244,17 +264,19 @@ class Deque<T>:
             j = j + 1
         return out
 
-## deque() -> empty unbounded deque (Python `deque()`). The element type
-## is inferred from later use; for a typed empty deque prefer
-## `deque_of`/`deque_bounded` on a typed list.
+"""
+deque() -> empty unbounded deque (Python `deque()`). The element type
+is inferred from later use; for a typed empty deque prefer
+`deque_of`/`deque_bounded` on a typed list.
+"""
 fn deque():
     return Deque([], [], 0, -1)
 
-## deque_of(xs) -> deque from a list (Python `deque(iterable)`).
+"""deque_of(xs) -> deque from a list (Python `deque(iterable)`)."""
 fn deque_of<T>(xs: [T]) -> Deque<T>:
     return Deque([], xs.copy(), 0, -1)
 
-## (Python `deque(iterable, maxlen)`).
+"""(Python `deque(iterable, maxlen)`)."""
 fn deque_bounded<T>(xs: [T], maxlen: i64) -> Deque<T>:
     d = Deque([], [], 0, maxlen)
     for x in xs:

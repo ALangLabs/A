@@ -36,9 +36,11 @@ fn _sort_rec(xs, cmp):
     right = _sort_rec(xs[mid..], cmp)
     return _merge(left, right, cmp)
 
-## sort_by(xs, cmp) -> new array with `xs` sorted by the three-way
-## comparator `cmp(a, b) -> i64` (negative/zero/positive). Stable; does not
-## mutate `xs`. This is the A analogue of
-## `sorted(xs, key=functools.cmp_to_key(cmp))`.
+"""
+sort_by(xs, cmp) -> new array with `xs` sorted by the three-way
+comparator `cmp(a, b) -> i64` (negative/zero/positive). Stable; does not
+mutate `xs`. This is the A analogue of
+`sorted(xs, key=functools.cmp_to_key(cmp))`.
+"""
 fn sort_by(xs, cmp):
     return _sort_rec(xs.copy(), cmp)

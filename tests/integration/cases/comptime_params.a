@@ -10,8 +10,10 @@ class Buffer:
 impl Sized for Buffer:
     pass
 
-## `comptime` parameters are parsed and usable in the body; call-site
-## specialization is still tracked in TODO.md.
+"""
+`comptime` parameters are parsed and usable in the body; call-site
+specialization is still tracked in TODO.md.
+"""
 fn repeat_n(comptime N: i64, value: i64) -> i64:
     total = 0
     i = 0

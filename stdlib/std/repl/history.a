@@ -1,6 +1,6 @@
 # REPL input history: in-memory ring plus ~/.a_history persistence.
-import fs
-import terminal
+import std:fs
+import std:terminal
 
 entries = []
 class HistState:

@@ -1,6 +1,6 @@
 #
 # everything else is plain A loops/comprehensions over lists.
-import math
+import std:math
 
 fn fused_add(a, b):
     out = []

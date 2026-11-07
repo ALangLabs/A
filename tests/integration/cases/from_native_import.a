@@ -1,7 +1,7 @@
-from math import sqrt
-from math import pow as p
-from math import PI
-from unsafe import get, set
+from std:math import sqrt
+from std:math import pow as p
+from std:math import PI
+from std:unsafe import get, set
 
 print(sqrt(16.0), p(2.0, 10.0))
 print(PI)

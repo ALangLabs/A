@@ -2,7 +2,7 @@
 # Pure A maps over lists; `math` natives cover exp/log. `math` has no
 # tanh/erf/log1p, so those are implemented below in A (stable piecewise
 # forms, Abramowitz & Stegun erf approximation).
-import math
+import std:math
 
 fn _tanh(x):
     # Numerically stable tanh via exp (avoids overflow for large |x|).

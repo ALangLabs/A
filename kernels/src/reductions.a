@@ -1,7 +1,7 @@
 #
 # Self-hosted pure A: plain loops over lists. Int inputs stay int for
 # native `kernel_ops` behavior they replace.
-import math
+import std:math
 
 fn reduce_sum(xs):
     total = 0

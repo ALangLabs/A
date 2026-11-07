@@ -1,4 +1,4 @@
-import core
+import std:core
 
 fn repeat<T>(n: i64, x: T) -> [T]:
     out = []

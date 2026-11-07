@@ -1,10 +1,10 @@
 # A REPL — self-hosted interactive shell (IPython analog).
 # Run via `a repl` on a terminal; the driver loads this file.
-import terminal
-import repl
-import fs
-import env
-import time
+import std:terminal
+import std:repl
+import std:fs
+import std:env
+import std:time
 import "editor.a"
 import "complete.a"
 import "history.a"

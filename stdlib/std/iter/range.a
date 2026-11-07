@@ -1,4 +1,4 @@
-import core
+import std:core
 
 fn range_step(lo: i64, hi: i64, step: i64) -> [i64]:
     if step == 0:

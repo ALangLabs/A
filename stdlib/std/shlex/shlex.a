@@ -15,22 +15,22 @@
 #    are runtime errors via core.panic (documented in README.md).
 #  - `sourcehook` reads files through `import fs` (whole-file strings;
 #    there is no file-object IO in A).
-import core
-import fs
-import json
+import std:core
+import std:fs
+import std:json
 
 _WORDCHARS_BASE = "abcdfeghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
 _WORDCHARS_POSIX_EXTRA = "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ"
 _SAFE_CHARS = "%+,-./0123456789:=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
 
-## _str_chars(s) -> [String] of single characters (codepoints).
+"""_str_chars(s) -> [String] of single characters (codepoints)."""
 fn _str_chars(s):
     out = []
     for c in s:
         out.append(str(c))
     return out
 
-## _join_chars(cs, start, end) -> string of cs[start:end] (end exclusive).
+"""_join_chars(cs, start, end) -> string of cs[start:end] (end exclusive)."""
 fn _join_chars(cs, start, end):
     out = ""
     i = start
@@ -39,22 +39,22 @@ fn _join_chars(cs, start, end):
         i = i + 1
     return out
 
-## _slice(s, start, end) -> substring s[start:end] in characters.
+"""_slice(s, start, end) -> substring s[start:end] in characters."""
 fn _slice(s, start, end):
     return _join_chars(_str_chars(s), start, end)
 
-## _is_abs(path) -> true for POSIX-absolute paths ('/' prefix).
+"""_is_abs(path) -> true for POSIX-absolute paths ('/' prefix)."""
 fn _is_abs(path):
     return path.startswith("/")
 
-## _dirname(path) -> directory portion of a '/'-separated path ("" if none).
+"""_dirname(path) -> directory portion of a '/'-separated path ("" if none)."""
 fn _dirname(path):
     i = path.rfind("/")
     if i < 0:
         return ""
     return _slice(path, 0, i)
 
-## _join_path(dir, name) -> dir + "/" + name (dir "" -> name).
+"""_join_path(dir, name) -> dir + "/" + name (dir "" -> name)."""
 fn _join_path(dir, name):
     if dir == "":
         return name
@@ -86,13 +86,13 @@ class Shlex:
     _pos                # int cursor into _chars
     _chars              # [String] cached characters of instream
 
-    ## _set_instream(self, s) -> make `s` the current input source.
+    """_set_instream(self, s) -> make `s` the current input source."""
     fn _set_instream(self, s):
         self.instream = s
         self._chars = _str_chars(s)
         self._pos = 0
 
-    ## _next_char(self) -> next input char as a 1-char String, or None at EOF.
+    """_next_char(self) -> next input char as a 1-char String, or None at EOF."""
     fn _next_char(self):
         if self._pos >= len(self._chars):
             return None
@@ -100,7 +100,7 @@ class Shlex:
         self._pos = self._pos + 1
         return c
 
-    ## _read_line(self) -> consume through the next '\n' (like readline()).
+    """_read_line(self) -> consume through the next '\n' (like readline())."""
     fn _read_line(self):
         out = ""
         while self._pos < len(self._chars):
@@ -111,13 +111,17 @@ class Shlex:
                 break
         return out
 
-    ## push_token(self, tok) -> push a token onto the stack popped by
-    ## get_token (LIFO, like Python's deque.appendleft/popleft pair).
+    """
+    push_token(self, tok) -> push a token onto the stack popped by
+    get_token (LIFO, like Python's deque.appendleft/popleft pair).
+    """
     fn push_token(self, tok):
         self.pushback.insert(0, tok)
 
-    ## push_source(self, newstream, newfile) -> push an input source onto
-    ## the lexer's input source stack. `newfile` may be None.
+    """
+    push_source(self, newstream, newfile) -> push an input source onto
+    the lexer's input source stack. `newfile` may be None.
+    """
     fn push_source(self, newstream, newfile):
         entry = {}
         entry["infile"] = self.infile
@@ -130,7 +134,7 @@ class Shlex:
         self._set_instream(newstream)
         self.lineno = 1
 
-    ## pop_source(self) -> pop the input source stack.
+    """pop_source(self) -> pop the input source stack."""
     fn pop_source(self):
         entry = self.filestack.pop(0)
         self.infile = entry["infile"]
@@ -140,7 +144,7 @@ class Shlex:
         self._chars = entry["chars"]
         self.state = " "
 
-    ## get_token(self) -> next token, or self.eof at end of input.
+    """get_token(self) -> next token, or self.eof at end of input."""
     fn get_token(self):
         if len(self.pushback) > 0:
             return self.pushback.pop(0)
@@ -158,8 +162,10 @@ class Shlex:
             raw = self.get_token()
         return raw
 
-    ## read_token(self) -> scan the next raw token (String, or None at EOF
-    ## in posix mode). Ported line-for-line from Python shlex.read_token.
+    """
+    read_token(self) -> scan the next raw token (String, or None at EOF
+    in posix mode). Ported line-for-line from Python shlex.read_token.
+    """
     fn read_token(self):
         quoted = false
         escapedstate = " "
@@ -270,10 +276,12 @@ class Shlex:
             result = None
         return result
 
-    ## sourcehook(self, newfile) -> (newfile, contents) for a filename to
-    ## be sourced, or None when the file cannot be read as a relative
-    ## include. Python raises IOError; A surfaces a runtime error from
-    ## fs.read_file for missing files (see README.md).
+    """
+    sourcehook(self, newfile) -> (newfile, contents) for a filename to
+    be sourced, or None when the file cannot be read as a relative
+    include. Python raises IOError; A surfaces a runtime error from
+    fs.read_file for missing files (see README.md).
+    """
     fn sourcehook(self, newfile):
         if newfile.startswith("\""):
             newfile = _slice(newfile, 1, len(newfile) - 1)
@@ -281,19 +289,25 @@ class Shlex:
             newfile = _join_path(_dirname(self.infile), newfile)
         return (newfile, fs.read_file(newfile))
 
-    ## error_leader(self) -> C-compiler-like, Emacs-friendly error leader
-    ## for the current infile/lineno, e.g. `"file", line 3: `.
+    """
+    error_leader(self) -> C-compiler-like, Emacs-friendly error leader
+    for the current infile/lineno, e.g. `"file", line 3: `.
+    """
     fn error_leader(self):
         return "\"" + str(self.infile) + "\", line " + str(self.lineno) + ": "
 
-    ## read_line(self) -> consume and return the rest of the current
-    ## input line (convenience addition; Python shlex has no read_line).
+    """
+    read_line(self) -> consume and return the rest of the current
+    input line (convenience addition; Python shlex has no read_line).
+    """
     fn read_line(self):
         return self._read_line()
 
-## Shlex_new(source, posix, punctuation_chars) -> Shlex over `source`.
-## `punctuation_chars`: false/"" -> none, true -> "();<>|&", or a string
-## of punctuation characters (Python's punctuation_chars argument).
+"""
+Shlex_new(source, posix, punctuation_chars) -> Shlex over `source`.
+`punctuation_chars`: false/"" -> none, true -> "();<>|&", or a string
+of punctuation characters (Python's punctuation_chars argument).
+"""
 fn Shlex_new(source, posix, punctuation_chars):
     pc = ""
     pkind = json.kind(punctuation_chars)
@@ -323,9 +337,11 @@ fn Shlex_new(source, posix, punctuation_chars):
     lx._set_instream(source)
     return lx
 
-## split(s, comments, posix) -> [String] shell-like split of `s`.
-## Python: split(s, comments=False, posix=True); A has no default args, so
-## pass all three. `comments` true keeps '#' comments enabled.
+"""
+split(s, comments, posix) -> [String] shell-like split of `s`.
+Python: split(s, comments=False, posix=True); A has no default args, so
+pass all three. `comments` true keeps '#' comments enabled.
+"""
 fn split(s, comments, posix):
     if s == None:
         core.panic("shlex.split: s argument must not be None")
@@ -341,7 +357,7 @@ fn split(s, comments, posix):
         out.append(tok)
     return out
 
-## quote(s) -> shell-escaped version of the string `s`.
+"""quote(s) -> shell-escaped version of the string `s`."""
 fn quote(s):
     if s == "":
         return "''"
@@ -356,7 +372,7 @@ fn quote(s):
             return s
     return "'" + s.replace("'", "'\"'\"'") + "'"
 
-## join(split_command) -> shell-escaped string from an array of args.
+"""join(split_command) -> shell-escaped string from an array of args."""
 fn join(split_command):
     parts = []
     for arg in split_command:

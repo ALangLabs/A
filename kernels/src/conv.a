@@ -1,6 +1,6 @@
 # Self-hosted pure A: sliding-window loops with the standard
 # (len - window) / stride + 1 output length.
-import math
+import std:math
 
 fn conv1d(input, kernel, stride):
     out = []
