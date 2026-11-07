@@ -83,7 +83,7 @@ syntax and native performance. A quick tour:
 ```python
 import math
 
-struct Point:
+class Point:
     x: float
     y: float
 
@@ -99,12 +99,12 @@ fn main():
     p = Point(3.0, 4.0)
     print("length:", p.length())          # 5.0
     print("fib(20):", fib(20))            # 6765
-    print("squares:", [x * x for x in range(5)])
+    print("squares:", [x * x for x in 0..5])
 
 main()
 ```
 
-Highlights: `struct`/`class` with methods and inheritance, `enum` (plain and
+Highlights: `class` types with fields, methods, and inheritance, `enum` (plain and
 algebraic), `trait` + `impl` conformance, generics and `comptime` params,
 closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 `Result`, slices/views, `defer`, destructuring, string interpolation, and

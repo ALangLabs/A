@@ -11,7 +11,7 @@ focused translation units.
 | `parser.hpp` | `class Parser` public interface: `parseProgram()`, `parseInlineExpression()` (for string interpolation fragments). Private helpers cover statements, declarations, expressions, patterns, call args, string parts, destructuring. |
 | `parser_internal.hpp` | Internal helpers shared across the .cpp files. |
 | `parser_core.cpp` | Token cursor primitives: `cur/peek/check/match/advance/expect`, `fail()` → throws `ParseError`, `synchronize()` for error recovery, `previousSpan()`. |
-| `parser_decl.cpp` | Declaration parsing: `parseFnDecl`, `parseStructDecl` (`class`/`struct`/`metaclass`), `parseEnumDecl`, `parseTraitDecl`, `parseImplDecl`, `parseTypeAliasDecl`, params, docstring statements. |
+| `parser_decl.cpp` | Declaration parsing: `parseFnDecl`, `parseStructDecl` (the `class`/`Class`/`metaclass`/`Metaclass` keywords — there is no `struct` keyword; `StructDecl` is only the internal AST node name), `parseEnumDecl`, `parseTraitDecl`, `parseImplDecl`, `parseTypeAliasDecl`, params, docstring statements. |
 | `parser_stmt.cpp` | Statement dispatch: `if`/`elif`/`else`, `while`, `do..while`, `for..in`, `loop`, `return`, `break`/`continue`, `defer`, imports, let/typed declarations, destructuring, simple statements. |
 | `parser_expr.cpp` | Pratt expression parser: `parseExpression(minPrec)`, `parsePrefix`, `parsePostfix`, `parseLambda`, `parseMatch`, `parseCallOrIndexPostfix`, `parseCallArgs`, `binaryPrecedence`/`isRightAssociative`/`binOp`. |
 | `parser_expr_primary.cpp` | `parsePrimary`: literals, identifiers, parenthesized exprs/tuples, array/map/set literals, ranges. |
