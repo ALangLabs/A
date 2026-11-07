@@ -36,6 +36,7 @@ struct ABinding {
   EnumVariantInfo* en = nullptr;
   int moduleId = -1;
   FnInfo* dropFn = nullptr;  // struct `drop` method, if the value owns one
+  std::string pyMember;      // PyFunc: python member name (aux = module)
 };
 
 class AsmEmitter {
@@ -120,6 +121,10 @@ class AsmEmitter {
   static constexpr uint64_t kNone = kTag | 0x2ULL;
   static constexpr uint64_t kFalse = kTag | 0x4ULL;
   static constexpr uint64_t kTrue = kTag | 0x6ULL;
+  // "argument not supplied" sentinel for defaulted parameters: payload 0 is
+  // unused by the runtime (not a pointer, not an int, not a small constant).
+  // Callers pad missing argv slots with this; callees substitute defaults.
+  static constexpr uint64_t kMissing = kTag;
 
   void fail(const std::string& msg) {
     if (!failed_) {
@@ -376,6 +381,7 @@ class AsmEmitter {
           info->globalVar = "__a_gf" + std::to_string(fnId);
           for (const ComptimeParam& p : fn->comptimeParams) info->paramNames.push_back(p.name);
           for (const ParamDecl& p : fn->params) info->paramNames.push_back(p.name);
+          info->variadic = !fn->params.empty() && fn->params.back().variadic;
           fns_[fn] = info;
           fnList_.push_back(info);
         } else if (s->kind == StmtKind::StructDecl) {
@@ -400,6 +406,7 @@ class AsmEmitter {
             mi->globalVar = "__a_gf" + std::to_string(fnId);
             for (const ComptimeParam& p : m->comptimeParams) mi->paramNames.push_back(p.name);
             for (const ParamDecl& p : m->params) mi->paramNames.push_back(p.name);
+            mi->variadic = !m->params.empty() && m->params.back().variadic;
             fns_[m.get()] = mi;
             fnList_.push_back(mi);
             info->methods[m->name] = mi;
@@ -575,6 +582,16 @@ class AsmEmitter {
     for (const StmtPtr& s : mod.program->statements) {
       if (s->kind == StmtKind::Import) {
         const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+        if (im->pythonModuleImport) {
+          // import python:<mod> [as x]: dynamic module, calls go through
+          // the runtime py_call builtin.
+          std::string alias = !im->alias.empty() ? im->alias : stemOf(im->pythonModule);
+          ABinding b;
+          b.kind = BKind::PyModule;
+          b.aux = im->pythonModule;
+          scopes_.back()[alias] = b;
+          continue;
+        }
         std::string alias = !im->alias.empty() ? im->alias
                             : !im->bareName.empty() ? im->bareName
                             : stemOf(im->path);
@@ -614,6 +631,17 @@ class AsmEmitter {
         }
       } else if (s->kind == StmtKind::FromImport) {
         const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        if (im->pythonModuleImport) {
+          // from python:<mod> import name [as x]: dynamic member call.
+          for (const auto& item : im->items) {
+            ABinding b;
+            b.kind = BKind::PyFunc;
+            b.aux = im->pythonModule;
+            b.pyMember = item.name;
+            scopes_.back()[item.alias] = b;
+          }
+          continue;
+        }
         if (im->moduleId >= 0) {
           const Module& src = graph_.at(im->moduleId);
           if (src.program) {
@@ -709,6 +737,26 @@ class AsmEmitter {
     curModuleId_ = f->moduleId;
     bool savedInFn = inFunction_;
     inFunction_ = true;
+    // Default parameters: any argv slot still holding kMissing is replaced by
+    // its default expression, evaluated in order so a default may reference
+    // earlier (already-substituted) parameters.
+    if (f->decl) {
+      std::size_t offset = f->paramNames.size() - f->decl->params.size();
+      for (std::size_t i = offset; i < f->paramNames.size(); ++i) {
+        const ParamDecl& p = f->decl->params[i - offset];
+        if (!p.defaultValue) continue;
+        ABinding* pb = lookup(f->paramNames[i]);
+        if (!pb || pb->kind != BKind::Param) continue;
+        int ps = pb->slot;
+        std::string skipL = newLabel("def");
+        loadSlot(ps);
+        movImm(kMissing, "%rcx");
+        emit("    cmp %rcx, %rax\n    jne " + skipL + "\n");
+        emitExpr(p.defaultValue.get());
+        storeRax(ps);
+        emitLabel(skipL);
+      }
+    }
     emitBody(f->decl->body);
     emit("    mov $" + u64s(kNone) + ", %rax\n    leave\n    ret\n");
     int frame = frameBytes();
@@ -790,6 +838,15 @@ class AsmEmitter {
       for (const StmtPtr& s : mod.program->statements) {
         if (s->kind == StmtKind::Import) {
           const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+          if (im->pythonModuleImport) {
+            std::string alias = !im->alias.empty() ? im->alias
+                                : stemOf(im->pythonModule);
+            ABinding b;
+            b.kind = BKind::PyModule;
+            b.aux = im->pythonModule;
+            scopes_.back()[alias] = b;
+            continue;
+          }
           std::string alias = !im->alias.empty() ? im->alias
                               : !im->bareName.empty() ? im->bareName
                               : stemOf(im->path);
@@ -801,6 +858,16 @@ class AsmEmitter {
           }
         } else if (s->kind == StmtKind::FromImport) {
           const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+          if (im->pythonModuleImport) {
+            for (const auto& item : im->items) {
+              ABinding b;
+              b.kind = BKind::PyFunc;
+              b.aux = im->pythonModule;
+              b.pyMember = item.name;
+              scopes_.back()[item.alias] = b;
+            }
+            continue;
+          }
           if (im->moduleId >= 0) {
             const Module& src = graph_.at(im->moduleId);
             if (src.program) {
@@ -1300,7 +1367,20 @@ class AsmEmitter {
       int is = evalSlot(ix.index.get());
       int vs = evalSlot(st.value.get());
       if (st.op != "=") {
-        fail("compound index assignment not supported by asm backend");
+        // obj[i] op= v  ->  obj[i] = obj[i] <op> v
+        std::string baseOp = st.op.substr(0, st.op.size() - 1);
+        const char* sym = binopSlow(baseOp);
+        if (!sym) {
+          fail("unsupported operator '" + baseOp + "'");
+          return;
+        }
+        int cs = allocSlot();
+        call2slot("a_getitem", os, is);
+        storeRax(cs);
+        call2slot(sym, cs, vs);
+        int ns = allocSlot();
+        storeRax(ns);
+        call3slot("a_setitem", os, is, ns);
         return;
       }
       call3slot("a_setitem", os, is, vs);
@@ -1317,6 +1397,24 @@ class AsmEmitter {
             ABinding gb;
             gb.kind = BKind::Global;
             gb.sym = it->second;
+            if (st.op != "=") {
+              // mod.g op= v  ->  mod.g = mod.g <op> v
+              std::string baseOp = st.op.substr(0, st.op.size() - 1);
+              const char* sym = binopSlow(baseOp);
+              if (!sym) {
+                fail("unsupported operator '" + baseOp + "'");
+                return;
+              }
+              int vs = evalSlot(st.value.get());
+              int cs = allocSlot();
+              emit("    mov " + gb.sym + "(%rip), %rax\n");
+              storeRax(cs);
+              call2slot(sym, cs, vs);
+              int ns = allocSlot();
+              storeRax(ns);
+              storeBinding(gb, ns);
+              return;
+            }
             int vs = evalSlot(st.value.get());
             storeBinding(gb, vs);
             return;
@@ -1325,11 +1423,28 @@ class AsmEmitter {
       }
       int os = evalSlot(fx.object.get());
       int vs = evalSlot(st.value.get());
+      std::string lbl = emitStrData(fx.field, true);
       if (st.op != "=") {
-        fail("compound field assignment not supported by asm backend");
+        // obj.f op= v  ->  obj.f = obj.f <op> v
+        std::string baseOp = st.op.substr(0, st.op.size() - 1);
+        const char* sym = binopSlow(baseOp);
+        if (!sym) {
+          fail("unsupported operator '" + baseOp + "'");
+          return;
+        }
+        loadSlot(os, "%rdi");
+        emit("    lea " + lbl + "(%rip), %rsi\n    call a_getattr\n");
+        int cs = allocSlot();
+        storeRax(cs);
+        call2slot(sym, cs, vs);
+        int ns = allocSlot();
+        storeRax(ns);
+        loadSlot(os, "%rdi");
+        emit("    lea " + lbl + "(%rip), %rsi\n");
+        loadSlot(ns, "%rdx");
+        emit("    call a_setattr");
         return;
       }
-      std::string lbl = emitStrData(fx.field, true);
       loadSlot(os, "%rdi");
       emit("    lea " + lbl + "(%rip), %rsi\n");
       loadSlot(vs, "%rdx");
@@ -1365,6 +1480,24 @@ class AsmEmitter {
     std::vector<int> slots;
     for (const Expr* a : args) slots.push_back(evalSlot(a));
     emitBiCallSlots(id, slots);
+  }
+
+  // py_call(module, member, args...): argv[0..1] are the module/member
+  // strings, argv[2..] the user args. The runtime resolves libpython.
+  void emitPyCall(const std::string& module, const std::string& member,
+                  const CallExpr& call) {
+    int ms = strLitSlot(module);
+    int fs = strLitSlot(member);
+    std::vector<int> slots;
+    for (const CallArg& a : call.args) slots.push_back(evalSlot(a.value.get()));
+    Argv av = allocArgv((int)slots.size() + 2);
+    argvStore(av, 0, ms);
+    argvStore(av, 1, fs);
+    for (std::size_t i = 0; i < slots.size(); ++i) argvStore(av, (int)i + 2, slots[i]);
+    movImm((uint64_t)builtinRuntimeId("py_call"), "%rdi");
+    movImm(slots.size() + 2, "%rsi");
+    leaSlot(argvPtr(av), "%rdx");
+    emit("    call a_bi_call");
   }
 
   // a_call(fn, n, argv): indirect call through an FNON value.
@@ -1408,14 +1541,23 @@ class AsmEmitter {
   // Place evaluated call args into paramSlots (indexed by paramNames position,
   // -1 = fill A_NONE). `offset` shifts where positional args land (1 for
   // methods whose paramNames[0] is `self`, already filled by the caller).
+  // When `variadicSlot` >= 0, positional args landing at or past that index
+  // are packed into a list stored in paramSlots[variadicSlot]; an empty list
+  // is stored when no extras were passed (unless a named arg supplied it).
   void placeArgs(const CallExpr& call, const std::vector<std::string>& paramNames,
-                 std::vector<int>& paramSlots, std::size_t offset = 0) {
+                 std::vector<int>& paramSlots, std::size_t offset = 0,
+                 int variadicSlot = -1) {
     std::size_t pos = 0;
+    std::vector<int> extras;
     for (auto& a : call.args) {
       int s = evalSlot(a.value.get());
       if (a.name.empty()) {
         std::size_t p = pos + offset;
-        if (p < paramSlots.size()) paramSlots[p] = s;
+        if (variadicSlot >= 0 && (int)p >= variadicSlot) {
+          extras.push_back(s);
+        } else if (p < paramSlots.size()) {
+          paramSlots[p] = s;
+        }
         ++pos;
       } else {
         for (std::size_t i = 0; i < paramNames.size(); ++i) {
@@ -1425,6 +1567,25 @@ class AsmEmitter {
           }
         }
       }
+    }
+    if (variadicSlot >= 0 && (std::size_t)variadicSlot < paramSlots.size() &&
+        paramSlots[variadicSlot] < 0) {
+      int ls;
+      if (extras.empty()) {
+        movImm(0, "%rdi");
+        emit("    xor %esi, %esi\n    call a_list_new\n");
+        ls = allocSlot();
+        storeRax(ls);
+      } else {
+        Argv av = allocArgv((int)extras.size());
+        for (std::size_t i = 0; i < extras.size(); ++i) argvStore(av, (int)i, extras[i]);
+        movImm(extras.size(), "%rdi");
+        leaSlot(argvPtr(av), "%rsi");
+        emit("    call a_list_new\n");
+        ls = allocSlot();
+        storeRax(ls);
+      }
+      paramSlots[variadicSlot] = ls;
     }
   }
 
@@ -1436,7 +1597,7 @@ class AsmEmitter {
       if (paramSlots[i] >= 0) {
         argvStore(av, (int)i + 1, paramSlots[i]);
       } else {
-        argvStoreImm(av, (int)i + 1, kNone);
+        argvStoreImm(av, (int)i + 1, kMissing);
       }
     }
     leaSlot(argvPtr(av), "%rdi");
@@ -1459,9 +1620,14 @@ class AsmEmitter {
       const IdentExpr& id = static_cast<const IdentExpr&>(*callee);
       ABinding* b = lookup(id.name);
       if (b) {
+        if (b->kind == BKind::PyFunc) {
+          emitPyCall(b->aux, b->pyMember, call);
+          return;
+        }
         if (b->kind == BKind::FnValue && b->fn) {
           std::vector<int> ps(b->fn->paramNames.size(), -1);
-          placeArgs(call, b->fn->paramNames, ps);
+          placeArgs(call, b->fn->paramNames, ps, 0,
+                    b->fn->variadic ? (int)b->fn->paramNames.size() - 1 : -1);
           emitDirectCall(b->fn->cname.c_str(), ps);
           return;
         }
@@ -1496,11 +1662,19 @@ class AsmEmitter {
       if (f.object->kind == ExprKind::Ident) {
         const IdentExpr& mid = static_cast<const IdentExpr&>(*f.object);
         ABinding* mb = lookup(mid.name);
+        if (mb && mb->kind == BKind::PyModule) {
+          emitPyCall(mb->aux, f.field, call);
+          return;
+        }
         if (mb && mb->kind == BKind::Module) {
-          int bid = builtinRuntimeId(f.field);
-          if (bid >= 0) {
-            emitBiCall(bid, call);
-            return;
+          // Native modules resolve through the nativeModules() spec first:
+          // member names may shadow builtin names (unsafe.set vs set).
+          if (mb->moduleId >= 0) {
+            int bid = builtinRuntimeId(f.field);
+            if (bid >= 0) {
+              emitBiCall(bid, call);
+              return;
+            }
           }
           if (mb->moduleId < 0) {
             // Native module member: resolve module.member -> builtin name
@@ -1526,7 +1700,8 @@ class AsmEmitter {
           for (FnInfo* fi : fnList_) {
             if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == f.field) {
               std::vector<int> ps(fi->paramNames.size(), -1);
-              placeArgs(call, fi->paramNames, ps);
+              placeArgs(call, fi->paramNames, ps, 0,
+                        fi->variadic ? (int)fi->paramNames.size() - 1 : -1);
               emitDirectCall(fi->cname.c_str(), ps);
               return;
             }
@@ -1576,7 +1751,8 @@ class AsmEmitter {
         ps[0] = selfS;  // self
         if (method->paramNames.size() > 1) {
           std::vector<std::string> rest(method->paramNames.begin() + 1, method->paramNames.end());
-          placeArgs(call, rest, ps, 1);
+          placeArgs(call, rest, ps, 1,
+                    method->variadic ? (int)method->paramNames.size() - 1 : -1);
         }
         emitDirectCall(method->cname.c_str(), ps);
         return;
@@ -1693,8 +1869,53 @@ class AsmEmitter {
       case ExprKind::Unary: {
         auto& x = static_cast<const UnaryExpr&>(*e);
         if (x.op == "++" || x.op == "--") {
-          fail("increment/decrement not supported by asm backend");
-          movImm(kNone);
+          // ++/-- on a variable: updated = old +/- 1; prefix yields updated,
+          // postfix yields old (mirrors the IR lowering).
+          if (x.operand->kind != ExprKind::Ident) {
+            fail("operand of '" + x.op + "' must be a variable");
+            movImm(kNone);
+            return;
+          }
+          const IdentExpr& id = static_cast<const IdentExpr&>(*x.operand);
+          ABinding* b = lookup(id.name);
+          if (!b) {
+            fail("undefined variable '" + id.name + "'");
+            movImm(kNone);
+            return;
+          }
+          emitBindingValue(*b);
+          int oldS = allocSlot();
+          storeRax(oldS);
+          int oneS = allocSlot();
+          movImm(mkintA(1), "%rcx");
+          emit("    mov %rcx, " + slotRef(oneS));
+          call2slot(x.op == "++" ? "a_add_slow" : "a_sub_slow", oldS, oneS);
+          int newS = allocSlot();
+          storeRax(newS);
+          // Rebinding drops the previous owned value first (same as assign).
+          DropRec* oldRec = b->dropFn ? findDropRec(*b) : nullptr;
+          if (b->dropFn && oldRec &&
+              (b->kind == BKind::Local || b->kind == BKind::Param ||
+               b->kind == BKind::Global)) {
+            emitDropRec(*oldRec);
+          }
+          storeBinding(*b, newS);
+          FnInfo* newDrop = dropFnFor(x.operand->inferredType);
+          b->dropFn = newDrop;
+          DropRec* rec = findDropRec(*b);
+          if (rec) {
+            rec->fn = newDrop;
+          } else if (newDrop && !inFunction_ &&
+                     (b->kind == BKind::Local || b->kind == BKind::Global)) {
+            if (b->kind == BKind::Global) {
+              deferStack_.back().drops.push_back({-1, newDrop, b->sym});
+            } else {
+              deferStack_.back().drops.push_back({b->slot, newDrop, ""});
+            }
+          } else if (newDrop && inFunction_ && b->kind == BKind::Local) {
+            deferStack_.back().drops.push_back({b->slot, newDrop, ""});
+          }
+          loadSlot(x.postfix ? oldS : newS);
           return;
         }
         emitExpr(x.operand.get());

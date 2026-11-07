@@ -1,0 +1,42 @@
+# ++/-- prefix/postfix and compound assignment (index/field/module attr)
+i = 5
+a = i++
+b = ++i
+c = i--
+d = --i
+print(a, i, b, c, d)
+
+f = 1.5
+f++
+f--
+print(f)
+
+xs = [1, 2, 3]
+xs[0] += 10
+xs[1] *= 4
+xs[2] -= 1
+print(xs)
+
+d2 = {"k": 1}
+d2["k"] += 41
+print(d2["k"])
+
+class Point:
+    x
+    y
+
+p = Point(1, 2)
+p.x += 5
+p.y *= 3
+print(p.x, p.y)
+
+fn bump(n):
+    n += 1
+    return n
+
+print(bump(41))
+
+n = 0
+while n < 4:
+    n++
+print(n)

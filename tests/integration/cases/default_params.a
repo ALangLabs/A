@@ -1,0 +1,27 @@
+# Default parameter values (trailing-only), incl. methods and chained defaults
+fn greet(name, punct = "!"):
+    return "hi " + name + punct
+
+print(greet("a"))
+print(greet("b", "?"))
+
+fn f(a, b = a + 1, c = b * 2):
+    return a + b + c
+
+print(f(1))
+print(f(1, 10))
+print(f(1, 10, 100))
+
+fn all_default(a = 1, b = 2):
+    return a + b
+
+print(all_default())
+print(all_default(5))
+
+class C:
+    fn m(self, x, y = x * 10):
+        return x + y
+
+c = C()
+print(c.m(1))
+print(c.m(1, 5))

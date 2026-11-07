@@ -439,6 +439,9 @@ fn greet(name: String) -> String:
 Features supported by the parser/AST/type checker (with varying levels of specialization/enforcement):
 
 - parameters with optional type annotations
+- default parameter values on trailing parameters: `fn f(a, b = a + 1)`
+- variadic parameters: `fn f(first, *rest)` / `fn f(*args: int)` — extra
+  positional arguments are collected into a list
 - return type annotations (`-> T`)
 - generic type parameters: `fn id[T](x: T) -> T`
 - `comptime` parameters: `fn f(comptime N: int, ...)`

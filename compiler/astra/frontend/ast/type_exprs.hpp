@@ -46,6 +46,8 @@ struct ParamDecl {
   std::string name;
   Span span;
   TypeExprPtr type;  // may be null for inferred parameter types
+  ExprPtr defaultValue;  // `fn f(x = 1)`; null when the parameter is required
+  bool variadic = false;  // `fn f(*args)`; collects extra args into a list
 };
 
 }  // namespace a

@@ -900,11 +900,39 @@ TypePtr Sema::makeSignatureTypes(FnDecl& decl, TypePtr selfType, FnSig& sig) {
   std::size_t index = 0;
   if (selfType) {
     sig.paramTypes.push_back(selfType);
+    sig.paramHasDefault.push_back(0);
     index = 1;
   }
 
+  bool seenDefault = false;
   for (std::size_t i = index; i < decl.params.size(); ++i) {
     ParamDecl& param = decl.params[i];
+    if (param.variadic) {
+      sig.variadic = true;
+      TypePtr elem;
+      if (param.type) {
+        elem = resolveTypeExpr(*param.type);
+        if (resolveType(elem)->kind == TypeKind::Void) {
+          sink_.error(param.span, "A variadic parameter cannot have element type void.");
+          elem = typeError();
+        }
+      } else {
+        elem = freshVar(Constraint::None, param.span,
+                        "the element type of parameter '" + param.name + "' of '" + decl.name + "'");
+        resolveType(elem)->allowUnresolved = true;
+      }
+      sig.paramTypes.push_back(typeArray(elem, -1));
+      sig.paramHasDefault.push_back(0);
+      continue;
+    }
+    if (param.defaultValue) {
+      seenDefault = true;
+    } else if (seenDefault) {
+      sink_.error(param.span,
+                  "Parameter '" + param.name + "' has no default value but follows a parameter that does.",
+                  "Give every parameter after the first default a default value too.");
+    }
+    sig.paramHasDefault.push_back(param.defaultValue ? 1 : 0);
     TypePtr type;
     if (param.type) {
       type = resolveTypeExpr(*param.type);
@@ -957,6 +985,14 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
   pushScope();
   for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
     declareVar(decl.params[i].name, decl.params[i].span, sig.paramTypes[i], false, "parameter");
+  }
+  // Default values are checked with earlier parameters in scope, so a
+  // default may reference a preceding parameter (e.g. `fn f(a, b = a + 1)`).
+  for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
+    ParamDecl& param = decl.params[i];
+    if (!param.defaultValue) continue;
+    checkArgAgainst(*param.defaultValue, sig.paramTypes[i],
+                    "in the default value of parameter '" + param.name + "' of '" + decl.name + "'");
   }
   // `comptime N: int` parameters are bound as typed values in the body. They are
   // not passed at call sites yet; specialization is tracked in TODO.md.
@@ -2643,13 +2679,42 @@ TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
       return typeError();
     }
   }
-  if (call.args.size() != effective.paramTypes.size()) {
+  std::size_t required = effective.requiredArgs();
+  std::size_t total = effective.paramTypes.size();
+  bool arityOk = call.args.size() >= required &&
+                 (effective.variadic || call.args.size() <= total);
+  if (!arityOk) {
+    std::string expect;
+    if (effective.variadic) {
+      expect = required == 0 ? "any number of argument(s)"
+                             : "at least " + std::to_string(required) + " argument(s)";
+    } else if (required == total) {
+      expect = std::to_string(required) + " argument(s)";
+    } else {
+      expect = "between " + std::to_string(required) + " and " +
+               std::to_string(total) + " argument(s)";
+    }
     sink_.error(call.span,
-                "Function '" + effective.name + "' expects " + std::to_string(effective.paramTypes.size()) +
-                    " argument(s), found " + std::to_string(call.args.size()) + ".");
+                "Function '" + effective.name + "' expects " + expect +
+                    ", found " + std::to_string(call.args.size()) + ".");
     return typeError();
   }
+  // Element type of the variadic list parameter (null when untyped).
+  TypePtr varElem;
+  if (effective.variadic && total > 0) {
+    TypePtr rt = resolveType(effective.paramTypes.back());
+    if (rt && rt->kind == TypeKind::Array) varElem = rt->elem;
+  }
   for (std::size_t i = 0; i < call.args.size(); ++i) {
+    if (effective.variadic && i + 1 >= total) {
+      if (varElem) {
+        checkArgAgainst(*call.args[i].value, varElem,
+                        "in variadic argument " + std::to_string(i + 1) + " to '" + effective.name + "'");
+      } else {
+        inferExpr(*call.args[i].value);
+      }
+      continue;
+    }
     checkArgAgainst(*call.args[i].value, effective.paramTypes[i],
                    "in argument " + std::to_string(i + 1) + " to '" + effective.name + "'");
   }
@@ -2920,15 +2985,44 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     }
     if (rejectNamed()) return typeError();
     const FnSig& sig = methodIt->second;
-    std::size_t expected = sig.paramTypes.size() - 1;  // exclude self
-    if (call.args.size() != expected) {
+    std::size_t total = sig.paramTypes.size();
+    std::size_t expected = total - 1;  // exclude self
+    // self is always required, so user-facing required count is requiredArgs()-1.
+    std::size_t required = sig.requiredArgs() > 0 ? sig.requiredArgs() - 1 : 0;
+    bool arityOk = call.args.size() >= required &&
+                   (sig.variadic || call.args.size() <= expected);
+    if (!arityOk) {
+      std::string expect;
+      if (sig.variadic) {
+        expect = required == 0 ? "any number of argument(s)"
+                               : "at least " + std::to_string(required) + " argument(s)";
+      } else if (required == expected) {
+        expect = std::to_string(expected) + " argument(s)";
+      } else {
+        expect = "between " + std::to_string(required) + " and " +
+                 std::to_string(expected) + " argument(s)";
+      }
       sink_.error(call.span,
-                  "Method '" + method + "' expects " + std::to_string(expected) +
-                      " argument(s), found " + std::to_string(call.args.size()) + ".");
+                  "Method '" + method + "' expects " + expect +
+                      ", found " + std::to_string(call.args.size()) + ".");
       for (auto& arg : call.args) inferExpr(*arg.value);
       return typeError();
     }
+    TypePtr varElem;
+    if (sig.variadic && total > 0) {
+      TypePtr rt = resolveType(sig.paramTypes.back());
+      if (rt && rt->kind == TypeKind::Array) varElem = rt->elem;
+    }
     for (std::size_t i = 0; i < call.args.size(); ++i) {
+      if (sig.variadic && i + 2 >= total) {
+        if (varElem) {
+          checkArgAgainst(*call.args[i].value, varElem,
+                          "in variadic argument " + std::to_string(i + 1) + " to method '" + method + "'");
+        } else {
+          inferExpr(*call.args[i].value);
+        }
+        continue;
+      }
       checkArgAgainst(*call.args[i].value, sig.paramTypes[i + 1],
                       "in argument " + std::to_string(i + 1) + " to method '" + method + "'");
     }

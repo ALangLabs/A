@@ -140,6 +140,8 @@ enum {
     /* unsafe module: raw-ish container/memory access */
     A_BI_UNSAFE_GET, A_BI_UNSAFE_SET, A_BI_UNSAFE_ADDRESS_OF,
     A_BI_UNSAFE_LOAD, A_BI_UNSAFE_STORE, A_BI_UNSAFE_OFFSET,
+    /* python interop: argv = [module:str, member:str, args...] */
+    A_BI_PY_CALL,
     A_BI_COUNT
 };
 

@@ -68,7 +68,7 @@ class Parser {
   std::vector<StmtPtr> parseSuite();
   void expectNewline();
 
-  ParamDecl parseParam();
+  ParamDecl parseParam(bool allowDefault = false);
   TypeExprPtr parseTypeExpr();
 
   ExprPtr parseExpression(int minPrec = 0);

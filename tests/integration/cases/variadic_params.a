@@ -1,0 +1,35 @@
+# Variadic *args parameters (packed into a list at the call site)
+fn sum(*nums):
+    t = 0
+    for x in nums:
+        t += x
+    return t
+
+print(sum())
+print(sum(1, 2, 3))
+
+fn head(first, *rest):
+    print(first, rest)
+    return rest
+
+print(head(1))
+print(head(1, 2, 3))
+
+fn show(tag, *vals: int):
+    return tag + ":" + str(len(vals))
+
+print(show("n", 1, 2))
+
+class C:
+    fn collect(self, *items):
+        return items
+
+c = C()
+print(c.collect(7, 8))
+print(c.collect())
+
+fn combo(a = 10, *r):
+    print(a, r)
+
+combo()
+combo(1, 2, 3)

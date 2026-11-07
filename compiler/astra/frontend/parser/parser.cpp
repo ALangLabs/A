@@ -199,6 +199,7 @@ StmtPtr Parser::parseFnDecl() {
 
   expect(Tok::LParen, "'(' after the function name");
   if (!check(Tok::RParen)) {
+    bool seenVariadic = false;
     while (true) {
       if (check(Tok::KwComptime)) {
         // Compile-time parameter: `comptime N: int`. Recorded for future
@@ -212,7 +213,12 @@ StmtPtr Parser::parseFnDecl() {
         if (match(Tok::Colon)) param.type = parseTypeExpr();
         decl->comptimeParams.push_back(std::move(param));
       } else {
-        decl->params.push_back(parseParam());
+        ParamDecl pd = parseParam(true);
+        if (seenVariadic) {
+          fail(pd.span, "No parameters may follow a variadic '*" + pd.name + "' parameter.");
+        }
+        if (pd.variadic) seenVariadic = true;
+        decl->params.push_back(std::move(pd));
       }
       if (!match(Tok::Comma)) break;
       if (check(Tok::RParen)) break;
@@ -261,8 +267,21 @@ StmtPtr Parser::parseFnDecl() {
   return decl;
 }
 
-ParamDecl Parser::parseParam() {
+ParamDecl Parser::parseParam(bool allowDefault) {
   ParamDecl param;
+  if (allowDefault && check(Tok::Star)) {
+    // Variadic parameter: `*args` or `*args: T` (T is the element type; the
+    // runtime value is a list of T). Must be the last parameter.
+    advance();
+    param.variadic = true;
+    const Token& nameTok = expect(Tok::Ident, "a parameter name after '*'");
+    param.name = nameTok.lexeme;
+    param.span = nameTok.span;
+    if (match(Tok::Colon)) {
+      param.type = parseTypeExpr();
+    }
+    return param;
+  }
   if (check(Tok::KwSelf)) {
     param.span = cur().span;
     param.name = "self";
@@ -276,7 +295,11 @@ ParamDecl Parser::parseParam() {
     param.type = parseTypeExpr();
   }
   if (check(Tok::Eq)) {
-    fail(cur().span, "Default parameter values are not supported yet.");
+    if (param.name == "self" || !allowDefault) {
+      fail(cur().span, "Default parameter values are not supported here.");
+    }
+    advance();
+    param.defaultValue = parseExpression();
   }
   return param;
 }

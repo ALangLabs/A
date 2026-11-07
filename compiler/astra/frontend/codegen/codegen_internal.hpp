@@ -70,6 +70,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"unsafe_get", 156}, {"unsafe_set", 157},
       {"unsafe_address_of", 158}, {"unsafe_load", 159},
       {"unsafe_store", 160}, {"unsafe_offset", 161},
+      {"py_call", 162},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -172,6 +173,7 @@ struct FnInfo {
   std::string structName;
   int moduleId = -1;
   std::string name;
+  bool variadic = false;  // last param collects extra args into a list
 };
 
 struct StructInfo {
@@ -192,6 +194,6 @@ struct EnumVariantInfo {
   std::vector<std::string> payloadFields;
 };
 
-enum class BKind { Local, Global, Param, Capture, FnValue, Builtin, StructCtor, EnumValue, Module };
+enum class BKind { Local, Global, Param, Capture, FnValue, Builtin, StructCtor, EnumValue, Module, PyModule, PyFunc };
 
 }  // namespace a

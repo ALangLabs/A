@@ -116,8 +116,21 @@ class Sema {
     std::vector<std::string> typeParams;
     std::vector<TypePtr> typeParamVars;
     std::vector<TypePtr> paramTypes;
+    // Parallel to paramTypes: nonzero when the parameter has a default value.
+    // Defaults are only allowed on trailing parameters (validated at decl).
+    std::vector<char> paramHasDefault;
+    // `fn f(..., *args)`: the last paramType is a list collecting extra args.
+    bool variadic = false;
     TypePtr retType;
     const FnDecl* decl = nullptr;
+
+    // Number of leading parameters that must be supplied at the call site.
+    std::size_t requiredArgs() const {
+      std::size_t limit = paramTypes.size() - (variadic && !paramTypes.empty() ? 1 : 0);
+      for (std::size_t i = 0; i < limit; ++i)
+        if (paramHasDefault[i]) return i;
+      return limit;
+    }
   };
 
   struct StructSym {
