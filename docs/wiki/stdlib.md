@@ -1,52 +1,34 @@
 # Standard library
 
-`stdlib/` contains A-source library code loaded through the module system —
-there is no separate runtime for it; everything is compiled by the same
-frontend/backend pipeline.
+`stdlib/` is a tree of `.a` modules — ordinary A code using the same import
+system as user code (verified against `stdlib/std/` layout).
 
-## Layout
+## Entry points
 
-- `stdlib/prelude.a` (and duplicate `stdlib/std/prelude/prelude.a`) — loaded
-  before every program by the module loader; namespaced under `prelude.*`
-  (e.g. `class Vec4`, `Result`, `Ok`, `prelude_version()`). Native modules are
-  untouched by it.
-- `stdlib/std/std.a` / `stdlib/std/__init__.a` — top-level re-export shims
-  pulling in subpackages (`builtin`, `collections`, `math`, `simd`, `traits`,
-  `memory`, ...).
-- `stdlib/std/<pkg>/__init__.a` (+ domain files) — one package per directory:
-  `binary`, `bisect`, `builtin`, `bytes`, `collections` (chainmap, counter,
-  defaultdict, deque, dict, list, namedtuple, ordereddict, userdict, userlist),
-  `colorsys`, `comptime`, `copy`, `core`, `debug`, `format` (csv, table),
-  `fractions`, `fs`, `functools` (cache, dispatch, partial, reduce, sort),
-  `getopt`, `gpu`, `graphlib`, `heapq`, `html`, `http`, `iter`, `json`,
-  `keyword`, `log`, `math`, `memory`, `metrics`, `net`, `operator`, `pprint`,
-  `prelude`, `pyenum` (has its own README.md), `repl` (complete, editor,
-  highlight, history, main — the self-hosted IPython-style shell run by
-  `a repl` on a TTY), `reprlib`, `shlex`, `simd`, `statistics`, `string`,
-  `test`/`testing`, `textwrap`, `time`, `token`, `trace`, `traits`
-  (comparable, copyable, equatable, hashable), `types`.
+- `import std:prelude` — helpers incl. `Ok`, `Err`, `is_ok`, `unwrap`,
+  `unwrap_or`, `err_value`, `prelude_version()`.
+- `import std:<pkg>` or `import "std/<pkg>/__init__.a"` style paths reach
+  packages under `stdlib/std/`.
+- `stdlib/std/std.a` re-exports the common subset (`Int`, `Float`, `Bool`,
+  `String`, `len_of`, `map_list`, `sqrt`, `Equatable`, arena helpers, …).
 
-## Import forms
+## Packages (`stdlib/std/`)
 
-- Quoted relative paths: `import "lib/util.a"`, `from "lib/util.a" import add, Vec as Point`.
-- Bare native modules: `import math`, `import std:prelude`.
-- Python interop: `import python:<pkg>` / `from python:<pkg> import x` —
-  resolved at runtime via the `py` native module (libpython `dlopen`'d; see
-  [runtime.md](runtime.md)).
+| Package | Contents |
+| --- | --- |
+| `builtin` | `Int`, `Float`, `Bool`, `String`, `len_of`, `range_list` |
+| `collections` | `map_list`, `filter_list`, `reduce_list`, `sum_list`, `list_reverse`, `dict_get`, plus `list`, `dict`, `deque`, `counter`, `defaultdict`, `chainmap`, `ordereddict`, `namedtuple`, `userlist`, `userdict` |
+| `math` | `sqrt`, `abs_val`, `min_val`, `max_val`, `pow_val`, `clamp`, constants, functions |
+| `simd` | `vec_new`, `dot_lists`, `add_lists`, `scale_list`, `hadamard` |
+| `traits` | `Equatable`, `Hashable`, `Comparable`, `eq`, `is_copyable` |
+| `memory` | `arena_new`, `arena_pool`, `alloc`, `used`, `total` |
+| `iter`, `functools`, `operator`, `types`, `reprlib`, `pprint`, `textwrap`, `shlex`, `keyword`, `token`, `colorsys`, `statistics`, `fractions`, `bisect`, `heapq`, `graphlib`, `copy`, `comptime`, `debug`, `format` (csv/table), `getopt`, `html`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `http`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `pyenum`, `prelude` |
 
-## Relationship to native modules
+Many packages are thin A wrappers over the native modules in
+[builtins](builtins.md); others are pure A.
 
-Many `std/` modules are thin A wrappers over the native-module table in
-`compiler/astra/frontend/name-resolution/native_modules.hpp` (`math.*`,
-`fs.*`, `json.*`, `net.*`, `py.*`, `kernel_ops.*`, ...), whose members map to
-`A_BI_*` runtime builtins. Sema checks builtin calls through the
-`sema_builtins_*.cpp` domain files; docs come from `builtin_docs_*.hpp`.
+## Self-hosted REPL
 
-## How it fits
-
-`ModuleLoader` resolves `std:`/quoted/bare imports against `stdlibRoot`
-(`--stdlib`, `$A_STDLIB`, executable-relative, `./stdlib`; see
-`defaultStdlibRoot()` in `module_loader.cpp`). `tests/integration/cases/stdlib/`
-and `examples/stdlib/` exercise it. Related:
-[Name resolution](frontend-name-resolution.md), [Kernels](kernels.md),
-[examples](examples.md), [overview](overview.md).
+`stdlib/std/repl/main.a` implements the IPython-style shell that `a repl`
+launches on a TTY (line editing, history, highlighting, completion via
+`repl` module builtins).
