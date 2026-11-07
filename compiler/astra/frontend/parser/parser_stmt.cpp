@@ -121,8 +121,16 @@ StmtPtr Parser::parseImport() {
   auto parseModulePrefix = [&](Span& targetSpan, std::string& out) {
     const Token& kw = expect(Tok::Ident, "'python' or 'std'");
     expect(Tok::Colon, "':' after '" + kw.lexeme + "'");
-    std::string mod = expect(Tok::Ident, "a module name after '" + kw.lexeme + ":'").lexeme;
-    while (check(Tok::Dot) && peek(1).kind == Tok::Ident) { advance(); mod += "." + advance().lexeme; }
+    auto isNameTok = [](Tok k) {
+      return k == Tok::Ident || (k >= Tok::KwFn && k <= Tok::KwImpl);
+    };
+    std::string mod;
+    if (isNameTok(cur().kind)) {
+      mod = advance().lexeme;
+    } else {
+      fail(cur().span, "Expected a module name after '" + kw.lexeme + ":'");
+    }
+    while (check(Tok::Dot) && isNameTok(peek(1).kind)) { advance(); mod += "." + advance().lexeme; }
     targetSpan = Span::join(kw.span, previousSpan());
     out = std::move(mod);
   };
@@ -170,8 +178,16 @@ StmtPtr Parser::parseFromImport() {
   auto parseModulePrefix = [&](Span& targetSpan, std::string& out) {
     const Token& kw = expect(Tok::Ident, "'python' or 'std'");
     expect(Tok::Colon, "':' after '" + kw.lexeme + "'");
-    std::string mod = expect(Tok::Ident, "a module name after '" + kw.lexeme + ":'").lexeme;
-    while (check(Tok::Dot) && peek(1).kind == Tok::Ident) { advance(); mod += "." + advance().lexeme; }
+    auto isNameTok = [](Tok k) {
+      return k == Tok::Ident || (k >= Tok::KwFn && k <= Tok::KwImpl);
+    };
+    std::string mod;
+    if (isNameTok(cur().kind)) {
+      mod = advance().lexeme;
+    } else {
+      fail(cur().span, "Expected a module name after '" + kw.lexeme + ":'");
+    }
+    while (check(Tok::Dot) && isNameTok(peek(1).kind)) { advance(); mod += "." + advance().lexeme; }
     targetSpan = Span::join(kw.span, previousSpan());
     out = std::move(mod);
   };

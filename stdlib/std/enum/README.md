@@ -1,14 +1,14 @@
-# std.pyenum — Python `enum` module port
+# std.enum — Python `enum` module port
 
 Source: CPython 3.14 `Lib/enum.py` (functional API subset).
 
-`enum` is an A **keyword**, so the package is named `pyenum` (bare
+`enum` is an A keyword, but `std:`/`from std:` module paths now accept keywords, so the package is named `enum` (bare
 `import enum` cannot parse — see `docs/standard-library/python-porting.md`).
 Import it as:
 
 ```a
-import pyenum
-from pyenum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
+import enum
+from enum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
 ```
 
 ## Why not `class Color(Enum)`?
@@ -138,5 +138,5 @@ Not ported (no A analogue or out of scope):
 
 ## Testing
 
-`tests/integration/cases/stdlib/pyenum.a` exercises the main API
+`tests/integration/cases/stdlib/enum.a` exercises the main API
 (`.flags` = `test`, `fn test_*` functions).

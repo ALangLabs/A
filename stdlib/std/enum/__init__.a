@@ -1,4 +1,4 @@
-# std.pyenum — port of Python 3.14 Lib/enum.py (functional API subset).
+# std.enum — port of Python 3.14 Lib/enum.py (functional API subset).
 #
 # Python's Enum is built on class syntax plus the EnumMeta metaclass:
 #
@@ -43,7 +43,7 @@ auto() value continues from the previous integer value + 1. In Flag
 specs auto values are powers of two (1, 2, 4, 8, ...).
 """
 fn auto():
-    return "@@pyenum.auto@@"
+    return "@@enum.auto@@"
 
 """
 _concrete(v) -> unwrap a Json value to its concrete A type
@@ -69,7 +69,7 @@ fn _is_auto(v):
     s = json.as_str(v)
     if s == None:
         return false
-    return s! == "@@pyenum.auto@@"
+    return s! == "@@enum.auto@@"
 
 """
 EnumMember: a single named enum member (canonical or flag composite).

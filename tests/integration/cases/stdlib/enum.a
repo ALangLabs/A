@@ -1,5 +1,4 @@
-import std:pyenum
-from std:pyenum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
+from std:enum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
 
 fn assert_eq(a, b):
     assert(a == b)

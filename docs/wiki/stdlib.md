@@ -22,7 +22,7 @@ system as user code (verified against `stdlib/std/` layout).
 | `simd` | `vec_new`, `dot_lists`, `add_lists`, `scale_list`, `hadamard` |
 | `traits` | `Equatable`, `Hashable`, `Comparable`, `eq`, `is_copyable` |
 | `memory` | `arena_new`, `arena_pool`, `alloc`, `used`, `total` |
-| `iter`, `functools`, `operator`, `types`, `reprlib`, `pprint`, `textwrap`, `shlex`, `keyword`, `token`, `colorsys`, `statistics`, `fractions`, `bisect`, `heapq`, `graphlib`, `copy`, `comptime`, `debug`, `format` (csv/table), `getopt`, `html`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `http`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `pyenum`, `prelude` |
+| `iter`, `functools`, `operator`, `types`, `reprlib`, `pprint`, `textwrap`, `shlex`, `keyword`, `token`, `colorsys`, `statistics`, `fractions`, `bisect`, `heapq`, `graphlib`, `copy`, `comptime`, `debug`, `format` (csv/table), `getopt`, `html`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `http`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `enum`, `prelude` |
 
 Many packages are thin A wrappers over the native modules in
 [builtins](builtins.md); others are pure A.
