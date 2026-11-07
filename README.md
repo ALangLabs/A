@@ -155,10 +155,13 @@ count = 10
 count += 5
 print(count)  # 15
 
-# Explicit immutable constants
-const PI = 3.14159265359
-const APP_NAME: str = "A-Engine"
+# Optional type annotation
+APP_NAME: str = "A-Engine"
 ```
+
+Bindings are plain `name = value` (optionally `name: Type = value`) — there are
+no `var`/`let`/`const` keywords; every binding is mutable. Module constants
+come from the standard library (e.g. `math.PI`).
 
 ### 2. Classes & Inheritance
 ```a
@@ -406,7 +409,7 @@ cmake --build build --target a-lsp -j
 `tools/vscode-a/` adds TextMate syntax highlighting and connects VS Code to
 `a-lsp`:
 
-- Keywords (`var` `const` `pvt` `type` `fn` `class` `enum` `import` …),
+- Keywords (`fn` `class` `enum` `trait` `impl` `match` `comptime` `import` …),
   declarations, types (`Json`, fixed arrays, `T?` optionals), builtins, numbers,
   operators (`..`, `++`, `--`, `|>`, `??`, `?.`), and comments
 - Strings with `{interpolation}`, raw `"""` strings, char literals, and escapes
