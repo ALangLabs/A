@@ -8,7 +8,6 @@
 #include "ast/ast.hpp"
 #include "lexer/lexer.hpp"
 #include "parser/parser.hpp"
-#include "memory/value.hpp"
 #include "type-checker/sema.hpp"
 #include "type-checker/types.hpp"
 #include "driver/version.hpp"
