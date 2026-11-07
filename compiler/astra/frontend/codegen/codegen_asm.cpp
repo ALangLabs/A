@@ -338,6 +338,18 @@ class AsmEmitter {
     uint64_t p = (((uint64_t)v) << 1) | 1ULL;
     return kTag | (p & kPayloadMask);
   }
+  // Integer literal -> aval, mirroring mkint_full: the inline 47-bit
+  // encoding only covers [-2^46, 2^46); wider values must box as T_INT64
+  // (mkintA alone would truncate the payload and miscompile the sign).
+  void emitIntLitA(std::int64_t v) {
+    const std::int64_t lim = std::int64_t(1) << 46;
+    if (v >= -lim && v < lim) {
+      movImm(mkintA(v));
+      return;
+    }
+    movImm((uint64_t)v);
+    emitBoxInt64();
+  }
   void movImm(uint64_t v, const char* reg = "%rax") {
     emit(std::string("    mov $") + u64s(v) + ", " + reg);
     if (rawRegOn()) {
@@ -1987,6 +1999,85 @@ class AsmEmitter {
   };
   std::vector<BceCtx> bceLoops_;
 
+  // Value whitelist for the fill-loop idiom: scalar, non-allocating,
+  // non-aliasing expressions whose value cannot change across iterations
+  // (no calls, no heap reads/writes, no object-building literals, no
+  // ++/-- side effects). Anything else is re-evaluated per iteration and
+  // must stay on the generic loop path.
+  bool fillValueOk(const Expr* e) const {
+    if (!e) return true;
+    switch (e->kind) {
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+      case ExprKind::Ident:
+        return true;
+      case ExprKind::StringLit:
+        for (const StringPart& p :
+             static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr) return false;
+        return true;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if (u.op == "++" || u.op == "--") return false;
+        return fillValueOk(u.operand.get());
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        return fillValueOk(b.lhs.get()) && fillValueOk(b.rhs.get());
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        return fillValueOk(t.cond.get()) && fillValueOk(t.thenValue.get()) &&
+               fillValueOk(t.elseValue.get());
+      }
+      default:
+        return false;
+    }
+  }
+
+  // `for i in lo..hi[..step]` whose entire body is `xs[i] = v` with v a
+  // loop-invariant scalar lowers to one a_list_fill_range call instead of
+  // the per-element loop. curS/endS/stepS are the raw int64 range slots
+  // already computed by emitFor; xs and v are evaluated once (both are
+  // loop-invariant: xs is a plain ident, v passes fillValueOk and names
+  // neither i nor xs). The runtime helper reproduces a_setitem's
+  // normalize_index panics element-by-element.
+  bool tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS) {
+    if (st.body.size() != 1) return false;
+    const Stmt* bs = st.body[0].get();
+    if (!bs || bs->kind != StmtKind::Assign) return false;
+    const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
+    if (as.op != "=" || !as.target || !as.value ||
+        as.target->kind != ExprKind::Index)
+      return false;
+    const IndexExpr& ix = static_cast<const IndexExpr&>(*as.target);
+    if (ix.object->kind != ExprKind::Ident ||
+        ix.index->kind != ExprKind::Ident)
+      return false;
+    const std::string& xsName =
+        static_cast<const IdentExpr&>(*ix.object).name;
+    if (xsName == st.var ||
+        static_cast<const IdentExpr&>(*ix.index).name != st.var)
+      return false;
+    TypePtr xt = resolveType(ix.object->inferredType);
+    if (!xt || xt->kind != TypeKind::Array) return false;
+    if (!fillValueOk(as.value.get())) return false;
+    std::set<std::string> ids;
+    collectIdents(as.value.get(), ids);
+    if (ids.count(st.var) || ids.count(xsName)) return false;
+    int xsS = evalSlot(ix.object.get());
+    int vS = evalSlot(as.value.get());
+    loadSlot(xsS, "%rdi");
+    loadSlot(curS, "%rsi");
+    loadSlot(endS, "%rdx");
+    loadSlot(stepS, "%rcx");
+    loadSlot(vS, "%r8");
+    emit("    call a_list_fill_range\n");
+    return true;
+  }
+
   void emitFor(const ForStmt& st) {
     // Fast path: `for x in lo..hi[..step]` as a native counted int64 loop.
     const Expr* loE = nullptr;
@@ -2027,6 +2118,10 @@ class AsmEmitter {
         emit("    lea " + msg + "(%rip), %rdi\n    call a_panic_msg\n");
         emitLabel(okL);
       }
+      // Fill idiom: `for i in lo..hi[..step]: xs[i] = <invariant>` becomes
+      // one runtime bulk-fill call (checked after the step==0 panic so
+      // that behaviour is preserved).
+      if (tryEmitForFill(st, curS, endS, stepS)) return;
       int varS = allocSlot();
       std::string loopL = newLabel("for");
       std::string contL = newLabel("forc");
@@ -2264,6 +2359,18 @@ class AsmEmitter {
       if (b->rawInt && st.op == "=" && !b->dropFn &&
           rawSafeExpr(st.value.get()) && exprIsInt(st.value.get())) {
         emitRawExpr(st.value.get(), b->slot);
+        return;
+      }
+      // Promoted local + proven non-overflowing op-assign (x += v, x &= v,
+      // ...): update the raw int64 slot in place. The proof mirrors
+      // promoteWriteStmt's assignOpRawOk gate, so a promoted binding always
+      // takes this path and keeps rawInt set.
+      if (b->rawInt && !b->dropFn && st.op.size() > 1 && st.op.back() == '=' &&
+          assignOpRawOk(id.name, st.op.substr(0, st.op.size() - 1),
+                        st.value.get())) {
+        int vs = allocSlot();
+        emitRawExpr(st.value.get(), vs);
+        emitRawBin(st.op.substr(0, st.op.size() - 1), b->slot, vs, b->slot);
         return;
       }
       int vs;
@@ -3139,11 +3246,11 @@ class AsmEmitter {
   }
 
   static void rngJoin(ARange& a, const ARange& b) {
-    if (!a.known) {
-      a = b;
-      return;
-    }
-    if (!b.known) {
+    // Unknown is the top element ("could be anything"): joining any known
+    // range with an unknown one must stay unknown. The previous order-
+    // dependent behaviour could drop earlier known bounds and let overflow
+    // proofs fire on incomplete intervals.
+    if (!a.known || !b.known) {
       a.known = false;
       return;
     }
@@ -3304,6 +3411,39 @@ class AsmEmitter {
       auto it = nameRanges_.find(n);
       return it == nameRanges_.end() ? ARange{} : it->second;
     });
+  }
+
+  // Overflow proofs for in-place updates (`x++`, `x--`, `x += v`, ...).
+  // nameRanges_[nm] is the union of every interval nm holds at any program
+  // point, so "union range <op> value range fits int64" proves the update
+  // can never produce the double aval that overflow yields — the same
+  // contract rawSafeExpr's arithFits gate relies on.
+  bool nameRangeKnown(const std::string& nm, ARange& out) const {
+    auto it = nameRanges_.find(nm);
+    if (it == nameRanges_.end() || !it->second.known) return false;
+    out = it->second;
+    return true;
+  }
+
+  bool incDecProven(const std::string& nm, bool isInc) const {
+    ARange r;
+    if (!nameRangeKnown(nm, r)) return false;
+    return arithFits(r, rngSpan(1, 1), isInc ? "+" : "-");
+  }
+
+  // `nm <op>= v` stays int64: structural for ops that cannot overflow
+  // (& | ^ % << >> on int64 always yield int64-or-panic, and emitRawBin
+  // reproduces the panic paths), range-proven for + - *.
+  bool assignOpRawOk(const std::string& nm, const std::string& base,
+                     const Expr* v) {
+    if (!v || !exprIsInt(v) || !rawSafeExpr(v)) return false;
+    if (base == "&" || base == "|" || base == "^" || base == "%" ||
+        base == "<<" || base == ">>")
+      return true;
+    if (base != "+" && base != "-" && base != "*") return false;
+    ARange r;
+    if (!nameRangeKnown(nm, r)) return false;
+    return arithFits(r, exprRangeFlat(v), base);
   }
 
   // ---- range dataflow -------------------------------------------------------
@@ -3783,6 +3923,23 @@ class AsmEmitter {
       }
     }
 
+  // `x++`/`x--`/`++x`/`--x` as a whole statement expr: model as x = x +/- 1.
+  // rangeBinOp yields unknown whenever the increment can overflow int64
+  // (the runtime would then produce a double aval), so the recorded range
+  // stays sound and incDecProven only fires on genuinely bounded values.
+  // Nested uses (f(x++), y = x++ + 1) still go through rangePoisonExpr.
+  bool rangeIncDec(const Expr* e, ARangeEnv& env) {
+    if (!e || e->kind != ExprKind::Unary) return false;
+    const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+    if ((u.op != "++" && u.op != "--") || !u.operand ||
+        u.operand->kind != ExprKind::Ident)
+      return false;
+    const std::string& nm = static_cast<const IdentExpr&>(*u.operand).name;
+    env.assign(nm, rangeBinOp(u.op == "++" ? "+" : "-",
+                              env.find(nm), rngSpan(1, 1)));
+    return true;
+  }
+
   void rangeStmt(const Stmt* s, ARangeEnv& env) {
     if (!s || rangeAbort_) return;
     auto lk = [&env](const std::string& n) -> ARange { return env.find(n); };
@@ -3815,9 +3972,11 @@ class AsmEmitter {
         }
         return;
       }
-      case StmtKind::Expr:
-        rangePoisonExpr(static_cast<const ExprStmt&>(*s).expr.get(), env);
+      case StmtKind::Expr: {
+        const Expr* ex = static_cast<const ExprStmt&>(*s).expr.get();
+        if (!rangeIncDec(ex, env)) rangePoisonExpr(ex, env);
         return;
+      }
       case StmtKind::Destructure: {
         const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
         rangePoisonExpr(st.value.get(), env);
@@ -3985,9 +4144,15 @@ class AsmEmitter {
         return;
       case ExprKind::Unary: {
         const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
-        if ((u.op == "++" || u.op == "--") &&
-            u.operand->kind == ExprKind::Ident)
-          ps.bad.insert(static_cast<const IdentExpr&>(*u.operand).name);
+        if ((u.op == "++" || u.op == "--") && u.operand &&
+            u.operand->kind == ExprKind::Ident) {
+          // ++/-- stores through the raw int64 path only when the range
+          // proof shows the increment cannot overflow (emitExpr mirrors
+          // this check); otherwise the target is disqualified as before.
+          const std::string& nm =
+              static_cast<const IdentExpr&>(*u.operand).name;
+          if (!incDecProven(nm, u.op == "++")) ps.bad.insert(nm);
+        }
         promoteMarkExpr(u.operand.get(), ps);
         return;
       }
@@ -4113,8 +4278,18 @@ class AsmEmitter {
         if (st.target->kind == ExprKind::Ident) {
           const std::string& nm =
               static_cast<const IdentExpr&>(*st.target).name;
+          bool rawWrite = false;
           if (st.op == "=" && st.value &&
-              rawSafeExpr(st.value.get()) && exprIsInt(st.value.get()))
+              rawSafeExpr(st.value.get()) && exprIsInt(st.value.get())) {
+            rawWrite = true;
+          } else if (st.op.size() > 1 && st.op.back() == '=' && st.value) {
+            // x <op>= v keeps a raw int64 slot when the op cannot overflow
+            // (structural for bitwise/%/shifts, range-proven for + - *);
+            // emitAssign mirrors this via assignOpRawOk.
+            rawWrite = assignOpRawOk(nm, st.op.substr(0, st.op.size() - 1),
+                                     st.value.get());
+          }
+          if (rawWrite)
             ps.safe.insert(nm);
           else
             ps.bad.insert(nm);
@@ -4246,9 +4421,18 @@ class AsmEmitter {
         for (const StringPart& p : static_cast<const StringLitExpr&>(*e).parts)
           if (p.isExpr) promoteCoverExpr(p.expr.get(), ps);
         return;
-      case ExprKind::Unary:
-        promoteCoverExpr(static_cast<const UnaryExpr&>(*e).operand.get(), ps);
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        // A proven ++/-- reads its operand as raw int64 and boxes only the
+        // yielded value, so the operand read stays inside a raw region.
+        if ((u.op == "++" || u.op == "--") && u.operand &&
+            u.operand->kind == ExprKind::Ident &&
+            incDecProven(static_cast<const IdentExpr&>(*u.operand).name,
+                         u.op == "++"))
+          return;
+        promoteCoverExpr(u.operand.get(), ps);
         return;
+      }
       case ExprKind::Index: {
         const IndexExpr& x = static_cast<const IndexExpr&>(*e);
         promoteCoverExpr(x.object.get(), ps);
@@ -4921,7 +5105,7 @@ class AsmEmitter {
     }
     switch (e->kind) {
       case ExprKind::IntLit:
-        movImm(mkintA(static_cast<const IntLitExpr*>(e)->value));
+        emitIntLitA(static_cast<const IntLitExpr*>(e)->value);
         return;
       case ExprKind::FloatLit:
         movImm(dblBits(static_cast<const FloatLitExpr*>(e)->value));
@@ -4991,8 +5175,8 @@ class AsmEmitter {
         if (x.name == "I16_MAX") { movImm(mkintA(32767)); return; }
         if (x.name == "I32_MIN") { movImm(mkintA(-2147483648LL)); return; }
         if (x.name == "I32_MAX") { movImm(mkintA(2147483647LL)); return; }
-        if (x.name == "I64_MIN") { movImm(mkintA(INT64_MIN)); return; }
-        if (x.name == "I64_MAX") { movImm(mkintA(INT64_MAX)); return; }
+        if (x.name == "I64_MIN") { emitIntLitA(INT64_MIN); return; }
+        if (x.name == "I64_MAX") { emitIntLitA(INT64_MAX); return; }
         if (x.name == "U8_MAX") { movImm(mkintA(255)); return; }
         if (x.name == "U16_MAX") { movImm(mkintA(65535)); return; }
         if (x.name == "U32_MAX") { movImm(mkintA(4294967295LL)); return; }
@@ -5032,13 +5216,34 @@ class AsmEmitter {
             movImm(kNone);
             return;
           }
+          const bool isInc = x.op == "++";
+          // Promoted raw-int binding + proven non-overflowing increment:
+          // update the int64 slot in place and box only the yielded value.
+          // The slot stays raw (ints own nothing, so no drop bookkeeping
+          // and no demotion). incDecProven mirrors promoteMarkExpr /
+          // promoteCoverExpr, so a promoted binding always qualifies.
+          if (b->rawInt && !b->dropFn && incDecProven(id.name, isInc)) {
+            int oldS = allocSlot();
+            copySlot(b->slot, oldS);
+            loadSlot(b->slot);
+            emit(std::string("    ") + (isInc ? "addq $1, %rax\n"
+                                                 : "subq $1, %rax\n"));
+            storeRax(b->slot);
+            loadSlot(x.postfix ? oldS : b->slot);
+            emitBoxInt64();
+            return;
+          }
           emitBindingValue(*b);
           int oldS = allocSlot();
           storeRax(oldS);
           int oneS = allocSlot();
           movImm(mkintA(1), "%rcx");
           emit("    mov %rcx, " + slotRef(oneS));
-          call2slot(x.op == "++" ? "a_add_slow" : "a_sub_slow", oldS, oneS);
+          // emitArith inlines the int64 add/sub with jo -> a_add_slow /
+          // a_sub_slow on overflow (yielding the double aval), so the slow
+          // call is only emitted for non-int operands — identical
+          // semantics to the previous unconditional call2slot.
+          emitArith(isInc ? "+" : "-", oldS, oneS);
           int newS = allocSlot();
           storeRax(newS);
           // Rebinding drops the previous owned value first (same as assign).

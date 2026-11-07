@@ -902,6 +902,54 @@ aval a_setitem(aval obj, aval idx, aval val) {
     }
 }
 
+/* Bulk fill for the `for i in lo..hi[..step]: xs[i] = v` idiom emitted by
+ * the codegen fill-loop fast path. Applies a_setitem's K_LIST/K_VIEW
+ * element stores for the whole index range: normalize_index panics
+ * "index out of range" at the first bad index, exactly like the
+ * interpreted loop, and len/root are resolved once up front (a plain
+ * item store cannot resize the container). The index advances with
+ * unsigned wrap to mirror the int64 slot arithmetic of the counted
+ * loop. Returns val (the loop discards it). */
+aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
+                       aval val) {
+    AArr *root;
+    int64_t base = 0;
+    uint64_t len;
+    switch (kind_of(obj)) {
+        case K_VIEW: {
+            AView *vw = (AView *)obj_of(obj);
+            len = (uint64_t)vw->len;
+            root = view_root(obj, &base);
+            break;
+        }
+        case K_LIST: {
+            AArr *a = (AArr *)obj_of(obj);
+            len = a->h.len;
+            root = a;
+            break;
+        }
+        default:
+            panicf("object of type '%s' does not support item assignment",
+                   type_name_cstr(obj));
+            return A_NONE;
+    }
+    int64_t k = lo;
+    if (step >= 0) {
+        while (k < hi) {
+            int64_t i = normalize_index(k, len);
+            root->items[(size_t)(base + i)] = val;
+            k = (int64_t)((uint64_t)k + (uint64_t)step);
+        }
+    } else {
+        while (k > hi) {
+            int64_t i = normalize_index(k, len);
+            root->items[(size_t)(base + i)] = val;
+            k = (int64_t)((uint64_t)k + (uint64_t)step);
+        }
+    }
+    return val;
+}
+
 static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
     AView *vw = (AView *)xmalloc(sizeof(AView));
     vw->h.type = T_VIEW;

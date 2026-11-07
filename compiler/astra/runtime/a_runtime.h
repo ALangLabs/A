@@ -436,6 +436,8 @@ aval a_range_contains(aval r, aval v);
 /* indexing / slicing */
 aval a_getitem(aval obj, aval idx);             /* str/list/tuple/dict */
 aval a_setitem(aval obj, aval idx, aval val);   /* list/dict */
+aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
+                       aval val);                /* xs[lo..hi step] = val */
 aval a_slice(aval obj, aval lo, aval hi, aval step); /* lo/hi/step may be A_NONE */
 
 /* iteration protocol: iter = a_iter_new(v); loop a_iter_next(it,&out) */
