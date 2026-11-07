@@ -399,7 +399,7 @@ Try it in development:
 ```
 
 Or install the prebuilt extension from the [GitHub
-Release](https://github.com/OEvortex/A/releases) assets:
+Release](https://github.com/ALangLabs/A/releases) assets:
 
 ```bash
 # Use whichever CLI you have installed:
