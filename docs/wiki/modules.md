@@ -24,6 +24,10 @@ from python:json import loads
   [builtins](builtins.md)) or stdlib packages.
 - `std:` imports reach `stdlib/std/`; `python:` imports are resolved at run
   time through libpython.
+- Module names after `std:`/`python:` may be A keywords (`enum`, `type`,
+  `match`, …), so keyword-named packages like `std/enum/` are importable:
+  `from std:enum import Enum`. Plain `import std:enum` binds a keyword name
+  — prefer `as` aliasing or the `from` form.
 - Modules are namespaced; `import "lib/mathx.a"` binds `mathx.*` members.
 - Import cycles and missing modules are compile errors.
 

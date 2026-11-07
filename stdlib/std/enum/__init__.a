@@ -1,6 +1,7 @@
-# std.enum — port of Python 3.14 Lib/enum.py (functional API subset).
+# std.enum — named constant sets and bit flags (functional API).
 #
-# Python's Enum is built on class syntax plus the EnumMeta metaclass:
+# A native `enum` declaration is built into the language; this package
+# provides runtime-constructed constant sets via a functional API:
 #
 #   class Color(Enum):
 #       RED = 1
@@ -28,7 +29,7 @@ import std:json
 # improbable plain string, only compared after json.as_str extraction.
 
 # Monotonic id distinguishing specs: two Enum("Color", ...) calls produce
-# distinct member types even when names/values coincide (Python semantics).
+# distinct member types even when names/values coincide (matching enum-class semantics).
 # Under `a test` this counts in floats; ids stay unique either way.
 _spec_id_counter = 0
 
@@ -73,7 +74,7 @@ fn _is_auto(v):
 
 """
 EnumMember: a single named enum member (canonical or flag composite).
-`name`/`value` are public fields, matching Python's `member.name` /
+`name`/`value` are public fields, matching the `member.name` /
 `member.value` attributes.
 """
 class EnumMember:
@@ -93,8 +94,8 @@ class EnumMember:
         return self._owner_name
 
     """
-    text() -> Python str(member) analogue: "Owner.NAME" for Enum and
-    Flag, the bare value for IntEnum/StrEnum/IntFlag (Python 3.11+).
+    text() -> "Owner.NAME" for Enum and Flag, the bare value for
+    IntEnum/StrEnum/IntFlag.
     """
     fn text(self):
         if self._style == "intenum" or self._style == "strenum" or self._style == "intflag":
@@ -108,7 +109,7 @@ class EnumMember:
     """
     eq(other) -> true for the same member of the same spec.
     (A `==` on instances is already structural; this is the explicit,
-    Python-style comparison.)
+    explicit member comparison.)
     """
     fn eq(self, other):
         return self._spec_id == other._spec_id and self.name == other.name
@@ -132,7 +133,7 @@ class EnumSpec:
 
     """
     members() -> canonical members in definition order
-    (Python `list(Color)`; aliases excluded).
+    (aliases excluded).
     """
     fn members(self):
         return self._members.copy()
@@ -150,14 +151,14 @@ class EnumSpec:
 
     """
     members_map() -> \{name: member\} including aliases
-    (Python `Color.__members__`).
+    (the members mapping).
     """
     fn members_map(self):
         return self._by_name.copy()
 
     """
     at(name) -> member; runtime error when absent
-    (Python `Color['RED']` / `Color.RED`, raises KeyError/AttributeError).
+    (raises a runtime error when absent).
     """
     fn at(self, name):
         if name not in self._by_name:
@@ -176,7 +177,7 @@ class EnumSpec:
 
     """
     value_of(v) -> member with value v; runtime error when absent
-    (Python `Color(1)`, raises ValueError).
+    (raises a runtime error when absent).
     """
     fn value_of(self, v):
         if v not in self._by_value:
@@ -235,7 +236,7 @@ class FlagSpec:
     """
     _mk(iv) -> canonical or composite member for bitmask iv.
     Unknown bits are kept and folded into the member name as a decimal
-    suffix (Python IntFlag boundary=KEEP behaviour for both Flag kinds).
+    suffix (unknown bits are kept for both Flag kinds).
     """
     fn _mk(self, iv):
         if iv < 0:
@@ -274,7 +275,7 @@ class FlagSpec:
     fn find_value(self, v):
         return self._mk(self._flag_int(v))
 
-    """union(a, b) -> a | b  (Python `Flag.A | Flag.B`)."""
+    """union(a, b) -> a | b  (the `|` operator analogue)."""
     fn union(self, a, b):
         return self._mk(self._flag_int(a.value) | self._flag_int(b.value))
 
@@ -296,7 +297,7 @@ class FlagSpec:
 
     """
     contains_flag(container, flag) -> true when every bit of `flag`
-    is set in `container` (Python `flag in container`).
+    is set in `container` (the `in` operator analogue).
     """
     fn contains_flag(self, container, flag):
         cv = self._flag_int(container.value)
@@ -435,7 +436,7 @@ fn Flag(typename, spec) -> FlagSpec:
 
 """
 IntFlag(typename, spec) -> FlagSpec whose text() renders the numeric
-value, matching Python 3.11+ IntFlag.__str__.
+value.
 """
 fn IntFlag(typename, spec) -> FlagSpec:
     return _build_flag(typename, spec, "intflag")
