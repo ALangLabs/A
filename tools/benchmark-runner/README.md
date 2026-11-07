@@ -1,7 +1,7 @@
 # Benchmark runner
 
-`run.sh` times every program under `benchmarks/*/*.a` with the A interpreter
-and prints the best wall-clock time plus the program output.
+`run.sh` times every program under `benchmarks/*/*.a` via `a run` (compile +
+execute) and prints the best wall-clock time plus the program output.
 
 ```sh
 tools/benchmark-runner/run.sh build/a

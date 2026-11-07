@@ -261,7 +261,9 @@ if(NOT WIN32 AND NOT APPLE)
         add_custom_command(OUTPUT "${rt_obj}"
             COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${ASTRA_RT_FLAGS}
                     -c "${rt_c}" -o "${rt_obj}"
-            DEPENDS astra_driver "${rt_c}"
+            # libastra1.a must exist first: without -B the driver finds its
+            # staged include/lib dir by probing for it next to the binary.
+            DEPENDS astra_driver "${astra_libdir}/libastra1.a" "${rt_c}"
             COMMENT "astra runtime ${rt_c_name}"
             VERBATIM)
         list(APPEND ASTRA_RT_OBJS "${rt_obj}")

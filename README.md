@@ -36,8 +36,8 @@ print("Length squared: {point.length_squared()}")  # 25.0
 
 ## 🚀 Key Features
 
-* **⚡ C++ Parity Performance**: Native compilation (`a build`) with sub-4 ms startup, matching optimized C++ (`g++ -O2`) on arithmetic, pipeline traversals, and string allocation.
-* **🐍 Python-Grade Ergonomics**: Python-style natural variable declarations (`x = 10`), clean indented blocks, and the instant `ac` runner.
+* **⚡ C++ Parity Performance**: Native compilation (`a build`) producing standalone machine-code binaries with ~2.4 ms startup, matching or beating optimized C++ (`g++ -O2`) on the benchmark suite.
+* **🐍 Python-Grade Ergonomics**: Python-style natural variable declarations (`x = 10`), clean indented blocks, and the fast `a run` compile-and-execute path.
 * **🔗 Python Interop**: `import python:<pkg>` / `from python:<pkg> import name` embeds CPython directly — call NumPy, PyTorch, `json`, or any installed package with A syntax (interpreter path; needs Python 3 dev files at build time).
 * **🏛️ Classes, Inheritance & Metaclasses**: Clean object-oriented programming with `class Child(Parent):` and declarative `metaclass Meta: pass`.
 * **🛠️ 25+ First-Class Operators**: Rich operator support including arithmetic (`+ - * / % **`), bitwise (`& | ^ ~ << >>`), containment (`in`, `not in`), functional pipelines (`|>`), and safe null-coalescing (`??`, `?.`).
@@ -48,17 +48,23 @@ print("Length squared: {point.length_squared()}")  # 25.0
 
 ## 📊 Benchmarks
 
-Measured over 7 runs against **C++ (`g++ -O2`)** and **CPython 3.13** on identical workloads:
+Best-of-5 wall time on identical workloads — A compiled to a native binary
+(`a build`) vs. C++ (`g++ -O2 -std=c++20`) vs. CPython. Measured on an
+AMD Ryzen 5 7520U (x86-64 Linux), g++ 13.3.0, CPython 3.14.9:
 
-| Workload | Task | A Native (`a build`) | C++ (`-O2`) | Python 3.13 | Parity vs. C++ |
-|:---|:---|:---:|:---:|:---:|:---:|
-| **Arithmetic** | 200,000 range additions | **3.23 ms** | 3.46 ms | 56.05 ms | **1.0× (Native Parity)** |
-| **Collections** | 5,000-element pipeline | **3.25 ms** | 3.46 ms | 33.39 ms | **1.0× (Native Parity)** |
-| **Memory** | 100k `str()` + join | **7.25 ms** | 6.70 ms | 47.91 ms | **1.1× (Native Parity)** |
-| **Numerical** | 50,000 `sqrt` + `round` | **4.00 ms** | 3.91 ms | 44.85 ms | **1.0× (Native Parity)** |
-| **Process Startup** | CLI launch latency | **3.96 ms** | 3.29 ms | 31.36 ms | **~1.1× (Sub-4 ms)** |
+| Workload | Task | A Native | C++ (`-O2`) | CPython 3.14 | A vs. C++ |
+|:---|:---|---:|---:|---:|---:|
+| **Arithmetic** | 200,000 range additions | **2.22 ms** | 2.42 ms | 43.65 ms | **0.9×** |
+| **Collections** | 5,000-element filter/map/sum pipeline | **2.30 ms** | 2.66 ms | 24.63 ms | **0.9×** |
+| **Memory** | 100k `str()` + join | **5.48 ms** | 4.91 ms | 38.95 ms | **1.1×** |
+| **Numerical** | 50,000 `sqrt` + `round` | **2.63 ms** | 3.19 ms | 34.02 ms | **0.8×** |
 
-*Run benchmarks locally with `python3 tools/benchmark-runner/compare.py --native --runs 5`.*
+**Startup** (no-op program, wall time): A native binary **~2.4 ms**, C++ binary
+**~2.4 ms**, CPython **~40 ms**. End-to-end `a run`/`a build` of a no-op —
+frontend → x86-64 assembly → astra assemble/link — is **~40 ms**.
+
+*Reproduce with `python3 tools/benchmark-runner/compare.py --native --runs 5`;
+methodology and targets in [`docs/performance/`](docs/performance/README.md).*
 
 ---
 
