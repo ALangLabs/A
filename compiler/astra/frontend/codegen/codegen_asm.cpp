@@ -294,6 +294,77 @@ class AsmEmitter {
     }
   };
 
+  // Loop register residency: inside pure for-loop bodies, hot raw-int
+  // bindings live in xmm2..xmm15 (caller-saved, so no prologue/epilogue
+  // is needed and `return` needs no cleanup) instead of round-tripping
+  // through frame slots every access. loopXmm_ maps frame slot -> xmm
+  // index. xmm regs are clobbered by any call, so emit() flushes every
+  // resident slot back to its frame slot and clears the map the moment
+  // a `call` instruction is emitted; later accesses then correctly use
+  // the (now authoritative) slots. loopXmmAdded_ tracks which slots the
+  // innermost registerized loop installed so nested loops restore
+  // correctly on exit.
+  std::unordered_map<int, int> loopXmm_;
+  std::vector<int> loopXmmAdded_;
+
+  void loopXmmFlush() {
+    if (loopXmm_.empty()) return;
+    for (const auto& kv : loopXmm_) {
+      emit(std::string("    movq %xmm") + std::to_string(kv.second) + ", " +
+           slotRef(kv.first));
+    }
+  }
+  // Reload resident values after a call: slots were flushed before it, so
+  // movq m64->xmm restores each register without needing a scratch GPR
+  // (which could hold the call's result).
+  void loopXmmReload() {
+    if (loopXmm_.empty()) return;
+    for (const auto& kv : loopXmm_) {
+      emit("    movq " + slotRef(kv.first) + ", %xmm" +
+           std::to_string(kv.second));
+    }
+  }
+
+  // Install every in-scope raw-int/spec binding (up to xmm15) into an xmm
+  // register for the duration of a pure loop body. Returns a marker for
+  // loopXmmExit. Bindings not touched by the body simply waste a register;
+  // correctness never depends on use.
+  int loopXmmEnter() {
+    const int marker = (int)loopXmmAdded_.size();
+    int next = 2;  // xmm0/xmm1 stay reserved for double scratch
+    auto xmmFree = [&](int x) {
+      for (const auto& kv : loopXmm_)
+        if (kv.second == x) return false;
+      return true;
+    };
+    for (auto& scope : scopes_) {
+      for (auto& kv : scope) {
+        ABinding& b = kv.second;
+        if (b.slot < 0 || loopXmm_.count(b.slot)) continue;
+        if (b.kind != BKind::Local && b.kind != BKind::Param) continue;
+        if (!b.rawInt && !b.specRaw) continue;
+        while (next <= 15 && !xmmFree(next)) ++next;
+        if (next > 15) return marker;
+        loadSlot(b.slot);
+        emit("    movq %rax, %xmm" + std::to_string(next));
+        loopXmm_[b.slot] = next;
+        loopXmmAdded_.push_back(b.slot);
+        ++next;
+      }
+    }
+    return marker;
+  }
+
+  // Flush resident values back to their slots and drop this loop level's
+  // residency (outer loops' entries survive for nested loops).
+  void loopXmmExit(int marker) {
+    loopXmmFlush();
+    while ((int)loopXmmAdded_.size() > marker) {
+      loopXmm_.erase(loopXmmAdded_.back());
+      loopXmmAdded_.pop_back();
+    }
+  }
+
   struct InlineInfo {
     bool safe = false;
     bool raw = false;
@@ -332,6 +403,19 @@ class AsmEmitter {
   }
   void emit(const std::string& s) {
     if (s.empty() || failed_) return;
+    // Any call may clobber xmm registers: spill resident slots to their
+    // frame slots before the call and reload them right after, keeping
+    // residency (and correctness on the taken path) with zero cost on
+    // paths that never reach the call.
+    if (!loopXmm_.empty() &&
+        (s.find("call ") != std::string::npos ||
+         s.find("call\t") != std::string::npos)) {
+      loopXmmFlush();
+      text_ << s;
+      if (s.back() != '\n') text_ << '\n';
+      loopXmmReload();
+      return;
+    }
     text_ << s;
     if (s.back() != '\n') text_ << '\n';
   }
@@ -374,10 +458,29 @@ class AsmEmitter {
     }
   }
   void storeRax(int slot) {
+    auto xi = loopXmm_.find(slot);
+    if (xi != loopXmm_.end()) {
+      emit(std::string("    movq %rax, %xmm") + std::to_string(xi->second));
+      rawLearn(slot, kRRax);  // %rax still holds the stored bits
+      return;
+    }
     emit("    mov %rax, " + slotRef(slot));
     rawLearn(slot, kRRax);  // %rax still holds the stored bits
   }
   void loadSlot(int slot, const char* reg = "%rax") {
+    auto xi = loopXmm_.find(slot);
+    if (xi != loopXmm_.end()) {
+      emit(std::string("    movq %xmm") + std::to_string(xi->second) + ", " +
+           reg);
+      if (rawRegOn()) {
+        int c = rawRegCode(reg);
+        if (c >= 0) {
+          rawDropReg(c);
+          rawLearn(slot, c);
+        }
+      }
+      return;
+    }
     if (rawRegOn()) {
       int want = rawRegCode(reg);
       if (want >= 0) {
@@ -400,6 +503,24 @@ class AsmEmitter {
   }
   // mem -> mem is impossible on x86; route slot copies through %rcx.
   void copySlot(int from, int to) {
+    auto xf = loopXmm_.find(from), xt = loopXmm_.find(to);
+    if (xf != loopXmm_.end() && xt != loopXmm_.end()) {
+      emit(std::string("    movapd %xmm") + std::to_string(xf->second) +
+           ", %xmm" + std::to_string(xt->second));
+      return;
+    }
+    if (xf != loopXmm_.end()) {
+      emit(std::string("    movq %xmm") + std::to_string(xf->second) +
+           ", %rcx\n    mov %rcx, " + slotRef(to));
+      rawLearn(to, kRRcx);
+      return;
+    }
+    if (xt != loopXmm_.end()) {
+      emit("    mov " + slotRef(from) + ", %rcx\n    movq %rcx, %xmm" +
+           std::to_string(xt->second));
+      rawLearn(to, kRRcx);
+      return;
+    }
     if (!rawRegOn()) {
       emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
       return;
@@ -2264,6 +2385,7 @@ class AsmEmitter {
       std::string contL = newLabel("forc");
       std::string endL = newLabel("fend");
       std::string bodyL = newLabel("forb");
+      int xmmMark = loopXmmEnter();
       emitLabel(loopL);
       // continue while (step>0 ? cur<end : cur>end)
       emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) + ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
@@ -2338,6 +2460,7 @@ class AsmEmitter {
       emitRangeIncr(curS, endS, stepS);
       jmp(loopL);
       emitLabel(endL);
+      loopXmmExit(xmmMark);
       return;
     }
     // Array/tuple-typed iterables get a direct indexed loop over the AArr
@@ -2467,6 +2590,7 @@ class AsmEmitter {
       emit("    mov %rcx, " + slotRef(pkIS));
       std::string pkLoopL = newLabel("for"), pkContL = newLabel("forc"),
               pkEndL = newLabel("fend");
+      int xmmMark = loopXmmEnter();
       emitLabel(pkLoopL);
       emit("    mov " + slotRef(pkIS) + ", %rax\n"
            "    mov " + slotRef(pkLenS) + ", %rdx\n    cmp %rdx, %rax\n    jae " +
@@ -2480,6 +2604,7 @@ class AsmEmitter {
       }
       emitForArrayLoopTail(st, pkIS, pkVarS, pkLoopL, pkContL, pkEndL, varRaw);
       emitLabel(pkEndL);
+      loopXmmExit(xmmMark);
       jmp(fastEndL);
       // ---- aval loop (existing hoisted path) ----
       emitLabel(avL);
@@ -2492,15 +2617,20 @@ class AsmEmitter {
       int varS = allocSlot();
       std::string loopL = newLabel("for");
       std::string contL = newLabel("forc");
+      std::string avEndL = newLabel("avend");
+      int xmmMarkAv = loopXmmEnter();
       emitLabel(loopL);
       // iS = index; lenS/itemsS hoisted. Same load as the reload path but
       // without re-untagging the object or re-reading h.len/items.
       emit("    mov " + slotRef(iS) + ", %rax\n"
            "    mov " + slotRef(lenS) + ", %rdx\n    cmp %rdx, %rax\n    jae " +
-           fastEndL + "\n"
+           avEndL + "\n"
            "    mov " + slotRef(itemsS) + ", %rcx\n    mov (%rcx,%rax,8), %rax\n"
            "    mov %rax, " + slotRef(varS) + "\n");
-      emitForArrayLoopTail(st, iS, varS, loopL, contL, fastEndL, false);
+      emitForArrayLoopTail(st, iS, varS, loopL, contL, avEndL, false);
+      emitLabel(avEndL);
+      loopXmmExit(xmmMarkAv);
+      jmp(fastEndL);
     } else {
       // Impure body: reload the object each pass and branch on the packed
       // flag per element, so mid-iteration packed<->aval conversion
@@ -2594,7 +2724,7 @@ class AsmEmitter {
       emit(std::string("    ") +
            (topArith->op == "+" ? "add" : topArith->op == "-" ? "sub" : "imul") +
            " %rcx, %rax\n    jo " + deoptL + "\n");
-      emit("    mov %rax, " + slotRef(rawS) + "\n");
+      storeRax(rawS);
       jmp(doneL);
       // Overflow: operands are still raw in ls/rs (the slot was not
       // written). Box both and recompute through the aval slow path —
@@ -2638,7 +2768,7 @@ class AsmEmitter {
       emit(std::string("    ") +
            (baseOp == "+" ? "add" : baseOp == "-" ? "sub" : "imul") +
            " %rcx, %rax\n    jo " + deoptL + "\n");
-      emit("    mov %rax, " + slotRef(rawS) + "\n");
+      storeRax(rawS);
       jmp(doneL);
       // v_old is still in rawS (jo fired before the store); e is raw in vs.
       emitLabel(deoptL);
