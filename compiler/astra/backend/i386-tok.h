@@ -152,6 +152,19 @@
  DEF_ASM(db5)
  DEF_ASM(db6)
  DEF_ASM(db7)
+#ifdef ASTRA_TARGET_X86_64
+ /* High xmm registers need a REX prefix; they are kept out of the
+    contiguous al..db7 register block (which packs 8 regs per type)
+    and are handled specially by the operand parser. */
+ DEF_ASM(xmm8)
+ DEF_ASM(xmm9)
+ DEF_ASM(xmm10)
+ DEF_ASM(xmm11)
+ DEF_ASM(xmm12)
+ DEF_ASM(xmm13)
+ DEF_ASM(xmm14)
+ DEF_ASM(xmm15)
+#endif
  DEF_ASM(dr0)
  DEF_ASM(dr1)
  DEF_ASM(dr2)

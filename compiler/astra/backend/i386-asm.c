@@ -404,6 +404,11 @@ static void parse_operand(ASTRAState *s1, Operand *op)
 	} else if (tok >= TOK_ASM_spl && tok <= TOK_ASM_dil) {
 	    op->type = OP_REG8 | OP_REG8_LOW;
 	    op->reg = 4 + tok - TOK_ASM_spl;
+	} else if (tok >= TOK_ASM_xmm8 && tok <= TOK_ASM_xmm15) {
+	    /* High xmm registers: keep reg numbers 8-15 so that
+	       asm_rex() emits REX.R/REX.B and reduces them modulo 8. */
+	    op->type = OP_SSE;
+	    op->reg = 8 + tok - TOK_ASM_xmm8;
         } else if ((op->reg = asm_parse_numeric_reg(tok, &op->type)) >= 0) {
 	    ;
 #endif
