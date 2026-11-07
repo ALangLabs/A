@@ -5,12 +5,20 @@ add_executable(a-lsp
   compiler_worker.cpp
   diagnostics.cpp
   handlers_navigation.cpp
-  handlers_features.cpp
+  handlers_format.cpp
+  handlers_symbols.cpp
+  handlers_completion.cpp
+  handlers_semantic.cpp
+  handlers_actions.cpp
+  handlers_annotations.cpp
   handlers_hierarchy.cpp
   text_utils.cpp
   docs.cpp
   main.cpp
   analysis.cpp
+  analysis_index.cpp
+  analysis_resolve.cpp
+  analysis_collect.cpp
   json.cpp
 )
 target_link_libraries(a-lsp PRIVATE a_type_checker a_tooling)

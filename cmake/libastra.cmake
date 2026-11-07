@@ -154,6 +154,7 @@ foreach(staged IN LISTS ASTRA_RUNTIME_STAGED)
     endif()
 endforeach()
 set(ASTRA_RUNTIME_STAGED_OUTPUTS "")
+set(ASTRA_RUNTIME_C_OUTPUTS "")
 foreach(rt_file IN LISTS ASTRA_RUNTIME_SOURCES)
     get_filename_component(rt_name "${rt_file}" NAME)
     set(staged_file "${ASTRA_STAGE}/${rt_name}")
@@ -165,6 +166,9 @@ foreach(rt_file IN LISTS ASTRA_RUNTIME_SOURCES)
         COMMENT "stage ${rt_name} -> astralib"
         VERBATIM)
     list(APPEND ASTRA_RUNTIME_STAGED_OUTPUTS "${staged_file}")
+    if(rt_file MATCHES "\\.c$")
+        list(APPEND ASTRA_RUNTIME_C_OUTPUTS "${staged_file}")
+    endif()
 endforeach()
 if(WIN32)
     set(astra_libdir "${ASTRA_STAGE}/lib")
@@ -242,8 +246,40 @@ add_custom_command(OUTPUT "${astra_libdir}/runmain.o"
     COMMENT "astra lib/runmain.c"
     VERBATIM)
 
-add_custom_target(astra_runtime ALL
-    DEPENDS "${astra_libdir}/libastra1.a" "${astra_libdir}/runmain.o"
-            ${ASTRA_RUNTIME_STAGED_OUTPUTS})
+# Prebuild the A runtime modules once into libaruntime.a so `a run`/`a build`
+# link an archive instead of recompiling every runtime .c per program. Only
+# the ELF path is archived; other targets keep the compile-sources fallback.
+set(ASTRA_RUNTIME_ARCHIVE "")
+if(NOT WIN32 AND NOT APPLE)
+    set(ASTRA_RT_FLAGS -O2 -I${ASTRA_STAGE}
+               -I/usr/include -I/usr/include/x86_64-linux-gnu
+               -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/local/include)
+    set(ASTRA_RT_OBJS "")
+    foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
+        get_filename_component(rt_c_name "${rt_c}" NAME)
+        set(rt_obj "${ASTRA_BUILD}/obj/rt_${rt_c_name}.o")
+        add_custom_command(OUTPUT "${rt_obj}"
+            COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${ASTRA_RT_FLAGS}
+                    -c "${rt_c}" -o "${rt_obj}"
+            DEPENDS astra_driver "${rt_c}"
+            COMMENT "astra runtime ${rt_c_name}"
+            VERBATIM)
+        list(APPEND ASTRA_RT_OBJS "${rt_obj}")
+    endforeach()
+    set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
+    add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
+        COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
+                "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
+        DEPENDS ${ASTRA_RT_OBJS}
+        COMMENT "astra -ar libaruntime.a"
+        VERBATIM)
+endif()
+
+set(ASTRA_RUNTIME_DEPS "${astra_libdir}/libastra1.a" "${astra_libdir}/runmain.o"
+                      ${ASTRA_RUNTIME_STAGED_OUTPUTS})
+if(ASTRA_RUNTIME_ARCHIVE)
+    list(APPEND ASTRA_RUNTIME_DEPS "${ASTRA_RUNTIME_ARCHIVE}")
+endif()
+add_custom_target(astra_runtime ALL DEPENDS ${ASTRA_RUNTIME_DEPS})
 
 message(STATUS "libastra: native backend (${astra_version}) for ${astra_arch}")

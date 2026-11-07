@@ -1,0 +1,208 @@
+#include "parser/parser_internal.hpp"
+
+namespace a {
+ExprPtr Parser::parsePrimary() {
+  const Token& token = cur();
+  switch (token.kind) {
+    case Tok::Int: {
+      advance();
+      auto expr = std::make_unique<IntLitExpr>();
+      expr->span = token.span;
+      expr->value = token.intValue;
+      return expr;
+    }
+    case Tok::Float: {
+      advance();
+      auto expr = std::make_unique<FloatLitExpr>();
+      expr->span = token.span;
+      expr->value = token.floatValue;
+      return expr;
+    }
+    case Tok::String: {
+      advance();
+      auto expr = std::make_unique<StringLitExpr>();
+      expr->span = token.span;
+      expr->parts = parseStringParts(token);
+      return expr;
+    }
+    case Tok::Char: {
+      advance();
+      auto expr = std::make_unique<CharLitExpr>();
+      expr->span = token.span;
+      expr->value = token.charValue;
+      return expr;
+    }
+    case Tok::KwTrue:
+    case Tok::KwFalse: {
+      advance();
+      auto expr = std::make_unique<BoolLitExpr>();
+      expr->span = token.span;
+      expr->value = token.kind == Tok::KwTrue;
+      return expr;
+    }
+    case Tok::Ident: {
+      advance();
+      auto expr = std::make_unique<IdentExpr>();
+      expr->span = token.span;
+      expr->name = token.lexeme;
+      return expr;
+    }
+    case Tok::KwSelf: {
+      advance();
+      auto expr = std::make_unique<IdentExpr>();
+      expr->span = token.span;
+      expr->name = "self";
+      return expr;
+    }
+    case Tok::KwNone: {
+      advance();
+      auto expr = std::make_unique<IdentExpr>();
+      expr->span = token.span;
+      expr->name = "None";
+      return expr;
+    }
+    case Tok::KwFn:
+      return parseLambda();
+    case Tok::KwMatch:
+      return parseMatch();
+    case Tok::LParen: {
+      Span start = token.span;
+      advance();
+      if (check(Tok::RParen)) {
+        fail(cur().span, "Empty tuples are not supported.");
+      }
+      auto first = parseExpression();
+      if (!match(Tok::Comma)) {
+        expect(Tok::RParen, "')' after the expression");
+        first->span = Span::join(start, previousSpan());
+        return first;
+      }
+      auto tuple = std::make_unique<TupleExpr>();
+      tuple->elements.push_back(std::move(first));
+      while (!check(Tok::RParen)) {
+        tuple->elements.push_back(parseExpression());
+        if (!match(Tok::Comma)) break;
+      }
+      expect(Tok::RParen, "')' after the tuple elements");
+      tuple->span = Span::join(start, previousSpan());
+      return tuple;
+    }
+    case Tok::LBracket: {
+      Span start = token.span;
+      advance();
+      if (check(Tok::RBracket)) {
+        advance();
+        auto array = std::make_unique<ArrayLitExpr>();
+        array->span = Span::join(start, previousSpan());
+        return array;
+      }
+      auto first = parseExpression();
+      if (check(Tok::KwFor)) {
+        advance();
+        const Token& varTok = expect(Tok::Ident, "a loop variable name");
+        expect(Tok::KwIn, "'in' after the loop variable");
+        auto comprehension = std::make_unique<ComprehensionExpr>();
+        comprehension->var = varTok.lexeme;
+        comprehension->varSpan = varTok.span;
+        comprehension->element = std::move(first);
+        comprehension->iterable = parseExpression();
+        if (match(Tok::KwIf)) {
+          comprehension->condition = parseExpression();
+        }
+        expect(Tok::RBracket, "']' after the comprehension");
+        comprehension->span = Span::join(start, previousSpan());
+        return comprehension;
+      }
+      auto array = std::make_unique<ArrayLitExpr>();
+      array->elements.push_back(std::move(first));
+      while (match(Tok::Comma)) {
+        if (check(Tok::RBracket)) break;
+        array->elements.push_back(parseExpression());
+      }
+      expect(Tok::RBracket, "']' after the array elements");
+      array->span = Span::join(start, previousSpan());
+      return array;
+    }
+    case Tok::LBrace: {
+      Span start = token.span;
+      advance();
+      if (check(Tok::RBrace)) {
+        advance();
+        // `{}` is an empty map, as in Python; an empty set needs set().
+        auto map = std::make_unique<MapLitExpr>();
+        map->span = Span::join(start, previousSpan());
+        return map;
+      }
+      auto firstKey = parseExpression();
+      if (check(Tok::KwFor)) {
+        advance();
+        const Token& varTok = expect(Tok::Ident, "a loop variable name");
+        expect(Tok::KwIn, "'in' after the loop variable");
+        auto comprehension = std::make_unique<ComprehensionExpr>();
+        comprehension->isSet = true;
+        comprehension->var = varTok.lexeme;
+        comprehension->varSpan = varTok.span;
+        comprehension->element = std::move(firstKey);
+        comprehension->iterable = parseExpression();
+        if (match(Tok::KwIf)) {
+          comprehension->condition = parseExpression();
+        }
+        expect(Tok::RBrace, "'}' after the set comprehension");
+        comprehension->span = Span::join(start, previousSpan());
+        return comprehension;
+      }
+      if (match(Tok::Colon)) {
+        // Map literal: {key: value, ...}
+        auto map = std::make_unique<MapLitExpr>();
+        auto firstVal = parseExpression();
+        map->entries.push_back({std::move(firstKey), std::move(firstVal)});
+        while (match(Tok::Comma)) {
+          if (check(Tok::RBrace)) break;
+          auto key = parseExpression();
+          expect(Tok::Colon, "':' after map key");
+          auto value = parseExpression();
+          map->entries.push_back({std::move(key), std::move(value)});
+        }
+        expect(Tok::RBrace, "'}' after map entries");
+        map->span = Span::join(start, previousSpan());
+        return map;
+      }
+      // Set literal: {1, 2, 3}
+      auto set = std::make_unique<SetLitExpr>();
+      set->elements.push_back(std::move(firstKey));
+      while (match(Tok::Comma)) {
+        if (check(Tok::RBrace)) break;
+        set->elements.push_back(parseExpression());
+      }
+      expect(Tok::RBrace, "'}' after set elements");
+      set->span = Span::join(start, previousSpan());
+      return set;
+    }
+    default:
+      fail(token.span, "Expected an expression, found " + describeToken(token) + ".");
+  }
+}
+
+ExprPtr Parser::parseLambda() {
+  Span start = cur().span;
+  expect(Tok::KwFn, "'fn'");
+  expect(Tok::LParen, "'(' after 'fn' in a lambda");
+  auto lambda = std::make_unique<LambdaExpr>();
+  if (!check(Tok::RParen)) {
+    while (true) {
+      lambda->params.push_back(parseParam());
+      if (!match(Tok::Comma)) break;
+      if (check(Tok::RParen)) break;
+    }
+  }
+  expect(Tok::RParen, "')' after the lambda parameters");
+  if (match(Tok::Arrow)) {
+    lambda->returnType = parseTypeExpr();
+  }
+  expect(Tok::FatArrow, "'=>' before the lambda body");
+  lambda->body = parseExpression();
+  lambda->span = Span::join(start, lambda->body->span);
+  return lambda;
+}
+
+}  // namespace a

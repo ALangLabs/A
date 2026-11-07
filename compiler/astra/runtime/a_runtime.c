@@ -167,7 +167,6 @@ void a_runtime_init(void) {
     if (g_runtime_ready) return;
     g_runtime_ready = 1;
     srand((unsigned)time(NULL));
-    for (uint64_t i = 0; i < (uint64_t)A_BI_COUNT; ++i) (void)a_builtin(i);
 }
 
 

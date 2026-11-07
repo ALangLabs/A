@@ -77,33 +77,30 @@ cmake --build build -j
 
 ### Running Programs
 ```bash
-# 1. Instant execution (shortcut):
-./ac examples/classes/classes.a
+# 1. Standard execution:
+./build/a run examples/classes/classes.a
 
-# 2. Standard execution:
-./build/a run program.a
-
-# 3. Type-check without running:
+# 2. Type-check without running:
 ./build/a check program.a
 
-# 4. Run every `fn test_*()` in a program:
+# 3. Run every `fn test_*()` in a program:
 ./build/a test program.a
 
-# 5. Compile to an optimized standalone native binary:
+# 4. Compile to an optimized standalone native binary:
 ./build/a build program.a -o my_app
 ./my_app
 
-# 6. Interactive REPL (state persists across lines, `>>>` echo):
+# 5. Interactive REPL (state persists across lines, `>>>` echo):
 ./build/a repl
 
-# 7. Inline source, like `python -c`:
+# 6. Inline source, like `python -c`:
 ./build/a -c 'print("hello from A")'
 
-# 8. Format and document it:
+# 7. Format and document it:
 ./build/a fmt -w program.a
 ./build/a doc -o docs/program.md program.a
 
-# 9. Inspect the typed SSA IR (optionally after optimization):
+# 8. Inspect the typed SSA IR (optionally after optimization):
 ./build/a ir program.a
 ./build/a ir --opt program.a
 ```
@@ -235,36 +232,42 @@ cannot lower them. The full member tables and semantics live in
 ## 📂 Project Organization
 
 ```
-├── ac                          # Instant CLI runner script
+├── benchmarks/               # Cross-language benchmark suites (arithmetic, collections, memory, numerical, real-world)
+├── cmake/                    # AOptions.cmake (options, warnings, LTO) + libastra.cmake (backend/runtime build)
 ├── compiler/
-│   ├── a.hpp                   # Umbrella header for embedding the toolchain
-│   └── stages/                 # One CMake module per pipeline stage
-│       ├── lexer/              # Indentation-aware lexer & tokenization
-│       ├── parser/             # Recursive-descent parser
-│       ├── ast/                # Typed AST nodes
-│       ├── diagnostics/        # DiagnosticSink + SourceFile (incl. lexer/source.cpp)
-│       ├── name-resolution/    # Module loader, native module table, builtin docs
-│       ├── type-checker/       # Sema & unification type inference
-│       ├── ownership/          # Move/borrow analysis (`move(x)`, view borrows)
-│       ├── ir/                 # Typed SSA IR with basic blocks and phis
-│       ├── optimization/       # Constant folding, DCE, inlining, LICM
-│       ├── backend/            # interpreter.cpp, stdlib/builtins.cpp, native/, llvm/
-│       ├── tooling/            # AST formatter, doc generator, shared printers
-│       ├── driver/             # Version, linking glue (driver.cpp)
-│       └── cli/                # `a run|build|check|test|fmt|doc|ir` (main.cpp)
-├── cmake/                      # AOptions.cmake (options, warnings, LTO)
-├── compiler/astra/runtime/     # C runtime modules + C++ support (values, UTF-8, file I/O)
-├── stdlib/                     # Module notes + A-file modules (math, json, net, …)
-│   └── std/                    # Self-hosted stdlib in A (Mojo std/ analog)
-├── kernels/                    # A-written compute kernels (Mojo MAX analog)
-├── benchmarks/                 # Verification suites with cross-language equivalents
-├── examples/                   # Runnable programs, indexed by examples/README.md
-├── docs/                       # Language spec, type system, compiler design, performance
+│   └── astra/                # The Astra toolchain
+│       ├── frontend/         # C++ frontend (a.hpp umbrella; CMake target a_frontend)
+│       │   ├── lexer/        # Indentation-aware lexer, tokens, spans, source locations
+│       │   ├── parser/       # Recursive-descent parser (core/decl/stmt/type/expr/pattern/string)
+│       │   ├── ast/          # Typed AST nodes (exprs, stmts, kinds, type exprs, builtins)
+│       │   ├── diagnostics/  # DiagnosticSink + SourceFile
+│       │   ├── name-resolution/  # Module loader, native module table, builtin docs (per-domain tables)
+│       │   ├── type-checker/ # Sema & unification type inference (+ builtin domain checkers)
+│       │   ├── ownership/    # Move/borrow analysis (`move(x)`, view borrows)
+│       │   ├── ir/           # Typed SSA IR: builder, analysis, printer
+│       │   ├── optimization/ # Constant folding, DCE, SCCP, inlining, LICM, instcombine
+│       │   ├── codegen/      # x86-64 AT&T assembly emitter (emit/analysis/calls/decls/expr/stmt)
+│       │   ├── tooling/      # AST formatter, doc generator, shared printers
+│       │   ├── pipeline/     # Frontend → asm → Astra → native executable driver
+│       │   ├── driver/       # Version, CLI glue
+│       │   └── cli/          # `a run|build|check|test|fmt|doc|ir|repl` (main.cpp)
+│       ├── backend/          # Astra C backend: assembler/linker producing native ELF
+│       └── runtime/          # C runtime modules linked into compiled programs
+│           ├── a_runtime.c/.h        # Runtime entry + public API
+│           ├── core_*.c, value_*.c   # Values, buffers, dicts, arrays, formatting
+│           ├── builtins_*.c          # Builtin functions by domain
+│           ├── methods_*.c           # Dot-method dispatch by domain
+│           └── fs/json/binary/log/metrics/trace/net/arena/unsafe/python/terminal/time/intrinsics.c
+├── stdlib/                   # Module notes + A-file modules (math, json, net, …)
+│   └── std/                  # Self-hosted stdlib in A (Mojo std/ analog)
+├── kernels/                  # A-written compute kernels (Mojo MAX analog)
+├── examples/                 # Runnable programs, indexed by examples/README.md
+├── docs/                     # Language spec, type system, compiler design, performance
 ├── tools/
-│   ├── lsp/        # a-lsp: diagnostics, navigation, completion, hover
-│   ├── vscode-a/               # VS Code extension (grammar + LSP client)
-│   └── benchmark-runner/       # run.sh + compare.py
-└── tests/                      # Automated golden test suite (integration/, ir/, tooling/)
+│   ├── lsp/                  # a-lsp: diagnostics, navigation, completion, hover (handlers_*.cpp)
+│   ├── vscode-a/             # VS Code extension (grammar + LSP client)
+│   └── benchmark-runner/     # run.sh + compare.py
+└── tests/                    # Automated golden test suite (integration/, ir/, tooling/)
 ```
 
 ---

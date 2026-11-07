@@ -292,6 +292,24 @@ class Sema {
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkPrintCall(const std::string& name, CallExpr& call);
   TypePtr checkIcCall(CallExpr& call);
+  // Builtin domains: each returns nullptr when `name` is not handled so the
+  // dispatcher can try the next domain.
+  TypePtr checkBuiltinValues(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinIo(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinMemory(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinNumeric(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinSystem(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinCollections(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinJson(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinTesting(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinLog(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinMetrics(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinTrace(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinNet(const std::string& name, CallExpr& call);
+  TypePtr checkBuiltinKernels(const std::string& name, CallExpr& call);
+  std::vector<TypePtr> inferCallArgTypes(CallExpr& call);
+  void builtinArityError(const std::string& name, CallExpr& call, std::size_t expected);
+  TypePtr inferAnyCallArg(CallExpr& call, std::size_t index, const std::string& context);
   std::string icContextString(Span span) const;
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);
 

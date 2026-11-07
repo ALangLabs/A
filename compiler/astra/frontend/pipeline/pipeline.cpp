@@ -174,7 +174,15 @@ int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostr
   std::vector<std::string> args = {optFlag, "-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
                      "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include",
                      srcPath};
-  args.insert(args.end(), rtSrcs.begin(), rtSrcs.end());
+  // The staged libaruntime.a is built once by cmake (O2); linking it avoids
+  // recompiling every runtime module for each program. Non-default opt levels
+  // and targets without the archive keep the compile-sources path.
+  const std::string rtArchive = runtimeDir + "/libaruntime.a";
+  if (optimizationLevel == 2 && std::filesystem::exists(rtArchive)) {
+    args.push_back(rtArchive);
+  } else {
+    args.insert(args.end(), rtSrcs.begin(), rtSrcs.end());
+  }
   args.push_back("-o"); args.push_back(outPath);
   int rc = runAstra(args);
   if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
@@ -184,7 +192,8 @@ int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostr
 // Emits assembly for a checked program, assembles+links it with astra, and
 // runs the resulting binary. Returns the program's exit code.
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
-                  bool testMode = false, int optimizationLevel = 2) {
+                  bool testMode = false, int optimizationLevel = 2,
+                  const std::string* keepBin = nullptr) {
   (void)in; (void)out;
   // A -> asm -> machine code: the asm backend is the only codegen path.
   std::string sSource, sError;
@@ -194,13 +203,14 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   }
   std::string sPath = stageSrc(sSource, ".s", err);
   if (sPath.empty()) return kCErr;
-  std::string bin = tempPath("bin");
-  int rc = astraBuild(sPath, bin, err, optimizationLevel);
+  std::string tmpBin = tempPath("bin");
+  std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
+  int rc = astraBuild(sPath, runPath, err, optimizationLevel);
   std::error_code ec;
   std::filesystem::remove(sPath, ec);
-  if (rc != 0) { std::filesystem::remove(bin, ec); return kCErr; }
-  rc = runBinary(bin);
-  std::filesystem::remove(bin, ec);
+  if (rc != 0) { std::filesystem::remove(runPath, ec); return kCErr; }
+  rc = runBinary(runPath);
+  if (!keepBin) std::filesystem::remove(runPath, ec);
   return rc < 0 ? kCErr : rc;
 }
 }

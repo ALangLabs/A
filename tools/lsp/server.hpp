@@ -9,7 +9,10 @@
 //   compiler_worker.cpp      - debounced background type checking
 //   diagnostics.cpp          - publishDiagnostics / pull diagnostics
 //   handlers_navigation.cpp  - definition, references, rename, highlights
-//   handlers_features.cpp    - hover, completion, symbols, formatting, ...
+//   handlers_format.cpp     - formatting, folding/range formatting
+//   handlers_symbols.cpp    - hover, document/workspace symbols
+//   handlers_completion.cpp - completion, signature help
+//   handlers_semantic.cpp   - semantic tokens, hints, actions, lens, links
 //   handlers_hierarchy.cpp   - call hierarchy and type hierarchy
 //   main.cpp                 - entry point (--version/--help, stdio setup)
 //

@@ -1,6 +1,6 @@
 #pragma once
 // Internal shared types/helpers for the codegen backends (C emitter in
-// codegen.cpp, asm emitter in codegen_asm.cpp). Not part of the public
+// codegen.cpp, asm emitter in codegen_emitter.hpp + codegen_*.cpp). Not part of the public
 // codegen.hpp interface.
 #include <cstdint>
 #include <cstdio>
