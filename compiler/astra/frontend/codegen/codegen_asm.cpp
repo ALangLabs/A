@@ -1955,6 +1955,10 @@ class AsmEmitter {
         const WhileStmt& st = static_cast<const WhileStmt&>(*s);
         std::string loopL = newLabel("while");
         std::string endL = newLabel("wend");
+        const bool xmmOk =
+            scanStmtsPure(st.body, nullptr) &&
+            scanExprPure(st.cond.get(), nullptr);
+        int xmmMark = xmmOk ? loopXmmEnter() : -1;
         emitLabel(loopL);
         condJump(st.cond.get(), endL, false);
         loopBreak_.push_back(endL);
@@ -1966,6 +1970,7 @@ class AsmEmitter {
         loopCont_.pop_back();
         jmp(loopL);
         emitLabel(endL);
+        if (xmmOk) loopXmmExit(xmmMark);
         return;
       }
       case StmtKind::DoWhile: {
