@@ -2386,6 +2386,20 @@ class AsmEmitter {
       std::string endL = newLabel("fend");
       std::string bodyL = newLabel("forb");
       int xmmMark = loopXmmEnter();
+      // Raw range-loop var: written (copySlot/storeRax) before any read
+      // each pass, so it can join residency without a preheader load.
+      if (promoteNames_.count(st.var)) {
+        for (int x = 2; x <= 15; ++x) {
+          bool used = false;
+          for (const auto& kv : loopXmm_)
+            if (kv.second == x) used = true;
+          if (!used) {
+            loopXmm_[varS] = x;
+            loopXmmAdded_.push_back(varS);
+            break;
+          }
+        }
+      }
       emitLabel(loopL);
       // continue while (step>0 ? cur<end : cur>end)
       emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) + ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
@@ -2591,6 +2605,20 @@ class AsmEmitter {
       std::string pkLoopL = newLabel("for"), pkContL = newLabel("forc"),
               pkEndL = newLabel("fend");
       int xmmMark = loopXmmEnter();
+      // The packed loop var's slot is written before any read each pass,
+      // so it can join residency without a preheader load.
+      if (varRaw) {
+        for (int x = 2; x <= 15; ++x) {
+          bool used = false;
+          for (const auto& kv : loopXmm_)
+            if (kv.second == x) used = true;
+          if (!used) {
+            loopXmm_[pkVarS] = x;
+            loopXmmAdded_.push_back(pkVarS);
+            break;
+          }
+        }
+      }
       emitLabel(pkLoopL);
       emit("    mov " + slotRef(pkIS) + ", %rax\n"
            "    mov " + slotRef(pkLenS) + ", %rdx\n    cmp %rdx, %rax\n    jae " +
