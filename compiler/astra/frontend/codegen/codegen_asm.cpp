@@ -44,6 +44,18 @@ struct ABinding {
   // it (flag cleared, aval stored). Reads always stay correct: generic paths
   // box via emitBoxInt64, raw paths copy the int64 directly.
   bool rawInt = false;
+  // Speculative raw accumulator ("optimistic nsw + deopt"): when set,
+  // `slot` holds a raw int64 ONLY while `specFlag` == 0. Overflowing +,-,*
+  // writes are emitted as raw ops with `jo` to a deopt that computes the
+  // result through the aval slow path, stores it in `specAval`, and sets
+  // specFlag = 1 — a PERMANENT, function-local demotion: every later read
+  // or write of this binding checks the flag and uses the aval slot.
+  // specNames_ (function-level, name-based like promoteNames_) decides
+  // which bindings get this treatment; all accesses MUST go through the
+  // flag check (emitBindingValue, emitRawExprImpl, emitSpecAssign).
+  bool specRaw = false;
+  int specFlag = -1;   // frame slot: 0 = raw int64 live, 1 = demoted to aval
+  int specAval = -1;   // frame slot: aval value once demoted
 };
 
 // ---- int64 range analysis domain -----------------------------------------
@@ -194,6 +206,10 @@ class AsmEmitter {
   // (see ABinding::rawInt). rawDepth_/rawCallCount_ bound compile-time raw
   // inlining so mutually recursive raw-inline candidates still terminate.
   std::unordered_set<std::string> promoteNames_;
+  // Subset of promoteNames_ whose bindings use the speculative raw
+  // accumulator representation (see ABinding::specRaw). Computed by
+  // computePromoteSet; saved/restored together with promoteNames_.
+  std::unordered_set<std::string> specNames_;
   int rawDepth_ = 0;
   int rawCallCount_ = 0;
   // Coverage-walk state: true while inside a loop body/condition, where a
@@ -513,6 +529,20 @@ class AsmEmitter {
     }
   }
   void emitBindingValue(const ABinding& b) {
+    if (b.specRaw) {
+      // Speculative accumulator: flag==0 -> box the raw int64 slot;
+      // flag==1 (permanently demoted) -> the aval slot is canonical.
+      std::string setL = newLabel("spa"), doneL = newLabel("spd");
+      loadSlot(b.specFlag);
+      emit("    test %rax, %rax\n    jnz " + setL + "\n");
+      loadSlot(b.slot);
+      emitBoxInt64();
+      emit("    jmp " + doneL + "\n");
+      emitLabel(setL);
+      loadSlot(b.specAval);
+      emitLabel(doneL);
+      return;
+    }
     if (b.rawInt) {
       // Promoted local: slot holds raw int64; box to an aval on demand.
       loadSlot(b.slot);
@@ -1301,12 +1331,15 @@ class AsmEmitter {
       }
     }
     auto savedPromote = std::move(promoteNames_);
+    auto savedSpec = std::move(specNames_);
     auto savedRanges = std::move(nameRanges_);
     promoteNames_.clear();
+    specNames_.clear();
     nameRanges_.clear();
     computePromoteSet(f->decl);
     emitBody(f->decl->body);
     promoteNames_ = std::move(savedPromote);
+    specNames_ = std::move(savedSpec);
     nameRanges_ = std::move(savedRanges);
     emit("    mov $" + u64s(kNone) + ", %rax\n    leave\n    ret\n");
     int frame = frameBytes();
@@ -1454,6 +1487,7 @@ class AsmEmitter {
         }
       }
       promoteNames_.clear();  // top-level bindings are globals, never raw
+      specNames_.clear();
       nameRanges_.clear();
       emitBody(mod.program->statements, true);
       }
@@ -1595,7 +1629,10 @@ class AsmEmitter {
           bindLocal(st.name, sl);
           if (wantRaw) {
             ABinding* rb = lookup(st.name);
-            if (rb) rb->rawInt = true;
+            if (rb) {
+              rb->rawInt = true;
+              if (specNames_.count(st.name)) initSpecSlots(rb);
+            }
           }
           FnInfo* dropFn = dropFnFor(st.init->inferredType);
           if (dropFn) {
@@ -2319,7 +2356,9 @@ class AsmEmitter {
       // ---- packed-int loop (raw int64 elements) ----
       PromoteScan ps;
       promoteWriteStmts(st.body, ps);
-      const bool varRaw = !ps.bad.count(st.var);
+      // Spec-write names have no plain-raw element binding: the packed
+      // loop stores raw int64 every pass with no demotion check.
+      const bool varRaw = !ps.bad.count(st.var) && !ps.spec.count(st.var);
       int pkLenS = allocSlot(), pkItS = allocSlot();
       emit("    mov 4(%rcx), %edx\n    mov %rdx, " + slotRef(pkLenS) + "\n"
            "    mov 24(%rcx), %rcx\n    mov %rcx, " + slotRef(pkItS) + "\n");
@@ -2400,6 +2439,192 @@ class AsmEmitter {
     emitLabel(mergedL);
   }
 
+  // Allocate the demotion flag (0 = raw live) and aval slot for a
+  // speculative accumulator binding. The aval slot stays uninitialized
+  // until the first deopt or aval write — unreachable while flag == 0.
+  void initSpecSlots(ABinding* b) {
+    b->specRaw = true;
+    b->specFlag = allocSlot();
+    b->specAval = allocSlot();
+    movImm(0, "%rcx");
+    emit("    mov %rcx, " + slotRef(b->specFlag) + "\n");
+  }
+
+  // Speculative accumulator write (see ABinding::specRaw). Every access
+  // checks specFlag: while 0 the raw slot is authoritative and +,-,* ops
+  // run with `jo` into a deopt that recomputes through the aval slow path,
+  // stores the aval result in specAval and latches flag = 1 forever; once
+  // 1, writes go straight to the aval slot. Non-arith writes simply latch
+  // the flag after storing the aval.
+  void emitSpecAssign(ABinding* b, const AssignStmt& st) {
+    const int rawS = b->slot, avalS = b->specAval, flagS = b->specFlag;
+    // Classify (mirrors specWriteOk / promoteWriteStmt's rawWrite gate).
+    const BinaryExpr* topArith = nullptr;
+    bool opAssign = false;
+    std::string baseOp;
+    if (st.op != "=") {
+      opAssign = true;
+      baseOp = st.op.substr(0, st.op.size() - 1);
+    } else if (st.value && st.value->kind == ExprKind::Binary) {
+      const BinaryExpr& bb = static_cast<const BinaryExpr&>(*st.value);
+      if ((bb.op == "+" || bb.op == "-" || bb.op == "*") &&
+          exprIsInt(bb.lhs.get()) && exprIsInt(bb.rhs.get()) &&
+          rawSafeExpr(bb.lhs.get()) && rawSafeExpr(bb.rhs.get()) &&
+          !rawSafeExpr(st.value.get()))
+        topArith = &bb;
+    }
+    const bool valRawInt =
+        st.value && exprIsInt(st.value.get()) && rawSafeExpr(st.value.get());
+    const bool arithOp = baseOp == "+" || baseOp == "-" || baseOp == "*";
+    const bool safeOp = baseOp == "&" || baseOp == "|" || baseOp == "^" ||
+                        baseOp == "%" || baseOp == "<<" || baseOp == ">>";
+
+    if (topArith) {
+      // `v = L <op> R`, unproven top-level arith: raw op + jo deopt.
+      const char* slowSym = binopSlow(topArith->op);
+      std::string setL = newLabel("spa"), deoptL = newLabel("spd"),
+              doneL = newLabel("spx");
+      loadSlot(flagS);
+      emit("    test %rax, %rax\n    jnz " + setL + "\n");
+      int ls = allocSlot(), rs = allocSlot();
+      emitRawExpr(topArith->lhs.get(), ls);
+      emitRawExpr(topArith->rhs.get(), rs);
+      loadSlot(ls);
+      loadSlot(rs, "%rcx");
+      emit(std::string("    ") +
+           (topArith->op == "+" ? "add" : topArith->op == "-" ? "sub" : "imul") +
+           " %rcx, %rax\n    jo " + deoptL + "\n");
+      emit("    mov %rax, " + slotRef(rawS) + "\n");
+      jmp(doneL);
+      // Overflow: operands are still raw in ls/rs (the slot was not
+      // written). Box both and recompute through the aval slow path —
+      // identical to emitArith's slow branch, including overflow->double.
+      emitLabel(deoptL);
+      int ta = allocSlot(), tb = allocSlot();
+      loadSlot(ls);
+      emitBoxInt64();
+      rawInvAll();
+      storeRax(ta);
+      loadSlot(rs);
+      emitBoxInt64();
+      rawInvAll();
+      storeRax(tb);
+      call2slot(slowSym, ta, tb);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      movImm(1, "%rcx");
+      emit("    mov %rcx, " + slotRef(flagS) + "\n");
+      jmp(doneL);
+      // Demoted: evaluate the whole RHS as avals (spec reads see flag==1).
+      emitLabel(setL);
+      int la = evalSlot(topArith->lhs.get());
+      int lb = evalSlot(topArith->rhs.get());
+      emitArith(topArith->op, la, lb);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      emitLabel(doneL);
+      return;
+    }
+
+    if (opAssign && arithOp && valRawInt) {
+      // `v <op>= e`, op in {+,-,*}: raw update + jo deopt.
+      const char* slowSym = binopSlow(baseOp);
+      std::string setL = newLabel("spa"), deoptL = newLabel("spd"),
+              doneL = newLabel("spx");
+      loadSlot(flagS);
+      emit("    test %rax, %rax\n    jnz " + setL + "\n");
+      int vs = allocSlot();
+      emitRawExpr(st.value.get(), vs);
+      loadSlot(rawS);
+      loadSlot(vs, "%rcx");
+      emit(std::string("    ") +
+           (baseOp == "+" ? "add" : baseOp == "-" ? "sub" : "imul") +
+           " %rcx, %rax\n    jo " + deoptL + "\n");
+      emit("    mov %rax, " + slotRef(rawS) + "\n");
+      jmp(doneL);
+      // v_old is still in rawS (jo fired before the store); e is raw in vs.
+      emitLabel(deoptL);
+      int ta = allocSlot(), tb = allocSlot();
+      loadSlot(rawS);
+      emitBoxInt64();
+      rawInvAll();
+      storeRax(ta);
+      loadSlot(vs);
+      emitBoxInt64();
+      rawInvAll();
+      storeRax(tb);
+      call2slot(slowSym, ta, tb);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      movImm(1, "%rcx");
+      emit("    mov %rcx, " + slotRef(flagS) + "\n");
+      jmp(doneL);
+      emitLabel(setL);
+      int cs = evalSlot(st.target.get());
+      int rs = evalSlot(st.value.get());
+      emitArith(baseOp, cs, rs);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      emitLabel(doneL);
+      return;
+    }
+
+    if (opAssign && safeOp && valRawInt) {
+      // Bitwise/%/shift op-assign: result is always int64-or-panic, so the
+      // raw path never deopts — but the flag still selects the
+      // representation once demoted.
+      std::string setL = newLabel("spa"), doneL = newLabel("spx");
+      loadSlot(flagS);
+      emit("    test %rax, %rax\n    jnz " + setL + "\n");
+      int vs = allocSlot();
+      emitRawExpr(st.value.get(), vs);
+      emitRawBin(baseOp, rawS, vs, rawS);
+      jmp(doneL);
+      emitLabel(setL);
+      int cs = evalSlot(st.target.get());
+      int rs = evalSlot(st.value.get());
+      emitArith(baseOp, cs, rs);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      emitLabel(doneL);
+      return;
+    }
+
+    if (opAssign) {
+      // Non-raw-safe operand (or unknown op): identical to the generic
+      // op-assign path, but the result lands in the aval slot and latches
+      // demotion. evalSlot(target) yields the right aval whether the
+      // binding is still raw (boxes it) or already demoted.
+      int cs = evalSlot(st.target.get());
+      int rs = evalSlot(st.value.get());
+      emitArith(baseOp, cs, rs);
+      emit("    mov %rax, " + slotRef(avalS) + "\n");
+      movImm(1, "%rcx");
+      emit("    mov %rcx, " + slotRef(flagS) + "\n");
+      return;
+    }
+
+    if (valRawInt) {
+      // `v = <raw-safe int>`: plain raw write while flag==0; once demoted
+      // the value must be stored as an aval (boxed) instead.
+      std::string setL = newLabel("spa"), doneL = newLabel("spx");
+      loadSlot(flagS);
+      emit("    test %rax, %rax\n    jnz " + setL + "\n");
+      emitRawExpr(st.value.get(), rawS);
+      jmp(doneL);
+      emitLabel(setL);
+      int t = allocSlot();
+      emitRawExpr(st.value.get(), t);
+      loadSlot(t);
+      emitBoxInt64();
+      rawInvAll();
+      storeRax(avalS);
+      emitLabel(doneL);
+      return;
+    }
+
+    // `v = <non-raw-safe value>`: latch demotion and store the aval.
+    int vs = evalSlot(st.value.get());
+    copySlot(vs, avalS);
+    movImm(1, "%rcx");
+    emit("    mov %rcx, " + slotRef(flagS) + "\n");
+  }
+
   void emitAssign(const AssignStmt& st) {
     if (st.target->kind == ExprKind::Ident) {
       const IdentExpr& id = static_cast<const IdentExpr&>(*st.target);
@@ -2423,8 +2648,15 @@ class AsmEmitter {
             rawSafeExpr(st.value.get()) && exprIsInt(st.value.get())) {
           emitRawExpr(st.value.get(), sl);
           b->rawInt = true;
+          if (specNames_.count(id.name)) initSpecSlots(b);
           return;
         }
+      }
+      // Speculative accumulator: the slot/flag/aval representation is
+      // selected per-write; intercept before the plain rawInt paths.
+      if (b->specRaw) {
+        emitSpecAssign(b, st);
+        return;
       }
       // Promoted local + raw-safe int write: keep the slot as raw int64.
       // Ints never own drops, so the drop bookkeeping below is unnecessary.
@@ -3026,8 +3258,24 @@ class AsmEmitter {
         copySlot(it->second, out);
         return true;
       }
-      // Promoted local: the slot already holds a raw int64.
+      // Speculative accumulator: flag==0 -> copy the raw int64 slot;
+      // flag==1 -> unbox the canonical aval slot back to int64.
       ABinding* b = lookup(nm);
+      if (b && b->specRaw) {
+        std::string setL = newLabel("spr"), doneL = newLabel("spd");
+        loadSlot(b->specFlag);
+        emit("    test %rax, %rax\n    jnz " + setL + "\n");
+        copySlot(b->slot, out);
+        emit("    jmp " + doneL + "\n");
+        emitLabel(setL);
+        loadSlot(b->specAval, "%rdi");
+        emitAvalToI64();
+        rawInvAll();  // the unbox clobbers registers the cache cannot track
+        storeRax(out);
+        emitLabel(doneL);
+        return true;
+      }
+      // Promoted local: the slot already holds a raw int64.
       if (b && b->rawInt) {
         copySlot(b->slot, out);
         return true;
@@ -3516,6 +3764,29 @@ class AsmEmitter {
     ARange r;
     if (!nameRangeKnown(nm, r)) return false;
     return arithFits(r, exprRangeFlat(v), base);
+  }
+
+  // Write-side gate for the speculative accumulator (mirrors
+  // emitSpecAssign's classification): an int-typed write whose int64
+  // result MAY overflow is still speculatable — emission keeps the slot
+  // raw and deopts to the aval path on `jo`. Covers `v <op>= e` and
+  // `v = L <op> R` for op in {+,-,*} with raw-safe int operands; the
+  // `=` form only counts when the top-level arith is unproven (proven
+  // writes already took the rawWrite branch above).
+  bool specWriteOk(const AssignStmt& st) {
+    if (!st.value) return false;
+    if (st.op.size() > 1 && st.op.back() == '=') {
+      const std::string base = st.op.substr(0, st.op.size() - 1);
+      return (base == "+" || base == "-" || base == "*") &&
+             exprIsInt(st.value.get()) && rawSafeExpr(st.value.get());
+    }
+    if (st.op == "=" && st.value->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*st.value);
+      return (b.op == "+" || b.op == "-" || b.op == "*") &&
+             exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
+             rawSafeExpr(b.lhs.get()) && rawSafeExpr(b.rhs.get());
+    }
+    return false;
   }
 
   // ---- range dataflow -------------------------------------------------------
@@ -4198,8 +4469,12 @@ class AsmEmitter {
   struct PromoteScan {
     std::unordered_set<std::string> safe;       // all writes raw-safe + int
     std::unordered_set<std::string> bad;        // disqualified names
-    std::unordered_set<std::string> pending;    // safe - bad
+    std::unordered_set<std::string> pending;    // safe|spec - bad
     std::unordered_set<std::string> uncovered;  // reads outside raw regions
+    std::unordered_set<std::string> spec;       // >=1 overflow-unproven
+                                                 // +,-,* write (deopt-able)
+    std::unordered_set<std::string> noSpec;     // ++/-- targets, for-vars:
+                                                 // speculation excluded
   };
 
   // Walk every expr child (mirrors collectIdents) marking names that must
@@ -4224,6 +4499,9 @@ class AsmEmitter {
           const std::string& nm =
               static_cast<const IdentExpr&>(*u.operand).name;
           if (!incDecProven(nm, u.op == "++")) ps.bad.insert(nm);
+          // ++/-- updates the raw slot in place with no deopt point, so a
+          // name touched by one can never use the speculative accumulator.
+          ps.noSpec.insert(nm);
         }
         promoteMarkExpr(u.operand.get(), ps);
         return;
@@ -4361,10 +4639,15 @@ class AsmEmitter {
             rawWrite = assignOpRawOk(nm, st.op.substr(0, st.op.size() - 1),
                                      st.value.get());
           }
-          if (rawWrite)
+          if (rawWrite) {
             ps.safe.insert(nm);
-          else
+          } else if (specWriteOk(st)) {
+            // Overflow-unproven +,-,* write: still int64-or-double, handled
+            // at emission by the speculative raw accumulator + jo deopt.
+            ps.spec.insert(nm);
+          } else {
             ps.bad.insert(nm);
+          }
         } else {
           promoteMarkExpr(st.target.get(), ps);
         }
@@ -4419,6 +4702,9 @@ class AsmEmitter {
                     static_cast<const BinaryExpr&>(*it).op == ".."));
         if (rawRange) ps.safe.insert(st.var);
         else ps.bad.insert(st.var);
+        // The per-iteration implicit write cannot check a demotion flag,
+        // so for-vars never use the speculative accumulator.
+        ps.noSpec.insert(st.var);
         promoteMarkExpr(st.iterable.get(), ps);
         for (const StmtPtr& b : st.body) promoteWriteStmt(b.get(), ps);
         return;
@@ -4677,10 +4963,25 @@ class AsmEmitter {
     promoteWriteStmts(fn->body, ps);
     for (const std::string& nm : ps.safe)
       if (!ps.bad.count(nm)) ps.pending.insert(nm);
+    for (const std::string& nm : ps.spec)
+      if (!ps.bad.count(nm)) ps.pending.insert(nm);
     promoteHot_ = false;
     for (const StmtPtr& s : fn->body) promoteCoverStmt(s.get(), ps);
     for (const std::string& nm : ps.pending)
       if (!ps.uncovered.count(nm)) promoteNames_.insert(nm);
+    // Speculative accumulators: promoted names with at least one
+    // overflow-unproven +,-,* write, excluding ++/-- targets and for-vars
+    // (noSpec — their raw update paths have no deopt point). A spec-write
+    // name that fails the gate is dropped from promotion entirely: its
+    // writes have no plain-raw fallback, so leaving it promoted would hit
+    // the compile-time demotion path mid-loop (unsound across the back
+    // edge). Dropping it restores the all-aval status quo.
+    specNames_.clear();
+    for (const std::string& nm : ps.spec)
+      if (promoteNames_.count(nm) && !ps.noSpec.count(nm))
+        specNames_.insert(nm);
+    for (const std::string& nm : ps.spec)
+      if (!specNames_.count(nm)) promoteNames_.erase(nm);
   }
 
   bool tryEmitInlineCall(FnInfo* f, const CallExpr& call) {
@@ -4732,8 +5033,10 @@ class AsmEmitter {
     // The inlined body is a different function: swap in its own promotion
     // set (computed below for the generic path; raw bodies don't need it).
     auto savedPromote = std::move(promoteNames_);
+    auto savedSpec = std::move(specNames_);
     auto savedRanges = std::move(nameRanges_);
     promoteNames_.clear();
+    specNames_.clear();
     nameRanges_.clear();
 
     if (rawOk) {
@@ -4767,6 +5070,7 @@ class AsmEmitter {
     }
 
     promoteNames_ = std::move(savedPromote);
+    specNames_ = std::move(savedSpec);
     nameRanges_ = std::move(savedRanges);
     curModuleId_ = savedModule;
     inFunction_ = savedInFn;
@@ -5427,7 +5731,9 @@ class AsmEmitter {
         if (x.index && x.index->kind == ExprKind::Ident) {
           ABinding* ib =
               lookup(static_cast<const IdentExpr&>(*x.index).name);
-          if (ib && ib->rawInt) isRaw = ib->slot;
+          // specRaw bindings have no single raw slot (demotion swaps the
+          // representation), so they take the generic evalSlot path.
+          if (ib && ib->rawInt && !ib->specRaw) isRaw = ib->slot;
         }
         if (isRaw < 0 && x.index && exprIsInt(x.index.get()) &&
             rawSafeExpr(x.index.get()) &&
@@ -5996,6 +6302,7 @@ class AsmEmitter {
     bool savedInFn = inFunction_;
     inFunction_ = true;
     promoteNames_.clear();  // lambda bodies are expressions; no raw locals
+    specNames_.clear();
     nameRanges_.clear();
     emitExpr(x.body.get());
     emit("    leave\n    ret\n");
