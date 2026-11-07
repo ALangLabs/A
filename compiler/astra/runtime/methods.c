@@ -227,6 +227,7 @@ static aval str_affix(aval v, int64_t width, aval fillv, int mode) {
 
 static aval seq_index(aval v, aval item, int64_t start, int64_t stop) {
     AArr *a = (AArr *)obj_of(v);
+    arr_ensure_aval(a);
     uint64_t n = a->h.len;
     int64_t lo = start < 0 ? start + (int64_t)n : start;
     int64_t hi = stop < 0 ? stop + (int64_t)n : stop;
@@ -240,6 +241,7 @@ static aval seq_index(aval v, aval item, int64_t start, int64_t stop) {
 
 static int seq_contains(aval v, aval item) {
     AArr *a = (AArr *)obj_of(v);
+    arr_ensure_aval(a);
     for (uint64_t i = 0; i < a->h.len; ++i)
         if (values_equal(a->items[i], item)) return 1;
     return 0;
@@ -276,6 +278,7 @@ aval a_getattr(aval obj, const char *name) {
 
 static aval list_pop(aval v, int64_t idx, int has_idx) {
     AArr *a = (AArr *)obj_of(v);
+    arr_ensure_aval(a);
     if (a->h.len == 0) panicf("Cannot pop from an empty array.");
     int64_t i = has_idx ? normalize_index(idx, a->h.len) : (int64_t)a->h.len - 1;
     aval r = a->items[i];
@@ -297,6 +300,8 @@ static aval make_keys_values_items(aval v, int mode) {
     out->h.len = 0;
     out->h.cap = d->h.len;
     out->items = (aval *)xmalloc((size_t)(d->h.len ? d->h.len : 1) * sizeof(aval));
+    out->iitems = NULL;
+    out->flags = 0;
     for (uint64_t i = 0; i < d->h.len; ++i) {
         aval x;
         if (mode == 0) x = d->pairs[i].k;
@@ -320,6 +325,8 @@ static aval method_set_op(aval v, aval other, int mode) {
     out->h.len = 0;
     out->h.cap = s->h.len + o->h.len;
     out->items = (aval *)xmalloc((size_t)(out->h.cap ? out->h.cap : 1) * sizeof(aval));
+    out->iitems = NULL;
+    out->flags = 0;
     for (uint64_t i = 0; i < s->h.len; ++i) {
         int in_o = 0;
         for (uint64_t j = 0; j < o->h.len; ++j)
@@ -668,15 +675,28 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
             if (lo < 0) lo = 0;
             if (hi > (int64_t)a->h.len) hi = (int64_t)a->h.len;
             int64_t c = 0;
+            arr_ensure_aval(a);
             for (int64_t i = lo; i < hi; ++i)
                 if (values_equal(a->items[i], argv[0])) ++c;
             return mkint_full(c);
         }
         if (!strcmp(name, "contains")) { want_args(name, n, 1, 1); return bool_aval(seq_contains(obj, argv[0])); }
-        if (!strcmp(name, "first")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(a->items[0]); }
-        if (!strcmp(name, "last")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(a->items[a->h.len - 1]); }
+        if (!strcmp(name, "first")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(arr_elem(a, 0)); }
+        if (!strcmp(name, "last")) { want_args(name, n, 0, 0); if (!a->h.len) return A_NONE; return a_some_new(arr_elem(a, (uint64_t)a->h.len - 1)); }
         if (!strcmp(name, "copy")) {
             want_args(name, n, 0, 0);
+            if (arr_packed(a)) {
+                /* packed int copy stays packed */
+                AArr *out = (AArr *)xmalloc(sizeof(AArr));
+                out->h.type = a->h.type;
+                out->h.len = a->h.len;
+                out->h.cap = a->h.len;
+                out->items = NULL;
+                out->iitems = (int64_t *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(int64_t));
+                if (a->h.len) memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
+                out->flags = ARR_F_PACKED;
+                return mkobj(&out->h);
+            }
             return list_from_vec(a->items, a->h.len, !is_list);
         }
         if (!is_list) return method_no_method(obj, name);
@@ -698,6 +718,18 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
             if (i < 0) i += (int64_t)a->h.len;
             if (i < 0) i = 0;
             if (i > (int64_t)a->h.len) i = (int64_t)a->h.len;
+            if (arr_packed(a) && is_int_val(argv[1])) {
+                arr_reserve_i64(a, (uint64_t)a->h.len + 1);
+                memmove(a->iitems + i + 1, a->iitems + i,
+                        (size_t)(a->h.len - (uint64_t)i) * sizeof(int64_t));
+                a->iitems[i] = int_val_full(argv[1]);
+                a->h.len++;
+                return A_NONE;
+            }
+            if (arr_packed(a)) {
+                a->flags |= ARR_F_NOMIX;
+                arr_ensure_aval(a);
+            }
             arr_reserve(a, (uint64_t)a->h.len + 1);
             memmove(a->items + i + 1, a->items + i,
                     (size_t)(a->h.len - (uint64_t)i) * sizeof(aval));
@@ -710,6 +742,12 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
             int64_t i = expect_int64(argv[0], "index");
             if (i < 0) i += (int64_t)a->h.len;
             if (i < 0 || i >= (int64_t)a->h.len) panicf("remove_at index out of range");
+            if (arr_packed(a)) {
+                int64_t r = a->iitems[i];
+                memmove(a->iitems + i, a->iitems + i + 1, (size_t)(a->h.len - (uint64_t)i - 1) * sizeof(int64_t));
+                a->h.len--;
+                return mkint_full(r);
+            }
             aval r = a->items[i];
             memmove(a->items + i, a->items + i + 1, (size_t)(a->h.len - (uint64_t)i - 1) * sizeof(aval));
             a->h.len--;
@@ -724,6 +762,7 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
         }
         if (!strcmp(name, "remove")) {
             want_args(name, n, 1, 1);
+            arr_ensure_aval(a);
             for (uint64_t i = 0; i < a->h.len; ++i) {
                 if (values_equal(a->items[i], argv[0])) {
                     memmove(a->items + i, a->items + i + 1,
@@ -742,11 +781,20 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
         if (!strcmp(name, "clear")) { want_args(name, n, 0, 0); a->h.len = 0; return A_NONE; }
         if (!strcmp(name, "sort")) {
             want_args(name, n, 0, 0);
+            arr_ensure_aval(a);
             sort_arr(a->items, a->h.len);
+            arr_try_pack(a);  /* an all-int sort may re-pack lazily */
             return A_NONE;
         }
         if (!strcmp(name, "reverse")) {
             want_args(name, n, 0, 0);
+            if (arr_packed(a)) {
+                for (uint64_t i = 0; i < a->h.len / 2; ++i) {
+                    uint64_t j = a->h.len - 1 - i;
+                    int64_t t = a->iitems[i]; a->iitems[i] = a->iitems[j]; a->iitems[j] = t;
+                }
+                return A_NONE;
+            }
             for (uint64_t i = 0; i < a->h.len / 2; ++i) {
                 uint64_t j = a->h.len - 1 - i;
                 aval t = a->items[i]; a->items[i] = a->items[j]; a->items[j] = t;
@@ -917,6 +965,8 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
             out->h.len = s->h.len;
             out->h.cap = s->h.len;
             out->items = (aval *)xmalloc((size_t)(s->h.len ? s->h.len : 1) * sizeof(aval));
+            out->iitems = NULL;
+            out->flags = 0;
             if (s->h.len) memcpy(out->items, s->items, (size_t)s->h.len * sizeof(aval));
             return mkobj(&out->h);
         }

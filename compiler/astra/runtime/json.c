@@ -284,6 +284,7 @@ static void json_write(Buf *b, aval v, int pretty, int depth) {
             return;
         case T_LIST: case T_TUPLE: case T_SET: {
             AArr *a = (AArr *)o;
+            arr_ensure_aval(a);
             buf_addc(b, '[');
             for (uint32_t i = 0; i < a->h.len; ++i) {
                 if (i) buf_adds(b, pretty ? "," : ", ");
@@ -374,7 +375,7 @@ aval bi_json_at(uint64_t n, aval *argv) {
     int64_t idx = expect_int64(argv[1], "json.at index");
     if (idx < 0) idx += (int64_t)a->h.len;
     if (idx < 0 || (uint64_t)idx >= a->h.len) return A_NONE;
-    return a_some_new(a->items[idx]);
+    return a_some_new(arr_elem(a, (uint64_t)idx));
 }
 
 aval bi_json_len(uint64_t n, aval *argv) {

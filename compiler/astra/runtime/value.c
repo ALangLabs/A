@@ -189,6 +189,16 @@ int values_equal(aval a, aval b) {
         int64_t la = ka == K_VIEW ? ((AView *)obj_of(a))->len : (int64_t)((AArr *)obj_of(a))->h.len;
         int64_t lb = kb == K_VIEW ? ((AView *)obj_of(b))->len : (int64_t)((AArr *)obj_of(b))->h.len;
         if (la != lb) return 0;
+        /* Views may alias packed-int storage: normalize both sides to
+           aval elements once before the element-wise compare. */
+        if (ka == K_VIEW)
+            arr_ensure_aval((AArr *)obj_of(((AView *)obj_of(a))->parent));
+        else if (ka == K_LIST)
+            arr_ensure_aval((AArr *)obj_of(a));
+        if (kb == K_VIEW)
+            arr_ensure_aval((AArr *)obj_of(((AView *)obj_of(b))->parent));
+        else if (kb == K_LIST)
+            arr_ensure_aval((AArr *)obj_of(b));
         for (int64_t i = 0; i < la; ++i) {
             aval xa = ka == K_VIEW ? ((AArr *)obj_of(((AView *)obj_of(a))->parent))->items[(size_t)(((AView *)obj_of(a))->off + i)]
                                    : ((AArr *)obj_of(a))->items[(size_t)i];
@@ -221,6 +231,8 @@ int values_equal(aval a, aval b) {
         case K_LIST:
         case K_TUPLE: {
             AArr *x = (AArr *)obj_of(a), *y = (AArr *)obj_of(b);
+            arr_ensure_aval(x);
+            arr_ensure_aval(y);
             if (x->h.len != y->h.len) return 0;
             for (uint64_t i = 0; i < x->h.len; ++i)
                 if (!values_equal(x->items[i], y->items[i])) return 0;
@@ -443,6 +455,20 @@ static aval concat_arr(aval l, aval r) {
     out->h.type = is_tuple ? T_TUPLE : T_LIST;
     out->h.len = 0;
     out->h.cap = (uint64_t)a->h.len + b->h.len;
+    out->iitems = NULL;
+    out->flags = 0;
+    if (!is_tuple && arr_packed(a) && arr_packed(b)) {
+        /* int-list + int-list stays packed */
+        out->items = NULL;
+        out->iitems = (int64_t *)xmalloc((size_t)(out->h.cap ? out->h.cap : 1) * sizeof(int64_t));
+        memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
+        memcpy(out->iitems + a->h.len, b->iitems, (size_t)b->h.len * sizeof(int64_t));
+        out->h.len = a->h.len + b->h.len;
+        out->flags |= ARR_F_PACKED;
+        return mkobj(&out->h);
+    }
+    arr_ensure_aval(a);
+    arr_ensure_aval(b);
     out->items = (aval *)xmalloc((size_t)(out->h.cap ? out->h.cap : 1) * sizeof(aval));
     memcpy(out->items, a->items, (size_t)a->h.len * sizeof(aval));
     memcpy(out->items + a->h.len, b->items, (size_t)b->h.len * sizeof(aval));
@@ -581,6 +607,7 @@ aval a_contains(aval cont, aval item) {
         case K_TUPLE:
         case K_SET: {
             AArr *a = (AArr *)obj_of(cont);
+            arr_ensure_aval(a);
             for (uint64_t i = 0; i < a->h.len; ++i)
                 if (values_equal(a->items[i], item)) return A_TRUE;
             return A_FALSE;
@@ -654,6 +681,8 @@ aval list_from_vec(const aval *p, uint64_t n, int tuple) {
     a->h.len = (uint32_t)n;
     a->h.cap = n;
     a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
+    a->iitems = NULL;
+    a->flags = 0;
     if (n) memcpy(a->items, p, (size_t)n * sizeof(aval));
     return mkobj(&a->h);
 }
@@ -715,6 +744,8 @@ aval a_set_new(void) {
     s->h.len = 0;
     s->h.cap = 0;
     s->items = NULL;
+    s->iitems = NULL;
+    s->flags = 0;
     return mkobj(&s->h);
 }
 
@@ -847,7 +878,7 @@ aval a_getitem(aval obj, aval idx) {
         case K_TUPLE: {
             AArr *a = (AArr *)obj_of(obj);
             int64_t i = normalize_index(expect_int64(idx, "index"), a->h.len);
-            return a->items[i];
+            return arr_elem(a, (uint64_t)i);
         }
         case K_DICT: {
             ADict *d = (ADict *)obj_of(obj);
@@ -888,6 +919,14 @@ aval a_setitem(aval obj, aval idx, aval val) {
         case K_LIST: {
             AArr *a = (AArr *)obj_of(obj);
             int64_t i = normalize_index(expect_int64(idx, "index"), a->h.len);
+            if (arr_packed(a)) {
+                if (is_int_val(val)) {
+                    a->iitems[i] = int_val_full(val);
+                    return val;
+                }
+                a->flags |= ARR_F_NOMIX;
+                arr_ensure_aval(a);
+            }
             a->items[i] = val;
             return val;
         }
@@ -933,17 +972,32 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
                    type_name_cstr(obj));
             return A_NONE;
     }
+    /* Packed-int storage: an all-int fill stays packed; a non-int value
+       converts the root to aval storage first (mirrors a_setitem). */
+    int pok = 0;
+    int64_t pv = 0;
+    if (arr_packed(root)) {
+        if (is_int_val(val)) {
+            pok = 1;
+            pv = int_val_full(val);
+        } else {
+            root->flags |= ARR_F_NOMIX;
+            arr_ensure_aval(root);
+        }
+    }
     int64_t k = lo;
     if (step >= 0) {
         while (k < hi) {
             int64_t i = normalize_index(k, len);
-            root->items[(size_t)(base + i)] = val;
+            if (pok) root->iitems[(size_t)(base + i)] = pv;
+            else root->items[(size_t)(base + i)] = val;
             k = (int64_t)((uint64_t)k + (uint64_t)step);
         }
     } else {
         while (k > hi) {
             int64_t i = normalize_index(k, len);
-            root->items[(size_t)(base + i)] = val;
+            if (pok) root->iitems[(size_t)(base + i)] = pv;
+            else root->items[(size_t)(base + i)] = val;
             k = (int64_t)((uint64_t)k + (uint64_t)step);
         }
     }
@@ -961,7 +1015,10 @@ static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
     vw->is_tuple = is_tuple;
     return mkobj(&vw->h);
 }
-/* Resolve a view (or direct list) to root AArr + absolute offset. */
+/* Resolve a view (or direct list) to root AArr + absolute offset.
+   Packed-int roots are normalized to aval storage here: every caller
+   reads or writes root->items, so conversion is the single choke point
+   that keeps views semantics identical. */
 AArr *view_root(aval v, int64_t *off) {
     AObj *o = obj_of(v);
     if (o && o->type == T_VIEW) {
@@ -972,7 +1029,9 @@ AArr *view_root(aval v, int64_t *off) {
         return root;
     }
     *off = 0;
-    return (AArr *)o;
+    AArr *r = (AArr *)o;
+    if (r) arr_ensure_aval(r);
+    return r;
 }
 static int64_t slice_step(aval v) {
     int64_t s = expect_int64(v, "slice step");
@@ -1033,19 +1092,7 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         int64_t cnt = stop - start;
         if (cnt < 0) cnt = 0;
         if (o->type == T_VIEW) {
-            int64_t base;
-            AArr *root = view_root(obj, &base);
-            (void)root;
-            int64_t rootBase = 0;
-            AArr *flat = view_root(obj, &rootBase);
-            aval flatAval = obj;
-            /* flatten: parent is the root array object */
-            int64_t dummy = 0;
-            AObj *rootObj = (AObj *)view_root(obj, &dummy);
-            /* rootObj points at root AArr; recover its aval via parent chain */
-            /* Simpler: keep obj as parent but offset relative to obj */
             AView *vw = (AView *)o;
-            (void)flat; (void)flatAval;
             return view_new(vw->parent, vw->off + start, cnt, vw->is_tuple);
         }
         (void)v;
@@ -1063,9 +1110,11 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         }
         aval r = list_from_vec(v.p, v.len, 0);
         free(v.p);
+        arr_try_pack((AArr *)obj_of(r));
         return r;
     }
     AArr *a = (AArr *)o;
+    arr_ensure_aval(a);
     for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
         avec_push(&v, a->items[i]);
         if (st > 0) { if (i > INT64_MAX - st) break; i += st; }
@@ -1073,6 +1122,7 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
     }
     aval r = list_from_vec(v.p, v.len, o->type == T_TUPLE);
     free(v.p);
+    arr_try_pack((AArr *)obj_of(r));
     return r;
 }
 
@@ -1156,6 +1206,7 @@ aval a_iter_next(aval it, aval *out) {
     AObj *so = obj_of(src);
     uint64_t len;
     aval *items = NULL;
+    int64_t *iitems = NULL;
     ADict *d = NULL;
     AView *vw_src = NULL;
     APyBuf *pb_src = NULL;
@@ -1174,7 +1225,8 @@ aval a_iter_next(aval it, aval *out) {
     } else {
         AArr *a = (AArr *)so;
         len = a->h.len;
-        items = a->items;
+        if (arr_packed(a)) iitems = a->iitems;
+        else items = a->items;
     }
     if (iter->idx >= len) return (aval)0;
     uint64_t i = iter->idx++;
@@ -1191,6 +1243,7 @@ aval a_iter_next(aval it, aval *out) {
         if (boff + (uint64_t)l > s->h.len) l = 1;
         *out = a_char_new(s->data + boff, (uint64_t)l);
     }
+    else if (iitems) *out = mkint_full(iitems[i]);
     else *out = items[i];
     return (aval)1;
 }

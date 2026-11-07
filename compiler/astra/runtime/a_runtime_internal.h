@@ -40,6 +40,14 @@ typedef struct AObj {
     uint64_t cap;
 } AObj;
 
+/* AArr flags (offset 32 in the struct; items/iitems pointers at 16/24):
+   ARR_F_PACKED — element storage is `iitems` (int64_t *), `items` is NULL.
+     Only ever set on T_LIST objects; every element is an integer.
+   ARR_F_NOMIX  — sticky "known to contain a non-int aval" marker on an
+     aval-mode T_LIST, so arr_push_int skips its all-int promotion scan. */
+#define ARR_F_PACKED 1u
+#define ARR_F_NOMIX  2u
+
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
     T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
@@ -47,7 +55,7 @@ enum {
 };
 
 typedef struct { AObj h; char data[]; } AStr;
-typedef struct { AObj h; aval *items; } AArr;
+typedef struct { AObj h; aval *items; int64_t *iitems; uint32_t flags; } AArr;
 typedef struct { aval k, v; } APair;
 /* pairs keeps insertion order; phash[i] is the cached hash of pairs[i].k;
    slots is an open-addressed index (power-of-two scap, 0 = empty, else
@@ -164,7 +172,13 @@ int64_t str_find(aval hay, aval needle, int64_t start, int reverse);
 aval str_repeat(aval s, int64_t count);
 AArr *arr_of(aval v, const char *what);
 void arr_reserve(AArr *a, uint64_t need);
+void arr_reserve_i64(AArr *a, uint64_t need);
 void arr_push(AArr *a, aval v);
+int arr_packed(const AArr *a);
+void arr_ensure_aval(AArr *a);
+void arr_try_pack(AArr *a);
+void arr_push_int(AArr *a, aval v);
+aval arr_elem(const AArr *a, uint64_t i);
 ADict *dict_of(aval v, const char *what);
 int64_t dict_find(ADict *d, aval k);
 void dict_put(ADict *d, aval k, aval v);

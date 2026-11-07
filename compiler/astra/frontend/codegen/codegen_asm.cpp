@@ -2250,11 +2250,44 @@ class AsmEmitter {
     jmp(mergedL);
   }
 
+  // Shared tail of an emitForArray fast loop: binds the loop variable,
+  // pushes break/continue labels, emits the body, bumps the index and
+  // jumps back. `varRaw` marks the binding rawInt (slot holds int64).
+  void emitForArrayLoopTail(const ForStmt& st, int iS, int varS,
+                            const std::string& loopL,
+                            const std::string& contL,
+                            const std::string& endL, bool varRaw) {
+    pushScope();
+    bindLocal(st.var, varS);
+    if (varRaw) {
+      ABinding* vb = lookup(st.var);
+      if (vb) vb->rawInt = true;
+    }
+    loopBreak_.push_back(endL);
+    loopCont_.push_back(contL);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    emitBody(st.body);
+    loopDeferDepth_.pop_back();
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    popScope();
+    emitLabel(contL);
+    emit("    addq $1, " + slotRef(iS) + "\n");
+    jmp(loopL);
+  }
+
   // `for x in <array-typed>`: emit a runtime kind check once; AArr-backed
   // objects (T_LIST/T_TUPLE/T_SET share {AObj; aval *items}) iterate with a
   // pointer-bump loop that reloads len/items each pass (matching
   // a_iter_next's live-view semantics under mutation). Anything else falls
   // back to the generic iterator loop.
+  //
+  // Packed-int lists (AArr.flags bit0, iitems @24) get a dedicated loop:
+  // with a pure body the flag/items/len are loop-invariant, so the packed
+  // check runs once and elements load as raw int64 — bound rawInt when the
+  // promote scan proves every write to the var is raw-safe, boxed to aval
+  // otherwise. Impure bodies use a per-pass flag check that tolerates
+  // mid-iteration packed<->aval conversion (append of a non-int).
   void emitForArray(const ForStmt& st) {
     int objS = evalSlot(st.iterable.get());
     std::string fastL = newLabel("afast"), slowL = newLabel("aslow"),
@@ -2276,21 +2309,51 @@ class AsmEmitter {
     // keeps reloading both every pass, which is what makes mutation during
     // iteration (e.g. append) observable — preserved exactly.
     const bool hoist = scanStmtsPure(st.body, nullptr);
-    int lenS = -1, itemsS = -1;
     if (hoist) {
-      lenS = allocSlot();
-      itemsS = allocSlot();
+      // Packed check once: pure bodies cannot append/convert, so the flag
+      // and the iitems pointer stay valid for the whole loop.
+      std::string pkL = newLabel("apk"), avL = newLabel("aav");
+      emit("    mov 32(%rcx), %eax\n    test $1, %eax\n"
+           "    jnz " + pkL + "\n    jmp " + avL + "\n");
+      emitLabel(pkL);
+      // ---- packed-int loop (raw int64 elements) ----
+      PromoteScan ps;
+      promoteWriteStmts(st.body, ps);
+      const bool varRaw = !ps.bad.count(st.var);
+      int pkLenS = allocSlot(), pkItS = allocSlot();
+      emit("    mov 4(%rcx), %edx\n    mov %rdx, " + slotRef(pkLenS) + "\n"
+           "    mov 24(%rcx), %rcx\n    mov %rcx, " + slotRef(pkItS) + "\n");
+      int pkIS = allocSlot(), pkVarS = allocSlot();
+      movImm(0, "%rcx");
+      emit("    mov %rcx, " + slotRef(pkIS));
+      std::string pkLoopL = newLabel("for"), pkContL = newLabel("forc"),
+              pkEndL = newLabel("fend");
+      emitLabel(pkLoopL);
+      emit("    mov " + slotRef(pkIS) + ", %rax\n"
+           "    mov " + slotRef(pkLenS) + ", %rdx\n    cmp %rdx, %rax\n    jae " +
+           pkEndL + "\n"
+           "    mov " + slotRef(pkItS) + ", %rcx\n    mov (%rcx,%rax,8), %rax\n");
+      if (varRaw) {
+        storeRax(pkVarS);  // raw int64 element
+      } else {
+        emitBoxInt64();    // box to aval element
+        storeRax(pkVarS);
+      }
+      emitForArrayLoopTail(st, pkIS, pkVarS, pkLoopL, pkContL, pkEndL, varRaw);
+      emitLabel(pkEndL);
+      jmp(fastEndL);
+      // ---- aval loop (existing hoisted path) ----
+      emitLabel(avL);
+      int lenS = allocSlot(), itemsS = allocSlot();
       emit("    mov 4(%rcx), %edx\n    mov %rdx, " + slotRef(lenS) + "\n"
            "    mov 16(%rcx), %rcx\n    mov %rcx, " + slotRef(itemsS) + "\n");
-    }
-    int iS = allocSlot();
-    movImm(0, "%rcx");
-    emit("    mov %rcx, " + slotRef(iS));
-    int varS = allocSlot();
-    std::string loopL = newLabel("for");
-    std::string contL = newLabel("forc");
-    emitLabel(loopL);
-    if (hoist) {
+      int iS = allocSlot();
+      movImm(0, "%rcx");
+      emit("    mov %rcx, " + slotRef(iS));
+      int varS = allocSlot();
+      std::string loopL = newLabel("for");
+      std::string contL = newLabel("forc");
+      emitLabel(loopL);
       // iS = index; lenS/itemsS hoisted. Same load as the reload path but
       // without re-untagging the object or re-reading h.len/items.
       emit("    mov " + slotRef(iS) + ", %rax\n"
@@ -2298,29 +2361,38 @@ class AsmEmitter {
            fastEndL + "\n"
            "    mov " + slotRef(itemsS) + ", %rcx\n    mov (%rcx,%rax,8), %rax\n"
            "    mov %rax, " + slotRef(varS) + "\n");
+      emitForArrayLoopTail(st, iS, varS, loopL, contL, fastEndL, false);
     } else {
+      // Impure body: reload the object each pass and branch on the packed
+      // flag per element, so mid-iteration packed<->aval conversion
+      // (append of a non-int frees iitems) is observed correctly.
+      int iS = allocSlot();
+      movImm(0, "%rcx");
+      emit("    mov %rcx, " + slotRef(iS));
+      int varS = allocSlot();
+      std::string loopL = newLabel("for");
+      std::string contL = newLabel("forc");
+      std::string pkL = newLabel("apkp"), avL = newLabel("apav"),
+              bodyL = newLabel("apbd");
+      emitLabel(loopL);
       // obj aval -> rcx = object pointer; rdx = len (u32); rax = index.
       emit("    mov " + slotRef(objS) + ", %rax\n"
            "    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
            "    mov 4(%rcx), %edx\n"
            "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
-           fastEndL + "\n");
+           fastEndL + "\n"
+           "    mov 32(%rcx), %r8d\n    test $1, %r8d\n    jnz " + pkL + "\n"
+           "    jmp " + avL + "\n");
+      emitLabel(avL);
       emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
-           "    mov %rax, " + slotRef(varS) + "\n");
+           "    mov %rax, " + slotRef(varS) + "\n    jmp " + bodyL + "\n");
+      emitLabel(pkL);
+      emit("    mov 24(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n");
+      emitBoxInt64();
+      emit("    mov %rax, " + slotRef(varS) + "\n");
+      emitLabel(bodyL);
+      emitForArrayLoopTail(st, iS, varS, loopL, contL, fastEndL, false);
     }
-    pushScope();
-    bindLocal(st.var, varS);
-    loopBreak_.push_back(fastEndL);
-    loopCont_.push_back(contL);
-    loopDeferDepth_.push_back((int)deferStack_.size());
-    emitBody(st.body);
-    loopDeferDepth_.pop_back();
-    loopBreak_.pop_back();
-    loopCont_.pop_back();
-    popScope();
-    emitLabel(contL);
-    emit("    addq $1, " + slotRef(iS) + "\n");
-    jmp(loopL);
     emitLabel(fastEndL);
     jmp(mergedL);
     emitLabel(slowL);
@@ -4833,6 +4905,9 @@ class AsmEmitter {
         int vs = evalSlot(call.args[0].value.get());
         loadSlot(os, "%rdi");
         loadSlot(vs, "%rsi");
+        // Int-typed values go through the packed-int-aware append: int
+        // elements keep (or promote to) int64 storage; anything else
+        // falls back to the generic append semantics inside the runtime.
         emit("    call a_list_append\n");
         return;
       }
@@ -5427,21 +5502,36 @@ class AsmEmitter {
                "    cmp $3, %eax\n    je " + fastL + "\n"
                "    jmp " + slowL + "\n");
           emitLabel(fastL);
-          if (bceHit) {
-            // i >= 0 and i < len(arr): load items[i] directly.
-            emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
-                 "    jmp " + doneL + "\n");
-          } else {
-            emit("    mov 4(%rcx), %edx\n");  // rdx = len (u32, zero-extended)
-            emit("    test %r8, %r8\n    jns " + negL + "_p\n"
-                 "    add %rdx, %r8\n");
-            emitLabel(negL + "_p");
-            emit("    cmp %rdx, %r8\n    jae " + panicL + "\n");
-            emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
-                 "    jmp " + doneL + "\n");
-            emitLabel(panicL);
-            emitPanicStr("index out of range");
-            emit("    jmp " + doneL + "\n");
+          // Packed-int storage: flag bit0 of AArr.flags (@32) selects the
+          // int64 element buffer (@24) instead of the aval items (@16);
+          // the loaded int64 is boxed back to an aval for the result.
+          {
+            std::string pkL = newLabel("gipk"), avL = newLabel("giav");
+            auto emitIdxLoad = [&](const std::string& doneL) {
+              emit("    mov 32(%rcx), %r9d\n    test $1, %r9d\n    jnz " + pkL +
+                   "\n    jmp " + avL + "\n");
+              emitLabel(avL);
+              emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
+                   "    jmp " + doneL + "\n");
+              emitLabel(pkL);
+              emit("    mov 24(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n");
+              emitBoxInt64();
+              emit("    jmp " + doneL + "\n");
+            };
+            if (bceHit) {
+              // i >= 0 and i < len(arr): load element directly.
+              emitIdxLoad(doneL);
+            } else {
+              emit("    mov 4(%rcx), %edx\n");  // rdx = len (u32, zero-extended)
+              emit("    test %r8, %r8\n    jns " + negL + "_p\n"
+                   "    add %rdx, %r8\n");
+              emitLabel(negL + "_p");
+              emit("    cmp %rdx, %r8\n    jae " + panicL + "\n");
+              emitIdxLoad(doneL);
+              emitLabel(panicL);
+              emitPanicStr("index out of range");
+              emit("    jmp " + doneL + "\n");
+            }
           }
           emitLabel(slowL);
           call2slot("a_getitem", os, avalIndex());
@@ -5477,6 +5567,14 @@ class AsmEmitter {
         movImm(es.size(), "%rdi");
         leaSlot(argvPtr(av), "%rsi");
         emit("    call a_list_new");
+        // All-int literals pack into int64 element storage (the runtime
+        // re-verifies every element is an int before converting).
+        bool allInt = true;
+        for (auto& el : x.elements)
+          if (!exprIsInt(el.get())) { allInt = false; break; }
+        if (allInt) {
+          emit("\n    mov %rax, %rdi\n    call a_list_pack");
+        }
         return;
       }
       case ExprKind::Tuple: {
@@ -5991,8 +6089,24 @@ class AsmEmitter {
            "    mov 4(%rcx), %edx\n"
            "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
            fastEndL + "\n");
-      emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
-           "    mov %rax, " + slotRef(varS) + "\n");
+      // Packed-int source: flag bit0 of AArr.flags (@32) selects the
+      // int64 element buffer (@24); the value is boxed for the var slot.
+      // Checked per pass so mid-iteration packed<->aval conversion is
+      // observed (element exprs may call back into the array).
+      {
+        std::string pkL = newLabel("cpkp"), avL = newLabel("cpav"),
+                bodyL = newLabel("cpbd");
+        emit("    mov 32(%rcx), %r8d\n    test $1, %r8d\n    jnz " + pkL +
+             "\n    jmp " + avL + "\n");
+        emitLabel(avL);
+        emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
+             "    mov %rax, " + slotRef(varS) + "\n    jmp " + bodyL + "\n");
+        emitLabel(pkL);
+        emit("    mov 24(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n");
+        emitBoxInt64();
+        emit("    mov %rax, " + slotRef(varS) + "\n");
+        emitLabel(bodyL);
+      }
       if (x.condition) {
         condJump(x.condition.get(), contL, false);
       }

@@ -23,7 +23,7 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
     if (o && (o->type == T_LIST || o->type == T_TUPLE)) {
         AArr *a = (AArr *)o;
         if (i < 0 || (uint64_t)i >= a->h.len) panicf("unsafe.get: index out of bounds");
-        return a->items[i];
+        return arr_elem(a, (uint64_t)i);
     }
     if (o && o->type == T_SET) {
         AArr *a = (AArr *)o;
@@ -54,6 +54,14 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
     if (o && (o->type == T_LIST || o->type == T_TUPLE)) {
         AArr *a = (AArr *)o;
         if (i < 0 || (uint64_t)i >= a->h.len) panicf("unsafe.set: index out of bounds");
+        if (arr_packed(a)) {
+            if (is_int_val(argv[2])) {
+                a->iitems[i] = int_val_full(argv[2]);
+                return A_NONE;
+            }
+            a->flags |= ARR_F_NOMIX;
+            arr_ensure_aval(a);
+        }
         a->items[i] = argv[2];
         return A_NONE;
     }

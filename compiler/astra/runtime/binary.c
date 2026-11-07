@@ -114,6 +114,7 @@ static void bin_encode_val(BinBuf *b, aval v) {
     }
     case K_LIST: case K_TUPLE: case K_SET: {
         AArr *a = (AArr *)obj_of(v);
+        arr_ensure_aval(a);
         bin_put(b, kind_of(v) == K_TUPLE ? BIN_TUPLE
                     : kind_of(v) == K_SET ? BIN_SET : BIN_ARRAY);
         bin_varint(b, a->h.len);
@@ -316,7 +317,7 @@ aval bi_binary_decode(uint64_t n, aval *argv) {
     r.len = r.pos = 0;
     r.err = 0;
     for (uint32_t i = 0; i < a->h.len; ++i) {
-        int64_t byte = int_val_full(a->items[i]);
+        int64_t byte = arr_packed(a) ? a->iitems[i] : int_val_full(a->items[i]);
         if (byte < 0 || byte > 255) {
             free((void *)r.p);
             panicf("'binary.decode' expects an array of byte values (0-255)");

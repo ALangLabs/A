@@ -487,4 +487,6 @@ aval a_i64n(long long v);
 int a_is_propagate(aval v);
 aval a_match_fail(aval subj);
 aval a_list_push(aval list, aval v);
+aval a_list_append_int(aval list, aval v);  /* append preferring packed-int storage */
+aval a_list_pack(aval v);                   /* pack all-int list -> int64 storage */
 aval a_setattr(aval obj, const char *name, aval v);

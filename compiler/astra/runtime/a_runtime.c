@@ -191,6 +191,19 @@ aval a_list_push(aval list, aval v) {
     arr_push(a, v);
     return list;
 }
+aval a_list_append_int(aval list, aval v) {
+    AObj *o = obj_of(list);
+    if (o && o->type == T_LIST) {
+        arr_push_int((AArr *)o, v);
+        return A_NONE;
+    }
+    return a_list_append(list, v);
+}
+aval a_list_pack(aval v) {
+    AObj *o = obj_of(v);
+    if (o && o->type == T_LIST) arr_try_pack((AArr *)o);
+    return v;
+}
 aval a_list_append(aval list, aval v) {
     AObj *o = obj_of(list);
     if (o && o->type == T_LIST) {
