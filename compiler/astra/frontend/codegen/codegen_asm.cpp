@@ -309,11 +309,13 @@ class AsmEmitter {
     storeRax(s);
     return s;
   }
-  // Raw int64 of an aval slot -> fresh slot via a_int_full.
+  // Raw int64 of an aval slot -> fresh slot (inline unbox; a_int_full on
+  // non-int, preserving its panic behaviour).
   int int64Slot(int avalS) {
     int s = allocSlot();
     loadSlot(avalS, "%rdi");
-    emit("    call a_int_full\n    mov %rax, " + slotRef(s));
+    emitAvalToI64();
+    storeRax(s);
     return s;
   }
 
@@ -575,11 +577,77 @@ class AsmEmitter {
     emitLabel(doneL);
   }
 
+  // `a <cmp> b` with int operands materialized as raw int64 and compared
+  // directly: comparisons cannot trap or overflow, so both sides only need
+  // the rawBinFastOk operand gate (safe-op restriction does not apply).
+  bool rawCmpOk(const BinaryExpr& b) {
+    static const std::set<std::string> kCmp = {"==", "!=", "<", "<=", ">", ">="};
+    return kCmp.count(b.op) && exprIsInt(b.lhs.get()) &&
+           exprIsInt(b.rhs.get()) && rawSafeExpr(b.lhs.get()) &&
+           rawSafeExpr(b.rhs.get());
+  }
+
+  // Structural mirror of tryRawCondJump for the promotion coverage scan.
+  bool rawCondOk(const Expr* e) {
+    if (!e) return false;
+    if (e->kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+      return u.op == "not" && rawCondOk(u.operand.get());
+    }
+    if (e->kind == ExprKind::Binary &&
+        rawCmpOk(static_cast<const BinaryExpr&>(*e)))
+      return true;
+    return exprIsInt(e) && rawSafeExpr(e);
+  }
+
+  // Raw int64 condition jump: int comparisons, `not e`, and bare int exprs
+  // (truthy iff != 0) branch without materializing the bool aval. Anything
+  // else falls through to the generic truthiness path in condJump.
+  bool tryRawCondJump(const Expr* cond, const std::string& label,
+                      bool jumpIfTrue) {
+    if (!cond || failed_) return false;
+    if (cond->kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(*cond);
+      if (u.op != "not") return false;
+      return tryRawCondJump(u.operand.get(), label, !jumpIfTrue);
+    }
+    if (cond->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*cond);
+      static const std::unordered_map<std::string, const char*> kJcc = {
+          {"==", "je"}, {"!=", "jne"}, {"<", "jl"},
+          {"<=", "jle"}, {">", "jg"}, {">=", "jge"}};
+      auto it = kJcc.find(b.op);
+      if (it != kJcc.end() && rawCmpOk(b)) {
+        int ls = allocSlot(), rs = allocSlot();
+        emitRawExpr(b.lhs.get(), ls);
+        emitRawExpr(b.rhs.get(), rs);
+        loadSlot(ls);
+        loadSlot(rs, "%rcx");
+        emit("    cmp %rcx, %rax\n");
+        static const std::unordered_map<std::string, const char*> kInv = {
+            {"je", "jne"}, {"jne", "je"}, {"jl", "jge"}, {"jle", "jg"},
+            {"jg", "jle"}, {"jge", "jl"}};
+        const char* cc = it->second;
+        if (!jumpIfTrue) cc = kInv.at(cc);
+        emit(std::string("    ") + cc + " " + label + "\n");
+        return true;
+      }
+    }
+    if (!exprIsInt(cond) || !rawSafeExpr(cond)) return false;
+    int s = allocSlot();
+    emitRawExpr(cond, s);
+    loadSlot(s);
+    emit(std::string("    test %rax, %rax\n    ") +
+         (jumpIfTrue ? "jnz " : "jz ") + label + "\n");
+    return true;
+  }
+
   // Jump helper: evaluate cond expr -> truthy test -> jcc.
   // Fast paths cover A_TRUE/A_FALSE/A_NONE, inline ints, and untagged
   // doubles inline; everything else (boxed ints, strings, objects) goes
   // through a_truthy_raw_slow.
   void condJump(const Expr* cond, const std::string& label, bool jumpIfTrue) {
+    if (tryRawCondJump(cond, label, jumpIfTrue)) return;
     emitExpr(cond);
     std::string oneL = newLabel("tj1"), zeroL = newLabel("tj0"),
             intL = newLabel("tji"), dblL = newLabel("tjd"),
@@ -1575,12 +1643,26 @@ class AsmEmitter {
       emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
       emitLabel(bodyL + "_p");
       emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
+      // Promoted loop var: varS is a distinct slot holding the raw int64
+      // counter value (copied, not boxed); reads box on demand and any
+      // non-raw write demotes the binding. The promotion analysis only
+      // admits the var when every write is raw-safe, so the slot content
+      // always matches the flag across iterations.
+      const bool rawVar = promoteNames_.count(st.var) != 0;
       emitLabel(bodyL);
-      // var = a_i64n(cur)
-      emit("    mov " + slotRef(curS) + ", %rdi\n    call a_i64n\n");
-      storeRax(varS);
+      if (rawVar) {
+        copySlot(curS, varS);
+      } else {
+        // var = a_i64n(cur)
+        emit("    mov " + slotRef(curS) + ", %rdi\n    call a_i64n\n");
+        storeRax(varS);
+      }
       pushScope();
       bindLocal(st.var, varS);
+      if (rawVar) {
+        ABinding* vb = lookup(st.var);
+        if (vb) vb->rawInt = true;
+      }
       loopBreak_.push_back(endL);
       loopCont_.push_back(contL);
       loopDeferDepth_.push_back((int)deferStack_.size());
@@ -2705,7 +2787,18 @@ class AsmEmitter {
       }
       case StmtKind::For: {
         const ForStmt& st = static_cast<const ForStmt&>(*s);
-        ps.bad.insert(st.var);  // loop var binds an aval each iteration
+        // Range loops (`for i in lo..hi[..step]`) bind the var as a raw
+        // int64 each iteration (see emitFor), so the implicit write is a
+        // safe int write like a promoted `let`; body writes are scanned
+        // normally and any non-raw one disqualifies the name. Other
+        // iterables still bind an aval per iteration.
+        const Expr* it = st.iterable.get();
+        const bool rawRange =
+            it && (it->kind == ExprKind::Range ||
+                   (it->kind == ExprKind::Binary &&
+                    static_cast<const BinaryExpr&>(*it).op == ".."));
+        if (rawRange) ps.safe.insert(st.var);
+        else ps.bad.insert(st.var);
         promoteMarkExpr(st.iterable.get(), ps);
         for (const StmtPtr& b : st.body) promoteWriteStmt(b.get(), ps);
         return;
@@ -2724,6 +2817,13 @@ class AsmEmitter {
 
   void promoteWriteStmts(const std::vector<StmtPtr>& stmts, PromoteScan& ps) {
     for (const StmtPtr& s : stmts) promoteWriteStmt(s.get(), ps);
+  }
+
+  // Condition positions: tryRawCondJump emits raw int comparisons, `not`,
+  // and bare int exprs without boxing, so reads inside them stay raw.
+  void promoteCoverCond(const Expr* e, PromoteScan& ps) {
+    if (rawCondOk(e)) return;
+    promoteCoverExpr(e, ps);
   }
 
   // Read-side scan: mark pending names whose reads are NOT inside a raw
@@ -2822,7 +2922,7 @@ class AsmEmitter {
       }
       case ExprKind::Ternary: {
         const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
-        promoteCoverExpr(t.cond.get(), ps);
+        promoteCoverCond(t.cond.get(), ps);
         promoteCoverExpr(t.thenValue.get(), ps);
         promoteCoverExpr(t.elseValue.get(), ps);
         return;
@@ -2831,7 +2931,7 @@ class AsmEmitter {
         const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
         promoteCoverExpr(c.element.get(), ps);
         promoteCoverExpr(c.iterable.get(), ps);
-        promoteCoverExpr(c.condition.get(), ps);
+        promoteCoverCond(c.condition.get(), ps);
         return;
       }
       case ExprKind::Match: {
@@ -2839,7 +2939,7 @@ class AsmEmitter {
         promoteCoverExpr(m.subject.get(), ps);
         for (const MatchArm& arm : m.arms) {
           promoteCoverPattern(arm.pattern, ps);
-          promoteCoverExpr(arm.guard.get(), ps);
+          promoteCoverCond(arm.guard.get(), ps);
           promoteCoverExpr(arm.result.get(), ps);
         }
         return;
@@ -2890,7 +2990,7 @@ class AsmEmitter {
       case StmtKind::If: {
         const IfStmt& st = static_cast<const IfStmt&>(*s);
         for (const IfStmt::Branch& br : st.branches) {
-          promoteCoverExpr(br.cond.get(), ps);
+          promoteCoverCond(br.cond.get(), ps);
           for (const StmtPtr& b : br.body) promoteCoverStmt(b.get(), ps);
         }
         for (const StmtPtr& b : st.elseBody) promoteCoverStmt(b.get(), ps);
@@ -2900,7 +3000,7 @@ class AsmEmitter {
         const WhileStmt& st = static_cast<const WhileStmt&>(*s);
         bool savedHot = promoteHot_;
         promoteHot_ = true;  // cond + body run per iteration
-        promoteCoverExpr(st.cond.get(), ps);
+        promoteCoverCond(st.cond.get(), ps);
         for (const StmtPtr& b : st.body) promoteCoverStmt(b.get(), ps);
         promoteHot_ = savedHot;
         return;
@@ -2910,7 +3010,7 @@ class AsmEmitter {
         bool savedHot = promoteHot_;
         promoteHot_ = true;
         for (const StmtPtr& b : st.body) promoteCoverStmt(b.get(), ps);
-        promoteCoverExpr(st.cond.get(), ps);
+        promoteCoverCond(st.cond.get(), ps);
         promoteHot_ = savedHot;
         return;
       }
