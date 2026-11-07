@@ -31,8 +31,10 @@ triple-quoted) documents the module when it is the first statement, a function
 when it is the first statement of its body or sits directly above the `fn`,
 and a type/trait/enum or member when it appears inside the body — the first
 string-literal statement documents the type itself, later ones document the
-member that follows. `a doc` and `a-lsp` hover pick these up; `##` comments
-take precedence when both are present.
+member that follows. Inside `impl` blocks a docstring similarly documents
+the method that follows it (the parser records it, but `a doc` does not
+currently emit `impl` blocks as items). `a doc` and `a-lsp` hover pick these
+up; `##` comments take precedence when both are present.
 
 ### 2.2 Identifiers
 

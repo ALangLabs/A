@@ -82,6 +82,54 @@ A_STDLIB=/path/to/stdlib ./build/a run main.a
 ./build/a run --stdlib ./stdlib main.a
 ```
 
+## `a doc` — documentation generator
+
+`a doc <file.a>` extracts documentation and prints Markdown to stdout;
+`--json` prints a structured JSON document instead, and `-o <file>` writes
+either format to a file. Only lexing and parsing run (no type checking), so
+the command fails only on syntax errors.
+
+**Doc sources.** For each documented declaration, the doc text is picked in
+this order:
+
+1. `##` comment lines directly above the declaration. Consecutive `##`
+   lines form a single doc block; `##` comments trailing code on the same
+   line are ignored. `##` comment blocks before the first declaration that
+   are not attached to it (e.g. followed by a blank line) are joined into
+   the module doc.
+2. A docstring (bare string literal, typically `"""..."""`) as the first
+   statement of a function body.
+3. A docstring recorded by the parser directly above the declaration —
+   inside `class`/`struct`, `enum`, and `trait` bodies the first string
+   literal documents the type/trait/enum itself and later ones document the
+   member that follows; inside `impl` bodies a docstring documents the
+   method that follows it.
+4. A docstring statement directly above a top-level declaration (documents
+   the module when it is the first statement of the file; for the module
+   doc, detached `##` blocks take precedence over the docstring).
+
+**Coverage.** Top-level functions, classes/structs/metaclasses (with fields
+and methods), enums (with variants), traits (with signatures), type aliases,
+and module-level `let` variables. `impl` blocks are parsed — including any
+docstrings they contain — but are not emitted as documentation items.
+
+**Markdown output** has a `# <module>` title, optional module doc, a table of
+contents, and `## Functions` / `## Types` / `## Constants and variables`
+sections; each item shows its signature in a fenced `a` code block plus its
+doc, parameters, fields/variants, and methods.
+
+**JSON output** is a single object: `{"module", "path", "doc", "items":[…]}`.
+Each item has `kind` (`function`, `class`, `struct`, `metaclass`, `enum`,
+`trait`, `type`, or `variable`), `name`, `signature`, `doc`,
+`returnType`, `private`, `params` (`{name, type}`), `fields`, `variants`,
+and nested `methods` (same item shape).
+
+```sh
+./build/a doc examples/classes/point.a
+./build/a doc -o docs/point.md examples/classes/point.a
+./build/a doc --json examples/classes/point.a
+```
+
 ## Exit codes (integration harness conventions)
 
 The integration test harness uses:

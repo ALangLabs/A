@@ -115,6 +115,10 @@ class AsmEmitter {
  public:
   AsmEmitter(const ModuleGraph& graph, const SemaResult& sema, bool testMode = false)
       : graph_(graph), sema_(sema), testMode_(testMode) {}
+  ~AsmEmitter() {
+    for (FnInfo* f : fnList_) delete f;
+    for (StructInfo* s : structList_) delete s;
+  }
 
     bool run(std::string& out, std::string& error);
 

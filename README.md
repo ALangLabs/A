@@ -84,7 +84,7 @@ cmake --build build -j
 ### Running Programs
 ```bash
 # 1. Standard execution:
-./build/a run examples/classes/classes.a
+./build/a run examples/classes/inheritance.a
 
 # 2. Type-check without running:
 ./build/a check program.a
@@ -330,8 +330,9 @@ and the LSP.)
 
 ### Documentation generator: `a doc`
 
-Generates API documentation from `##` doc comments attached to
-declarations, with Markdown and structured JSON output.
+Generates API documentation from `##` doc comments and Python-style
+docstrings attached to declarations, with Markdown and structured JSON
+output.
 
 ```a
 ## Adds two numbers.
@@ -345,8 +346,24 @@ a doc -o docs/geometry.md geometry.a
 a doc --json geometry.a             # machine-readable API model
 ```
 
-Functions, classes, enums, type aliases, fields, methods, variants,
-constants, and variables are included. (Docgen lives in
+Doc sources, in precedence order: `##` comment lines directly above a
+declaration (consecutive lines form one doc block; trailing `##` comments
+are ignored), a docstring as the first statement of a function body, a
+docstring directly above a declaration, and docstrings inside class, enum,
+and trait bodies (first documents the type/trait/enum itself, later ones
+document the member that follows) or `impl` bodies (document the method
+that follows). When both a `##` comment and a docstring are present, the
+`##` comment wins.
+
+Functions, classes, structs, metaclasses, enums, traits, type aliases,
+fields, methods, variants, and module-level variables (rendered under
+"Constants and variables") are included; `impl` blocks are parsed but not
+emitted. Markdown output groups items into
+Functions, Types, and Constants and variables sections with a table of
+contents; `--json` emits `{module, path, doc, items[]}` where each item
+carries `kind`, `name`, `signature`, `doc`, `returnType`, `params`,
+`fields`, `variants`, and `methods`. Only lexing and parsing run — no type
+checking — so `a doc` fails only on syntax errors. (Docgen lives in
 `compiler/astra/frontend/tooling/`.)
 
 ---
