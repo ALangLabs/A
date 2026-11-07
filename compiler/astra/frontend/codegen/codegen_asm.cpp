@@ -298,15 +298,18 @@ class AsmEmitter {
       emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
       return;
     }
-    rawDropReg(kRRcx);  // %rcx is rewritten below
     auto it = rawRegOf_.find(from);
     if (it != rawRegOf_.end()) {
-      emit(std::string("    mov ") + kRawRegNames[it->second] + ", %rcx\n    mov %rcx, " +
-           slotRef(to));
-    } else {
-      emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
-      rawRegOf_[from] = kRRcx;  // %rcx now holds `from`'s bits as well
+      // `from` is already in a register: store straight from it (no %rcx
+      // round-trip, and %rcx's claims survive untouched).
+      int r = it->second;
+      emit(std::string("    mov ") + kRawRegNames[r] + ", " + slotRef(to));
+      rawLearn(to, r);
+      return;
     }
+    rawDropReg(kRRcx);  // %rcx is rewritten below
+    emit("    mov " + slotRef(from) + ", %rcx\n    mov %rcx, " + slotRef(to));
+    rawRegOf_[from] = kRRcx;  // %rcx now holds `from`'s bits as well
     rawLearn(to, kRRcx);
   }
   uint64_t dblBits(double d) const {
