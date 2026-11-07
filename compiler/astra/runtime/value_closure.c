@@ -18,11 +18,22 @@ aval fnon_new_raw(uint64_t entry, aval env, const char *name,
     f->nparams = nparams;
     f->flags = flags;
     f->name = name ? xstrdup(name) : NULL;
+    f->sig = NULL;
+    f->doc = NULL;
     return mkobj(&f->h);
 }
 
 aval a_fnon_new(uint64_t entry, aval env, const char *name) {
     return fnon_new_raw(entry, env, name, 0, NPARAMS_UNKNOWN);
+}
+
+aval a_fnon_new_ex(uint64_t entry, aval env, const char *name,
+                   const char *sig, const char *doc) {
+    aval v = fnon_new_raw(entry, env, name, 0, NPARAMS_UNKNOWN);
+    AFnon *f = (AFnon *)obj_of(v);
+    f->sig = sig && *sig ? xstrdup(sig) : NULL;
+    f->doc = doc && *doc ? xstrdup(doc) : NULL;
+    return v;
 }
 
 aval a_closure_env_new(uint64_t n) {

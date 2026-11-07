@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 namespace a {
-struct DriverConfig { bool checkOnly=false,jsonDiagnostics=false,useColor=false; int jobs=1; int optimizationLevel=2; std::string backend="llvm"; std::vector<std::string> modulePaths; std::string stdlibRoot; };
+struct DriverConfig { bool checkOnly=false,jsonDiagnostics=false,useColor=false; int jobs=1; int optimizationLevel=2; std::string backend="llvm"; std::vector<std::string> modulePaths; std::string stdlibRoot; std::string target; };
 int runFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int runSource(const std::string& displayPath,std::string source,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int testFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);

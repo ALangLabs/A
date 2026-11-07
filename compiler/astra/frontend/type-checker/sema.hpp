@@ -289,9 +289,13 @@ class Sema {
   TypePtr enumTypeFromInfo(const EnumInfo& info, NamedTypeExpr& named);
   bool enumNamespaceUse(ExprPtr& object, const std::string& enumQ);
   TypePtr checkFunctionCall(const FnSig& sig, CallExpr& call);
+  // Prelude fallback: unqualified calls that match a prelude function resolve
+  // to it, giving prelude decls Python-builtin-like visibility.
+  const FnDecl* findPreludeFunction(const std::string& name) const;
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkPrintCall(const std::string& name, CallExpr& call);
   TypePtr checkIcCall(CallExpr& call);
+  std::string icContextString(Span span) const;
   // Builtin domains: each returns nullptr when `name` is not handled so the
   // dispatcher can try the next domain.
   TypePtr checkBuiltinValues(const std::string& name, CallExpr& call);
@@ -310,7 +314,6 @@ class Sema {
   std::vector<TypePtr> inferCallArgTypes(CallExpr& call);
   void builtinArityError(const std::string& name, CallExpr& call, std::size_t expected);
   TypePtr inferAnyCallArg(CallExpr& call, std::size_t index, const std::string& context);
-  std::string icContextString(Span span) const;
   TypePtr checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallExpr& call);
 
   // flow narrowing (ty/pyrefly style): `if x != None:` refines `x: T?` to
@@ -326,6 +329,9 @@ class Sema {
   void restoreNarrowing(std::vector<NarrowRestore>& restores);
 
   // helpers
+  // Closest visible name to `name` (edit distance), or "" — powers the
+  // Python-style "Did you mean 'x'?" hint on undefined-name errors.
+  std::string suggestName(const std::string& name) const;
   void requireBool(TypePtr type, Span span, const std::string& what);
   void requireInteger(TypePtr type, Span span, const std::string& what);
   TypePtr requireNumeric(TypePtr type, Span span, const std::string& what);

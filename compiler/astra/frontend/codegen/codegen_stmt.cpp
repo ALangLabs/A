@@ -201,6 +201,7 @@ void AsmEmitter::emitStmt(const Stmt* s, bool topLevel) {
           return;
         }
         emitDeferredPeekAll();
+        emitFramePop();
         loadSlot(rvS);
         if (inFunction_) {
           emit("    leave\n    ret");

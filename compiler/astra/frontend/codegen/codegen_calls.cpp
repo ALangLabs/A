@@ -961,6 +961,22 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
     const Expr* callee = call.callee.get();
     if (callee->kind == ExprKind::Ident) {
       const IdentExpr& id = static_cast<const IdentExpr&>(*callee);
+      // Sema already resolved the callee to an exact FnDecl (local or
+      // prelude fallback): dispatch on it directly. Scope lookup by bare
+      // name is ambiguous across modules — the first module to declare a
+      // name wins the global binding.
+      if (call.calleeFunction) {
+        auto fit = fns_.find(call.calleeFunction);
+        if (fit != fns_.end() && !fit->second->isMethod) {
+          FnInfo* fi = fit->second;
+          if (tryEmitInlineCall(fi, call)) return;
+          std::vector<int> ps(fi->paramNames.size(), -1);
+          placeArgs(call, fi->paramNames, ps, 0,
+                    fi->variadic ? (int)fi->paramNames.size() - 1 : -1);
+          emitDirectCall(fi->cname.c_str(), ps);
+          return;
+        }
+      }
       ABinding* b = lookup(id.name);
       if (b) {
         if (b->kind == BKind::PyFunc) {

@@ -129,7 +129,7 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
                                 stdRoot / "std" / "prelude" / "__init__.a",
                                 stdRoot / "std" / "prelude.a"}) {
     if (fs::exists(candidate, exists)) {
-      loadModule(candidate.string(), candidate.string(), nullptr);
+      graph_.preludeId = loadModule(candidate.string(), candidate.string(), nullptr);
       break;
     }
   }

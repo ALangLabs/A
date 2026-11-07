@@ -67,9 +67,8 @@ inline bool isKnownBuiltin(const std::string& name) {
       "arena_reset", "arena_used", "arena_total", "move", "copy",
       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
       "unsafe_offset", "py_buffer",
-      "Some", "Ok", "Err", "ic",
-      "__file__", "__line__", "__func__", "__function__", "__source_file__", "__source_line__",
-      "__repr__", "__debug_repr__", "__debug_time__", "__debug_context__", "__ic_format__",
+      "Some", "Ok", "Err", "ic", "repr",
+      "__repr__", "__debug_repr__", "__ic_format__",
       // LLVM-style intrinsics
       "ctz", "clz", "popcount", "bswap", "rotl", "rotr",
       "fma", "fabs", "copysign",
@@ -135,6 +134,5 @@ inline std::string collapseIcWhitespace(std::string_view text) {
   }
   return out;
 }
-
 
 }  // namespace a

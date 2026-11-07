@@ -126,7 +126,7 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     return type;
   }
 
-  if (name == "str") {
+  if (name == "str" || name == "repr") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);
       inferCallArgTypes(call);
@@ -134,7 +134,8 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     }
     TypePtr type = inferExpr(*call.args[0].value);
     if (resolveType(type)->kind == TypeKind::Void) {
-      sink_.error(call.args[0].value->span, "Cannot convert a void value to a string.");
+      sink_.error(call.args[0].value->span,
+                  "Cannot convert a void value to a string.");
     }
     return typeString();
   }

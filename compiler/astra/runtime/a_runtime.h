@@ -166,6 +166,9 @@ enum {
     A_BI_PY_TRUTHY,
     A_BI_PY_TYPE,
     A_BI_PY_BUFFER_INFO,
+    A_BI_JSON_SET, A_BI_JSON_DELETE,
+    A_BI_STRUCT_NAME, A_BI_STRUCT_METHODS,
+    A_BI_FN_SIGNATURE, A_BI_FN_DOC,
     A_BI_COUNT
 };
 
@@ -446,10 +449,16 @@ aval a_iter_next(aval it, aval *out);           /* returns 1/0 */
 
 /* functions / calls */
 aval a_fnon_new(uint64_t entry, aval env, const char *name);
+aval a_fnon_new_ex(uint64_t entry, aval env, const char *name,
+                   const char *sig, const char *doc);
 aval a_closure_env_new(uint64_t n);
 aval a_env_set(aval env, uint64_t i, aval v);
 aval a_env_get(aval env, uint64_t i);
 aval a_call(aval fn, uint64_t n, aval *argv);   /* dispatch A-fn or builtin */
+/* Call-frame tracking for panic tracebacks: codegen emits a_frame_push()
+   in each function prologue and a_frame_pop() before every return. */
+void a_frame_push(const char *name, const char *file, int line);
+void a_frame_pop(void);
 /* argv holds n positional args followed by nkw (name, value) pairs.
    Named args are only meaningful for T_PYOBJ receivers (Python kwargs);
    other receiver kinds panic when nkw > 0. */

@@ -87,7 +87,6 @@ TypePtr Sema::inferStringLiteral(StringLitExpr& expr) {
 }
 
 TypePtr Sema::inferIdent(IdentExpr& expr) {
-  if (auto magic = debug_magic::inferMagicIdentifier(expr.name)) return *magic;
   if (VarSym* sym = lookupVar(expr.name)) {
     sym->used = true;
     return sym->type;
@@ -148,7 +147,10 @@ TypePtr Sema::inferIdent(IdentExpr& expr) {
                 "Construct it: " + expr.name + "(...).");
     return typeError();
   }
-  sink_.errorWithCode(expr.span, "E0001", "Undefined name '" + expr.name + "'.",
+  std::string undefMsg = "Undefined name '" + expr.name + "'.";
+  if (std::string sug = suggestName(expr.name); !sug.empty())
+    undefMsg += " Did you mean '" + sug + "'?";
+  sink_.errorWithCode(expr.span, "E0001", undefMsg,
               "Declare it by assigning a value, e.g. " + expr.name + " = 0.");
   return typeError();
 }
@@ -160,7 +162,10 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
     if (auto* ident = dynamic_cast<IdentExpr*>(expr.operand.get())) {
       VarSym* sym = lookupVar(ident->name);
       if (!sym) {
-        sink_.error(expr.opSpan, "Undefined variable '" + ident->name + "'.");
+        std::string m = "Undefined variable '" + ident->name + "'.";
+        if (std::string sug = suggestName(ident->name); !sug.empty())
+          m += " Did you mean '" + sug + "'?";
+        sink_.error(expr.opSpan, m);
         return typeError();
       }
       sym->used = true;
@@ -183,7 +188,10 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
     if (auto* ident = dynamic_cast<IdentExpr*>(expr.operand.get())) {
       VarSym* sym = lookupVar(ident->name);
       if (!sym) {
-        sink_.error(expr.opSpan, "Undefined variable '" + ident->name + "'.");
+        std::string m = "Undefined variable '" + ident->name + "'.";
+        if (std::string sug = suggestName(ident->name); !sug.empty())
+          m += " Did you mean '" + sug + "'?";
+        sink_.error(expr.opSpan, m);
         return typeError();
       }
       sym->used = true;
@@ -474,7 +482,18 @@ TypePtr Sema::inferCall(CallExpr& expr) {
       for (auto& arg : expr.args) inferExpr(*arg.value);
       return typeError();
     }
-    sink_.error(ident->span, "Undefined function '" + name + "'.",
+    // Prelude functions act like Python builtins: callable unqualified.
+    if (const FnDecl* preludeFn = findPreludeFunction(name)) {
+      expr.calleeFunction = preludeFn;
+      expr.calleeResolved = true;
+      auto sigIt = signatures_.find(preludeFn);
+      if (sigIt == signatures_.end()) return typeError();
+      return checkFunctionCall(sigIt->second, expr);
+    }
+    std::string undefFn = "Undefined function '" + name + "'.";
+    if (std::string sug = suggestName(name); !sug.empty())
+      undefFn += " Did you mean '" + sug + "'?";
+    sink_.error(ident->span, undefFn,
                 "Functions must be declared before they are called.");
     return typeError();
   }

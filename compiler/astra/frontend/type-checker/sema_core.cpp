@@ -17,9 +17,88 @@ ModuleExports& Sema::exportsFor(int moduleId) {
   return moduleExports_[static_cast<std::size_t>(moduleId)];
 }
 
+const FnDecl* Sema::findPreludeFunction(const std::string& name) const {
+  if (graph_.preludeId < 0) return nullptr;
+  auto it = functionsByName_.find(qualifiedFor(graph_.preludeId, name));
+  return it == functionsByName_.end() ? nullptr : it->second;
+}
+
 Sema::ModuleAlias* Sema::findAlias(const std::string& name) {
   auto found = moduleAliases_.find(name);
   return found == moduleAliases_.end() ? nullptr : &found->second;
+}
+
+namespace {
+int editDistance(const std::string& a, const std::string& b) {
+  if (a == b) return 0;
+  const std::size_t n = a.size(), m = b.size();
+  if (!n) return (int)m;
+  if (!m) return (int)n;
+  std::vector<int> prev(m + 1), cur(m + 1);
+  for (std::size_t j = 0; j <= m; ++j) prev[j] = (int)j;
+  for (std::size_t i = 1; i <= n; ++i) {
+    cur[0] = (int)i;
+    for (std::size_t j = 1; j <= m; ++j) {
+      int cost = a[i - 1] == b[j - 1] ? 0 : 1;
+      cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
+    }
+    std::swap(prev, cur);
+  }
+  return prev[m];
+}
+}  // namespace
+
+std::string Sema::suggestName(const std::string& name) const {
+  if (name.empty()) return "";
+  std::vector<std::string> candidates;
+  auto add = [&candidates](const std::string& c) {
+    if (!c.empty()) candidates.push_back(c);
+  };
+  auto shortName = [](const std::string& q) {
+    auto p = q.rfind("::");
+    return p == std::string::npos ? q : q.substr(p + 2);
+  };
+  for (const auto& scope : scopes_)
+    for (const auto& kv : scope) add(kv.first);
+  for (const auto& kv : functionsByName_) add(shortName(kv.first));
+  for (const auto& kv : structsByName_) add(shortName(kv.first));
+  for (const auto& kv : structs_) add(shortName(kv.first));
+  for (const auto& kv : enums_) add(shortName(kv.first));
+  for (const auto& kv : traits_) add(shortName(kv.first));
+  for (const auto& kv : fromBindings_) add(kv.first);
+  for (const auto& kv : moduleAliases_) add(kv.first);
+  for (const auto& kv : typeAliases_) add(kv.first);
+  // Builtin/prelude names worth suggesting (typos like 'pritn' -> 'print').
+  static const char* kBuiltins[] = {
+      "print", "eprint", "len", "str", "int", "float", "bool", "abs", "min",
+      "max", "sum", "pow", "sqrt", "sin", "cos", "tan", "asin", "acos",
+      "atan", "exp", "log", "floor", "ceil", "round", "trunc", "random",
+      "random_int", "range", "set", "tuple", "list", "dict", "map", "filter",
+      "any", "all", "some", "ok", "err", "panic", "assert", "assert_eq",
+      "input", "read_file", "write_file", "append_file", "file_exists",
+      "list_dir", "remove_file", "create_dir", "remove_dir", "rename",
+      "current_dir", "repr", "type", "isinstance", "join", "sorted",
+      "reversed", "enumerate", "zip", "reduce", "flush", "env_get", "now",
+      "sleep", "Some", "Ok", "Err", "None", "True", "False",
+  };
+  for (const char* b : kBuiltins) add(b);
+
+  int best = -1;
+  std::string bestName;
+  for (const std::string& c : candidates) {
+    if (c == name) continue;
+    int d = editDistance(name, c);
+    if (d <= 0) continue;
+    // Similarity gate ~ Python difflib's 0.6 cutoff: distance <= 40% of len.
+    if (best < 0 || d < best ||
+        (d == best && c.size() < bestName.size())) {
+      if (d * 5 <= (int)name.size() * 2) {
+        best = d;
+        bestName = c;
+      }
+    }
+  }
+  return bestName;
 }
 
 TypePtr Sema::moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
@@ -385,7 +464,10 @@ TypePtr Sema::resolveTypeExpr(TypeExpr& expr) {
       }
       return typeOptional(resolveTypeExpr(*named->typeArgs[0]));
     }
-    sink_.error(named->span, "Unknown type '" + named->name + "'.",
+    std::string unknownType = "Unknown type '" + named->name + "'.";
+    if (std::string sug = suggestName(named->name); !sug.empty())
+      unknownType += " Did you mean '" + sug + "'?";
+    sink_.error(named->span, unknownType,
                 "Type names are 'bool', 'char', 'String', 'void', the sized numeric types, "
                 "class names, '[T]' for arrays, '(T, U)' for tuples, 'fn(T) -> R' for "
                 "functions, or 'T?' for optionals.");

@@ -48,6 +48,11 @@ inline void addJsonDocs(StringMap<BuiltinDoc>& docs) {
       {"json_as_array", {"json_as_array", "json.as_array(doc) -> [Json]?", "A JSON array, or None."}},
       {"json_as_map", {"json_as_map", "json.as_map(doc) -> {String: Json}?",
                         "A JSON object as a map, or None."}},
+      {"json_set", {"json_set", "json.set(doc, key, value) -> Json",
+                     "Stores value under key in a dict or class instance (live mutation); returns value.",
+                     "doc = {\"a\": 1}\njson.set(doc, \"b\", 2)\ndoc[\"b\"]\n2"}},
+      {"json_delete", {"json_delete", "json.delete(doc, key) -> bool",
+                        "Removes key from a dict or class instance; true when it existed."}},
 
       // binary
       {"binary_encode", {"binary_encode", "binary.encode(value) -> [i64]",

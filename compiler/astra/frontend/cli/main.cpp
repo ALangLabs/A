@@ -47,6 +47,10 @@ void printUsage(std::ostream& os) {
      << "  --opt            run optimization passes (ir)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
      << "  --stdlib <dir>   override standard library directory\n"
+     << "  --target <t>     cross-compile target arch (build only):\n"
+     << "                    x86_64, i386, arm, aarch64/arm64, riscv64\n"
+     << "                    (optional -linux/-windows/-macos suffix; must\n"
+     << "                    match the host OS — astra cannot cross OSes)\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  -h, --help       show this message\n"
      << "  -V, --version    print version\n";
@@ -67,6 +71,7 @@ struct Options {
   std::string outputPath;
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;
+  std::string target;
   bool useColor = false;
   bool checkOnly = false;
   bool writeInPlace = false;
@@ -162,6 +167,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     } else if (arg == "--stdlib") {
       if (i + 1 >= argc) { err << "error: '--stdlib' requires a directory\n"; return false; }
       options.stdlibRoot = argv[++i];
+    } else if (arg == "--target" || arg == "-target") {
+      if (i + 1 >= argc) { err << "error: '--target' requires a value\n"; return false; }
+      options.target = argv[++i];
+    } else if (arg.rfind("--target=", 0) == 0) {
+      options.target = arg.substr(9);
     } else if (arg == "-h" || arg == "--help") { printUsage(std::cout); std::exit(0); }
     else if (arg == "-V" || arg == "--version") { std::cout << a::kVersionLine << "\n"; std::exit(0); }
     else if (!arg.empty() && arg[0] == '-') { err << "error: unknown option '" << arg << "'\n"; return false; }
@@ -234,6 +244,7 @@ int main(int argc, char** argv) {
   }
   config.modulePaths = options.modulePaths;
   config.stdlibRoot = options.stdlibRoot;
+  config.target = options.target;
   if (options.command == "run") {
     if (!options.commandCode.empty()) {
       return a::runSource("<command>", options.commandCode, config, std::cin, std::cout, std::cerr);

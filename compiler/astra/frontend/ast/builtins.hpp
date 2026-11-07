@@ -36,14 +36,8 @@ enum class BuiltinId : std::uint8_t {
   Panic,
   Assert,
   AssertEq,
-  Ic,
   // Debug/source intrinsics for std.debug and A-level ic implementations.
-  File,
-  Line,
-  Func,
   DebugRepr,
-  DebugTime,
-  DebugContext,
   IcFormat,
 };
 
@@ -73,13 +67,7 @@ inline BuiltinId builtinIdForName(std::string_view name) {
   if (name == "panic") return BuiltinId::Panic;
   if (name == "assert") return BuiltinId::Assert;
   if (name == "assert_eq") return BuiltinId::AssertEq;
-  if (name == "ic") return BuiltinId::Ic;
-  if (name == "__file__" || name == "__source_file__") return BuiltinId::File;
-  if (name == "__line__" || name == "__source_line__") return BuiltinId::Line;
-  if (name == "__func__" || name == "__function__") return BuiltinId::Func;
   if (name == "__repr__" || name == "__debug_repr__") return BuiltinId::DebugRepr;
-  if (name == "__debug_time__") return BuiltinId::DebugTime;
-  if (name == "__debug_context__") return BuiltinId::DebugContext;
   if (name == "__ic_format__") return BuiltinId::IcFormat;
   return BuiltinId::None;
 }

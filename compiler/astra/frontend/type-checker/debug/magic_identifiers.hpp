@@ -9,13 +9,6 @@
 
 namespace a::debug_magic {
 
-inline std::optional<TypePtr> inferMagicIdentifier(const std::string& name) {
-  if (name == "__file__" || name == "__source_file__") return typeString();
-  if (name == "__line__" || name == "__source_line__") return typeInt(64, true);
-  if (name == "__func__" || name == "__function__") return typeString();
-  return std::nullopt;
-}
-
 inline std::string sourceFileName(const DiagnosticSink& sink, Span span) {
   if (const SourceFile* source = sink.file(span.fileId)) return source->path();
   return "<unknown>";

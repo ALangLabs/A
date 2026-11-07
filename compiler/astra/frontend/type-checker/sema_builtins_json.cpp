@@ -105,6 +105,29 @@ TypePtr Sema::checkBuiltinJson(const std::string& name, CallExpr& call) {
     return typeOptional(inner);
   }
 
+  if (name == "json_set") {
+    if (call.args.size() != 3) {
+      builtinArityError(name, call, 3);
+      inferCallArgTypes(call);
+      return typeJson();
+    }
+    checkArgAgainst(*call.args[0].value, typeJson(), "in the value passed to 'json.set'");
+    checkArgAgainst(*call.args[1].value, typeString(), "in the key passed to 'json.set'");
+    inferAnyCallArg(call, 2, "to 'json.set'");
+    return typeJson();
+  }
+
+  if (name == "json_delete") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeBool();
+    }
+    checkArgAgainst(*call.args[0].value, typeJson(), "in the value passed to 'json.delete'");
+    checkArgAgainst(*call.args[1].value, typeString(), "in the key passed to 'json.delete'");
+    return typeBool();
+  }
+
   // -------------------------------------------------------- binary module
 
   if (name == "binary_encode") {

@@ -23,7 +23,7 @@ static const char *json_kind_of(aval v) {
     switch (o->type) {
         case T_STR: case T_CHAR: return "string";
         case T_LIST: case T_TUPLE: case T_SET: return "array";
-        case T_DICT: return "object";
+        case T_DICT: case T_STRUCT: return "object";
         default: return "unknown";
     }
 }
@@ -295,7 +295,7 @@ static void json_write(Buf *b, aval v, int pretty, int depth) {
             buf_addc(b, ']');
             return;
         }
-        case T_DICT: {
+        case T_DICT: case T_STRUCT: {
             ADict *d = (ADict *)o;
             buf_addc(b, '{');
             for (uint32_t i = 0; i < d->h.len; ++i) {
@@ -361,7 +361,7 @@ aval bi_json_get(uint64_t n, aval *argv) {
     want_args("json.get", n, 2, 2);
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
-    if (!o || o->type != T_DICT) return A_NONE;
+    if (!o || !is_dict_t(o->type)) return A_NONE;
     int64_t i = dict_find((ADict *)o, argv[1]);
     return i >= 0 ? a_some_new(((ADict *)o)->pairs[i].v) : A_NONE;
 }
@@ -383,7 +383,7 @@ aval bi_json_len(uint64_t n, aval *argv) {
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
     if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET ||
-              o->type == T_DICT))
+              is_dict_t(o->type)))
         return mkint_full((int64_t)o->len);
     if (o && (o->type == T_STR || o->type == T_CHAR)) {
         uint64_t sl;
@@ -397,7 +397,7 @@ aval bi_json_has(uint64_t n, aval *argv) {
     want_args("json.has", n, 2, 2);
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
-    if (!o || o->type != T_DICT) return A_FALSE;
+    if (!o || !is_dict_t(o->type)) return A_FALSE;
     return bool_aval(dict_find((ADict *)o, argv[1]) >= 0);
 }
 
@@ -406,7 +406,7 @@ aval bi_json_keys(uint64_t n, aval *argv) {
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
     aval out = a_list_new(0, NULL);
-    if (o && o->type == T_DICT) {
+    if (o && is_dict_t(o->type)) {
         ADict *d = (ADict *)o;
         AArr *arr = arr_of(out, "json.keys");
         for (uint32_t i = 0; i < d->h.len; ++i) {
@@ -466,7 +466,30 @@ aval bi_json_as_map(uint64_t n, aval *argv) {
     want_args("json.as_map", n, 1, 1);
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
-    if (o && o->type == T_DICT) return a_some_new(v);
+    if (o && is_dict_t(o->type)) return a_some_new(v);
     return A_NONE;
 }
 
+
+aval bi_json_set(uint64_t n, aval *argv) {
+    want_args("json.set", n, 3, 3);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (!o || !is_dict_t(o->type))
+        panicf("json.set: value must be an object, not '%s'", type_name_cstr(v));
+    dict_put((ADict *)o, argv[1], argv[2]);
+    return argv[2];
+}
+
+aval bi_json_delete(uint64_t n, aval *argv) {
+    want_args("json.delete", n, 2, 2);
+    aval v = json_unwrap(argv[0]);
+    AObj *o = obj_of(v);
+    if (!o || !is_dict_t(o->type))
+        panicf("json.delete: value must be an object, not '%s'", type_name_cstr(v));
+    ADict *d = (ADict *)o;
+    int64_t i = dict_find(d, argv[1]);
+    if (i < 0) return A_FALSE;
+    dict_remove_at(d, (uint64_t)i);
+    return A_TRUE;
+}

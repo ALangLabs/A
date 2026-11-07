@@ -537,57 +537,94 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
   return typeError();
 }
 
+namespace {
+ExprPtr icStringLit(const std::string& text, Span span) {
+  auto lit = std::make_unique<StringLitExpr>();
+  lit->span = span;
+  StringPart part;
+  part.isExpr = false;
+  part.text = text;
+  lit->parts.push_back(std::move(part));
+  return lit;
+}
+}  // namespace
+
 TypePtr Sema::checkIcCall(CallExpr& call) {
-  // Mirrors litprinter/ic(ecream): ic() returns void/None-like output only,
-  // ic(x) returns x, ic(x, y, ...) returns a tuple of the inspected values.
-  // Named arguments are rejected (reserved for future options).
-  std::vector<TypePtr> types;
-  types.reserve(call.args.size());
+  // `ic(...)` desugars into a call to the prelude's `ic_impl`: the compiler
+  // injects the call-site context string and one source label per argument
+  // as hidden leading arguments, and the A implementation renders the
+  // litprinter-style output. ic() -> ic_impl(ctx, []), ic(x, y) ->
+  // ic_impl(ctxOrEmpty, [labels], x, y).
   for (auto& arg : call.args) {
     if (!arg.name.empty()) {
       sink_.error(arg.nameSpan, "'ic' does not accept named arguments.");
       inferExpr(*arg.value);
-      continue;
+      return typeError();
     }
-    TypePtr type = inferExpr(*arg.value);
-    if (resolveType(type)->kind == TypeKind::Void) {
-      sink_.error(arg.value->span, "Cannot inspect a void value with 'ic'.");
-      type = typeError();
-    }
-    types.push_back(type);
   }
 
-  // Capture the display metadata while source spans are available: the
-  // "file:line in fn()" context and one source-text label per argument.
-  call.icContext = icContextString(call.span);
-  call.icArgLabels.clear();
-  call.icArgLabels.reserve(call.args.size());
+  bool allSimple = true;
+  for (auto& arg : call.args) {
+    if (!icExprIsSimple(*arg.value)) {
+      allSimple = false;
+      break;
+    }
+  }
+  // Breadcrumbs (ic()) always carry context; inspections suppress it when
+  // every argument is a bare name or literal.
+  const std::string ctx =
+      call.args.empty() || !allSimple ? icContextString(call.span) : "";
+
+  std::vector<ExprPtr> labelExprs;
+  labelExprs.reserve(call.args.size());
   std::unordered_map<int, std::unique_ptr<tooling::SourceText>> sources;
   for (auto& arg : call.args) {
-    const SourceFile* file = sink_.file(arg.value->span.fileId);
     std::string label;
+    const SourceFile* file = sink_.file(arg.value->span.fileId);
     if (file && arg.value->span.valid()) {
       auto& slot = sources[arg.value->span.fileId];
       if (!slot) slot = std::make_unique<tooling::SourceText>(file->text());
       label = collapseIcWhitespace(slot->slice(arg.value->span));
     }
-    call.icArgLabels.push_back(std::move(label));
+    if (icExprIsBare(*arg.value)) label.clear();
+    labelExprs.push_back(icStringLit(label, arg.value->span));
   }
+  auto labels = std::make_unique<ArrayLitExpr>();
+  labels->span = call.span;
+  labels->elements = std::move(labelExprs);
 
-  if (types.empty()) return typeVoid();
-  if (types.size() == 1) return types[0];
-  return typeTuple(std::move(types));
+  std::vector<CallArg> args;
+  args.reserve(call.args.size() + 2);
+  CallArg ctxArg;
+  ctxArg.value = icStringLit(ctx, call.span);
+  args.push_back(std::move(ctxArg));
+  CallArg labelsArg;
+  labelsArg.value = std::move(labels);
+  args.push_back(std::move(labelsArg));
+  for (auto& arg : call.args) args.push_back(std::move(arg));
+  call.args = std::move(args);
+
+  const FnDecl* impl = findPreludeFunction("ic_impl");
+  if (!impl) {
+    sink_.error(call.span,
+                "The prelude does not provide 'ic_impl'; `ic` requires the standard library.");
+    return typeError();
+  }
+  call.calleeFunction = impl;
+  call.calleeResolved = true;
+  auto sigIt = signatures_.find(impl);
+  if (sigIt == signatures_.end()) return typeError();
+  return checkFunctionCall(sigIt->second, call);
 }
 
 std::string Sema::icContextString(Span span) const {
-  return debug_magic::functionDisplayName(currentFunction_ ? currentFunction_->name : std::string()) == "<module>"
-             ? debug_magic::sourceFileName(sink_, span) + ":" + std::to_string(span.line)
-             : debug_magic::sourceFileName(sink_, span).substr(
-                       debug_magic::sourceFileName(sink_, span).find_last_of("/\\") == std::string::npos
-                           ? 0
-                           : debug_magic::sourceFileName(sink_, span).find_last_of("/\\") + 1) +
-                   ":" + std::to_string(span.line) + " in " +
-                   debug_magic::functionDisplayName(currentFunction_->name) + "()";
+  std::string file = debug_magic::sourceFileName(sink_, span);
+  const std::size_t slash = file.find_last_of("/\\");
+  if (slash != std::string::npos) file = file.substr(slash + 1);
+  const std::string fn =
+      debug_magic::functionDisplayName(currentFunction_ ? currentFunction_->name : std::string());
+  return fn == "<module>" ? file + ":" + std::to_string(span.line)
+                          : file + ":" + std::to_string(span.line) + " in " + fn + "()";
 }
 
 }  // namespace a

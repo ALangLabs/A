@@ -90,12 +90,6 @@ struct CallExpr : Expr {
 
   // Set by Sema when the callee is a builtin that no local binding shadows.
   BuiltinId builtinId = BuiltinId::None;
-
-  // Populated by Sema for BuiltinId::Ic call sites: the call-site context
-  // ("file.a:3 in fn()") and one source-text label per argument, used by the
-  // interpreter and native emitters to render litprinter-style output.
-  std::string icContext;
-  std::vector<std::string> icArgLabels;
 };
 
 // `ic(...)` argument classification, shared by Sema (labels) and the

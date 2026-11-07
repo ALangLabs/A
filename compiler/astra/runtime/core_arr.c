@@ -124,7 +124,7 @@ void arr_push_int(AArr *a, aval v) {
 
 ADict *dict_of(aval v, const char *what) {
     AObj *o = obj_of(v);
-    if (!o || o->type != T_DICT)
+    if (!o || !is_dict_t(o->type))
         panicf("%s must be dict, not '%s'", what, type_name_cstr(v));
     return (ADict *)o;
 }

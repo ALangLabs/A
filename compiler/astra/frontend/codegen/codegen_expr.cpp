@@ -350,6 +350,7 @@ void AsmEmitter::emitLambdaFn(const AsmEmitter::PendingLambda& pl) {
     bindModuleImports(pl.moduleId);
     int argvSlot = allocSlot();
     emit("    mov %rdi, " + slotRef(argvSlot) + "\n");
+    emitFramePush("<lambda>", pl.moduleId, x.span.line);
     int envS = allocSlot();
     loadSlot(argvSlot, "%rax");
     emit("    mov (%rax), %rax\n    mov %rax, " + slotRef(envS) + "\n");
@@ -377,6 +378,10 @@ void AsmEmitter::emitLambdaFn(const AsmEmitter::PendingLambda& pl) {
     specNames_.clear();
     nameRanges_.clear();
     emitExpr(x.body.get());
+    int lamRet = allocSlot();
+    storeRax(lamRet);
+    emitFramePop();
+    loadSlot(lamRet);
     emit("    leave\n    ret\n");
     int frame = frameBytes();
     std::ostringstream emitted;
@@ -685,6 +690,7 @@ void AsmEmitter::emitTry(const TryExpr& x) {
         jmp(inlineReturnLabel_);
       } else {
         emitDeferredPeekAll();
+        emitFramePop();
         loadSlot(tS);
         emit("    leave\n    ret\n");
       }

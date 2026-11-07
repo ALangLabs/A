@@ -439,7 +439,7 @@ aval a_iter_next(aval it, aval *out) {
     AView *vw_src = NULL;
     APyBuf *pb_src = NULL;
     int64_t vw_base = 0;
-    if (so->type == T_DICT) {
+    if (is_dict_t(so->type)) {
         d = (ADict *)so;
         len = d->h.len;
     } else if (so->type == T_PYBUF) {

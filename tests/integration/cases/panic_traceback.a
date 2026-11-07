@@ -1,0 +1,8 @@
+fn inner():
+    panic("traceback check")
+
+fn outer():
+    y = 1
+    inner()
+
+outer()

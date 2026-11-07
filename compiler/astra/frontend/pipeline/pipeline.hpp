@@ -18,6 +18,11 @@ struct PipelineConfig {
   int jobs = 1;  // 1 = serial; >1 = parallel module checking (ty/pyrefly style)
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;
+  // Cross-compilation target (e.g. "i386-linux-gnu", "aarch64", "native").
+  // Empty means the host default. Only the architecture is selectable:
+  // astra binaries are bound to the host OS, so a target OS differing from
+  // the host is rejected.
+  std::string target;
 };
 struct CompiledModule { std::unique_ptr<ModuleGraph> graph; std::unique_ptr<SemaResult> sema; bool ok = false; };
 CompiledModule runFrontendPipeline(const std::string& path, std::string source, const PipelineConfig& config, DiagnosticSink& sink, std::ostream& diagOut, std::ostream& diagErr);

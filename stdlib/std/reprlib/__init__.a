@@ -1,6 +1,0 @@
-# std.reprlib package (Python `reprlib` port).
-#
-# Pure-A subset of Python 3.14 `Lib/reprlib.py`. See README.md for the
-# coverage matrix and semantic deviations.
-from "repr.a" import Repr, repr, aRepr
-from "recursive.a" import RecursiveRepr, recursive_repr

@@ -2,6 +2,7 @@
 # declared in codegen_internal.hpp and implemented across domain TUs.
 add_library(a_codegen STATIC
   codegen.cpp
+  codegen_c.cpp
   codegen_analysis.cpp
   codegen_calls.cpp
   codegen_decls.cpp

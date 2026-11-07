@@ -24,8 +24,19 @@ language server; the VS Code extension wraps both.
 - `-j <n>`, `--jobs <n>`, `--parallel` — parallel module checking.
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N`, `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
+- `--target <arch>` (`a build` only) — cross-compile target: `x86_64`
+  (default; native assembly emitter), `i386`, `arm` (ARMv7 hard-float),
+  `aarch64`/`arm64`, `riscv64`. An optional `-linux`/`-windows`/`-macos`
+  suffix is accepted but must match the host OS — Astra drivers are built
+  per-OS. Non-x86-64 targets go through the portable C emitter and the
+  matching `astra-<arch>` driver; linking needs a target sysroot via
+  `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
+  anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
+  paths that must be rewritten relative to the sysroot lib dir).
+  `a run`/`a test`/`a repl` always execute natively and reject other targets.
 
-Environment: `A_STDLIB`, `A_ASTRA`, `A_RUNTIME_C`, `A_DEBUG_SRC`, `A_JOBS`.
+Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
+`A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_DEBUG_SRC`, `A_JOBS`.
 
 ## Editor support
 

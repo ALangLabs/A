@@ -37,20 +37,6 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
     return checkIcCall(call);
   }
 
-  if (name == "__file__" || name == "__source_file__" || name == "__func__" ||
-      name == "__function__" || name == "__debug_time__" || name == "__debug_context__") {
-    if (!call.args.empty()) builtinArityError(name, call, 0);
-    inferCallArgTypes(call);
-    if (name == "__debug_time__") return typeString();
-    return typeString();
-  }
-
-  if (name == "__line__" || name == "__source_line__") {
-    if (!call.args.empty()) builtinArityError(name, call, 0);
-    inferCallArgTypes(call);
-    return typeInt(64, true);
-  }
-
   if (name == "__repr__" || name == "__debug_repr__") {
     if (call.args.size() != 1) builtinArityError(name, call, 1);
     inferCallArgTypes(call);
@@ -58,12 +44,18 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   }
 
   if (name == "__ic_format__") {
-    if (call.args.size() < 1 || call.args.size() > 3) {
-      sink_.error(call.span, "'__ic_format__' expects context/label/value (1 to 3) arguments, found " +
-                                 std::to_string(call.args.size()) + ".");
+    // Implemented as a prelude function; resolve through the prelude
+    // fallback like any other unqualified call.
+    if (const FnDecl* impl = findPreludeFunction("__ic_format__")) {
+      call.calleeFunction = impl;
+      call.calleeResolved = true;
+      auto sigIt = signatures_.find(impl);
+      if (sigIt == signatures_.end()) return typeError();
+      return checkFunctionCall(sigIt->second, call);
     }
-    inferCallArgTypes(call);
-    return typeString();
+    sink_.error(call.span, "'__ic_format__' requires the standard library prelude.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    return typeError();
   }
 
   for (auto& arg : call.args) {

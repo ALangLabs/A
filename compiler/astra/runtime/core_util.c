@@ -4,6 +4,50 @@
 /* small utilities                                                     */
 /* ------------------------------------------------------------------ */
 
+/* A-level call frames for panic tracebacks (Python-style). Codegen emits
+   a_frame_push() in every function prologue and a_frame_pop() on every
+   return path; panicf() then prints the live stack, oldest frame first. */
+typedef struct {
+    const char *name;
+    const char *file;
+    int line;
+} AFrame;
+
+static AFrame *g_frames;
+static size_t g_nframes;
+static size_t g_capframes;
+
+void a_frame_push(const char *name, const char *file, int line) {
+    if (g_nframes == g_capframes) {
+        size_t ncap = g_capframes ? g_capframes * 2 : 64;
+        AFrame *nf = (AFrame *)xrealloc(g_frames, ncap * sizeof(AFrame));
+        g_frames = nf;
+        g_capframes = ncap;
+    }
+    g_frames[g_nframes].name = name;
+    g_frames[g_nframes].file = file;
+    g_frames[g_nframes].line = line;
+    ++g_nframes;
+}
+
+void a_frame_pop(void) {
+    if (g_nframes) --g_nframes;
+}
+
+static void print_traceback(void) {
+    if (!g_nframes) return;
+    fputs("Traceback (most recent call last):\n", stderr);
+    for (size_t i = 0; i < g_nframes; ++i) {
+        const AFrame *f = &g_frames[i];
+        const char *file = f->file && *f->file ? f->file : "?";
+        const char *name = f->name && *f->name ? f->name : "?";
+        if (f->line > 0)
+            fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, f->line, name);
+        else
+            fprintf(stderr, "  File \"%s\", in %s\n", file, name);
+    }
+}
+
 void panicf(const char *fmt, ...) {
     va_list ap;
     va_start(ap, fmt);
@@ -11,12 +55,18 @@ void panicf(const char *fmt, ...) {
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
+    print_traceback();
     exit(2);
 }
 
 void *xmalloc(size_t n) {
-    void *p = malloc(n ? n : 1);
-    if (!p) panicf("out of memory");
+    /* Heap objects are NaN-boxed pointers distinguished by a zero low
+     * nibble, so every object needs 16-byte alignment. 64-bit libcs
+     * guarantee that from malloc; 32-bit libcs (ARM, i386) only
+     * guarantee 8, so allocate aligned explicitly. */
+    void *p = NULL;
+    if (posix_memalign(&p, 16, n ? n : 1) != 0 || !p)
+        panicf("out of memory");
     return p;
 }
 
@@ -49,7 +99,7 @@ aval mkobj(void *p) {
 
 AObj *obj_of(aval v) {
     if (!a_is_ptr(v)) return NULL;
-    return (AObj *)A_PAYLOAD(v);
+    return (AObj *)(uintptr_t)A_PAYLOAD(v);
 }
 
 int is_int_val(aval v) {

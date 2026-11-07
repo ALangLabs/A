@@ -1,0 +1,8 @@
+x = 42
+y = ic(x)
+print(y)
+
+z = ic(x + 1, "hi", [1, 2])
+print(z)
+
+ic()

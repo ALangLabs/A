@@ -12,10 +12,19 @@ struct ModuleGraph;
 struct SemaResult;
 
 // Emits x86-64 assembly (AT&T syntax) for astra to assemble/compile and link
-// into machine code — the only codegen backend (A -> asm -> machine code).
+// into machine code — the host fast path (A -> asm -> machine code).
 // In test mode, `main` discovers and runs top-level `fn test_*()` functions
 // through the runtime a_test_main harness. Returns false on constructs the
 // asm backend does not cover.
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
              std::string& error, bool testMode = false);
+
+// Emits portable C (calling the public runtime API in a_runtime.h) for astra
+// to compile for ANY target it supports (i386, x86-64, ARM, AArch64,
+// RISC-V64, PE, Mach-O). This is the cross-compilation / non-x86-64 path:
+// one emitter covers every backend target. In test mode, `main` discovers
+// and runs top-level `fn test_*()` functions. Returns false and fills
+// `error` on unsupported constructs.
+bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
+           std::string& error, bool testMode = false);
 }  // namespace a

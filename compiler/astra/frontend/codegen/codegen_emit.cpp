@@ -204,6 +204,22 @@ std::string AsmEmitter::emitStrData(const std::string& bytes, bool nulTerm) {
     return l;
   }
 
+void AsmEmitter::emitFramePush(const std::string& name, int moduleId, int line) {
+    std::string path;
+    if (moduleId >= 0 && moduleId < (int)graph_.modules.size())
+      path = graph_.at(moduleId).path;
+    std::string nl = emitStrData(name, true);
+    std::string fl = emitStrData(path, true);
+    emit("    lea " + nl + "(%rip), %rdi\n");
+    emit("    lea " + fl + "(%rip), %rsi\n");
+    emit("    mov $" + std::to_string(line) + ", %edx\n");
+    emit("    call a_frame_push\n");
+}
+
+void AsmEmitter::emitFramePop() {
+    emit("    call a_frame_pop\n");
+}
+
 // aval string value -> fresh slot holding a_str_new(ptr, len).
 int AsmEmitter::strLitSlot(const std::string& text) {
     std::string l = emitStrData(text, false);

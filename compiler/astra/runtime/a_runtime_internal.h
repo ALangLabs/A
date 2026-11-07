@@ -51,7 +51,7 @@ typedef struct AObj {
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
     T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
-    T_PYBUF
+    T_PYBUF, T_STRUCT
 };
 
 typedef struct { AObj h; char data[]; } AStr;
@@ -67,6 +67,12 @@ typedef struct {
     uint32_t *slots;
     uint64_t scap;
 } ADict;
+/* Class instance: ADict embedded first so every (ADict *)obj_of(v) cast
+   keeps working; `name` is the declared class name (NUL-terminated str
+   data), `methods` an aval list of method-name strings (A_NONE when the
+   class declares none). kind_of() reports K_DICT for T_STRUCT. */
+typedef struct { ADict d; aval name; aval methods; } AStruct;
+static inline int is_dict_t(uint32_t t) { return t == T_DICT || t == T_STRUCT; }
 typedef struct { AObj h; int64_t lo, hi, step; } ARange;
 typedef struct {
     AObj h;
@@ -75,6 +81,8 @@ typedef struct {
     uint64_t nparams;
     uint32_t flags;
     char *name;
+    char *sig;   /* compile-time signature text "name(p1, p2)", NULL when unknown */
+    char *doc;   /* compile-time docstring, NULL when absent */
 } AFnon;
 typedef struct { AObj h; uint64_t n; aval slots[]; } AEnv;
 typedef struct { AObj h; uint32_t ok; uint32_t is_option; aval value; } AResult;
@@ -210,6 +218,7 @@ aval a_list_new(uint64_t n, aval *items);
 aval a_tuple_new(uint64_t n, aval *items);
 aval a_list_from_iter(aval it);
 aval a_dict_new(void);
+aval a_struct_new(aval name, aval methods);
 aval a_dict_set(aval d, aval k, aval v);
 aval a_dict_get(aval d, aval k, aval dflt);
 aval a_set_new(void);
@@ -352,6 +361,12 @@ aval bi_json_as_float(uint64_t n, aval *argv);
 aval bi_json_as_bool(uint64_t n, aval *argv);
 aval bi_json_as_array(uint64_t n, aval *argv);
 aval bi_json_as_map(uint64_t n, aval *argv);
+aval bi_json_set(uint64_t n, aval *argv);
+aval bi_json_delete(uint64_t n, aval *argv);
+aval bi_struct_name(uint64_t n, aval *argv);
+aval bi_struct_methods(uint64_t n, aval *argv);
+aval bi_fn_signature(uint64_t n, aval *argv);
+aval bi_fn_doc(uint64_t n, aval *argv);
 aval dict_new_empty(void);
 aval bi_binary_encode(uint64_t n, aval *argv);
 aval bi_binary_decode(uint64_t n, aval *argv);

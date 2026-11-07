@@ -19,7 +19,7 @@ int kind_of(aval v) {
         case T_STR: return K_STR;
         case T_LIST: return K_LIST;
         case T_TUPLE: return K_TUPLE;
-        case T_DICT: return K_DICT;
+        case T_DICT: case T_STRUCT: return K_DICT;
         case T_SET: return K_SET;
         case T_RANGE: return K_RANGE;
         case T_ITER: return K_ITER;
@@ -33,6 +33,11 @@ int kind_of(aval v) {
 }
 
 const char *type_name_cstr(aval v) {
+    AObj *o = obj_of(v);
+    if (o && o->type == T_STRUCT) {
+        uint64_t nl;
+        return str_data(((AStruct *)o)->name, &nl);
+    }
     switch (kind_of(v)) {
         case K_NONE: return "NoneType";
         case K_BOOL: return "bool";
@@ -155,6 +160,22 @@ void format_into(Buf *b, aval v, int quote) {
         }
         case K_DICT: {
             ADict *d = (ADict *)obj_of(v);
+            AObj *ho = obj_of(v);
+            if (ho && ho->type == T_STRUCT) {
+                /* Class instance: Name(field=value, ...) like Python repr. */
+                uint64_t nl;
+                const char *np = str_data(((AStruct *)ho)->name, &nl);
+                buf_addn(b, np, (size_t)nl);
+                buf_addc(b, '(');
+                for (uint64_t i = 0; i < d->h.len; ++i) {
+                    if (i) buf_adds(b, ", ");
+                    format_into(b, d->pairs[i].k, 0);
+                    buf_adds(b, "=");
+                    format_into(b, d->pairs[i].v, 1);
+                }
+                buf_addc(b, ')');
+                return;
+            }
             buf_addc(b, '{');
             for (uint64_t i = 0; i < d->h.len; ++i) {
                 if (i) buf_adds(b, ", ");

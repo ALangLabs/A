@@ -5,8 +5,17 @@ typedef __SIZE_TYPE__ size_t;
 typedef __PTRDIFF_TYPE__ ssize_t;
 typedef __WCHAR_TYPE__ wchar_t;
 typedef __PTRDIFF_TYPE__ ptrdiff_t;
-typedef __PTRDIFF_TYPE__ intptr_t;
-typedef __SIZE_TYPE__ uintptr_t;
+/* intptr_t/uintptr_t must match stdint.h: __INTPTR_TYPE__ /
+   __UINTPTR_TYPE__ from astradefs.h (NetBSD lacks them; fall back to
+   the pointer-sized ptrdiff types). */
+#ifndef __INTPTR_TYPE__
+#define __INTPTR_TYPE__ __PTRDIFF_TYPE__
+#endif
+#ifndef __UINTPTR_TYPE__
+#define __UINTPTR_TYPE__ unsigned __PTRDIFF_TYPE__
+#endif
+typedef __INTPTR_TYPE__ intptr_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
 
 #if __STDC_VERSION__ >= 201112L
 typedef union { long long __ll; long double __ld; } max_align_t;

@@ -9,7 +9,7 @@ compiles A straight to native machine code.
 [![CI](https://github.com/ALangLabs/A/actions/workflows/ci.yml/badge.svg)](https://github.com/ALangLabs/A/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.0.1-informational.svg)](#)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20Windows-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey.svg)](#)
 
 [Features](#-features) • [Quick start](#-quick-start) • [The language](#-the-language) • [Toolchain](#-toolchain) • [Architecture](#-architecture) • [Documentation](#-documentation) • [Development](#-development)
 
@@ -19,9 +19,14 @@ compiles A straight to native machine code.
 
 ## ✨ Features
 
-- **Native compilation, no runtime VM** — `a build` lowers A to x86-64 assembly
+- **Native compilation, no runtime VM** — `a build` lowers A to machine code
   and links a real executable through the bundled **Astra** backend (a TinyCC
-  fork). `a run` does the same and executes it.
+  fork). `a run` does the same and executes it. x86-64 uses a dedicated
+  assembly emitter; other architectures go through a portable C emitter that
+  Astra compiles per target.
+- **Multi-target builds** — `a build --target <arch>` cross-compiles for
+  i386, AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS, given a
+  matching target sysroot (see *Cross-compilation* below).
 - **Static type checking with inference** — Hindley-Milner-style unification,
   generics, traits, algebraic enums, optional/result types, and flow-sensitive
   narrowing (`if x != None`).
@@ -114,8 +119,8 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 
 ```mermaid
 flowchart LR
-    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · asm codegen"]
-    fe --> s["x86-64 assembly (.s)"]
+    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · codegen"]
+    fe --> s["x86-64 asm / portable C"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
     astra --> bin["native executable"]
@@ -135,6 +140,42 @@ flowchart LR
   hover, go-to-definition, completion, formatting, call/type hierarchy, …).
 - **`tools/vscode-a/`** — VS Code extension with syntax highlighting,
   snippets, tasks, and the LSP client.
+
+## 🎯 Targets & cross-compilation
+
+`a build --target <arch>` selects the output architecture (the OS always
+matches the host — Astra drivers are built per-OS and cannot cross
+operating systems):
+
+| Target | Backend | Status |
+|---|---|---|
+| `x86_64` (default) | x86-64 asm emitter → `astra` | native, fully tested |
+| `i386` | portable C emitter → `astra-i386` | verified (runs natively on x86-64) |
+| `arm` (ARMv7 hard-float) | portable C emitter → `astra-arm` | verified under qemu-armhf |
+| `aarch64` / `arm64` | portable C emitter → `astra-arm64` | needs AArch64 sysroot |
+| `riscv64` | portable C emitter → `astra-riscv64` | needs RISC-V64 sysroot |
+
+`a run`, `a test` and `a repl` always execute natively and reject non-host
+targets. Linking a cross binary requires the target C library: install the
+matching cross toolchain (e.g. `gcc-aarch64-linux-gnu`, `libc6-dev-i386`)
+or point `A_SYSROOT` / `A_SYSROOT_<ARCH>` at a sysroot root. Per-arch Astra
+drivers and staged lib dirs are produced by the build (`build/astra/astra-<arch>`,
+`build/astralib-<arch>/`); `A_ASTRA_<ARCH>` overrides the driver lookup.
+
+Not supported: RISC-V32 (no astra backend; the runtime value model is
+64-bit) and 16-bit (no libc/runtime environment exists for it). Windows
+has a first-pass `_WIN32` port of the driver pipeline (`CreateProcess`,
+`GetTempPath`, `GetModuleFileName` in `pipeline.cpp`) but is untested —
+it still needs a Windows astra driver build, PE link verification, and a
+Win32 test-mode harness in the C emitter (`a test` emits POSIX
+`fork`/`waitpid` today). Debian `*-cross` sysroots ship `libc.so`/
+`libm.so` linker scripts with absolute paths astra cannot resolve — rewrite
+the `GROUP` entries relative to the sysroot lib dir when setting one up.
+
+`tests/integration/cross_suite.sh <arch> <sysroot-env> <sysroot> [runner]`
+cross-compiles every runnable integration case for a target and diffs
+program output — verified 70/70 on i386 (native), arm, aarch64 and riscv64
+(under qemu-user).
 
 ## 📚 Documentation
 

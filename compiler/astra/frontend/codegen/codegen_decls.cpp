@@ -359,13 +359,44 @@ void AsmEmitter::bindModuleImports(int moduleId) {
   }
 
 void AsmEmitter::emitStructCtor(StructInfo* st) {
-    // Slots: 0=argv ptr, 1=dict, 2+2i=key str, 3+2i=field value.
-    int need = 2 + 2 * (int)st->fieldNames.size();
+    // Slots: 0=argv ptr, 1=struct, 2+2i=key str, 3+2i=field value,
+    // nameS/methS hold the class-name string and method-name list passed
+    // to a_struct_new (runtime T_STRUCT carries both for introspection).
+    int nameS = 2 + 2 * (int)st->fieldNames.size();
+    int methS = nameS + 1;
+    int need = methS + 1;
     slotCounter_ = need;
     emit("    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
     emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frameBytes()) + ", %rsp\n");
     emit("    mov %rdi, " + slotRef(0) + "\n");
-    emit("    call a_dict_new\n    mov %rax, " + slotRef(1) + "\n");
+    // class display name: strip any module qualifier ("mod::Point" -> "Point")
+    std::string dispName = st->name;
+    std::size_t sep = dispName.rfind("::");
+    if (sep != std::string::npos) dispName = dispName.substr(sep + 2);
+    {
+      std::string nlbl = emitStrData(dispName, false);
+      emit("    lea " + nlbl + "(%rip), %rdi\n");
+      movImm(dispName.size(), "%rsi");
+      emit("    call a_str_new\n    mov %rax, " + slotRef(nameS) + "\n");
+    }
+    // method-name list (sorted for deterministic introspection output)
+    emit("    xor %edi, %edi\n    xor %esi, %esi\n    call a_list_new\n    mov %rax, " + slotRef(methS) + "\n");
+    {
+      std::vector<std::string> mnames;
+      for (const auto& kv : st->methods) mnames.push_back(kv.first);
+      std::sort(mnames.begin(), mnames.end());
+      for (const std::string& mn : mnames) {
+        std::string mlbl = emitStrData(mn, false);
+        emit("    lea " + mlbl + "(%rip), %rdi\n");
+        movImm(mn.size(), "%rsi");
+        emit("    call a_str_new\n");
+        loadSlot(methS, "%rdi");
+        emit("    mov %rax, %rsi\n    call a_list_append\n");
+      }
+    }
+    loadSlot(nameS, "%rdi");
+    loadSlot(methS, "%rsi");
+    emit("    call a_struct_new\n    mov %rax, " + slotRef(1) + "\n");
     for (std::size_t i = 0; i < st->fieldNames.size(); ++i) {
       int ks = 2 + 2 * (int)i, vs = ks + 1;
       std::string lbl = emitStrData(st->fieldNames[i], false);
@@ -393,6 +424,8 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     bindModuleImports(f->moduleId);
     int argvSlot = allocSlot();
     emit("    mov %rdi, " + slotRef(argvSlot) + "\n");
+    emitFramePush(f->isMethod ? f->structName + "." + f->name : f->name,
+                  f->moduleId, f->decl ? f->decl->span.line : 0);
     for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
       int ps = allocSlot();
       loadSlot(argvSlot, "%rax");
@@ -437,6 +470,7 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     promoteNames_ = std::move(savedPromote);
     specNames_ = std::move(savedSpec);
     nameRanges_ = std::move(savedRanges);
+    emitFramePop();
     emit("    mov $" + u64s(kNone) + ", %rax\n    leave\n    ret\n");
     int frame = frameBytes();
     std::ostringstream emitted;
@@ -450,6 +484,41 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     inFunction_ = savedInFn;
   }
 
+// Render "name(p1, p2, ...)" signature text for a function's runtime
+// metadata (inspect.signature / core.fn_signature).
+static std::string fnSignatureText(const FnInfo* f) {
+    std::string sig = f->name + "(";
+    bool first = true;
+    if (f->decl) {
+      for (const ParamDecl& p : f->decl->params) {
+        if (!first) sig += ", ";
+        first = false;
+        sig += p.name;
+        if (p.variadic) sig += "...";
+      }
+    } else {
+      for (const std::string& pn : f->paramNames) {
+        if (!first) sig += ", ";
+        first = false;
+        sig += pn;
+      }
+    }
+    sig += ")";
+    return sig;
+}
+
+// Docstring text for a function: methods carry decl->doc; top-level
+// functions keep it as a leading string-literal body statement.
+static std::string fnDocText(const FnInfo* f) {
+    if (!f->decl) return "";
+    if (!f->decl->doc.empty()) return f->decl->doc;
+    if (!f->decl->body.empty()) {
+      std::string out;
+      if (docstringText(*f->decl->body.front(), out)) return out;
+    }
+    return "";
+}
+
 void AsmEmitter::emitMain() {
     std::ostringstream saved;
     saved.swap(text_);
@@ -459,17 +528,30 @@ void AsmEmitter::emitMain() {
     pushScope();
     allocSlot();  // slot 0 reserved (unused scratch)
     emit("    call a_runtime_init\n");
+    emitFramePush("<module>", graph_.entry, 0);
     for (StructInfo* st : structList_) {
       emit("    lea " + st->ctorCname + "(%rip), %rdi\n    mov $" + u64s(kNone) + ", %rsi\n");
       std::string lbl = emitStrData(st->name, true);
-      emit("    lea " + lbl + "(%rip), %rdx\n    call a_fnon_new\n");
+      emit("    lea " + lbl + "(%rip), %rdx\n");
+      std::string sig = st->name + "(";
+      for (std::size_t i = 0; i < st->fieldNames.size(); ++i) {
+        if (i) sig += ", ";
+        sig += st->fieldNames[i];
+      }
+      sig += ")";
+      std::string sl = emitStrData(sig, true);
+      std::string dl = emitStrData(st->decl ? st->decl->doc : "", true);
+      emit("    lea " + sl + "(%rip), %rcx\n    lea " + dl + "(%rip), %r8\n    call a_fnon_new_ex\n");
       emit("    mov %rax, " + st->globalVar + "(%rip)\n");
     }
     for (FnInfo* f : fnList_) {
       if (f->isMethod) continue;
       emit("    lea " + f->cname + "(%rip), %rdi\n    mov $" + u64s(kNone) + ", %rsi\n");
       std::string lbl = emitStrData(f->name, true);
-      emit("    lea " + lbl + "(%rip), %rdx\n    call a_fnon_new\n");
+      emit("    lea " + lbl + "(%rip), %rdx\n");
+      std::string sl = emitStrData(fnSignatureText(f), true);
+      std::string dl = emitStrData(fnDocText(f), true);
+      emit("    lea " + sl + "(%rip), %rcx\n    lea " + dl + "(%rip), %r8\n    call a_fnon_new_ex\n");
       emit("    mov %rax, " + f->globalVar + "(%rip)\n");
     }
     for (auto& kv : enums_) {
@@ -502,7 +584,12 @@ void AsmEmitter::emitMain() {
       emit("    mov $" + std::to_string(tests.size()) + ", %rdi\n");
       emit("    lea __a_test_names(%rip), %rsi\n");
       emit("    lea __a_test_fns(%rip), %rdx\n");
-      emit("    call a_test_main\n    leave\n    ret\n");
+      emit("    call a_test_main\n");
+      int testRc = allocSlot();
+      emit("    mov %rax, " + slotRef(testRc) + "\n");
+      emitFramePop();
+      loadSlot(testRc);
+      emit("    leave\n    ret\n");
     } else {
       std::vector<int> order = graph_.order;
       if (order.empty()) order.push_back(graph_.entry);
@@ -588,6 +675,7 @@ void AsmEmitter::emitMain() {
       emitBody(mod.program->statements, true);
       }
       curModuleId_ = savedModule;
+      emitFramePop();
       emit("    xor %eax, %eax\n    leave\n    ret\n");
     }
     int frame = frameBytes();

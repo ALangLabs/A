@@ -100,7 +100,10 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "py_contains", bi_py_contains_builtin },
     { "py_truthy", bi_py_truthy_builtin },
     { "py_type", bi_py_type_builtin },
-    { "py_buffer_info", bi_py_buffer_info }
+    { "py_buffer_info", bi_py_buffer_info },
+    { "json_set", bi_json_set }, { "json_delete", bi_json_delete },
+    { "struct_name", bi_struct_name }, { "struct_methods", bi_struct_methods },
+    { "fn_signature", bi_fn_signature }, { "fn_doc", bi_fn_doc }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -156,8 +159,7 @@ aval a_eprintv(uint64_t n, aval *argv) {
 }
 
 aval a_panic_msg(const char *msg) {
-    fprintf(stderr, "error: %s\n", msg ? msg : "");
-    exit(2);
+    panicf("%s", msg ? msg : "");
     return A_NONE;
 }
 
@@ -219,7 +221,7 @@ aval a_setattr(aval obj, const char *name, aval v) {
        through PyObject_SetAttrString; others panic */
     AObj *o = obj_of(obj);
     if (o && o->type == T_PYOBJ) return a_py_setattr(obj, name, v);
-    if (o && o->type == T_DICT) {
+    if (o && is_dict_t(o->type)) {
         aval k = a_str_new(name, (uint64_t)strlen(name));
         a_dict_set(obj, k, v);
         return v;
@@ -248,7 +250,15 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
         }
         close(pfd[1]);
         char msg[4096];
-        ssize_t rn = read(pfd[0], msg, sizeof(msg) - 1);
+        /* panicf emits the error line and traceback in several small
+           writes; a single read() can return after just "error: ". Drain
+           the pipe until EOF so the FAILED summary sees the full message. */
+        ssize_t rn = 0;
+        while (rn < (ssize_t)sizeof(msg) - 1) {
+            ssize_t r = read(pfd[0], msg + rn, sizeof(msg) - 1 - (size_t)rn);
+            if (r <= 0) break;
+            rn += r;
+        }
         if (rn < 0) rn = 0;
         msg[rn] = 0;
         close(pfd[0]);
@@ -260,6 +270,10 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
         } else {
             char *m = (char *)msg;
             if (strncmp(m, "error: ", 7) == 0) m += 7;
+            /* Keep the FAILED summary to the panic message itself; the
+               traceback section is noise in the one-line test report. */
+            char *tb = strstr(m, "\nTraceback");
+            if (tb) *tb = 0;
             size_t ml = strlen(m);
             while (ml > 0 && (m[ml-1] == '\n' || m[ml-1] == '\r')) m[--ml] = 0;
             printf("FAILED %s: %s\n", names[i], m);

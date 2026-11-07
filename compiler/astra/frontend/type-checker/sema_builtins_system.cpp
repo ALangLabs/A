@@ -111,6 +111,36 @@ TypePtr Sema::checkBuiltinSystem(const std::string& name, CallExpr& call) {
     return typeVoid();
   }
 
+  if (name == "struct_name") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeString();
+    }
+    checkArgAgainst(*call.args[0].value, typeJson(), "in the value passed to 'struct_name'");
+    return typeString();
+  }
+
+  if (name == "struct_methods") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeArray(typeString());
+    }
+    checkArgAgainst(*call.args[0].value, typeJson(), "in the value passed to 'struct_methods'");
+    return typeArray(typeString());
+  }
+
+  if (name == "fn_signature" || name == "fn_doc") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeString();
+    }
+    inferAnyCallArg(call, 0, "to '" + name + "'");
+    return typeString();
+  }
+
   return nullptr;
 }
 

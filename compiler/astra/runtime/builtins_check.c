@@ -84,3 +84,41 @@ aval bi_isinstance(uint64_t n, aval *argv) {
     return bool_aval(r);
 }
 
+
+aval bi_struct_name(uint64_t n, aval *argv) {
+    want_args("struct_name", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    if (o && o->type == T_STRUCT) return ((AStruct *)o)->name;
+    return a_str_new("", 0);
+}
+
+aval bi_struct_methods(uint64_t n, aval *argv) {
+    want_args("struct_methods", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    if (o && o->type == T_STRUCT) {
+        aval m = ((AStruct *)o)->methods;
+        if (kind_of(m) == K_LIST) return m;
+    }
+    return a_list_new(0, NULL);
+}
+
+aval bi_fn_signature(uint64_t n, aval *argv) {
+    want_args("fn_signature", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    if (o && o->type == T_FNON) {
+        AFnon *f = (AFnon *)o;
+        if (f->sig) return a_str_new(f->sig, strlen(f->sig));
+        if (f->name) return a_str_new(f->name, strlen(f->name));
+    }
+    return a_str_new("", 0);
+}
+
+aval bi_fn_doc(uint64_t n, aval *argv) {
+    want_args("fn_doc", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    if (o && o->type == T_FNON) {
+        AFnon *f = (AFnon *)o;
+        if (f->doc) return a_str_new(f->doc, strlen(f->doc));
+    }
+    return a_str_new("", 0);
+}

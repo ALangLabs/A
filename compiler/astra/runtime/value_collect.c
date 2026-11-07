@@ -98,6 +98,20 @@ aval a_dict_new(void) {
     return mkobj(&d->h);
 }
 
+aval a_struct_new(aval name, aval methods) {
+    AStruct *s = (AStruct *)xmalloc(sizeof(AStruct));
+    s->d.h.type = T_STRUCT;
+    s->d.h.len = 0;
+    s->d.h.cap = 0;
+    s->d.pairs = NULL;
+    s->d.phash = NULL;
+    s->d.slots = NULL;
+    s->d.scap = 0;
+    s->name = name;
+    s->methods = methods;
+    return mkobj(&s->d.h);
+}
+
 aval a_dict_set(aval d, aval k, aval v) {
     dict_put(dict_of(d, "dict"), k, v);
     return A_NONE;

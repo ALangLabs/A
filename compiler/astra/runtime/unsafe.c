@@ -30,7 +30,7 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
         if (i < 0 || (uint64_t)i >= a->h.len) panicf("unsafe.get: index out of bounds");
         return a->items[i];
     }
-    if (o && o->type == T_DICT) {
+    if (o && is_dict_t(o->type)) {
         ADict *d = (ADict *)o;
         int64_t idx = dict_find(d, argv[1]);
         if (idx < 0) return A_NONE;
@@ -65,7 +65,7 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
         a->items[i] = argv[2];
         return A_NONE;
     }
-    if (o && o->type == T_DICT) {
+    if (o && is_dict_t(o->type)) {
         dict_put((ADict *)o, argv[1], argv[2]);
         return A_NONE;
     }

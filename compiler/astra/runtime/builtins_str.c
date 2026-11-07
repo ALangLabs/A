@@ -68,7 +68,7 @@ aval bi_join(uint64_t n, aval *argv) {
             int all_str = 1;
             for (uint64_t i = 0; i < a->h.len; ++i) {
                 aval v = a->items[i];
-                AObj *o = a_is_ptr(v) ? (AObj *)A_PAYLOAD(v) : NULL;
+                AObj *o = a_is_ptr(v) ? (AObj *)(uintptr_t)A_PAYLOAD(v) : NULL;
                 if (!o || o->type != T_STR) { all_str = 0; break; }
                 total += (uint64_t)((const AStr *)o)->h.len;
             }
@@ -78,7 +78,7 @@ aval bi_join(uint64_t n, aval *argv) {
                 char *p = out->data;
                 for (uint64_t i = 0; i < a->h.len; ++i) {
                     if (i) { memcpy(p, sep, (size_t)sn); p += sn; }
-                    const AStr *s = (const AStr *)A_PAYLOAD(a->items[i]);
+                    const AStr *s = (const AStr *)(uintptr_t)A_PAYLOAD(a->items[i]);
                     memcpy(p, s->data, (size_t)s->h.len);
                     p += s->h.len;
                 }
@@ -95,8 +95,8 @@ aval bi_join(uint64_t n, aval *argv) {
 }
 
 aval a_join_len(aval values, aval sep) {
-    AObj *so = a_is_ptr(sep) ? (AObj *)A_PAYLOAD(sep) : NULL;
-    AObj *src = a_is_ptr(values) ? (AObj *)A_PAYLOAD(values) : NULL;
+    AObj *so = a_is_ptr(sep) ? (AObj *)(uintptr_t)A_PAYLOAD(sep) : NULL;
+    AObj *src = a_is_ptr(values) ? (AObj *)(uintptr_t)A_PAYLOAD(values) : NULL;
     if (so && so->type == T_STR && src &&
         (src->type == T_LIST || src->type == T_TUPLE || src->type == T_SET) &&
         !arr_packed((const AArr *)src)) {
@@ -108,7 +108,7 @@ aval a_join_len(aval values, aval sep) {
         int all_str = 1;
         for (uint64_t i = 0; i < n; ++i) {
             aval v = a->items[i];
-            AObj *o = a_is_ptr(v) ? (AObj *)A_PAYLOAD(v) : NULL;
+            AObj *o = a_is_ptr(v) ? (AObj *)(uintptr_t)A_PAYLOAD(v) : NULL;
             if (!o || o->type != T_STR) { all_str = 0; break; }
             const AStr *s = (const AStr *)o;
             total += u8_count(s->data, s->h.len);

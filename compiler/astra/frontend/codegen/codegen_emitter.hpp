@@ -348,6 +348,13 @@ class AsmEmitter {
   // Returns the label; bytes are NOT escaped so any content works.
     std::string emitStrData(const std::string& bytes, bool nulTerm);
 
+  // Panic-traceback frames: emit a_frame_push(name, file, line) / a_frame_pop
+  // calls. Push goes in the prologue (after argv is saved to its slot);
+  // pop goes before every `leave; ret` while the return value is still in a
+  // stack slot, not %rax (a_frame_pop clobbers caller-saved registers).
+    void emitFramePush(const std::string& name, int moduleId, int line);
+    void emitFramePop();
+
   // aval string value -> fresh slot holding a_str_new(ptr, len).
     int strLitSlot(const std::string& text);
 

@@ -27,6 +27,7 @@ struct ModuleGraph {
   std::deque<Module> modules;
   std::vector<int> order;  // dependency order: imports before importers
   int entry = -1;
+  int preludeId = -1;      // auto-loaded prelude module, or -1
 
   const Module& at(int id) const { return modules[static_cast<std::size_t>(id)]; }
   Module& at(int id) { return modules[static_cast<std::size_t>(id)]; }

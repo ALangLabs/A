@@ -80,6 +80,9 @@ inline int builtinRuntimeId(const std::string& name) {
       {"py_is_pyobject", 178}, {"py_str", 179}, {"py_repr", 180},
       {"py_len", 181}, {"py_contains", 182}, {"py_truthy", 183},
       {"py_type", 184}, {"py_buffer_info", 185},
+      {"json_set", 186}, {"json_delete", 187},
+      {"struct_name", 188}, {"struct_methods", 189},
+      {"fn_signature", 190}, {"fn_doc", 191},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -111,6 +114,7 @@ inline int builtinIdForBuiltin(BuiltinId id) {
     case BuiltinId::Panic: return 39;
     case BuiltinId::Assert: return 40;
     case BuiltinId::AssertEq: return 41;
+    case BuiltinId::DebugRepr: return 53;  // __repr__/__debug_repr__ -> a_repr
     default: return -1;
   }
 }
