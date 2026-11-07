@@ -116,6 +116,32 @@ class AsmEmitter {
   int curModuleId_ = -1;
   bool testMode_ = false;
 
+  // Small-function inlining state. Generic inlining reuses the normal aval
+  // emitter with a fresh function-like scope; raw-int inlining is a separate
+  // straight-line path for leaf int->int functions and never sets these.
+  int inlineDepth_ = 0;
+  std::string inlineReturnLabel_;
+  int inlineResultSlot_ = -1;
+  int inlineDeferBase_ = 0;
+  std::unordered_map<std::string, int> rawVars_;
+
+  struct InlineInfo {
+    bool safe = false;
+    bool raw = false;
+  };
+  struct InlineScan {
+    const FnDecl* fn = nullptr;
+    bool unsafe = false;
+    bool nonInt = false;
+    bool unsupportedRaw = false;
+    bool unsupportedRawStmt = false;
+    int cost = 0;
+  };
+  std::unordered_map<const FnDecl*, InlineInfo> inlineInfo_;
+  std::unordered_map<const FnDecl*, int> inlineSites_;
+  static constexpr int kMaxInlineCost = 40;
+  static constexpr int kMaxInlineSites = 16;
+
   static constexpr uint64_t kTag = 0xFFFF000000000000ULL;
   static constexpr uint64_t kPayloadMask = 0x0000FFFFFFFFFFFFULL;
   static constexpr uint64_t kNone = kTag | 0x2ULL;
@@ -1191,10 +1217,12 @@ class AsmEmitter {
   }
   void emitDeferredAll() { emitDeferredDownTo(0); }
 
-  // Return/try-propagate path: emit every active frame's defers and drops
-  // WITHOUT popping — later code in the same function still needs its frames.
-  void emitDeferredPeekAll() {
-    for (int fi = (int)deferStack_.size() - 1; fi >= 0; --fi) {
+  // Return/try-propagate path: emit deferred statements of frames [depth,
+  // size) innermost-first, LIFO within each frame, WITHOUT popping — later
+  // code in the same function still needs its frames. Inlining uses `depth`
+  // to run only the callee's frames and leave the caller's defers untouched.
+  void emitDeferredPeekDownTo(int depth) {
+    for (int fi = (int)deferStack_.size() - 1; fi >= depth; --fi) {
       ScopeFrame& f = deferStack_[fi];
       for (auto it = f.defers.rbegin(); it != f.defers.rend(); ++it)
         emitStmt(*it, false);
@@ -1202,6 +1230,7 @@ class AsmEmitter {
         emitDropRec(*it);
     }
   }
+  void emitDeferredPeekAll() { emitDeferredPeekDownTo(0); }
 
   void emitBody(const std::vector<StmtPtr>& stmts, bool topLevel = false) {
     pushScope();
@@ -1286,6 +1315,12 @@ class AsmEmitter {
           movImm(kNone);
         }
         storeRax(rvS);
+        if (inlineDepth_ > 0) {
+          emitDeferredPeekDownTo(inlineDeferBase_);
+          copySlot(rvS, inlineResultSlot_);
+          jmp(inlineReturnLabel_);
+          return;
+        }
         emitDeferredPeekAll();
         loadSlot(rvS);
         if (inFunction_) {
@@ -1739,6 +1774,548 @@ class AsmEmitter {
     fail("unsupported assignment target");
   }
 
+  // ---- small-function inlining ---------------------------------------------
+  // The scanner is deliberately conservative: it only proves that emitting the
+  // body at a direct call site cannot change name resolution, control flow, or
+  // ownership behaviour. Anything doubtful disables inlining for that fn.
+  bool exprIsInt(const Expr* e) const {
+    TypePtr t = e ? resolveType(e->inferredType) : nullptr;
+    return t && t->kind == TypeKind::Int;
+  }
+
+  void scanInlineExpr(InlineScan& sc, const Expr* e) {
+    if (!e || sc.unsafe) return;
+    if (++sc.cost > kMaxInlineCost) {
+      sc.unsafe = true;
+      return;
+    }
+    TypePtr rt = resolveType(e->inferredType);
+    if (rt && rt->kind == TypeKind::Struct && dropFnFor(rt)) sc.unsafe = true;
+    if (!exprIsInt(e)) sc.nonInt = true;
+    const bool rawSimple =
+        e->kind == ExprKind::IntLit || e->kind == ExprKind::Ident ||
+        (e->kind == ExprKind::Binary &&
+         (static_cast<const BinaryExpr&>(*e).op == "&" ||
+          static_cast<const BinaryExpr&>(*e).op == "|" ||
+          static_cast<const BinaryExpr&>(*e).op == "^" ||
+          static_cast<const BinaryExpr&>(*e).op == "<<" ||
+          static_cast<const BinaryExpr&>(*e).op == ">>"));
+    if (!rawSimple) sc.unsupportedRaw = true;
+    switch (e->kind) {
+      case ExprKind::Ident:
+        if (static_cast<const IdentExpr&>(*e).name == sc.fn->name) sc.unsafe = true;
+        return;
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+        return;
+      case ExprKind::StringLit:
+        for (const StringPart& p : static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr) scanInlineExpr(sc, p.expr.get());
+        return;
+      case ExprKind::Unary:
+        scanInlineExpr(sc, static_cast<const UnaryExpr&>(*e).operand.get());
+        return;
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        scanInlineExpr(sc, b.lhs.get());
+        scanInlineExpr(sc, b.rhs.get());
+        return;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        scanInlineExpr(sc, c.callee.get());
+        for (const CallArg& a : c.args) scanInlineExpr(sc, a.value.get());
+        return;
+      }
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        scanInlineExpr(sc, x.object.get());
+        scanInlineExpr(sc, x.index.get());
+        return;
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        scanInlineExpr(sc, x.object.get());
+        scanInlineExpr(sc, x.start.get());
+        scanInlineExpr(sc, x.end.get());
+        scanInlineExpr(sc, x.step.get());
+        return;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv : static_cast<const MapLitExpr&>(*e).entries) {
+          scanInlineExpr(sc, kv.first.get());
+          scanInlineExpr(sc, kv.second.get());
+        }
+        return;
+      case ExprKind::SetLit:
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple: {
+        const auto& els = e->kind == ExprKind::SetLit
+            ? static_cast<const SetLitExpr&>(*e).elements
+            : e->kind == ExprKind::ArrayLit
+                ? static_cast<const ArrayLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els) scanInlineExpr(sc, el.get());
+        return;
+      }
+      case ExprKind::Field:
+        scanInlineExpr(sc, static_cast<const FieldExpr&>(*e).object.get());
+        return;
+      case ExprKind::SafeNav:
+        scanInlineExpr(sc, static_cast<const SafeNavExpr&>(*e).object.get());
+        return;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        scanInlineExpr(sc, r.start.get());
+        scanInlineExpr(sc, r.end.get());
+        scanInlineExpr(sc, r.step.get());
+        return;
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        scanInlineExpr(sc, t.cond.get());
+        scanInlineExpr(sc, t.thenValue.get());
+        scanInlineExpr(sc, t.elseValue.get());
+        return;
+      }
+      case ExprKind::Lambda:
+        scanInlineExpr(sc, static_cast<const LambdaExpr&>(*e).body.get());
+        return;
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        scanInlineExpr(sc, c.element.get());
+        scanInlineExpr(sc, c.iterable.get());
+        scanInlineExpr(sc, c.condition.get());
+        return;
+      }
+      case ExprKind::Match: {
+        const MatchExpr& m = static_cast<const MatchExpr&>(*e);
+        scanInlineExpr(sc, m.subject.get());
+        for (const MatchArm& arm : m.arms) {
+          scanInlinePattern(sc, arm.pattern);
+          scanInlineExpr(sc, arm.guard.get());
+          scanInlineExpr(sc, arm.result.get());
+        }
+        return;
+      }
+      case ExprKind::Try:
+        scanInlineExpr(sc, static_cast<const TryExpr&>(*e).operand.get());
+        return;
+      default:
+        return;
+    }
+  }
+
+  void scanInlinePattern(InlineScan& sc, const Pattern& p) {
+    if (sc.unsafe) return;
+    if (++sc.cost > kMaxInlineCost) {
+      sc.unsafe = true;
+      return;
+    }
+    scanInlineExpr(sc, p.value.get());
+    scanInlineExpr(sc, p.rangeStart.get());
+    scanInlineExpr(sc, p.rangeEnd.get());
+    scanInlineExpr(sc, p.ctor.get());
+    for (const Pattern& sub : p.subpatterns) scanInlinePattern(sc, sub);
+  }
+
+  void scanInlineStmt(InlineScan& sc, const Stmt* s) {
+    if (!s || sc.unsafe) return;
+    if (++sc.cost > kMaxInlineCost) {
+      sc.unsafe = true;
+      return;
+    }
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        scanInlineExpr(sc, st.init.get());
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind == ExprKind::Ident) {
+          const std::string& nm = static_cast<const IdentExpr&>(*st.target).name;
+          if (nm == sc.fn->name) sc.unsafe = true;
+          if (st.op != "=") sc.unsupportedRawStmt = true;
+        } else {
+          sc.unsupportedRawStmt = true;
+          scanInlineExpr(sc, st.target.get());
+        }
+        scanInlineExpr(sc, st.value.get());
+        return;
+      }
+      case StmtKind::Expr:
+        scanInlineExpr(sc, static_cast<const ExprStmt&>(*s).expr.get());
+        return;
+      case StmtKind::Destructure:
+        sc.unsupportedRawStmt = true;
+        scanInlineExpr(sc, static_cast<const DestructureStmt&>(*s).value.get());
+        return;
+      case StmtKind::Return:
+        scanInlineExpr(sc, static_cast<const ReturnStmt&>(*s).value.get());
+        return;
+      case StmtKind::Break:
+      case StmtKind::Continue:
+        sc.unsupportedRawStmt = true;
+        return;
+      case StmtKind::If: {
+        sc.unsupportedRawStmt = true;
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const auto& br : st.branches) {
+          scanInlineExpr(sc, br.cond.get());
+          for (const StmtPtr& b : br.body) scanInlineStmt(sc, b.get());
+        }
+        for (const StmtPtr& b : st.elseBody) scanInlineStmt(sc, b.get());
+        return;
+      }
+      case StmtKind::While: {
+        sc.unsupportedRawStmt = true;
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        scanInlineExpr(sc, st.cond.get());
+        for (const StmtPtr& b : st.body) scanInlineStmt(sc, b.get());
+        return;
+      }
+      case StmtKind::DoWhile: {
+        sc.unsupportedRawStmt = true;
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) scanInlineStmt(sc, b.get());
+        scanInlineExpr(sc, st.cond.get());
+        return;
+      }
+      case StmtKind::For: {
+        sc.unsupportedRawStmt = true;
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        scanInlineExpr(sc, st.iterable.get());
+        for (const StmtPtr& b : st.body) scanInlineStmt(sc, b.get());
+        return;
+      }
+      case StmtKind::Loop: {
+        sc.unsupportedRawStmt = true;
+        const LoopStmt& st = static_cast<const LoopStmt&>(*s);
+        for (const StmtPtr& b : st.body) scanInlineStmt(sc, b.get());
+        return;
+      }
+      default:
+        sc.unsafe = true;
+        return;
+    }
+  }
+
+  // Conservative check for whether an otherwise-undeclared assignment target
+  // could resolve to a global/function/struct/enum binding rather than a fresh
+  // local. Used only by the raw-int path; false positives just disable it.
+  bool rawNameMayBeGlobal(const std::string& nm) const {
+    for (const auto& kv : topLevelGlobals_) {
+      const std::string& key = kv.first;
+      if (key.size() > nm.size() &&
+          key.compare(key.size() - nm.size(), nm.size(), nm) == 0 &&
+          key[key.size() - nm.size() - 1] == ':')
+        return true;
+    }
+    for (FnInfo* f : fnList_)
+      if (!f->isMethod && f->name == nm) return true;
+    for (StructInfo* st : structList_)
+      if (st->name == nm) return true;
+    for (const auto& kv : enums_) {
+      std::size_t dot = kv.first.find('.');
+      if (dot != std::string::npos && kv.first.substr(dot + 1) == nm) return true;
+    }
+    return false;
+  }
+
+  bool rawInlineShapeOk(const FnDecl* fn) const {
+    if (!fn || fn->body.empty()) return false;
+    std::set<std::string> declared;
+    for (const ParamDecl& p : fn->params) declared.insert(p.name);
+    int returns = 0;
+    for (std::size_t i = 0; i < fn->body.size(); ++i) {
+      const Stmt* s = fn->body[i].get();
+      if (!s) return false;
+      switch (s->kind) {
+        case StmtKind::Let: {
+          const LetStmt& st = static_cast<const LetStmt&>(*s);
+          if (!st.init) return false;
+          declared.insert(st.name);
+          break;
+        }
+        case StmtKind::Assign: {
+          const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+          if (st.op != "=" || !st.target || st.target->kind != ExprKind::Ident ||
+              !st.value) return false;
+          const std::string& nm = static_cast<const IdentExpr&>(*st.target).name;
+          if (!declared.count(nm)) {
+            // `v = ...` with no prior binding creates a local in codegen unless
+            // the name resolves to a global/function/struct/enum binding.
+            if (rawNameMayBeGlobal(nm)) return false;
+            declared.insert(nm);
+          }
+          break;
+        }
+        case StmtKind::Expr:
+          break;
+        case StmtKind::Return: {
+          const ReturnStmt& st = static_cast<const ReturnStmt&>(*s);
+          if (i + 1 != fn->body.size() || !st.value) return false;
+          ++returns;
+          break;
+        }
+        default:
+          return false;
+      }
+    }
+    return returns == 1;
+  }
+
+  bool allIntParamsAndReturn(const FnDecl* fn) const {
+    auto pit = sema_.fnParamTypes.find(fn);
+    if (pit == sema_.fnParamTypes.end() || pit->second.size() != fn->params.size())
+      return false;
+    for (const TypePtr& t : pit->second) {
+      TypePtr r = resolveType(t);
+      if (!r || r->kind != TypeKind::Int) return false;
+    }
+    auto rit = sema_.fnReturnTypes.find(fn);
+    if (rit == sema_.fnReturnTypes.end()) return false;
+    TypePtr r = resolveType(rit->second);
+    return r && r->kind == TypeKind::Int;
+  }
+
+  const InlineInfo& inlineInfoFor(FnInfo* f) {
+    auto it = inlineInfo_.find(f->decl);
+    if (it != inlineInfo_.end()) return it->second;
+    InlineInfo info;
+    if (f->decl && !f->isMethod && !f->variadic && f->decl->comptimeParams.empty() &&
+        f->decl->typeParams.empty() && f->paramNames.size() == f->decl->params.size()) {
+      InlineScan sc;
+      sc.fn = f->decl;
+      for (const StmtPtr& s : f->decl->body) scanInlineStmt(sc, s.get());
+      info.safe = !sc.unsafe && sc.cost <= kMaxInlineCost;
+      if (info.safe) {
+        info.raw = !sc.nonInt && !sc.unsupportedRaw && !sc.unsupportedRawStmt &&
+                   rawInlineShapeOk(f->decl) && allIntParamsAndReturn(f->decl);
+      }
+    }
+    auto res = inlineInfo_.emplace(f->decl, info);
+    return res.first->second;
+  }
+
+  // Raw int64 helpers used only while emitting a raw-inline body. Slots in
+  // rawVars_ hold untagged int64 values, not avals.
+  bool rawIntLitFits(std::int64_t v) const {
+    const std::int64_t lim = std::int64_t(1) << 46;
+    return v >= -lim && v < lim;
+  }
+
+  bool emitRawExpr(const Expr* e, int out) {
+    if (!e || failed_) return false;
+    if (e->kind == ExprKind::IntLit) {
+      std::int64_t v = static_cast<const IntLitExpr&>(*e).value;
+      if (rawIntLitFits(v)) {
+        movImm((uint64_t)v);
+        storeRax(out);
+      } else {
+        // Preserve the generic literal encoding exactly (including its
+        // range behaviour) by materializing the aval and unboxing it.
+        emitExpr(e);
+        emit("    mov %rax, %rdi\n    call a_int_full\n");
+        storeRax(out);
+      }
+      return true;
+    }
+    if (e->kind == ExprKind::Ident) {
+      const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+      auto it = rawVars_.find(nm);
+      if (it != rawVars_.end()) {
+        copySlot(it->second, out);
+        return true;
+      }
+      emitExpr(e);
+      emit("    mov %rax, %rdi\n    call a_int_full\n");
+      storeRax(out);
+      return true;
+    }
+    if (e->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+      int ls = allocSlot(), rs = allocSlot();
+      if (!emitRawExpr(b.lhs.get(), ls) || !emitRawExpr(b.rhs.get(), rs))
+        return false;
+      emitRawBin(b.op, ls, rs, out);
+      return true;
+    }
+    fail("unsupported raw int expression");
+    return false;
+  }
+
+  void emitRawBin(const std::string& op, int ls, int rs, int out) {
+    if (op == "&" || op == "|" || op == "^") {
+      loadSlot(ls, "%rax");
+      loadSlot(rs, "%rcx");
+      emit(std::string("    ") + (op == "&" ? "and" : op == "|" ? "or" : "xor") +
+           " %rcx, %rax\n");
+      storeRax(out);
+      return;
+    }
+    if (op != "<<" && op != ">>") {
+      fail("unsupported raw int operator '" + op + "'");
+      movImm(0);
+      storeRax(out);
+      return;
+    }
+    const char* slowSym = op == "<<" ? "a_shl_slow" : "a_shr_slow";
+    std::string slowL = newLabel("rshs"), doneL = newLabel("rshd");
+    loadSlot(rs, "%rcx");
+    emit("    test %rcx, %rcx\n    js " + slowL + "\n"
+         "    cmp $63, %rcx\n    ja " + slowL + "\n");
+    loadSlot(ls, "%rax");
+    emit(std::string("    ") + (op == "<<" ? "shl" : "sar") + " %cl, %rax\n");
+    storeRax(out);
+    emit("    jmp " + doneL + "\n");
+    emitLabel(slowL);
+    // Invalid shift amount: reproduce the runtime path exactly (it panics
+    // for out-of-range amounts). Box both operands and call the slow helper.
+    loadSlot(ls);
+    emitBoxInt64();
+    int lBox = allocSlot();
+    storeRax(lBox);
+    loadSlot(rs);
+    emitBoxInt64();
+    int rBox = allocSlot();
+    storeRax(rBox);
+    loadSlot(rBox, "%rsi");
+    loadSlot(lBox, "%rdi");
+    emit(std::string("    call ") + slowSym + "\n"
+         "    mov %rax, %rdi\n    call a_int_full\n");
+    storeRax(out);
+    emitLabel(doneL);
+  }
+
+  void emitRawBody(FnInfo* f, const std::vector<int>& argSlots) {
+    rawVars_.clear();
+    const FnDecl* fn = f->decl;
+    for (std::size_t i = 0; i < fn->params.size(); ++i) {
+      int rs = allocSlot();
+      loadSlot(argSlots[i], "%rdi");
+      emit("    call a_int_full\n");
+      storeRax(rs);
+      rawVars_[fn->params[i].name] = rs;
+    }
+    for (const StmtPtr& sp : fn->body) {
+      const Stmt* s = sp.get();
+      if (s->kind == StmtKind::Let) {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        int vs = allocSlot();
+        emitRawExpr(st.init.get(), vs);
+        rawVars_[st.name] = vs;
+      } else if (s->kind == StmtKind::Assign) {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        const std::string& nm = static_cast<const IdentExpr&>(*st.target).name;
+        auto it = rawVars_.find(nm);
+        if (it == rawVars_.end()) {
+          int vs = allocSlot();
+          emitRawExpr(st.value.get(), vs);
+          rawVars_[nm] = vs;
+        } else {
+          emitRawExpr(st.value.get(), it->second);
+        }
+      } else if (s->kind == StmtKind::Expr) {
+        int tmp = allocSlot();
+        emitRawExpr(static_cast<const ExprStmt&>(*s).expr.get(), tmp);
+      } else if (s->kind == StmtKind::Return) {
+        int rs = allocSlot();
+        emitRawExpr(static_cast<const ReturnStmt&>(*s).value.get(), rs);
+        loadSlot(rs);
+        emitBoxInt64();
+      }
+    }
+    rawVars_.clear();
+  }
+
+  // Rebuild a function-like scope for the callee so caller locals/params can
+  // never be captured by name lookup. Returns the saved scope stack in
+  // `saved`; caller restores it after emission.
+  void beginInlineScope(FnInfo* f,
+                        std::vector<std::unordered_map<std::string, ABinding>>& saved) {
+    saved = std::move(scopes_);
+    scopes_.clear();
+    if (!saved.empty()) scopes_.push_back(saved.front());
+    else scopes_.emplace_back();
+    pushScope();
+    bindModuleImports(f->moduleId);
+  }
+
+  void endInlineScope(
+      std::vector<std::unordered_map<std::string, ABinding>>& saved) {
+    scopes_ = std::move(saved);
+  }
+
+  bool callArgsAllInt(const CallExpr& call) const {
+    for (const CallArg& a : call.args) {
+      TypePtr t = resolveType(a.value ? a.value->inferredType : nullptr);
+      if (!t || t->kind != TypeKind::Int) return false;
+    }
+    return true;
+  }
+
+  bool tryEmitInlineCall(FnInfo* f, const CallExpr& call) {
+    if (!f || inlineDepth_ != 0 || f->isMethod || f->variadic || !f->decl ||
+        f->moduleId != curModuleId_ || call.args.size() != f->paramNames.size())
+      return false;
+    for (const CallArg& a : call.args)
+      if (!a.name.empty()) return false;
+    const InlineInfo& info = inlineInfoFor(f);
+    if (!info.safe) return false;
+    int& sites = inlineSites_[f->decl];
+    if (sites >= kMaxInlineSites) return false;
+
+    std::vector<int> argSlots;
+    argSlots.reserve(call.args.size());
+    for (const CallArg& a : call.args) argSlots.push_back(evalSlot(a.value.get()));
+    ++sites;
+
+    std::vector<std::unordered_map<std::string, ABinding>> savedScopes;
+    beginInlineScope(f, savedScopes);
+    int savedModule = curModuleId_;
+    bool savedInFn = inFunction_;
+    curModuleId_ = f->moduleId;
+    inFunction_ = true;
+
+    if (info.raw && callArgsAllInt(call)) {
+      emitRawBody(f, argSlots);
+    } else {
+      for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
+        ABinding b;
+        b.kind = BKind::Param;
+        b.slot = argSlots[i];
+        scopes_.back()[f->paramNames[i]] = b;
+      }
+      int resultSlot = allocSlot();
+      int savedDepth = inlineDepth_;
+      std::string savedLabel = inlineReturnLabel_;
+      int savedResult = inlineResultSlot_;
+      int savedDeferBase = inlineDeferBase_;
+      inlineDepth_ = 1;
+      inlineDeferBase_ = (int)deferStack_.size();
+      inlineReturnLabel_ = newLabel("inlret");
+      inlineResultSlot_ = resultSlot;
+      emitBody(f->decl->body);
+      movImm(kNone);
+      storeRax(resultSlot);
+      emitLabel(inlineReturnLabel_);
+      loadSlot(resultSlot);
+      inlineDepth_ = savedDepth;
+      inlineReturnLabel_ = savedLabel;
+      inlineResultSlot_ = savedResult;
+      inlineDeferBase_ = savedDeferBase;
+    }
+
+    curModuleId_ = savedModule;
+    inFunction_ = savedInFn;
+    endInlineScope(savedScopes);
+    return true;
+  }
+
   // ---- calls -------------------------------------------------------------------
   std::vector<const Expr*> positionalArgs(const CallExpr& call) {
     std::vector<const Expr*> out;
@@ -1993,6 +2570,7 @@ class AsmEmitter {
           return;
         }
         if (b->kind == BKind::FnValue && b->fn) {
+          if (tryEmitInlineCall(b->fn, call)) return;
           std::vector<int> ps(b->fn->paramNames.size(), -1);
           placeArgs(call, b->fn->paramNames, ps, 0,
                     b->fn->variadic ? (int)b->fn->paramNames.size() - 1 : -1);
@@ -2067,6 +2645,7 @@ class AsmEmitter {
           }
           for (FnInfo* fi : fnList_) {
             if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == f.field) {
+              if (tryEmitInlineCall(fi, call)) return;
               std::vector<int> ps(fi->paramNames.size(), -1);
               placeArgs(call, fi->paramNames, ps, 0,
                         fi->variadic ? (int)fi->paramNames.size() - 1 : -1);
@@ -3017,9 +3596,15 @@ class AsmEmitter {
       std::string doneL = newLabel("tryok");
       loadSlot(tS, "%rdi");
       emit("    call a_is_propagate\n    test %eax, %eax\n    jz " + doneL + "\n");
-      emitDeferredPeekAll();
-      loadSlot(tS);
-      emit("    leave\n    ret\n");
+      if (inlineDepth_ > 0) {
+        emitDeferredPeekDownTo(inlineDeferBase_);
+        copySlot(tS, inlineResultSlot_);
+        jmp(inlineReturnLabel_);
+      } else {
+        emitDeferredPeekAll();
+        loadSlot(tS);
+        emit("    leave\n    ret\n");
+      }
       emitLabel(doneL);
     }
     loadSlot(tS);
