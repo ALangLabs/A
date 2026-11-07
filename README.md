@@ -81,7 +81,7 @@ A is a statically typed, indentation-sensitive language with Python-like
 syntax and native performance. A quick tour:
 
 ```python
-import math
+import std:math
 
 class Point:
     x: float
