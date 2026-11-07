@@ -42,7 +42,8 @@ typedef struct AObj {
 
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
-    T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ
+    T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
+    T_PYBUF
 };
 
 typedef struct { AObj h; char data[]; } AStr;
@@ -67,9 +68,39 @@ typedef struct {
     aval src;
     uint64_t idx;
     int64_t cur, end, step;
+    /* py_mode: src is a T_PYOBJ wrapping a PyObject* iterator; lookahead
+       holds the prefetched item (Mojo _PyIter-style one-item lookahead). */
+    int py_mode;
+    int has_lookahead;
+    aval lookahead;
 } AIter;
 typedef struct { uint64_t off, size; uint32_t free; } AAlloc;
 typedef struct { AObj h; void *obj; } APyObj; /* owned PyObject* (python interop) */
+
+/* Zero-copy view over a Python buffer-protocol export (numpy arrays,
+   array.array, memoryview, bytearray, ...). `data` points at element 0 of
+   a C-contiguous buffer owned by the Python exporter; `count` elements of
+   `itemsize` bytes each. `kind` is one of the APYBUF_* codes below and
+   `readonly` mirrors Py_buffer.readonly (item assignment panics on it).
+   `state`/`owner` are owned by python.c: `state` is the Py_buffer copy
+   released via PyBuffer_Release at process exit, `owner` an owned
+   PyObject* used to convert the view back to Python. Element access does
+   NOT take the GIL — the exported buffer keeps the exporter alive. */
+enum {
+    APYBUF_U8 = 1, APYBUF_I8, APYBUF_BOOL,
+    APYBUF_U16, APYBUF_I16, APYBUF_U32, APYBUF_I32,
+    APYBUF_U64, APYBUF_I64, APYBUF_F32, APYBUF_F64
+};
+typedef struct {
+    AObj h;
+    int64_t count;
+    int64_t itemsize;
+    int kind;
+    int readonly;
+    char *data;
+    void *state;
+    void *owner;
+} APyBuf;
 typedef struct {
     AObj h;
     uint64_t cap, bump, live;
@@ -330,6 +361,28 @@ aval bi_unsafe_load(uint64_t n, aval *argv);
 aval bi_unsafe_store(uint64_t n, aval *argv);
 aval bi_unsafe_offset(uint64_t n, aval *argv);
 aval bi_py_call(uint64_t n, aval *argv);
+aval bi_py_buffer(uint64_t n, aval *argv);
+
+/* Python interop bridge (compiler/astra/backend/python/python.c): opaque
+   T_PYOBJ values behave like Python objects — attribute access, indexing,
+   method calls, len/contains, iteration and call. Each takes the GIL
+   internally; Python errors panicf with the interpreter's error text. */
+aval a_py_getattr(aval obj, const char *name);
+aval a_py_setattr(aval obj, const char *name, aval v);
+aval a_py_getitem(aval obj, aval key);
+aval a_py_setitem(aval obj, aval key, aval v);
+aval a_py_len(aval obj);
+aval a_py_contains(aval obj, aval item);
+aval a_py_call(aval fn, uint64_t n, aval *argv);
+/* argv = n positional args followed by nkw (name, value) pairs. */
+aval a_py_call_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv);
+aval a_py_iter_begin(aval v);                /* T_PYOBJ-wrapped PyObject_GetIter */
+int a_py_iter_next(aval it, aval *out);      /* 1 = *out set, 0 = exhausted */
+aval a_py_str(aval obj);
+aval a_py_repr(aval obj);
+int a_py_truthy(aval obj);
+int a_py_equals(aval a, aval b);              /* PyObject_RichCompareBool(Py_EQ) */
+aval a_py_buffer_view(aval obj);              /* T_PYOBJ -> zero-copy T_PYBUF view */
 aval a_printv(uint64_t n, aval *argv);
 aval a_eprintv(uint64_t n, aval *argv);
 aval a_panic_msg(const char *msg);

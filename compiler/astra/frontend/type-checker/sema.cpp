@@ -45,7 +45,7 @@ bool isKnownBuiltin(const std::string& name) {
       "arena_new", "arena_pool", "arena_region", "arena_alloc", "arena_release",
       "arena_reset", "arena_used", "arena_total", "move", "copy",
       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
-      "unsafe_offset",
+      "unsafe_offset", "py_buffer",
       "Some", "Ok", "Err", "ic",
       "__file__", "__line__", "__func__", "__function__", "__source_file__", "__source_line__",
       "__repr__", "__debug_repr__", "__debug_time__", "__debug_context__", "__ic_format__",
@@ -3578,6 +3578,21 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
       sink_.error(arg.nameSpan, "Builtin functions do not accept named arguments.");
       return typeError();
     }
+  }
+
+  if (name == "py_buffer") {
+    // Zero-copy view over a Python object's buffer protocol; the result is
+    // a dynamic value (indexing/len/iteration dispatch at runtime).
+    if (call.args.size() != 1) {
+      arityError(1);
+      inferArgs();
+      return typeError();
+    }
+    inferExpr(*call.args[0].value);
+    auto t = std::make_shared<Type>();
+    t->kind = TypeKind::Var;
+    t->allowUnresolved = true;
+    return t;
   }
 
   // Structured values (Json) are opaque; any non-void value may be serialized.

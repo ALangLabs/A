@@ -142,6 +142,8 @@ enum {
     A_BI_UNSAFE_LOAD, A_BI_UNSAFE_STORE, A_BI_UNSAFE_OFFSET,
     /* python interop: argv = [module:str, member:str, args...] */
     A_BI_PY_CALL,
+    /* python interop: zero-copy buffer-protocol view over a PyObject */
+    A_BI_PY_BUFFER,
     A_BI_COUNT
 };
 
@@ -424,7 +426,10 @@ aval a_closure_env_new(uint64_t n);
 aval a_env_set(aval env, uint64_t i, aval v);
 aval a_env_get(aval env, uint64_t i);
 aval a_call(aval fn, uint64_t n, aval *argv);   /* dispatch A-fn or builtin */
-aval a_method(aval obj, const char *name, uint64_t n, aval *argv);
+/* argv holds n positional args followed by nkw (name, value) pairs.
+   Named args are only meaningful for T_PYOBJ receivers (Python kwargs);
+   other receiver kinds panic when nkw > 0. */
+aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv);
 aval a_getattr(aval obj, const char *name);     /* field access */
 aval a_unwrap(aval v);                          /* postfix ! */
 aval a_some_new(aval v);                        /* Some(v) option value */

@@ -1,5 +1,8 @@
 #include "a_runtime_internal.h"
 
+static aval pybuf_read(APyBuf *b, int64_t i);
+static void pybuf_write(APyBuf *b, int64_t i, aval v);
+
 /* ------------------------------------------------------------------ */
 /* truthiness / conversions                                            */
 /* ------------------------------------------------------------------ */
@@ -17,7 +20,12 @@ int truthy(aval v) {
         case K_TUPLE:
         case K_SET:
         case K_DICT: return ((AArr *)obj_of(v))->h.len != 0;
-        default: return 1;
+        default: {
+            AObj *o = obj_of(v);
+            if (o && o->type == T_PYOBJ) return a_py_truthy(v);
+            if (o && o->type == T_PYBUF) return ((APyBuf *)o)->count != 0;
+            return 1;
+        }
     }
 }
 
@@ -124,6 +132,9 @@ aval a_float(aval v) {
 }
 
 aval a_len(aval v) {
+    AObj *lo = obj_of(v);
+    if (lo && lo->type == T_PYOBJ) return a_py_len(v);
+    if (lo && lo->type == T_PYBUF) return mkint_full(((APyBuf *)lo)->count);
     switch (kind_of(v)) {
         case K_STR: {
             AStr *s = (AStr *)obj_of(v);
@@ -188,6 +199,21 @@ int values_equal(aval a, aval b) {
         return 1;
     }
     if (ka != kb) return 0;
+    if (ka == K_OTHER) {
+        AObj *oa = obj_of(a), *ob = obj_of(b);
+        if (oa && ob && oa->type == T_PYOBJ && ob->type == T_PYOBJ)
+            return a_py_equals(a, b);
+        if (oa && ob && oa->type == T_PYBUF && ob->type == T_PYBUF) {
+            APyBuf *x = (APyBuf *)oa, *y = (APyBuf *)ob;
+            if (x->count != y->count || x->kind != y->kind ||
+                x->itemsize != y->itemsize)
+                return 0;
+            for (int64_t i = 0; i < x->count; ++i)
+                if (!values_equal(pybuf_read(x, i), pybuf_read(y, i))) return 0;
+            return 1;
+        }
+        return 0;
+    }
     switch (ka) {
         case K_BOOL: return 0;
         case K_STR: return str_eq(a, b);
@@ -534,6 +560,14 @@ aval a_in_range_inclusive(aval v, aval lo, aval hi) {
 }
 
 aval a_contains(aval cont, aval item) {
+    AObj *co = obj_of(cont);
+    if (co && co->type == T_PYOBJ) return a_py_contains(cont, item);
+    if (co && co->type == T_PYBUF) {
+        APyBuf *b = (APyBuf *)co;
+        for (int64_t i = 0; i < b->count; ++i)
+            if (values_equal(pybuf_read(b, i), item)) return A_TRUE;
+        return A_FALSE;
+    }
     switch (kind_of(cont)) {
         case K_STR: {
             if (kind_of(item) != K_STR)
@@ -714,7 +748,77 @@ int64_t normalize_index(int64_t idx, uint64_t len) {
     return idx;
 }
 
+/* ------------------------------------------------------------------ */
+/* T_PYBUF element access: raw reads/writes into the exported buffer.  */
+/* No GIL is taken — the Py_buffer export keeps the exporter alive.    */
+/* ------------------------------------------------------------------ */
+
+static aval pybuf_read(APyBuf *b, int64_t i) {
+    const char *p = b->data + (size_t)i * (size_t)b->itemsize;
+    switch (b->kind) {
+        case APYBUF_U8: return mkint_full((unsigned char)p[0]);
+        case APYBUF_I8: return mkint_full((signed char)p[0]);
+        case APYBUF_BOOL: return bool_aval(p[0] != 0);
+        case APYBUF_U16: { uint16_t x; memcpy(&x, p, 2); return mkint_full(x); }
+        case APYBUF_I16: { int16_t x; memcpy(&x, p, 2); return mkint_full(x); }
+        case APYBUF_U32: { uint32_t x; memcpy(&x, p, 4); return mkint_full(x); }
+        case APYBUF_I32: { int32_t x; memcpy(&x, p, 4); return mkint_full(x); }
+        case APYBUF_U64: {
+            uint64_t x; memcpy(&x, p, 8);
+            return x <= (uint64_t)INT64_MAX ? mkint_full((int64_t)x)
+                                            : mkdouble((double)x);
+        }
+        case APYBUF_I64: { int64_t x; memcpy(&x, p, 8); return mkint_full(x); }
+        case APYBUF_F32: { float f; memcpy(&f, p, 4); return mkdouble((double)f); }
+        case APYBUF_F64: { double d; memcpy(&d, p, 8); return mkdouble(d); }
+        default: panicf("internal: bad pybuffer element kind");
+    }
+    return A_NONE;
+}
+
+static void pybuf_write(APyBuf *b, int64_t i, aval v) {
+    if (b->readonly)
+        panicf("pybuffer is read-only (the Python exporter did not grant write access)");
+    char *p = b->data + (size_t)i * (size_t)b->itemsize;
+    switch (b->kind) {
+        case APYBUF_BOOL:
+            p[0] = (char)(truthy(v) ? 1 : 0);
+            return;
+        case APYBUF_F32: {
+            float f = (float)num_to_double(v);
+            memcpy(p, &f, 4);
+            return;
+        }
+        case APYBUF_F64: {
+            double d = num_to_double(v);
+            memcpy(p, &d, 8);
+            return;
+        }
+        default: {
+            int64_t x = expect_int64(v, "pybuffer element");
+            switch (b->kind) {
+                case APYBUF_U8: p[0] = (char)(uint8_t)x; return;
+                case APYBUF_I8: p[0] = (char)(int8_t)x; return;
+                case APYBUF_U16: { uint16_t t = (uint16_t)x; memcpy(p, &t, 2); return; }
+                case APYBUF_I16: { int16_t t = (int16_t)x; memcpy(p, &t, 2); return; }
+                case APYBUF_U32: { uint32_t t = (uint32_t)x; memcpy(p, &t, 4); return; }
+                case APYBUF_I32: { int32_t t = (int32_t)x; memcpy(p, &t, 4); return; }
+                case APYBUF_U64: { uint64_t t = (uint64_t)x; memcpy(p, &t, 8); return; }
+                case APYBUF_I64: memcpy(p, &x, 8); return;
+                default: panicf("internal: bad pybuffer element kind");
+            }
+        }
+    }
+}
+
 aval a_getitem(aval obj, aval idx) {
+    AObj *oo = obj_of(obj);
+    if (oo && oo->type == T_PYOBJ) return a_py_getitem(obj, idx);
+    if (oo && oo->type == T_PYBUF) {
+        APyBuf *b = (APyBuf *)oo;
+        int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)b->count);
+        return pybuf_read(b, i);
+    }
     switch (kind_of(obj)) {
         case K_STR: {
             AStr *s = (AStr *)obj_of(obj);
@@ -761,6 +865,14 @@ aval a_getitem(aval obj, aval idx) {
 }
 
 aval a_setitem(aval obj, aval idx, aval val) {
+    AObj *so = obj_of(obj);
+    if (so && so->type == T_PYOBJ) return a_py_setitem(obj, idx, val);
+    if (so && so->type == T_PYBUF) {
+        APyBuf *b = (APyBuf *)so;
+        int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)b->count);
+        pybuf_write(b, i, val);
+        return val;
+    }
     switch (kind_of(obj)) {
         case K_VIEW: {
             AView *vw = (AView *)obj_of(obj);
@@ -921,6 +1033,9 @@ aval a_iter_new(aval v) {
     it->src = v;
     it->idx = 0;
     it->cur = it->end = it->step = 0;
+    it->py_mode = 0;
+    it->has_lookahead = 0;
+    it->lookahead = A_NONE;
     switch (kind_of(v)) {
         case K_VIEW:
         case K_LIST:
@@ -936,10 +1051,25 @@ aval a_iter_new(aval v) {
             it->step = r->step;
             return mkobj(&it->h);
         }
-        default:
+        default: {
+            AObj *vo = obj_of(v);
+            if (vo && vo->type == T_PYBUF) {
+                /* Index-based iteration over the raw buffer elements;
+                   handled by the generic path in a_iter_next. */
+                return mkobj(&it->h);
+            }
+            if (vo && vo->type == T_PYOBJ) {
+                /* Python iterator: src becomes a T_PYOBJ wrapping the
+                   PyObject* iterator; items are fetched lazily through
+                   a_py_iter_next with a one-item lookahead. */
+                it->src = a_py_iter_begin(v);
+                it->py_mode = 1;
+                return mkobj(&it->h);
+            }
             free(it);
             panicf("object of type '%s' is not iterable", type_name_cstr(v));
             return A_NONE;
+        }
     }
 }
 
@@ -947,6 +1077,16 @@ aval a_iter_next(aval it, aval *out) {
     AObj *o = obj_of(it);
     if (!o || o->type != T_ITER) panicf("argument is not an iterator");
     AIter *iter = (AIter *)o;
+    if (iter->py_mode) {
+        if (!iter->has_lookahead) {
+            if (!a_py_iter_next(iter->src, &iter->lookahead)) return (aval)0;
+            iter->has_lookahead = 1;
+        }
+        *out = iter->lookahead;
+        iter->lookahead = A_NONE;
+        iter->has_lookahead = 0;
+        return (aval)1;
+    }
     aval src = iter->src;
     if (kind_of(src) == K_RANGE) {
         int64_t c = iter->cur, e = iter->end, s = iter->step;
@@ -967,10 +1107,14 @@ aval a_iter_next(aval it, aval *out) {
     aval *items = NULL;
     ADict *d = NULL;
     AView *vw_src = NULL;
+    APyBuf *pb_src = NULL;
     int64_t vw_base = 0;
     if (so->type == T_DICT) {
         d = (ADict *)so;
         len = d->h.len;
+    } else if (so->type == T_PYBUF) {
+        pb_src = (APyBuf *)so;
+        len = (uint64_t)pb_src->count;
     } else if (so->type == T_VIEW) {
         vw_src = (AView *)so;
         len = (uint64_t)vw_src->len;
@@ -984,6 +1128,7 @@ aval a_iter_next(aval it, aval *out) {
     if (iter->idx >= len) return (aval)0;
     uint64_t i = iter->idx++;
     if (d) *out = d->pairs[i].k;
+    else if (pb_src) *out = pybuf_read(pb_src, (int64_t)i);
     else if (vw_src) {
         AArr *root = view_root(src, &vw_base);
         *out = root->items[(size_t)(vw_base + (int64_t)i)];
@@ -1087,6 +1232,8 @@ int result_ok(aval v) { return ((AResult *)obj_of(v))->ok != 0; }
 static aval result_value(aval v) { return ((AResult *)obj_of(v))->value; }
 
 aval a_call(aval fn, uint64_t n, aval *argv) {
+    AObj *fo = obj_of(fn);
+    if (fo && fo->type == T_PYOBJ) return a_py_call(fn, n, argv);
     AFnon *f = fnon_of(fn, "call target");
     if (f->flags & FNON_BUILTIN) {
         a_builtin_fn bf = (a_builtin_fn)(uintptr_t)f->entry;

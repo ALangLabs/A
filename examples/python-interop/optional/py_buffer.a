@@ -1,0 +1,40 @@
+# Python interop: zero-copy buffer-protocol views.
+# py_buffer(obj) wraps a Python object's exported memory (PEP 3118 buffer
+# protocol) as an A value: indexing, len(), iteration and item assignment
+# read/write the exporter's bytes directly — no per-element boxing.
+#
+# Works on C-contiguous numeric buffers: numpy arrays, array.array,
+# memoryview, bytearray. Read-only exports (bytes, readonly memoryviews,
+# non-writeable ndarrays) panic on item assignment. Non-contiguous or
+# unsupported formats (strings, structs, non-native byte order) panic at
+# py_buffer() time. Views live until process exit.
+import python:numpy as np
+import python:array
+import python:builtins
+import py
+
+# numpy: 1-D and C-order n-d (flat element indexing)
+a = np.arange(12.0).reshape(3, 4)
+v = py.buffer(a)
+print(len(v))          # 12
+print(v[0], v[5], v[11])  # 0.0 5.0 11.0
+v[0] = 99.0
+print(a.max())          # 99.0 — write went straight into numpy's memory
+s = 0.0
+for x in v:
+    s = s + x
+print(s)
+
+# array.array: any numeric item type
+i = array.array("i", [10, -20, 30])
+w = py.buffer(i)
+print(len(w), w[0], w[1], w[2])
+w[1] = -99
+print(i[1])            # -99
+
+# memoryview / bytearray
+ba = builtins.bytearray([65, 66, 67])
+mv = py.buffer(builtins.memoryview(ba))
+print(len(mv), mv[0], mv[1], mv[2])
+mv[0] = 90
+print(ba[0])           # 90

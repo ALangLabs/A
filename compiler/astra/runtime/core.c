@@ -539,9 +539,25 @@ void format_into(Buf *b, aval v, int quote) {
             buf_addc(b, ')');
             return;
         }
-        default:
+        default: {
+            AObj *o = obj_of(v);
+            if (o && o->type == T_PYBUF) {
+                APyBuf *pb = (APyBuf *)o;
+                buf_adds(b, "<pybuffer ");
+                buf_addi64(b, pb->count);
+                buf_adds(b, pb->readonly ? " readonly>" : ">");
+                return;
+            }
+            if (o && o->type == T_PYOBJ) {
+                /* Render via Python str()/repr() so opaque objects print
+                   like they would in the interpreter. */
+                aval s = quote ? a_py_repr(v) : a_py_str(v);
+                format_into(b, s, quote);
+                return;
+            }
             buf_adds(b, "<object>");
             return;
+        }
     }
 }
 

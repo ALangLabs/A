@@ -167,6 +167,14 @@ inline const StringMap<BuiltinDoc>& builtinDocs() {
       {"unsafe_offset", {"unsafe_offset", "unsafe_offset(pointer, count) -> *T",
                          "Moves a pointer by a number of elements."}},
 
+      // py (Python interop)
+      {"py_buffer", {"py_buffer", "py_buffer(obj) -> pybuffer",
+                     "Zero-copy view over a Python object's buffer protocol "
+                     "(numpy arrays, array.array, memoryview, bytearray). "
+                     "Supports C-contiguous numeric buffers; index, len(), "
+                     "iteration, and item assignment (when writable) work "
+                     "directly on the exported memory."}},
+
       // arena
       {"arena_new", {"arena_new", "arena_new(capacity) -> Allocator",
                      "Bump allocator: allocations are fast, release is all-or-nothing."}},

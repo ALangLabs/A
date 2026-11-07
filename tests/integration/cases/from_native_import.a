@@ -1,0 +1,12 @@
+from math import sqrt
+from math import pow as p
+from math import PI
+from unsafe import get, set
+
+print(sqrt(16.0), p(2.0, 10.0))
+print(PI)
+
+xs = [10, 20, 30]
+print(get(xs, 1))
+set(xs, 1, 99)
+print(xs)

@@ -18,7 +18,7 @@ This document summarizes the current implementation architecture. For exact beha
 - The backend is **Astra** (`compiler/astra/`, a TinyCC-derived C compiler/assembler/linker toolchain). The C++ frontend is the only A compiler; it emits x86-64 AT&T assembly for A programs, and `astra` assembles/compiles that assembly plus the C runtime in `compiler/astra/runtime/` (`a_runtime.c` + the domain `.c` modules) into a native executable.
 - `a run`, `a build`, and `a test` invoke the `astra` driver (found via `A_ASTRA`, staged `build/astra/astra` / related locations next to the executable, or `PATH`) as described in `frontend/pipeline/pipeline.cpp`.
 - Astra accepts LLVM/clang-style `-O` levels (`-O0`/`-O1`/`-O2`/`-O3`/`-Os`/`-Oz`/`-Ofast`): `-Os`/`-Oz` define `__OPTIMIZE_SIZE__`, and `-Ofast` maps to `-O3`, mirroring Clang's macro contract (the Astra codegen itself only implements `__OPTIMIZE__`). `a build -O<n>` forwards the optimization level to `astra`.
-- `import python:<pkg>` is handled at run time: codegen emits a `py_call` builtin and the `rt_python.c` runtime module dlopens libpython (no link-time dependency).
+- `import python:<pkg>` is handled at run time: codegen emits a `py_call` builtin and `compiler/astra/backend/python/python.c` dlopens libpython (no link-time dependency). Calls pass positional arguments plus keyword-argument name/value pairs, and large Python iterables (reported length > 65536) stay opaque instead of being converted to A lists.
 
 ## Key directories
 

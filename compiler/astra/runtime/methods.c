@@ -268,6 +268,8 @@ aval a_getattr(aval obj, const char *name) {
         int64_t i = dict_find(d, key);
         if (i >= 0) return d->pairs[i].v;
     }
+    AObj *o = obj_of(obj);
+    if (o && o->type == T_PYOBJ) return a_py_getattr(obj, name);
     panicf("'%s' object has no attribute '%s'", type_name_cstr(obj), name);
     return A_NONE;
 }
@@ -354,7 +356,13 @@ static aval method_subset(aval v, aval other, int sup) {
     return A_TRUE;
 }
 
-aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
+aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) {
+    /* Named args only have meaning for Python-interop receivers; every
+       other kind rejects them (sema already rejects them statically for
+       known receiver types, so this only fires for dynamic `var` values). */
+    AObj *po0 = obj_of(obj);
+    if (nkw && !(po0 && po0->type == T_PYOBJ))
+        panicf("'%s' object has no support for named arguments", type_name_cstr(obj));
     int k = kind_of(obj);
     if (k == K_STR) {
         AStr *s = (AStr *)obj_of(obj);
@@ -934,6 +942,10 @@ aval a_method(aval obj, const char *name, uint64_t n, aval *argv) {
         }
         return method_no_method(obj, name);
     }
+
+    AObj *po = obj_of(obj);
+    if (po && po->type == T_PYOBJ)
+        return a_py_call_method(obj, name, n, nkw, argv);
 
     return method_no_method(obj, name);
 }

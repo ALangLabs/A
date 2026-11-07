@@ -16,6 +16,31 @@
 typedef void *PyObj;
 typedef ptrdiff_t PySsize;
 
+/* Py_buffer layout is a stable CPython ABI (Include/object.h); we cannot
+   include Python.h, so mirror it. PySsize_t == ptrdiff_t on every supported
+   platform. */
+typedef struct {
+    void *buf;
+    PyObj obj;
+    PySsize len;
+    PySsize itemsize;
+    int readonly;
+    int ndim;
+    char *format;
+    PySsize *shape;
+    PySsize *strides;
+    PySsize *suboffsets;
+    void *internal;
+} PyBufferView;
+
+/* PyBUF_* flag values (Include/object.h). */
+#define PYBUF_SIMPLE 0
+#define PYBUF_WRITABLE 0x0001
+#define PYBUF_FORMAT 0x0004
+#define PYBUF_ND 0x0008
+#define PYBUF_STRIDES (0x0010 | PYBUF_ND)
+#define PYBUF_C_CONTIGUOUS (0x0020 | PYBUF_STRIDES)
+
 struct PyRt {
     void *handle;
     int state;          /* 0 = untried, 1 = ready, -1 = failed */
@@ -56,6 +81,13 @@ struct PyRt {
     PyObj (*PyObject_GetIter)(PyObj);
     PyObj (*PyIter_Next)(PyObj);
     PySsize (*PyObject_Length)(PyObj);
+    PyObj (*PyObject_GetItem)(PyObj, PyObj);
+    int (*PyObject_SetItem)(PyObj, PyObj, PyObj);
+    int (*PyObject_SetAttrString)(PyObj, const char *, PyObj);
+    int (*PySequence_Contains)(PyObj, PyObj);
+    int (*PyObject_IsTrue)(PyObj);
+    PyObj (*PyObject_Repr)(PyObj);
+    int (*PyObject_RichCompareBool)(PyObj, PyObj, int);
     int (*PyObject_IsInstance)(PyObj, PyObj);
     void (*Py_IncRef)(PyObj);
     void (*Py_DecRef)(PyObj);
@@ -65,6 +97,9 @@ struct PyRt {
     PySsize (*PyBytes_Size)(PyObj);
     PyObj (*PySet_New)(PyObj);
     int (*PySet_Add)(PyObj, PyObj);
+    int (*PyObject_CheckBuffer)(PyObj);
+    int (*PyObject_GetBuffer)(PyObj, PyBufferView *, int);
+    void (*PyBuffer_Release)(PyBufferView *);
 
     /* data symbols: addresses of the real objects inside libpython */
     PyObj none, py_true, py_false;
@@ -128,6 +163,13 @@ static int py_fill(void *h) {
     A_PY_SYM(PyObject_GetIter, "PyObject_GetIter");
     A_PY_SYM(PyIter_Next, "PyIter_Next");
     A_PY_SYM(PyObject_Length, "PyObject_Length");
+    A_PY_SYM(PyObject_GetItem, "PyObject_GetItem");
+    A_PY_SYM(PyObject_SetItem, "PyObject_SetItem");
+    A_PY_SYM(PyObject_SetAttrString, "PyObject_SetAttrString");
+    A_PY_SYM(PySequence_Contains, "PySequence_Contains");
+    A_PY_SYM(PyObject_IsTrue, "PyObject_IsTrue");
+    A_PY_SYM(PyObject_Repr, "PyObject_Repr");
+    A_PY_SYM(PyObject_RichCompareBool, "PyObject_RichCompareBool");
     A_PY_SYM(PyObject_IsInstance, "PyObject_IsInstance");
     A_PY_SYM(Py_IncRef, "Py_IncRef");
     A_PY_SYM(Py_DecRef, "Py_DecRef");
@@ -137,6 +179,9 @@ static int py_fill(void *h) {
     A_PY_SYM(PyBytes_Size, "PyBytes_Size");
     A_PY_SYM(PySet_New, "PySet_New");
     A_PY_SYM(PySet_Add, "PySet_Add");
+    A_PY_SYM(PyObject_CheckBuffer, "PyObject_CheckBuffer");
+    A_PY_SYM(PyObject_GetBuffer, "PyObject_GetBuffer");
+    A_PY_SYM(PyBuffer_Release, "PyBuffer_Release");
 #undef A_PY_SYM
 #define A_PY_DAT(field, name) p->field = dlsym(h, name)
     A_PY_DAT(none, "_Py_NoneStruct");
@@ -441,6 +486,23 @@ static int py_is(PyObj o, PyObj t) {
 
 /* GIL must be held. Takes a borrowed reference; never decrefs. */
 static aval py_to_aval(PyObj o);
+static void py_fail(const char *what);
+
+/* Wrap an owned PyObject* reference (new ref, ownership transferred) as a
+   T_PYOBJ aval. GIL must be held for the IncRef in the borrowed variant. */
+static aval py_wrap_owned(PyObj o) {
+    APyObj *p = (APyObj *)xmalloc(sizeof(APyObj));
+    p->h.type = T_PYOBJ;
+    p->h.len = 0;
+    p->h.cap = 0;
+    p->obj = o;
+    return mkobj(&p->h);
+}
+
+static aval py_wrap_borrowed(PyObj o) {
+    g_py.Py_IncRef(o);
+    return py_wrap_owned(o);
+}
 
 static aval py_iter_to_list(PyObj it) {
     /* drain an iterator into an A list */
@@ -455,6 +517,7 @@ static aval py_iter_to_list(PyObj it) {
         items[n++] = py_to_aval(item);
         g_py.Py_DecRef(item);
     }
+    if (g_py.PyErr_Occurred()) py_fail("iteration");
     aval r = a_list_new(n, items);
     free(items);
     return r;
@@ -532,8 +595,22 @@ static aval py_to_aval(PyObj o) {
             /* fall through to the opaque wrap below */
         } else {
             if (hint < 0) g_py.PyErr_Clear();
+            /* Buffer-protocol objects (numpy arrays, array.array,
+               memoryview, bytearray, mmap, ...) stay opaque regardless of
+               size so py_buffer() can hand out a zero-copy T_PYBUF view;
+               draining them would copy every element into A values. */
+            if (g_py.PyObject_CheckBuffer(o))
+                return py_wrap_borrowed(o);
             PyObj it = g_py.PyObject_GetIter(o);
             if (it) {
+                /* An object that is its own iterator (generators,
+                   iterators, one-shot streams) stays opaque so `for` can
+                   consume it lazily instead of draining it eagerly —
+                   draining would also exhaust it. */
+                if (it == o) {
+                    g_py.Py_DecRef(it);
+                    return py_wrap_borrowed(o);
+                }
                 aval r = py_iter_to_list(it);
                 g_py.Py_DecRef(it);
                 return r;
@@ -558,13 +635,7 @@ static aval py_to_aval(PyObj o) {
     }
     /* Anything else (modules, functions, class instances) stays a live
        Python object so it can be passed back into py_call later. */
-    APyObj *p = (APyObj *)xmalloc(sizeof(APyObj));
-    p->h.type = T_PYOBJ;
-    p->h.len = 0;
-    p->h.cap = 0;
-    p->obj = o;
-    g_py.Py_IncRef(o);
-    return mkobj(&p->h);
+    return py_wrap_borrowed(o);
 }
 
 /* GIL must be held. Returns a new reference or NULL (error set). */
@@ -669,6 +740,16 @@ static PyObj aval_to_py(aval v) {
                 APyObj *p = (APyObj *)o;
                 g_py.Py_IncRef(p->obj);
                 return p->obj;
+            }
+            case T_PYBUF: {
+                /* Hand the original Python object back so a buffer view
+                   round-trips as the exporter it was taken from. */
+                APyBuf *b = (APyBuf *)o;
+                if (b->owner) {
+                    g_py.Py_IncRef((PyObj)b->owner);
+                    return (PyObj)b->owner;
+                }
+                return NULL;
             }
             default:
                 break;
@@ -787,12 +868,440 @@ aval bi_py_call(uint64_t n, aval *argv) {
     return out;
 }
 
-#else /* _WIN32: no dlopen; keep the symbol so the builtin table links */
+/* ------------------------------------------------------------------ */
+/* opaque-object bridge: T_PYOBJ values behave like Python objects.    */
+/* Every entry point ensures the interpreter, takes the GIL, and      */
+/* panicf's (via py_fail) with the Python error text on failure.      */
+/* ------------------------------------------------------------------ */
+
+static APyObj *pyobj_of(aval v, const char *what) {
+    AObj *o = obj_of(v);
+    if (!o || o->type != T_PYOBJ)
+        panicf("%s must be a Python object, not '%s'", what, type_name_cstr(v));
+    return (APyObj *)o;
+}
+
+static int py_ready_or_panic(void) {
+    if (py_ensure_ready()) return 1;
+    panicf("python interop unavailable: %s", g_py.error);
+    return 0;
+}
+
+/* GIL held. Builds an args tuple of n positional avals; NULL on error. */
+static PyObj py_args_tuple(uint64_t n, aval *argv) {
+    PyObj args = g_py.PyTuple_New((PySsize)n);
+    if (!args) return NULL;
+    for (uint64_t i = 0; i < n; ++i) {
+        PyObj a = aval_to_py(argv[i]);
+        if (!a) { g_py.Py_DecRef(args); return NULL; }
+        if (g_py.PyTuple_SetItem(args, (PySsize)i, a) < 0) {
+            g_py.Py_DecRef(a);
+            g_py.Py_DecRef(args);
+            return NULL;
+        }
+    }
+    return args;
+}
+
+/* GIL held. Builds a kwargs dict from nkw (name:str, value) aval pairs;
+   NULL on error (Python error set). */
+static PyObj py_kwargs_dict(uint64_t nkw, aval *pairs) {
+    PyObj kw = g_py.PyDict_New();
+    if (!kw) return NULL;
+    for (uint64_t k = 0; k < nkw; ++k) {
+        aval kv = pairs[2 * k];
+        aval vv = pairs[2 * k + 1];
+        uint64_t knlen = 0;
+        const char *kn = str_data(kv, &knlen);
+        PyObj key = g_py.PyUnicode_DecodeUTF8(kn, (PySsize)knlen, "strict");
+        PyObj val = aval_to_py(vv);
+        if (!key || !val || g_py.PyDict_SetItem(kw, key, val) < 0) {
+            if (key) g_py.Py_DecRef(key);
+            if (val) g_py.Py_DecRef(val);
+            g_py.Py_DecRef(kw);
+            return NULL;
+        }
+        g_py.Py_DecRef(key); /* SetItem incref'd it */
+        g_py.Py_DecRef(val); /* SetItem incref'd it */
+    }
+    return kw;
+}
+
+/* GIL held. Calls fn(args..., ) with no kwargs; new ref or NULL. */
+static PyObj py_call_pos(PyObj fn, uint64_t n, aval *argv) {
+    PyObj args = py_args_tuple(n, argv);
+    if (!args) return NULL;
+    PyObj r = g_py.PyObject_Call(fn, args, NULL);
+    g_py.Py_DecRef(args);
+    return r;
+}
+
+/* Converts a call result and releases the GIL. Never returns on error. */
+static aval py_take_result(PyObj r, int gil, const char *what) {
+    if (!r) py_fail(what);
+    aval out = py_to_aval(r);
+    g_py.Py_DecRef(r);
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+aval a_py_getattr(aval obj, const char *name) {
+    APyObj *p = pyobj_of(obj, "attribute access target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj r = g_py.PyObject_GetAttrString(p->obj, name);
+    return py_take_result(r, gil, "attribute access");
+}
+
+aval a_py_setattr(aval obj, const char *name, aval v) {
+    APyObj *p = pyobj_of(obj, "attribute assignment target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj val = aval_to_py(v);
+    if (!val) py_fail("attribute value conversion");
+    int rc = g_py.PyObject_SetAttrString(p->obj, name, val);
+    g_py.Py_DecRef(val); /* SetAttrString does not steal */
+    if (rc < 0) py_fail("attribute assignment");
+    g_py.PyGILState_Release(gil);
+    return v;
+}
+
+aval a_py_getitem(aval obj, aval key) {
+    APyObj *p = pyobj_of(obj, "subscript target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj k = aval_to_py(key);
+    if (!k) py_fail("subscript key conversion");
+    PyObj r = g_py.PyObject_GetItem(p->obj, k);
+    g_py.Py_DecRef(k); /* GetItem does not steal the key */
+    return py_take_result(r, gil, "subscript");
+}
+
+aval a_py_setitem(aval obj, aval key, aval v) {
+    APyObj *p = pyobj_of(obj, "item assignment target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj k = aval_to_py(key);
+    PyObj val = k ? aval_to_py(v) : NULL;
+    if (!k || !val) py_fail("item assignment conversion");
+    int rc = g_py.PyObject_SetItem(p->obj, k, val);
+    g_py.Py_DecRef(k);   /* SetItem steals neither key nor value */
+    g_py.Py_DecRef(val);
+    if (rc < 0) py_fail("item assignment");
+    g_py.PyGILState_Release(gil);
+    return v;
+}
+
+aval a_py_len(aval obj) {
+    APyObj *p = pyobj_of(obj, "len() argument");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PySsize n = g_py.PyObject_Length(p->obj);
+    /* -1 is only an error when the interpreter says so; some types
+       (e.g. custom __len__ edge cases) report -1 without an error. */
+    if (n < 0 && g_py.PyErr_Occurred()) py_fail("len()");
+    aval out = mkint_full(n < 0 ? 0 : (int64_t)n);
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+aval a_py_contains(aval obj, aval item) {
+    APyObj *p = pyobj_of(obj, "membership test container");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj k = aval_to_py(item);
+    if (!k) py_fail("membership test value conversion");
+    int r = g_py.PySequence_Contains(p->obj, k);
+    g_py.Py_DecRef(k); /* Contains does not steal */
+    if (r < 0) py_fail("membership test");
+    aval out = bool_aval(r == 1);
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+aval a_py_call(aval fn, uint64_t n, aval *argv) {
+    APyObj *p = pyobj_of(fn, "call target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj r = py_call_pos(p->obj, n, argv);
+    return py_take_result(r, gil, "call");
+}
+
+/* argv = n positional args followed by nkw (name:str, value) pairs,
+   passed to CPython as a real kwargs dict (same model as bi_py_call). */
+aval a_py_call_method(aval obj, const char *name, uint64_t n, uint64_t nkw,
+                      aval *argv) {
+    APyObj *p = pyobj_of(obj, "method call target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj m = g_py.PyObject_GetAttrString(p->obj, name);
+    if (!m) py_fail("attribute access");
+    PyObj args = py_args_tuple(n, argv);
+    PyObj kw = NULL;
+    if (args && nkw) {
+        kw = py_kwargs_dict(nkw, argv + n);
+        if (!kw) { g_py.Py_DecRef(args); args = NULL; }
+    }
+    PyObj r = args ? g_py.PyObject_Call(m, args, kw) : NULL;
+    if (kw) g_py.Py_DecRef(kw);
+    if (args) g_py.Py_DecRef(args);
+    g_py.Py_DecRef(m);
+    return py_take_result(r, gil, "method call");
+}
+
+aval a_py_iter_begin(aval v) {
+    APyObj *p = pyobj_of(v, "iteration target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj it = g_py.PyObject_GetIter(p->obj);
+    if (!it) py_fail("iteration");
+    aval out = py_wrap_owned(it); /* takes the new reference */
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+int a_py_iter_next(aval it, aval *out) {
+    APyObj *p = pyobj_of(it, "iterator");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj item = g_py.PyIter_Next(p->obj);
+    if (!item) {
+        /* NULL + error set = real failure (propagate, unlike Mojo's
+           _PyIter which conflates it with StopIteration); NULL with a
+           clean error indicator = StopIteration. */
+        if (g_py.PyErr_Occurred()) py_fail("iteration");
+        g_py.PyGILState_Release(gil);
+        return 0;
+    }
+    *out = py_to_aval(item);
+    g_py.Py_DecRef(item);
+    g_py.PyGILState_Release(gil);
+    return 1;
+}
+
+static aval py_to_pystr(PyObj o, int use_repr) {
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj s = use_repr ? g_py.PyObject_Repr(o) : g_py.PyObject_Str(o);
+    aval out = py_take_result(s, gil, use_repr ? "repr()" : "str()");
+    return out;
+}
+
+aval a_py_str(aval obj) {
+    APyObj *p = pyobj_of(obj, "str() argument");
+    return py_to_pystr(p->obj, 0);
+}
+
+aval a_py_repr(aval obj) {
+    APyObj *p = pyobj_of(obj, "repr() argument");
+    return py_to_pystr(p->obj, 1);
+}
+
+int a_py_truthy(aval obj) {
+    APyObj *p = pyobj_of(obj, "truthiness test");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    int r = g_py.PyObject_IsTrue(p->obj);
+    if (r < 0) py_fail("truthiness test");
+    g_py.PyGILState_Release(gil);
+    return r == 1;
+}
+
+int a_py_equals(aval a, aval b) {
+    APyObj *pa = pyobj_of(a, "equality operand");
+    APyObj *pb = pyobj_of(b, "equality operand");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    /* Py_EQ == 2 (CPython rich-compare op ordering: LT, LE, EQ, NE, GT, GE) */
+    int r = g_py.PyObject_RichCompareBool(pa->obj, pb->obj, 2);
+    if (r < 0) py_fail("equality comparison");
+    g_py.PyGILState_Release(gil);
+    return r == 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* zero-copy buffer-protocol views (T_PYBUF)                           */
+/* ------------------------------------------------------------------ */
+
+static int pybuf_host_little(void) {
+    const unsigned x = 1;
+    return *(const unsigned char *)&x != 0;
+}
+
+/* Decode a PEP 3118 format string into an APYBUF_* kind; 0 = unsupported.
+   `itemsize` disambiguates 'l'/'L' (C long is 4 or 8 bytes). Only single
+   native/little/big-endian scalar formats are accepted — compound and
+   repeated formats panic at view creation. */
+static int pybuf_kind(const char *fmt, PySsize itemsize) {
+    if (!fmt || !*fmt) return APYBUF_U8; /* NULL format means unsigned bytes */
+    const char *p = fmt;
+    int little = pybuf_host_little();
+    if (*p == '@' || *p == '=') ++p;                 /* native byte order */
+    else if (*p == '<') { if (!little) return 0; ++p; }
+    else if (*p == '>' || *p == '!') { if (little) return 0; ++p; }
+    long count = 0;
+    int hasCount = 0;
+    while (*p >= '0' && *p <= '9') {
+        hasCount = 1;
+        count = count * 10 + (*p - '0');
+        if (count > 1000000) return 0;
+        ++p;
+    }
+    if (hasCount && count != 1) return 0;
+    char c = *p;
+    if (!c || p[1] != '\0') return 0; /* trailing spec / nested format */
+    switch (c) {
+        case 'B': return APYBUF_U8;
+        case 'b': case 'c': return APYBUF_I8;
+        case '?': return APYBUF_BOOL;
+        case 'H': return APYBUF_U16;
+        case 'h': return APYBUF_I16;
+        case 'I': return APYBUF_U32;
+        case 'i': return APYBUF_I32;
+        case 'L': return itemsize == 8 ? APYBUF_U64
+                    : itemsize == 4 ? APYBUF_U32 : 0;
+        case 'l': return itemsize == 8 ? APYBUF_I64
+                    : itemsize == 4 ? APYBUF_I32 : 0;
+        case 'Q': return APYBUF_U64;
+        case 'q': return APYBUF_I64;
+        case 'f': return APYBUF_F32;
+        case 'd': return APYBUF_F64;
+        default: return 0;
+    }
+}
+
+/* Defensive C-contiguity check (we request PyBUF_C_CONTIGUOUS, so this
+   should always pass; guards against exporter quirks). */
+static int pybuf_c_contiguous(PyBufferView *v) {
+    if (v->ndim <= 1) return 1;
+    if (!v->shape || !v->strides) return 0;
+    for (int i = 0; i < v->ndim; ++i)
+        if (v->shape[i] == 0) return 1; /* empty: trivially contiguous */
+    PySsize expect = v->itemsize;
+    for (int i = v->ndim - 1; i >= 0; --i) {
+        if (v->strides[i] != expect) return 0;
+        if (i > 0) expect *= v->shape[i];
+    }
+    return 1;
+}
+
+/* Live views are released at process exit: A objects are never freed, so
+   there is no per-object destroy hook. The exported buffer keeps the
+   Python exporter (and its memory) alive until then. */
+typedef struct PyBufNode {
+    APyBuf *buf;
+    struct PyBufNode *next;
+} PyBufNode;
+static PyBufNode *g_pybufs;
+static int g_pybuf_atexit_registered;
+
+static void pybuf_release_all(void) {
+    if (g_py.state != 1 || !g_py.initialized) return;
+    int gil = g_py.PyGILState_Ensure();
+    for (PyBufNode *n = g_pybufs; n; n = n->next) {
+        if (n->buf->state)
+            g_py.PyBuffer_Release((PyBufferView *)n->buf->state);
+        n->buf->state = NULL;
+    }
+    g_py.PyGILState_Release(gil);
+}
+
+aval a_py_buffer_view(aval obj) {
+    AObj *o = obj_of(obj);
+    if (o && o->type == T_PYBUF) return obj; /* already a view */
+    APyObj *p = pyobj_of(obj, "py_buffer() argument");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyBufferView bv;
+    memset(&bv, 0, sizeof bv);
+    /* C-contiguous + format: accepts any C-order n-d buffer and reports
+       the PEP 3118 element format; fails for strided/non-contiguous
+       exporters (documented v1 limitation). */
+    if (g_py.PyObject_GetBuffer(p->obj, &bv,
+                                PYBUF_C_CONTIGUOUS | PYBUF_FORMAT) < 0)
+        py_fail("buffer export");
+    int kind = pybuf_kind(bv.format, bv.itemsize);
+    if (!bv.buf || bv.itemsize <= 0 || bv.len < 0 || bv.len % bv.itemsize != 0 ||
+        !kind || !pybuf_c_contiguous(&bv)) {
+        /* bv.format is exporter-owned; copy it before releasing. */
+        char fmtbuf[80];
+        snprintf(fmtbuf, sizeof fmtbuf, "%s", bv.format ? bv.format : "(none)");
+        g_py.PyBuffer_Release(&bv);
+        g_py.PyGILState_Release(gil);
+        if (!kind)
+            panicf("py_buffer: unsupported buffer format '%s'", fmtbuf);
+        if (!bv.buf || bv.itemsize <= 0 || bv.len < 0 ||
+            bv.len % bv.itemsize != 0)
+            panicf("py_buffer: malformed buffer export");
+        panicf("py_buffer: buffer is not C-contiguous");
+    }
+    APyBuf *b = (APyBuf *)xmalloc(sizeof(APyBuf));
+    b->h.type = T_PYBUF;
+    b->h.len = 0;
+    b->h.cap = 0;
+    b->count = bv.len / bv.itemsize;
+    b->itemsize = bv.itemsize;
+    b->kind = kind;
+    b->readonly = bv.readonly != 0;
+    b->data = (char *)bv.buf;
+    b->owner = bv.obj;
+    if (b->owner) g_py.Py_IncRef((PyObj)b->owner); /* round-trip ref */
+    /* Keep a private copy of the Py_buffer for PyBuffer_Release. The
+       exporter-owned pointers (shape/strides/format/internal) stay valid
+       until release, which only happens at process exit. */
+    PyBufferView *keep = (PyBufferView *)xmalloc(sizeof(PyBufferView));
+    *keep = bv;
+    b->state = keep;
+    PyBufNode *node = (PyBufNode *)xmalloc(sizeof(PyBufNode));
+    node->buf = b;
+    node->next = g_pybufs;
+    g_pybufs = node;
+    if (!g_pybuf_atexit_registered) {
+        g_pybuf_atexit_registered = 1;
+        atexit(pybuf_release_all);
+    }
+    g_py.PyGILState_Release(gil);
+    return mkobj(&b->h);
+}
+
+aval bi_py_buffer(uint64_t n, aval *argv) {
+    want_args("py_buffer", n, 1, 1);
+    return a_py_buffer_view(argv[0]);
+}
+
+#else /* _WIN32: no dlopen; keep the symbols so the builtin table links */
 
 aval bi_py_call(uint64_t n, aval *argv) {
     (void)n; (void)argv;
     panicf("python interop is not supported on this platform");
     return A_NONE;
 }
+
+aval bi_py_buffer(uint64_t n, aval *argv) {
+    (void)n; (void)argv;
+    panicf("python interop is not supported on this platform");
+    return A_NONE;
+}
+
+static aval py_unsupported(void) {
+    panicf("python interop is not supported on this platform");
+    return A_NONE;
+}
+
+aval a_py_getattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
+aval a_py_setattr(aval obj, const char *name, aval v) { (void)obj; (void)name; (void)v; return py_unsupported(); }
+aval a_py_getitem(aval obj, aval key) { (void)obj; (void)key; return py_unsupported(); }
+aval a_py_setitem(aval obj, aval key, aval v) { (void)obj; (void)key; (void)v; return py_unsupported(); }
+aval a_py_len(aval obj) { (void)obj; return py_unsupported(); }
+aval a_py_contains(aval obj, aval item) { (void)obj; (void)item; return py_unsupported(); }
+aval a_py_call(aval fn, uint64_t n, aval *argv) { (void)fn; (void)n; (void)argv; return py_unsupported(); }
+aval a_py_call_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) { (void)obj; (void)name; (void)n; (void)nkw; (void)argv; return py_unsupported(); }
+aval a_py_iter_begin(aval v) { (void)v; return py_unsupported(); }
+int a_py_iter_next(aval it, aval *out) { (void)it; (void)out; return py_unsupported(), 0; }
+aval a_py_str(aval obj) { (void)obj; return py_unsupported(); }
+aval a_py_repr(aval obj) { (void)obj; return py_unsupported(); }
+int a_py_truthy(aval obj) { (void)obj; return py_unsupported(), 0; }
+int a_py_equals(aval a, aval b) { (void)a; (void)b; return py_unsupported(), 0; }
+aval a_py_buffer_view(aval obj) { (void)obj; return py_unsupported(); }
 
 #endif /* !_WIN32 */

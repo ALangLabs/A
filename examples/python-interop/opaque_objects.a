@@ -1,0 +1,39 @@
+# Python interop: opaque PyObjects behave like Python objects.
+# Objects that stay live (class instances, iterators, large containers)
+# support attribute access, indexing, method calls, len(), `in`,
+# for-loops, calls, ==, truthiness and str()/repr().
+import python:re
+import python:itertools
+import python:types
+import python:array
+
+# attribute read + method call on a re.Pattern object
+pat = re.compile("a+")
+print(pat.pattern)              # a+
+m = pat.search("caaat")
+print(m.group(0), m.start())    # aaa 1
+
+# method calls accept keyword arguments (forwarded as Python **kwargs)
+ones = re.compile("a")
+print(ones.sub("X", "aaa", count=2))     # XXa
+print(ones.sub("X", "aaa"))             # XXX
+print(pat.split("baaab", maxsplit=1))    # ["b", "b"]
+
+# a bound method extracted via getattr, then called as a plain value
+sub = pat.sub
+print(sub("X", "baaab"))        # bXb
+
+# attribute write + read on a plain Python object
+ns = types.SimpleNamespace(a=1)
+ns.b = 2
+print(ns.a, ns.b)               # 1 2
+
+# len / indexing / assignment / membership on a large opaque sequence
+arr = array.array("i", 0..70001)
+print(len(arr))                 # 70001
+arr[1] = 5
+print(arr[1], 5 in arr)         # 5 true
+
+# lazy iteration: repeat() is its own iterator, consumed one item at a time
+for x in itertools.repeat(7, 3):
+    print(x)                    # 7 7 7

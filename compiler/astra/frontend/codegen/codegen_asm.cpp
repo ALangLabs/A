@@ -125,6 +125,9 @@ class AsmEmitter {
   // unused by the runtime (not a pointer, not an int, not a small constant).
   // Callers pad missing argv slots with this; callees substitute defaults.
   static constexpr uint64_t kMissing = kTag;
+  // Mask matching inline ints: top 16 bits all 1s AND payload bit0 set.
+  // (v & kTagInt) == kTagInt iff v is an inline int aval.
+  static constexpr uint64_t kTagInt = kTag | 1ULL;
 
   void fail(const std::string& msg) {
     if (!failed_) {
@@ -298,6 +301,13 @@ class AsmEmitter {
     } else if (b.kind == BKind::Builtin) {
       movImm((uint64_t)b.builtinId, "%rdi");
       emit("    call a_builtin");
+    } else if (b.kind == BKind::NativeConst) {
+      // aux holds the native constant name (PI, E, ...); same lowering as
+      // `math.PI` in emitField.
+      double v = b.aux == "PI"   ? 3.14159265358979323846
+                : b.aux == "E"    ? 2.71828182845904523536
+                                    : 0.0;
+      movImm(dblBits(v));
     } else {
       fail("unsupported binding kind in expression");
       movImm(kNone);
@@ -341,12 +351,219 @@ class AsmEmitter {
     emit(std::string("    call ") + sym);
   }
 
+  // ---- inline numeric fast paths ------------------------------------------
+  // Slots keep holding avals; arithmetic/comparison first tries to unbox
+  // both operands to raw int64 (inline 47-bit int or boxed T_INT64 heap
+  // object, mirroring is_int_val/int_val_full) and emits native x86 ops,
+  // falling back to the *_slow runtime calls whenever the fast path does
+  // not apply. %rdx must hold kTagInt on entry to emitUnboxInt/emitBoxInt64.
+
+  // %rdi = aval -> int64 in `dst`; jumps to slowL unless the value is an
+  // integer. Clobbers %rax, %rcx and `dst`; preserves %rdx, %rsi.
+  void emitUnboxInt(const char* dst, const std::string& slowL) {
+    std::string inlL = newLabel("ubi"), doneL = newLabel("ubd");
+    emit("    mov %rdi, %rax\n    mov %rdi, %rcx\n    and %rdx, %rcx\n"
+         "    cmp %rdx, %rcx\n    je " + inlL + "\n");
+    // Boxed T_INT64: tagged pointer (top16 == 0xFFFF, payload 16-aligned and
+    // nonzero) to an object whose AObj.type == T_INT64 (11); value at +16.
+    emit("    mov %rdi, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
+         "    jne " + slowL + "\n");
+    emit("    mov %rdi, %rcx\n    and $0xF, %ecx\n    jnz " + slowL + "\n");
+    emit("    mov %rdi, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
+         "    jz " + slowL + "\n");
+    emit("    cmpl $11, (%rcx)\n    jne " + slowL + "\n");
+    emit("    mov 16(%rcx), " + std::string(dst) + "\n    jmp " + doneL + "\n");
+    emitLabel(inlL);
+    emit(std::string("    mov %rdi, ") + dst + "\n    shr $1, " + dst +
+         "\n    shl $17, " + dst + "\n    sar $17, " + dst + "\n");
+    emitLabel(doneL);
+  }
+
+  // %rax = int64 -> %rax = aval; equivalent to mkint_full (inline ints cover
+  // [-2^46, 2^46), wider values box as T_INT64 via a runtime call).
+  // Requires %rdx = kTagInt. Clobbers %rcx; %rdi only on the call path.
+  void emitBoxInt64() {
+    std::string callL = newLabel("boxc"), skipL = newLabel("boxs");
+    // v in [-2^46, 2^46) iff (v >> 46) is 0 or -1, i.e. (v>>46)+1 <=u 1.
+    emit("    mov %rax, %rcx\n    sar $46, %rcx\n    inc %rcx\n"
+         "    cmp $1, %rcx\n    ja " + callL + "\n");
+    emit("    mov %rax, %rcx\n    add %rcx, %rcx\n    or $1, %rcx\n"
+         "    shl $16, %rcx\n    shr $16, %rcx\n    or %rdx, %rcx\n"
+         "    mov %rcx, %rax\n    jmp " + skipL + "\n");
+    emitLabel(callL);
+    emit("    mov %rax, %rdi\n    call mkint_full\n");
+    emitLabel(skipL);
+  }
+
+  void emitPanicStr(const std::string& msg) {
+    std::string l = emitStrData(msg, true);
+    emit("    lea " + l + "(%rip), %rdi\n    call a_panic_msg\n");
+  }
+
+  // Double*double fast path for + - * / (arith_int_double semantics): both
+  // operands must be untagged doubles; result canonicalizes NaN via
+  // mkdouble. Falls through to slowL for anything else.
+  void emitDoubleArith(const std::string& op, int ls, int rs,
+                       const std::string& slowL, const std::string& doneL,
+                       const std::string& divzL) {
+    auto untagged = [&](int s, const std::string& failL) {
+      emit("    mov " + slotRef(s) + ", %rax\n    mov %rax, %rdx\n"
+           "    shr $48, %rdx\n    cmp $0xFFFF, %edx\n    je " + failL + "\n");
+    };
+    untagged(ls, slowL);
+    untagged(rs, slowL);
+    emit("    mov " + slotRef(ls) + ", %rax\n    movq %rax, %xmm0\n");
+    emit("    mov " + slotRef(rs) + ", %rax\n    movq %rax, %xmm1\n");
+    if (op == "/") {
+      // b == 0.0 (incl. -0.0) panics; NaN divisor proceeds to NaN result.
+      std::string okL = newLabel("dvok");
+      emit("    xorpd %xmm2, %xmm2\n    ucomisd %xmm2, %xmm1\n"
+           "    jp " + okL + "\n    jne " + okL + "\n    jmp " + divzL + "\n");
+      emitLabel(okL);
+      emit("    divsd %xmm1, %xmm0\n");
+    } else {
+      const char* ins = op == "+" ? "addsd" : op == "-" ? "subsd" : "mulsd";
+      emit(std::string("    ") + ins + " %xmm1, %xmm0\n");
+    }
+    std::string nanL = newLabel("dnan");
+    emit("    ucomisd %xmm0, %xmm0\n    jp " + nanL + "\n"
+         "    movq %xmm0, %rax\n    jmp " + doneL + "\n");
+    emitLabel(nanL);
+    emit("    call mkdouble\n    jmp " + doneL + "\n");
+  }
+
+  // Binary arith/compare with inline int64 (and double*double) fast paths.
+  // ls/rs are slots holding avals; result aval is left in %rax.
+  void emitArith(const std::string& op, int ls, int rs) {
+    const char* sym = binopSlow(op);
+    if (!sym) {
+      fail("unsupported operator '" + op + "'");
+      movImm(kNone);
+      return;
+    }
+    static const std::set<std::string> kFastInt = {
+        "+", "-", "*", "/", "%", "<<", ">>", "&", "|", "^",
+        "==", "!=", "<", "<=", ">", ">="};
+    if (!kFastInt.count(op)) {
+      call2slot(sym, ls, rs);
+      return;
+    }
+    const bool isCmp = op == "==" || op == "!=" || op == "<" ||
+                       op == "<=" || op == ">" || op == ">=";
+    const bool isArith = op == "+" || op == "-" || op == "*" || op == "/";
+    std::string slowL = newLabel("osl"), doneL = newLabel("odn"),
+            otherL = newLabel("oot");
+    std::string divzL, modzL;
+    if (op == "/") divzL = newLabel("divz");
+    if (op == "%") modzL = newLabel("modz");
+    movImm(kTagInt, "%rdx");
+    loadSlot(ls, "%rdi");
+    emitUnboxInt("%r8", otherL);
+    loadSlot(rs, "%rdi");
+    emitUnboxInt("%r9", otherL);
+    // r8 = lhs int64, r9 = rhs int64.
+    if (isCmp) {
+      static const std::unordered_map<std::string, const char*> kCc = {
+          {"==", "sete"}, {"!=", "setne"}, {"<", "setl"},
+          {"<=", "setle"}, {">", "setg"}, {">=", "setge"}};
+      // cmp %r9,%r8 computes lhs - rhs; rdx = kTagInt so
+      // lea 3(rdx, rax*2) yields A_FALSE (tag|4) or A_TRUE (tag|6).
+      emit("    xor %eax, %eax\n    cmp %r9, %r8\n    " +
+           std::string(kCc.at(op)) + " %al\n    lea 0x3(%rdx,%rax,2), %rax\n" +
+           "    jmp " + doneL + "\n");
+    } else {
+      if (op == "+") {
+        emit("    mov %r8, %rax\n    add %r9, %rax\n    jo " + slowL + "\n");
+      } else if (op == "-") {
+        emit("    mov %r8, %rax\n    sub %r9, %rax\n    jo " + slowL + "\n");
+      } else if (op == "*") {
+        emit("    mov %r8, %rax\n    imul %r9, %rax\n    jo " + slowL + "\n");
+      } else if (op == "/") {
+        emit("    test %r9, %r9\n    jz " + divzL + "\n");
+        // rhs == -1 would trap on INT64_MIN/-1; the slow path returns
+        // mkdouble(2^63) for that case and -a otherwise.
+        emit("    cmp $-1, %r9\n    je " + slowL + "\n");
+        emit("    mov %r8, %rax\n    cqo\n    idiv %r9\n");
+      } else if (op == "%") {
+        emit("    test %r9, %r9\n    jz " + modzL + "\n");
+        emit("    cmp $-1, %r9\n    je " + slowL + "\n");
+        emit("    mov %r8, %rax\n    cqo\n    idiv %r9\n    mov %rdx, %rax\n");
+      } else if (op == "<<" || op == ">>") {
+        // shift_amount(): amount must be an int in [0,63] else panic via
+        // the slow path; << is a logical shift on the uint64 pattern, >>
+        // is arithmetic on int64.
+        emit("    test %r9, %r9\n    js " + slowL + "\n"
+             "    cmp $63, %r9\n    ja " + slowL + "\n");
+        emit("    mov %r8, %rax\n    mov %r9, %rcx\n");
+        emit(std::string("    ") + (op == "<<" ? "shl" : "sar") + " %cl, %rax\n");
+      } else {  // & | ^
+        const char* ins = op == "&" ? "and" : op == "|" ? "or" : "xor";
+        emit(std::string("    mov %r8, %rax\n    ") + ins + " %r9, %rax\n");
+      }
+      emitBoxInt64();
+      emit("    jmp " + doneL + "\n");
+    }
+    emitLabel(otherL);
+    if (isArith) {
+      emitDoubleArith(op, ls, rs, slowL, doneL, divzL);
+    } else {
+      emit("    jmp " + slowL + "\n");
+    }
+    if (!divzL.empty()) {
+      emitLabel(divzL);
+      emitPanicStr("Division by zero.\n  = help: Check the divisor before dividing.");
+      emit("    jmp " + doneL + "\n");
+    }
+    if (!modzL.empty()) {
+      emitLabel(modzL);
+      emitPanicStr("Remainder by zero.\n  = help: Check the divisor before dividing.");
+      emit("    jmp " + doneL + "\n");
+    }
+    emitLabel(slowL);
+    call2slot(sym, ls, rs);
+    emitLabel(doneL);
+  }
+
   // Jump helper: evaluate cond expr -> truthy test -> jcc.
-  // Emits: <eval cond> ; rdi=cond ; call a_truthy_raw_slow ; test rax,rax ; j<cc> label
+  // Fast paths cover A_TRUE/A_FALSE/A_NONE, inline ints, and untagged
+  // doubles inline; everything else (boxed ints, strings, objects) goes
+  // through a_truthy_raw_slow.
   void condJump(const Expr* cond, const std::string& label, bool jumpIfTrue) {
     emitExpr(cond);
-    emit("    mov %rax, %rdi\n    call a_truthy_raw_slow\n    test %rax, %rax\n");
-    emit(std::string(jumpIfTrue ? "    jnz " : "    jz ") + label);
+    std::string oneL = newLabel("tj1"), zeroL = newLabel("tj0"),
+            intL = newLabel("tji"), dblL = newLabel("tjd"),
+            slowL = newLabel("tjs"), doneL = newLabel("tjf");
+    movImm(kTrue, "%rcx");
+    emit("    cmp %rcx, %rax\n    je " + oneL + "\n");
+    movImm(kFalse, "%rcx");
+    emit("    cmp %rcx, %rax\n    je " + zeroL + "\n");
+    movImm(kNone, "%rcx");
+    emit("    cmp %rcx, %rax\n    je " + zeroL + "\n");
+    movImm(kTagInt, "%rcx");
+    emit("    mov %rax, %rdx\n    and %rcx, %rdx\n    cmp %rcx, %rdx\n"
+         "    je " + intL + "\n");
+    emit("    mov %rax, %rdx\n    shr $48, %rdx\n    cmp $0xFFFF, %edx\n"
+         "    jne " + dblL + "\n    jmp " + slowL + "\n");
+    emitLabel(intL);
+    emit("    mov %rax, %rdx\n    shr $1, %rdx\n    shl $17, %rdx\n"
+         "    sar $17, %rdx\n    test %rdx, %rdx\n    jnz " + oneL +
+         "\n    jmp " + zeroL + "\n");
+    emitLabel(dblL);
+    // ucomisd vs 0.0: unordered (NaN) or not-equal -> truthy; equal
+    // (covers -0.0) -> falsy.
+    emit("    movq %rax, %xmm0\n    xorpd %xmm1, %xmm1\n"
+         "    ucomisd %xmm1, %xmm0\n    jp " + oneL + "\n    jne " + oneL +
+         "\n    jmp " + zeroL + "\n");
+    emitLabel(slowL);
+    emit("    mov %rax, %rdi\n    call a_truthy_raw_slow\n    test %rax, %rax\n"
+         "    jnz " + oneL + "\n    jmp " + zeroL + "\n");
+    emitLabel(oneL);
+    emit("    mov $1, %eax\n    jmp " + doneL + "\n");
+    emitLabel(zeroL);
+    emit("    xor %eax, %eax\n");
+    emitLabel(doneL);
+    emit(std::string("    test %rax, %rax\n    ") +
+         (jumpIfTrue ? "jnz " : "jz ") + label + "\n");
   }
 
   // Build the algebraic-enum variant dict ({__tag, __name}) into %rax.
@@ -562,7 +779,8 @@ class AsmEmitter {
     // (e.g. std/json) shadows the native namespace.
     for (const char* nm : {"math", "io", "fs", "strings", "collections", "core", "time",
                            "json", "binary", "testing", "log", "metrics", "trace", "net",
-                           "http", "terminal", "env", "repl", "kernels", "unsafe", "arena", "std"}) {
+                           "http", "terminal", "env", "repl", "kernels", "unsafe", "arena", "std",
+                           "py"}) {
       if (g.count(nm)) continue;
       ABinding b;
       b.kind = BKind::Module;
@@ -573,6 +791,28 @@ class AsmEmitter {
   }
 
   // ---- functions / main -------------------------------------------------------
+  // Bind `from <native-module> import member [as x]` items into the current
+  // scope: functions become BKind::Builtin (dispatched via a_bi_call),
+  // constants become BKind::NativeConst. Members missing from the
+  // nativeModules() spec are skipped here; sema already reported them.
+  void bindNativeFromImport(const FromImportStmt* im) {
+    for (const auto& item : im->items) {
+      if (const std::string* bn = nativeFunction(im->bareName, item.name)) {
+        int bid = builtinRuntimeId(*bn);
+        if (bid < 0) continue;
+        ABinding b;
+        b.kind = BKind::Builtin;
+        b.builtinId = bid;
+        scopes_.back()[item.alias] = b;
+      } else if (const std::string* cn = nativeConstant(im->bareName, item.name)) {
+        ABinding b;
+        b.kind = BKind::NativeConst;
+        b.aux = *cn;
+        scopes_.back()[item.alias] = b;
+      }
+    }
+  }
+
   // Register a module's import aliases (import x / from x import y) into the
   // current scope so function bodies can resolve module.member calls.
   void bindModuleImports(int moduleId) {
@@ -673,17 +913,7 @@ class AsmEmitter {
           }
         } else if (im->nativeModule) {
           // from <native> import member: bind member -> native builtin name
-          for (const auto& item : im->items) {
-            const std::string* bn = nativeFunction(im->bareName, item.name);
-            if (!bn) continue;
-            int bid = builtinRuntimeId(*bn);
-            if (bid < 0) continue;
-            std::string local = !item.alias.empty() ? item.alias : item.name;
-            ABinding b;
-            b.kind = BKind::Builtin;
-            b.builtinId = bid;
-            scopes_.back()[local] = b;
-          }
+          bindNativeFromImport(im);
         }
       }
     }
@@ -897,6 +1127,9 @@ class AsmEmitter {
                 }
               }
             }
+          } else if (im->nativeModule) {
+            // from <native> import member: bind member -> native builtin name
+            bindNativeFromImport(im);
           }
         }
       }
@@ -1324,12 +1557,7 @@ class AsmEmitter {
         std::string baseOp = st.op.substr(0, st.op.size() - 1);
         int cs = evalSlot(st.target.get());
         int rs = evalSlot(st.value.get());
-        const char* sym = binopSlow(baseOp);
-        if (!sym) {
-          fail("unsupported operator '" + baseOp + "'");
-          return;
-        }
-        call2slot(sym, cs, rs);  // rax = cur <op> val
+        emitArith(baseOp, cs, rs);  // rax = cur <op> val
         vs = allocSlot();
         storeRax(vs);
       } else {
@@ -1369,15 +1597,10 @@ class AsmEmitter {
       if (st.op != "=") {
         // obj[i] op= v  ->  obj[i] = obj[i] <op> v
         std::string baseOp = st.op.substr(0, st.op.size() - 1);
-        const char* sym = binopSlow(baseOp);
-        if (!sym) {
-          fail("unsupported operator '" + baseOp + "'");
-          return;
-        }
         int cs = allocSlot();
         call2slot("a_getitem", os, is);
         storeRax(cs);
-        call2slot(sym, cs, vs);
+        emitArith(baseOp, cs, vs);
         int ns = allocSlot();
         storeRax(ns);
         call3slot("a_setitem", os, is, ns);
@@ -1400,16 +1623,11 @@ class AsmEmitter {
             if (st.op != "=") {
               // mod.g op= v  ->  mod.g = mod.g <op> v
               std::string baseOp = st.op.substr(0, st.op.size() - 1);
-              const char* sym = binopSlow(baseOp);
-              if (!sym) {
-                fail("unsupported operator '" + baseOp + "'");
-                return;
-              }
               int vs = evalSlot(st.value.get());
               int cs = allocSlot();
               emit("    mov " + gb.sym + "(%rip), %rax\n");
               storeRax(cs);
-              call2slot(sym, cs, vs);
+              emitArith(baseOp, cs, vs);
               int ns = allocSlot();
               storeRax(ns);
               storeBinding(gb, ns);
@@ -1534,22 +1752,39 @@ class AsmEmitter {
     emit("    call a_call");
   }
 
-  // a_method(obj, name, n, argv): generic method dispatch.
+  // a_method(obj, name, n, nkw, argv): generic method dispatch. argv holds
+  // the n positional args followed by nkw (name, value) pairs; only
+  // T_PYOBJ receivers consume the pairs (as Python kwargs) — every other
+  // receiver kind panics on nkw > 0.
   void emitMethodCall(const Expr* objExpr, const std::string& field, const CallExpr& call) {
     int os = evalSlot(objExpr);
-    std::vector<const Expr*> args = positionalArgs(call);
-    std::vector<int> slots;
-    for (const Expr* a : args) slots.push_back(evalSlot(a));
-    Argv av = allocArgv((int)args.size());
-    for (std::size_t i = 0; i < args.size(); ++i) argvStore(av, (int)i, slots[i]);
+    std::vector<int> posSlots;
+    std::vector<std::pair<std::string, int>> kwSlots;
+    for (const CallArg& a : call.args) {
+      int s = evalSlot(a.value.get());
+      if (a.name.empty()) {
+        posSlots.push_back(s);
+      } else {
+        kwSlots.push_back({a.name, s});
+      }
+    }
+    Argv av = allocArgv((int)posSlots.size() + 2 * (int)kwSlots.size());
+    for (std::size_t i = 0; i < posSlots.size(); ++i)
+      argvStore(av, (int)i, posSlots[i]);
+    for (std::size_t i = 0; i < kwSlots.size(); ++i) {
+      int ks = strLitSlot(kwSlots[i].first);
+      argvStore(av, (int)(posSlots.size() + 2 * i), ks);
+      argvStore(av, (int)(posSlots.size() + 2 * i + 1), kwSlots[i].second);
+    }
     std::string lbl = emitStrData(field, true);
     loadSlot(os, "%rdi");
     emit("    lea " + lbl + "(%rip), %rsi\n");
-    movImm(args.size(), "%rdx");
-    if (args.empty()) {
-      emit("    xor %ecx, %ecx");
+    movImm(posSlots.size(), "%rdx");
+    movImm(kwSlots.size(), "%rcx");
+    if (av.n == 0) {
+      emit("    xor %r8d, %r8d");
     } else {
-      leaSlot(argvPtr(av), "%rcx");
+      leaSlot(argvPtr(av), "%r8");
     }
     emit("    call a_method");
   }
@@ -2601,15 +2836,9 @@ class AsmEmitter {
       call3slot("a_range_new", ls, rs, one);
       return;
     }
-    const char* sym = binopSlow(op);
-    if (!sym) {
-      fail("unsupported operator '" + op + "'");
-      movImm(kNone);
-      return;
-    }
     int ls = evalSlot(x.lhs.get());
     int rs = evalSlot(x.rhs.get());
-    call2slot(sym, ls, rs);
+    emitArith(op, ls, rs);
   }
 
   // Field access expr: module-qualified names, enum variants, getattr.

@@ -78,7 +78,7 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "unsafe_get", bi_unsafe_get }, { "unsafe_set", bi_unsafe_set },
     { "unsafe_address_of", bi_unsafe_address_of }, { "unsafe_load", bi_unsafe_load },
     { "unsafe_store", bi_unsafe_store }, { "unsafe_offset", bi_unsafe_offset },
-    { "py_call", bi_py_call }
+    { "py_call", bi_py_call }, { "py_buffer", bi_py_buffer }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -170,8 +170,10 @@ aval a_list_push(aval list, aval v) {
     return list;
 }
 aval a_setattr(aval obj, const char *name, aval v) {
-    /* field assignment: dicts store by key; others panic */
+    /* field assignment: dicts store by key; opaque Python objects go
+       through PyObject_SetAttrString; others panic */
     AObj *o = obj_of(obj);
+    if (o && o->type == T_PYOBJ) return a_py_setattr(obj, name, v);
     if (o && o->type == T_DICT) {
         aval k = a_str_new(name, (uint64_t)strlen(name));
         a_dict_set(obj, k, v);

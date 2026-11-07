@@ -10,5 +10,8 @@ its `site-packages` to `sys.path`.
 
 - `numpy_array.a` — needs `numpy` (`uv pip install numpy` in your env)
 - `torch_tensor.a` — needs `torch`
+- `py_buffer.a` — needs `numpy`; zero-copy buffer-protocol views via
+  `py.buffer(x)` / `py_buffer(x)` over numpy arrays, `array.array`,
+  `memoryview`, and `bytearray`
 
 They live one directory deeper so `examples/*/*.a` sweeps skip them.
