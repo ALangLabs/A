@@ -12,6 +12,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -37,6 +38,12 @@ struct ABinding {
   int moduleId = -1;
   FnInfo* dropFn = nullptr;  // struct `drop` method, if the value owns one
   std::string pyMember;      // PyFunc: python member name (aux = module)
+  // Phase 5 scalar promotion: when set on a Local binding, `slot` holds a
+  // raw int64 (not an aval). The binding is only marked after proving every
+  // write produces an int64 via rawSafeExpr; any later non-raw write demotes
+  // it (flag cleared, aval stored). Reads always stay correct: generic paths
+  // box via emitBoxInt64, raw paths copy the int64 directly.
+  bool rawInt = false;
 };
 
 class AsmEmitter {
@@ -124,6 +131,20 @@ class AsmEmitter {
   int inlineResultSlot_ = -1;
   int inlineDeferBase_ = 0;
   std::unordered_map<std::string, int> rawVars_;
+
+  // Phase 5 scalar promotion state. promoteNames_ holds the locals of the
+  // function currently being emitted whose bindings may keep raw int64 values
+  // (see ABinding::rawInt). rawDepth_/rawCallCount_ bound compile-time raw
+  // inlining so mutually recursive raw-inline candidates still terminate.
+  std::unordered_set<std::string> promoteNames_;
+  int rawDepth_ = 0;
+  int rawCallCount_ = 0;
+  // Coverage-walk state: true while inside a loop body/condition, where a
+  // boxed read would execute per iteration. Reads outside loops box at most
+  // once per call, which is still a win versus boxing every write.
+  bool promoteHot_ = false;
+  static constexpr int kMaxRawDepth = 4;
+  static constexpr int kMaxRawCalls = 256;
 
   struct InlineInfo {
     bool safe = false;
@@ -308,6 +329,12 @@ class AsmEmitter {
     }
   }
   void emitBindingValue(const ABinding& b) {
+    if (b.rawInt) {
+      // Promoted local: slot holds raw int64; box to an aval on demand.
+      loadSlot(b.slot);
+      emitBoxInt64();
+      return;
+    }
     if (b.kind == BKind::Local || b.kind == BKind::Param) {
       loadSlot(b.slot);
     } else if (b.kind == BKind::Global || b.kind == BKind::FnValue ||
@@ -402,6 +429,20 @@ class AsmEmitter {
     emitLabel(inlL);
     emit(std::string("    mov %rdi, ") + dst + "\n    shr $1, " + dst +
          "\n    shl $17, " + dst + "\n    sar $17, " + dst + "\n");
+    emitLabel(doneL);
+  }
+
+  // %rdi = aval -> %rax = int64, equivalent to a_int_full but with the
+  // inline-int and boxed-T_INT64 cases inlined (mirroring emitUnboxInt).
+  // Anything else (doubles, strings, ...) falls back to the runtime call,
+  // preserving its panic behaviour exactly.
+  void emitAvalToI64() {
+    std::string slowL = newLabel("a2is"), doneL = newLabel("a2id");
+    movImm(kTagInt, "%rdx");
+    emitUnboxInt("%rax", slowL);
+    jmp(doneL);
+    emitLabel(slowL);
+    emit("    mov %rdi, %rax\n    call a_int_full\n");
     emitLabel(doneL);
   }
 
@@ -999,7 +1040,11 @@ class AsmEmitter {
         emitLabel(skipL);
       }
     }
+    auto savedPromote = std::move(promoteNames_);
+    promoteNames_.clear();
+    computePromoteSet(f->decl);
     emitBody(f->decl->body);
+    promoteNames_ = std::move(savedPromote);
     emit("    mov $" + u64s(kNone) + ", %rax\n    leave\n    ret\n");
     int frame = frameBytes();
     std::ostringstream emitted;
@@ -1145,6 +1190,7 @@ class AsmEmitter {
           }
         }
       }
+      promoteNames_.clear();  // top-level bindings are globals, never raw
       emitBody(mod.program->statements, true);
       }
       curModuleId_ = savedModule;
@@ -1251,7 +1297,18 @@ class AsmEmitter {
     switch (s->kind) {
       case StmtKind::Let: {
         const LetStmt& st = static_cast<const LetStmt&>(*s);
-        int sl = evalSlot(st.init.get());
+        // Scalar promotion: a promotable local whose initializer is a raw
+        // int64 expression keeps the value untagged in its frame slot.
+        const bool wantRaw =
+            !topLevel && st.init && promoteNames_.count(st.name) &&
+            rawSafeExpr(st.init.get()) && exprIsInt(st.init.get());
+        int sl;
+        if (wantRaw) {
+          sl = allocSlot();
+          emitRawExpr(st.init.get(), sl);
+        } else {
+          sl = evalSlot(st.init.get());
+        }
         if (topLevel) {
           std::string key = std::to_string(curModuleId_) + ":" + st.name;
           auto it = topLevelGlobals_.find(key);
@@ -1272,6 +1329,10 @@ class AsmEmitter {
           }
         } else {
           bindLocal(st.name, sl);
+          if (wantRaw) {
+            ABinding* rb = lookup(st.name);
+            if (rb) rb->rawInt = true;
+          }
           FnInfo* dropFn = dropFnFor(st.init->inferredType);
           if (dropFn) {
             ABinding* b = lookup(st.name);
@@ -1653,6 +1714,20 @@ class AsmEmitter {
         int sl = allocSlot();
         bindLocal(id.name, sl);
         b = lookup(id.name);
+        // Fresh local from `x = <raw int expr>`: promote like a `let`.
+        if (st.op == "=" && b && promoteNames_.count(id.name) &&
+            rawSafeExpr(st.value.get()) && exprIsInt(st.value.get())) {
+          emitRawExpr(st.value.get(), sl);
+          b->rawInt = true;
+          return;
+        }
+      }
+      // Promoted local + raw-safe int write: keep the slot as raw int64.
+      // Ints never own drops, so the drop bookkeeping below is unnecessary.
+      if (b->rawInt && st.op == "=" && !b->dropFn &&
+          rawSafeExpr(st.value.get()) && exprIsInt(st.value.get())) {
+        emitRawExpr(st.value.get(), b->slot);
+        return;
       }
       int vs;
       if (st.op != "=") {
@@ -1673,6 +1748,9 @@ class AsmEmitter {
         emitDropRec(*oldRec);
       }
       storeBinding(*b, vs);
+      // Demotion: an aval was just stored into this slot, so it no longer
+      // holds a raw int64 (covers op-assigns and non-raw-safe values).
+      if (b->rawInt) b->rawInt = false;
       FnInfo* newDrop = dropFnFor(st.value->inferredType);
       b->dropFn = newDrop;
       // Update this binding's pending drop record in place, or register one.
@@ -1794,12 +1872,15 @@ class AsmEmitter {
     if (!exprIsInt(e)) sc.nonInt = true;
     const bool rawSimple =
         e->kind == ExprKind::IntLit || e->kind == ExprKind::Ident ||
+        (e->kind == ExprKind::Unary &&
+         static_cast<const UnaryExpr&>(*e).op == "~") ||
         (e->kind == ExprKind::Binary &&
          (static_cast<const BinaryExpr&>(*e).op == "&" ||
           static_cast<const BinaryExpr&>(*e).op == "|" ||
           static_cast<const BinaryExpr&>(*e).op == "^" ||
           static_cast<const BinaryExpr&>(*e).op == "<<" ||
-          static_cast<const BinaryExpr&>(*e).op == ">>"));
+          static_cast<const BinaryExpr&>(*e).op == ">>" ||
+          static_cast<const BinaryExpr&>(*e).op == "%"));
     if (!rawSimple) sc.unsupportedRaw = true;
     switch (e->kind) {
       case ExprKind::Ident:
@@ -2108,6 +2189,74 @@ class AsmEmitter {
     return v >= -lim && v < lim;
   }
 
+  // ---- Phase 5: raw int64 expressions & scalar promotion -------------------
+  // Ops whose int64 result is always an integer (or a panic): bitwise, shifts
+  // (panic on out-of-range amount), '~', and '%'. '+', '-', '*', '/' are
+  // excluded on purpose: int64 overflow (and INT64_MIN / -1) produces a
+  // *double* aval that a raw int64 slot cannot represent, so those stay on
+  // the aval path where the slow helpers implement overflow->double.
+  static bool rawSafeBinOp(const std::string& op) {
+    return op == "&" || op == "|" || op == "^" || op == "<<" ||
+           op == ">>" || op == "%";
+  }
+
+  // Direct-call target eligible for raw (int64) inlining, or nullptr.
+  // Mirrors the gates in tryEmitInlineCall; used by both the emitter and the
+  // promotion analysis so they always agree.
+  FnInfo* rawCallTarget(const CallExpr& call) {
+    if (call.callee->kind != ExprKind::Ident) return nullptr;
+    ABinding* b = lookup(static_cast<const IdentExpr&>(*call.callee).name);
+    if (!b || b->kind != BKind::FnValue || !b->fn) return nullptr;
+    FnInfo* f = b->fn;
+    if (f->isMethod || f->variadic || !f->decl || f->moduleId != curModuleId_ ||
+        call.args.size() != f->paramNames.size())
+      return nullptr;
+    for (const CallArg& a : call.args)
+      if (!a.name.empty()) return nullptr;
+    if (!callArgsAllInt(call)) return nullptr;
+    if (!inlineInfoFor(f).raw) return nullptr;
+    return f;
+  }
+
+  // Structural check mirroring emitRawExpr's capabilities. Ident is always
+  // accepted: bindings that are not raw-int fall back to aval evaluation +
+  // a_int_full (the same unbox the Phase-4 raw path already used).
+  bool rawSafeExpr(const Expr* e) {
+    if (!e || failed_) return false;
+    switch (e->kind) {
+      case ExprKind::IntLit:
+      case ExprKind::Ident:
+        return true;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        return u.op == "~" && rawSafeExpr(u.operand.get());
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        return rawSafeBinOp(b.op) && rawSafeExpr(b.lhs.get()) &&
+               rawSafeExpr(b.rhs.get());
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        if (!rawCallTarget(c)) return false;
+        for (const CallArg& a : c.args)
+          if (!rawSafeExpr(a.value.get())) return false;
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  // emitBinary fast-path gate: a safe-op binary whose operands are all raw
+  // int64 materializable. Kept in sync with the emitBinary call site and the
+  // promotion coverage scan.
+  bool rawBinFastOk(const BinaryExpr& b) {
+    return rawSafeBinOp(b.op) && exprIsInt(b.lhs.get()) &&
+           exprIsInt(b.rhs.get()) && rawSafeExpr(b.lhs.get()) &&
+           rawSafeExpr(b.rhs.get());
+  }
+
   bool emitRawExpr(const Expr* e, int out) {
     if (!e || failed_) return false;
     if (e->kind == ExprKind::IntLit) {
@@ -2119,7 +2268,8 @@ class AsmEmitter {
         // Preserve the generic literal encoding exactly (including its
         // range behaviour) by materializing the aval and unboxing it.
         emitExpr(e);
-        emit("    mov %rax, %rdi\n    call a_int_full\n");
+        emit("    mov %rax, %rdi\n");
+        emitAvalToI64();
         storeRax(out);
       }
       return true;
@@ -2131,8 +2281,28 @@ class AsmEmitter {
         copySlot(it->second, out);
         return true;
       }
+      // Promoted local: the slot already holds a raw int64.
+      ABinding* b = lookup(nm);
+      if (b && b->rawInt) {
+        copySlot(b->slot, out);
+        return true;
+      }
       emitExpr(e);
-      emit("    mov %rax, %rdi\n    call a_int_full\n");
+      emit("    mov %rax, %rdi\n");
+      emitAvalToI64();
+      storeRax(out);
+      return true;
+    }
+    if (e->kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+      if (u.op != "~") {
+        fail("unsupported raw int unary operator '" + u.op + "'");
+        return false;
+      }
+      int os = allocSlot();
+      if (!emitRawExpr(u.operand.get(), os)) return false;
+      loadSlot(os);
+      emit("    not %rax\n");
       storeRax(out);
       return true;
     }
@@ -2142,6 +2312,47 @@ class AsmEmitter {
       if (!emitRawExpr(b.lhs.get(), ls) || !emitRawExpr(b.rhs.get(), rs))
         return false;
       emitRawBin(b.op, ls, rs, out);
+      return true;
+    }
+    if (e->kind == ExprKind::Call) {
+      const CallExpr& c = static_cast<const CallExpr&>(*e);
+      FnInfo* f = rawCallTarget(c);
+      if (!f) {
+        fail("unsupported raw int call");
+        return false;
+      }
+      if (rawDepth_ >= kMaxRawDepth || rawCallCount_ >= kMaxRawCalls) {
+        // Inlining budget exhausted: emit an ordinary aval call and unbox.
+        // Args still go through emitRawExpr + box so raw-int locals and
+        // raw-inline params (rawVars_) resolve correctly in every context.
+        std::vector<int> ps(f->paramNames.size(), -1);
+        for (std::size_t i = 0; i < c.args.size(); ++i) {
+          int rs = allocSlot();
+          emitRawExpr(c.args[i].value.get(), rs);
+          loadSlot(rs);
+          emitBoxInt64();
+          int vs = allocSlot();
+          storeRax(vs);
+          ps[i] = vs;
+        }
+        emitDirectCall(f->cname.c_str(), ps);
+        emit("    mov %rax, %rdi\n");
+        emitAvalToI64();
+        storeRax(out);
+        return true;
+      }
+      ++rawCallCount_;
+      ++rawDepth_;
+      std::vector<int> rargs;
+      rargs.reserve(c.args.size());
+      for (const CallArg& a : c.args) {
+        int rs = allocSlot();
+        emitRawExpr(a.value.get(), rs);
+        rargs.push_back(rs);
+      }
+      emitRawBody(f, rargs, true, true);
+      --rawDepth_;
+      storeRax(out);
       return true;
     }
     fail("unsupported raw int expression");
@@ -2154,6 +2365,27 @@ class AsmEmitter {
       loadSlot(rs, "%rcx");
       emit(std::string("    ") + (op == "&" ? "and" : op == "|" ? "or" : "xor") +
            " %rcx, %rax\n");
+      storeRax(out);
+      return;
+    }
+    if (op == "%") {
+      // int64 remainder, matching arith_int_int('%'): divisor 0 panics with
+      // the same message, divisor -1 yields 0 (also avoiding the
+      // INT64_MIN % -1 hardware trap), otherwise idiv leaves the remainder
+      // in %rdx. The result is always an integer, never a double.
+      std::string modzL = newLabel("rmdz"), zeroL = newLabel("rmd0"),
+              doneL = newLabel("rmdd");
+      loadSlot(rs, "%rcx");
+      emit("    test %rcx, %rcx\n    jz " + modzL + "\n"
+           "    cmp $-1, %rcx\n    je " + zeroL + "\n");
+      loadSlot(ls, "%rax");
+      emit("    cqto\n    idiv %rcx\n    mov %rdx, %rax\n    jmp " + doneL +
+           "\n");
+      emitLabel(zeroL);
+      emit("    xor %eax, %eax\n    jmp " + doneL + "\n");
+      emitLabel(modzL);
+      emitPanicStr("Remainder by zero.\n  = help: Check the divisor before dividing.");
+      emitLabel(doneL);
       storeRax(out);
       return;
     }
@@ -2191,14 +2423,24 @@ class AsmEmitter {
     emitLabel(doneL);
   }
 
-  void emitRawBody(FnInfo* f, const std::vector<int>& argSlots) {
+  // argsRaw: argSlots already hold raw int64 (skip the aval->int64 unbox).
+  // keepRaw: leave the raw int64 result in %rax instead of boxing to aval.
+  // rawVars_ is saved/restored so raw-inline calls can nest inside
+  // emitRawExpr (e.g. `f(g(x))` or a promoted `x = f(y)`).
+  void emitRawBody(FnInfo* f, const std::vector<int>& argSlots,
+                   bool argsRaw = false, bool keepRaw = false) {
+    auto savedRawVars = std::move(rawVars_);
     rawVars_.clear();
     const FnDecl* fn = f->decl;
     for (std::size_t i = 0; i < fn->params.size(); ++i) {
       int rs = allocSlot();
-      loadSlot(argSlots[i], "%rdi");
-      emit("    call a_int_full\n");
-      storeRax(rs);
+      if (argsRaw) {
+        copySlot(argSlots[i], rs);
+      } else {
+        loadSlot(argSlots[i], "%rdi");
+        emitAvalToI64();
+        storeRax(rs);
+      }
       rawVars_[fn->params[i].name] = rs;
     }
     for (const StmtPtr& sp : fn->body) {
@@ -2226,10 +2468,10 @@ class AsmEmitter {
         int rs = allocSlot();
         emitRawExpr(static_cast<const ReturnStmt&>(*s).value.get(), rs);
         loadSlot(rs);
-        emitBoxInt64();
+        if (!keepRaw) emitBoxInt64();
       }
     }
-    rawVars_.clear();
+    rawVars_ = std::move(savedRawVars);
   }
 
   // Rebuild a function-like scope for the callee so caller locals/params can
@@ -2258,6 +2500,458 @@ class AsmEmitter {
     return true;
   }
 
+  // ---- Phase 5: scalar-promotion analysis ----------------------------------
+  // A local may keep a raw int64 in its frame slot only when every write
+  // produces an int64 via rawSafeExpr and every read is consumed inside a
+  // raw region (safe-op binary, raw-inlined call arg, or promoted
+  // let/assign). Reads outside those regions are still *correct* — they box
+  // on demand — but each box of a large int is a heap allocation, so the
+  // analysis disqualifies names with uncovered reads to avoid regressions.
+  // Emission re-checks every condition, so a wrong inclusion is only ever a
+  // missed optimization or a demotion, never a miscompile.
+  struct PromoteScan {
+    std::unordered_set<std::string> safe;       // all writes raw-safe + int
+    std::unordered_set<std::string> bad;        // disqualified names
+    std::unordered_set<std::string> pending;    // safe - bad
+    std::unordered_set<std::string> uncovered;  // reads outside raw regions
+  };
+
+  // Walk every expr child (mirrors collectIdents) marking names that must
+  // not be promoted: ++/-- targets (they store avals) and anything captured
+  // by a lambda (captures snapshot avals).
+  void promoteMarkExpr(const Expr* e, PromoteScan& ps) {
+    if (!e) return;
+    switch (e->kind) {
+      case ExprKind::Ident:
+        return;
+      case ExprKind::StringLit:
+        for (const StringPart& p : static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr) promoteMarkExpr(p.expr.get(), ps);
+        return;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if ((u.op == "++" || u.op == "--") &&
+            u.operand->kind == ExprKind::Ident)
+          ps.bad.insert(static_cast<const IdentExpr&>(*u.operand).name);
+        promoteMarkExpr(u.operand.get(), ps);
+        return;
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        promoteMarkExpr(b.lhs.get(), ps);
+        promoteMarkExpr(b.rhs.get(), ps);
+        return;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        promoteMarkExpr(c.callee.get(), ps);
+        for (const CallArg& a : c.args) promoteMarkExpr(a.value.get(), ps);
+        return;
+      }
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        promoteMarkExpr(x.object.get(), ps);
+        promoteMarkExpr(x.index.get(), ps);
+        return;
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        promoteMarkExpr(x.object.get(), ps);
+        promoteMarkExpr(x.start.get(), ps);
+        promoteMarkExpr(x.end.get(), ps);
+        promoteMarkExpr(x.step.get(), ps);
+        return;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv : static_cast<const MapLitExpr&>(*e).entries) {
+          promoteMarkExpr(kv.first.get(), ps);
+          promoteMarkExpr(kv.second.get(), ps);
+        }
+        return;
+      case ExprKind::SetLit:
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple: {
+        const auto& els = e->kind == ExprKind::SetLit
+            ? static_cast<const SetLitExpr&>(*e).elements
+            : e->kind == ExprKind::ArrayLit
+                ? static_cast<const ArrayLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els) promoteMarkExpr(el.get(), ps);
+        return;
+      }
+      case ExprKind::Field:
+        promoteMarkExpr(static_cast<const FieldExpr&>(*e).object.get(), ps);
+        return;
+      case ExprKind::SafeNav:
+        promoteMarkExpr(static_cast<const SafeNavExpr&>(*e).object.get(), ps);
+        return;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        promoteMarkExpr(r.start.get(), ps);
+        promoteMarkExpr(r.end.get(), ps);
+        promoteMarkExpr(r.step.get(), ps);
+        return;
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        promoteMarkExpr(t.cond.get(), ps);
+        promoteMarkExpr(t.thenValue.get(), ps);
+        promoteMarkExpr(t.elseValue.get(), ps);
+        return;
+      }
+      case ExprKind::Lambda: {
+        std::set<std::string> ids;
+        collectIdents(static_cast<const LambdaExpr&>(*e).body.get(), ids);
+        for (const std::string& nm : ids) ps.bad.insert(nm);
+        return;
+      }
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        promoteMarkExpr(c.element.get(), ps);
+        promoteMarkExpr(c.iterable.get(), ps);
+        promoteMarkExpr(c.condition.get(), ps);
+        return;
+      }
+      case ExprKind::Match: {
+        const MatchExpr& m = static_cast<const MatchExpr&>(*e);
+        promoteMarkExpr(m.subject.get(), ps);
+        for (const MatchArm& arm : m.arms) {
+          promoteMarkPattern(arm.pattern, ps);
+          promoteMarkExpr(arm.guard.get(), ps);
+          promoteMarkExpr(arm.result.get(), ps);
+        }
+        return;
+      }
+      case ExprKind::Try:
+        promoteMarkExpr(static_cast<const TryExpr&>(*e).operand.get(), ps);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void promoteMarkPattern(const Pattern& p, PromoteScan& ps) {
+    if (p.value) promoteMarkExpr(p.value.get(), ps);
+    if (p.rangeStart) promoteMarkExpr(p.rangeStart.get(), ps);
+    if (p.rangeEnd) promoteMarkExpr(p.rangeEnd.get(), ps);
+    if (p.ctor) promoteMarkExpr(p.ctor.get(), ps);
+    for (const Pattern& sub : p.subpatterns) promoteMarkPattern(sub, ps);
+  }
+
+  // Write-side scan: record which names have only raw-safe int writes and
+  // which are disqualified (++/--, lambda captures, compound assigns,
+  // destructure/for bindings, non-int or non-raw initializers).
+  void promoteWriteStmt(const Stmt* s, PromoteScan& ps) {
+    if (!s) return;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        if (st.init && rawSafeExpr(st.init.get()) && exprIsInt(st.init.get()))
+          ps.safe.insert(st.name);
+        else
+          ps.bad.insert(st.name);
+        promoteMarkExpr(st.init.get(), ps);
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind == ExprKind::Ident) {
+          const std::string& nm =
+              static_cast<const IdentExpr&>(*st.target).name;
+          if (st.op == "=" && st.value &&
+              rawSafeExpr(st.value.get()) && exprIsInt(st.value.get()))
+            ps.safe.insert(nm);
+          else
+            ps.bad.insert(nm);
+        } else {
+          promoteMarkExpr(st.target.get(), ps);
+        }
+        promoteMarkExpr(st.value.get(), ps);
+        return;
+      }
+      case StmtKind::Expr:
+        promoteMarkExpr(static_cast<const ExprStmt&>(*s).expr.get(), ps);
+        return;
+      case StmtKind::Destructure: {
+        const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
+        for (const std::string& nm : st.names)
+          if (nm != "_") ps.bad.insert(nm);
+        promoteMarkExpr(st.value.get(), ps);
+        return;
+      }
+      case StmtKind::Return:
+        promoteMarkExpr(static_cast<const ReturnStmt&>(*s).value.get(), ps);
+        return;
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          promoteMarkExpr(br.cond.get(), ps);
+          for (const StmtPtr& b : br.body) promoteWriteStmt(b.get(), ps);
+        }
+        for (const StmtPtr& b : st.elseBody) promoteWriteStmt(b.get(), ps);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        promoteMarkExpr(st.cond.get(), ps);
+        for (const StmtPtr& b : st.body) promoteWriteStmt(b.get(), ps);
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        for (const StmtPtr& b : st.body) promoteWriteStmt(b.get(), ps);
+        promoteMarkExpr(st.cond.get(), ps);
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        ps.bad.insert(st.var);  // loop var binds an aval each iteration
+        promoteMarkExpr(st.iterable.get(), ps);
+        for (const StmtPtr& b : st.body) promoteWriteStmt(b.get(), ps);
+        return;
+      }
+      case StmtKind::Loop:
+        for (const StmtPtr& b : static_cast<const LoopStmt&>(*s).body)
+          promoteWriteStmt(b.get(), ps);
+        return;
+      case StmtKind::Defer:
+        promoteWriteStmt(static_cast<const DeferStmt&>(*s).body.get(), ps);
+        return;
+      default:
+        return;  // decls/imports are not emitted as body statements
+    }
+  }
+
+  void promoteWriteStmts(const std::vector<StmtPtr>& stmts, PromoteScan& ps) {
+    for (const StmtPtr& s : stmts) promoteWriteStmt(s.get(), ps);
+  }
+
+  // Read-side scan: mark pending names whose reads are NOT inside a raw
+  // region. Mirrors the emission rules: safe-op binaries with raw-safe int
+  // operands emit fully raw (emitBinary fast path); calls to raw-inline
+  // fns with raw-safe int args materialize args raw; everything else is an
+  // aval position where a bare promoted ident would have to box.
+  void promoteCoverExpr(const Expr* e, PromoteScan& ps) {
+    if (!e) return;
+    switch (e->kind) {
+      case ExprKind::Ident: {
+        const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+        if (promoteHot_ && ps.pending.count(nm)) ps.uncovered.insert(nm);
+        return;
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        if (rawBinFastOk(b)) return;  // whole subtree stays raw
+        promoteCoverExpr(b.lhs.get(), ps);
+        promoteCoverExpr(b.rhs.get(), ps);
+        return;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        promoteCoverExpr(c.callee.get(), ps);
+        FnInfo* f = rawCallTarget(c);
+        bool argsRaw = f != nullptr;
+        if (argsRaw) {
+          for (const CallArg& a : c.args)
+            if (!rawSafeExpr(a.value.get())) {
+              argsRaw = false;
+              break;
+            }
+        }
+        if (argsRaw) return;  // args materialize raw (or box on fallback)
+        for (const CallArg& a : c.args) promoteCoverExpr(a.value.get(), ps);
+        return;
+      }
+      case ExprKind::Lambda: {
+        std::set<std::string> ids;
+        collectIdents(static_cast<const LambdaExpr&>(*e).body.get(), ids);
+        for (const std::string& nm : ids)
+          if (promoteHot_ && ps.pending.count(nm)) ps.uncovered.insert(nm);
+        return;
+      }
+      case ExprKind::StringLit:
+        for (const StringPart& p : static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr) promoteCoverExpr(p.expr.get(), ps);
+        return;
+      case ExprKind::Unary:
+        promoteCoverExpr(static_cast<const UnaryExpr&>(*e).operand.get(), ps);
+        return;
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        promoteCoverExpr(x.object.get(), ps);
+        promoteCoverExpr(x.index.get(), ps);
+        return;
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        promoteCoverExpr(x.object.get(), ps);
+        promoteCoverExpr(x.start.get(), ps);
+        promoteCoverExpr(x.end.get(), ps);
+        promoteCoverExpr(x.step.get(), ps);
+        return;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv : static_cast<const MapLitExpr&>(*e).entries) {
+          promoteCoverExpr(kv.first.get(), ps);
+          promoteCoverExpr(kv.second.get(), ps);
+        }
+        return;
+      case ExprKind::SetLit:
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple: {
+        const auto& els = e->kind == ExprKind::SetLit
+            ? static_cast<const SetLitExpr&>(*e).elements
+            : e->kind == ExprKind::ArrayLit
+                ? static_cast<const ArrayLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els) promoteCoverExpr(el.get(), ps);
+        return;
+      }
+      case ExprKind::Field:
+        promoteCoverExpr(static_cast<const FieldExpr&>(*e).object.get(), ps);
+        return;
+      case ExprKind::SafeNav:
+        promoteCoverExpr(static_cast<const SafeNavExpr&>(*e).object.get(), ps);
+        return;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        promoteCoverExpr(r.start.get(), ps);
+        promoteCoverExpr(r.end.get(), ps);
+        promoteCoverExpr(r.step.get(), ps);
+        return;
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        promoteCoverExpr(t.cond.get(), ps);
+        promoteCoverExpr(t.thenValue.get(), ps);
+        promoteCoverExpr(t.elseValue.get(), ps);
+        return;
+      }
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        promoteCoverExpr(c.element.get(), ps);
+        promoteCoverExpr(c.iterable.get(), ps);
+        promoteCoverExpr(c.condition.get(), ps);
+        return;
+      }
+      case ExprKind::Match: {
+        const MatchExpr& m = static_cast<const MatchExpr&>(*e);
+        promoteCoverExpr(m.subject.get(), ps);
+        for (const MatchArm& arm : m.arms) {
+          promoteCoverPattern(arm.pattern, ps);
+          promoteCoverExpr(arm.guard.get(), ps);
+          promoteCoverExpr(arm.result.get(), ps);
+        }
+        return;
+      }
+      case ExprKind::Try:
+        promoteCoverExpr(static_cast<const TryExpr&>(*e).operand.get(), ps);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void promoteCoverPattern(const Pattern& p, PromoteScan& ps) {
+    if (p.value) promoteCoverExpr(p.value.get(), ps);
+    if (p.rangeStart) promoteCoverExpr(p.rangeStart.get(), ps);
+    if (p.rangeEnd) promoteCoverExpr(p.rangeEnd.get(), ps);
+    if (p.ctor) promoteCoverExpr(p.ctor.get(), ps);
+    for (const Pattern& sub : p.subpatterns) promoteCoverPattern(sub, ps);
+  }
+
+  void promoteCoverStmt(const Stmt* s, PromoteScan& ps) {
+    if (!s) return;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        // If this let promotes, its whole initializer is emitted raw.
+        if (!(ps.pending.count(st.name) && st.init &&
+              rawSafeExpr(st.init.get()) && exprIsInt(st.init.get())))
+          promoteCoverExpr(st.init.get(), ps);
+        return;
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        if (st.target->kind != ExprKind::Ident)
+          promoteCoverExpr(st.target.get(), ps);
+        promoteCoverExpr(st.value.get(), ps);
+        return;
+      }
+      case StmtKind::Expr:
+        promoteCoverExpr(static_cast<const ExprStmt&>(*s).expr.get(), ps);
+        return;
+      case StmtKind::Destructure:
+        promoteCoverExpr(static_cast<const DestructureStmt&>(*s).value.get(), ps);
+        return;
+      case StmtKind::Return:
+        promoteCoverExpr(static_cast<const ReturnStmt&>(*s).value.get(), ps);
+        return;
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          promoteCoverExpr(br.cond.get(), ps);
+          for (const StmtPtr& b : br.body) promoteCoverStmt(b.get(), ps);
+        }
+        for (const StmtPtr& b : st.elseBody) promoteCoverStmt(b.get(), ps);
+        return;
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        bool savedHot = promoteHot_;
+        promoteHot_ = true;  // cond + body run per iteration
+        promoteCoverExpr(st.cond.get(), ps);
+        for (const StmtPtr& b : st.body) promoteCoverStmt(b.get(), ps);
+        promoteHot_ = savedHot;
+        return;
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        bool savedHot = promoteHot_;
+        promoteHot_ = true;
+        for (const StmtPtr& b : st.body) promoteCoverStmt(b.get(), ps);
+        promoteCoverExpr(st.cond.get(), ps);
+        promoteHot_ = savedHot;
+        return;
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        promoteCoverExpr(st.iterable.get(), ps);  // evaluated once
+        bool savedHot = promoteHot_;
+        promoteHot_ = true;
+        for (const StmtPtr& b : st.body) promoteCoverStmt(b.get(), ps);
+        promoteHot_ = savedHot;
+        return;
+      }
+      case StmtKind::Loop: {
+        bool savedHot = promoteHot_;
+        promoteHot_ = true;
+        for (const StmtPtr& b : static_cast<const LoopStmt&>(*s).body)
+          promoteCoverStmt(b.get(), ps);
+        promoteHot_ = savedHot;
+        return;
+      }
+      case StmtKind::Defer:
+        promoteCoverStmt(static_cast<const DeferStmt&>(*s).body.get(), ps);
+        return;
+      default:
+        return;
+    }
+  }
+
+  void computePromoteSet(const FnDecl* fn) {
+    promoteNames_.clear();
+    if (!fn) return;
+    PromoteScan ps;
+    promoteWriteStmts(fn->body, ps);
+    for (const std::string& nm : ps.safe)
+      if (!ps.bad.count(nm)) ps.pending.insert(nm);
+    promoteHot_ = false;
+    for (const StmtPtr& s : fn->body) promoteCoverStmt(s.get(), ps);
+    for (const std::string& nm : ps.pending)
+      if (!ps.uncovered.count(nm)) promoteNames_.insert(nm);
+  }
+
   bool tryEmitInlineCall(FnInfo* f, const CallExpr& call) {
     if (!f || inlineDepth_ != 0 || f->isMethod || f->variadic || !f->decl ||
         f->moduleId != curModuleId_ || call.args.size() != f->paramNames.size())
@@ -2269,9 +2963,33 @@ class AsmEmitter {
     int& sites = inlineSites_[f->decl];
     if (sites >= kMaxInlineSites) return false;
 
+    // Raw-int inlining prefers args already materialized as int64 (raw-int
+    // locals copy for free, literals become immediates, safe-op exprs stay
+    // raw) and falls back to aval slots + per-param unbox otherwise. Args
+    // must be evaluated exactly once, so the strategy is chosen before any
+    // arg code is emitted.
+    const bool rawOk = info.raw && callArgsAllInt(call);
+    bool argsRaw = false;
+    if (rawOk) {
+      argsRaw = true;
+      for (const CallArg& a : call.args)
+        if (!rawSafeExpr(a.value.get())) {
+          argsRaw = false;
+          break;
+        }
+    }
     std::vector<int> argSlots;
     argSlots.reserve(call.args.size());
-    for (const CallArg& a : call.args) argSlots.push_back(evalSlot(a.value.get()));
+    if (argsRaw) {
+      for (const CallArg& a : call.args) {
+        int s = allocSlot();
+        emitRawExpr(a.value.get(), s);
+        argSlots.push_back(s);
+      }
+    } else {
+      for (const CallArg& a : call.args)
+        argSlots.push_back(evalSlot(a.value.get()));
+    }
     ++sites;
 
     std::vector<std::unordered_map<std::string, ABinding>> savedScopes;
@@ -2280,9 +2998,13 @@ class AsmEmitter {
     bool savedInFn = inFunction_;
     curModuleId_ = f->moduleId;
     inFunction_ = true;
+    // The inlined body is a different function: its locals must not see this
+    // function's promotion set.
+    auto savedPromote = std::move(promoteNames_);
+    promoteNames_.clear();
 
-    if (info.raw && callArgsAllInt(call)) {
-      emitRawBody(f, argSlots);
+    if (rawOk) {
+      emitRawBody(f, argSlots, argsRaw, false);
     } else {
       for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
         ABinding b;
@@ -2310,6 +3032,7 @@ class AsmEmitter {
       inlineDeferBase_ = savedDeferBase;
     }
 
+    promoteNames_ = std::move(savedPromote);
     curModuleId_ = savedModule;
     inFunction_ = savedInFn;
     endInlineScope(savedScopes);
@@ -2847,6 +3570,7 @@ class AsmEmitter {
             emitDropRec(*oldRec);
           }
           storeBinding(*b, newS);
+          if (b->rawInt) b->rawInt = false;  // demote: slot now holds aval
           FnInfo* newDrop = dropFnFor(x.operand->inferredType);
           b->dropFn = newDrop;
           DropRec* rec = findDropRec(*b);
@@ -3422,6 +4146,7 @@ class AsmEmitter {
     curModuleId_ = pl.moduleId;
     bool savedInFn = inFunction_;
     inFunction_ = true;
+    promoteNames_.clear();  // lambda bodies are expressions; no raw locals
     emitExpr(x.body.get());
     emit("    leave\n    ret\n");
     int frame = frameBytes();
@@ -3644,6 +4369,20 @@ class AsmEmitter {
       movImm(mkintA(1), "%rcx");
       emit("    mov %rcx, " + slotRef(one));
       call3slot("a_range_new", ls, rs, one);
+      return;
+    }
+    // Raw int64 fast path: safe-op binaries (& | ^ << >> %) whose operands
+    // are all raw-materializable compute without ever boxing to avals
+    // (promoted locals copy directly; other ints unbox inline). The result
+    // is boxed once here. Ops that can yield a double (+ - * /) never take
+    // this path.
+    if (rawBinFastOk(x)) {
+      int ls = allocSlot(), rs = allocSlot(), out = allocSlot();
+      emitRawExpr(x.lhs.get(), ls);
+      emitRawExpr(x.rhs.get(), rs);
+      emitRawBin(op, ls, rs, out);
+      loadSlot(out);
+      emitBoxInt64();
       return;
     }
     int ls = evalSlot(x.lhs.get());
