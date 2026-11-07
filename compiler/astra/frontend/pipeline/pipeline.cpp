@@ -1,4 +1,5 @@
 #include "pipeline/pipeline.hpp"
+#include <algorithm>
 #include <cerrno>
 #include <cstdlib>
 #include <filesystem>
@@ -147,8 +148,10 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   }
   return p;
 }
-// Compiles emitted assembly (plus the runtime) with astra into outPath.
-// optimizationLevel maps to the clang-style -O flag (Astra/Astra honors it).
+// Compiles emitted assembly (plus the runtime modules) with astra into
+// outPath. The runtime is modular: every *.c next to the located
+// a_runtime.c (dispatch/printing plus the domain .c modules) is compiled
+// and linked in. optimizationLevel maps to the clang-style -O flag.
 int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostream& err, int optimizationLevel = 2) {
   std::string astra = findAstra();
   std::string runtimeC, runtimeDir;
@@ -156,10 +159,24 @@ int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostr
     err << "error: cannot locate A runtime (compiler/astra/runtime/a_runtime.c); set A_RUNTIME_C\n";
     return 1;
   }
+  std::vector<std::string> rtSrcs;
+  if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) {
+    rtSrcs.push_back(runtimeC);
+  } else {
+    std::error_code ec;
+    for (const auto& de : std::filesystem::directory_iterator(runtimeDir, ec)) {
+      if (de.path().extension() == ".c") rtSrcs.push_back(de.path().string());
+    }
+    if (rtSrcs.empty()) rtSrcs.push_back(runtimeC);
+    else std::sort(rtSrcs.begin(), rtSrcs.end());
+  }
   std::string optFlag = "-O" + std::to_string(optimizationLevel < 0 ? 0 : (optimizationLevel > 3 ? 3 : optimizationLevel));
-  int rc = runAstra({optFlag, "-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
+  std::vector<std::string> args = {optFlag, "-I" + runtimeDir, "-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
                      "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include",
-                     srcPath, runtimeC, "-o", outPath});
+                     srcPath};
+  args.insert(args.end(), rtSrcs.begin(), rtSrcs.end());
+  args.push_back("-o"); args.push_back(outPath);
+  int rc = runAstra(args);
   if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
   return 0;
 }

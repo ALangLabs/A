@@ -13,7 +13,7 @@ endif()
 add_library(a_project_options INTERFACE)
 target_include_directories(a_project_options INTERFACE
   $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/compiler/astra/frontend>
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/runtime>
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/compiler/astra/runtime>
   $<INSTALL_INTERFACE:include/a/compiler>
   $<INSTALL_INTERFACE:include/a/runtime>)
 if(MSVC)

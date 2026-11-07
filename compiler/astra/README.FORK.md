@@ -6,9 +6,9 @@ in-tree; there is no external gcc/clang/llc dependency.
 
 ## Role in A
 
-- `A -> x86-64 asm (emitAsm) -> astra (+ a_runtime.c) -> native EXE` for `a build`
-- `A -> x86-64 asm (emitAsm) -> astra (+ a_runtime.c) -> temp EXE -> run` for `a run`/`a test`
-- Built once by `cmake/libastra.cmake` into the `astra` driver / `libastra` and the staged runtime/support archive (`build/astra/`, `build/astralib/`: headers, `libastra1.a`, `runmain.o`, staged `a_runtime.*`).
+- `A -> x86-64 asm (emitAsm) -> astra (+ runtime modules) -> native EXE` for `a build`
+- `A -> x86-64 asm (emitAsm) -> astra (+ runtime modules) -> temp EXE -> run` for `a run`/`a test`
+- Built once by `cmake/libastra.cmake` into the `astra` driver / `libastra` and the staged runtime/support archive (`build/astra/`, `build/astralib/`: headers, `libastra1.a`, `runmain.o`, staged runtime sources (`a_runtime.*`, the domain `.c` modules, `a_runtime_internal.h`)).
 
 ## Layout
 

@@ -56,7 +56,7 @@ A/
 │       ├── tooling/            # AST formatter, doc generator, IR printers
 │       └── driver/  cli/       # Version, linking glue, `a` subcommands
 │
-├── runtime/                    # Values, memory, UTF-8 strings, collections, IO
+├── compiler/astra/runtime/     # C runtime modules + C++ support (values, UTF-8, collections, IO)
 │
 ├── stdlib/                     # Module docs/notes and A-file modules:
 │   ├── core/  math/  collections/  fs/  time/  test/

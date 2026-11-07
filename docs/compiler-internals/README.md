@@ -11,14 +11,14 @@ This document summarizes the current implementation architecture. For exact beha
 5. **Type checking / semantic analysis** — type inference/checking, builtin/native module typing, method signatures, trait/impl checks, symbol/module export tables.
 6. **Ownership / static analyses** — ownership/borrow-related analysis hooks (implementation-specific; runtime also enforces/tracks in places).
 7. **IR / optimization** — typed SSA IR emission and an LLVM-style optimization pipeline (`compiler/astra/frontend/optimization/`): constant folding, algebraic simplification/strength reduction, common subexpression elimination (EarlyCSE/GVN-lite), branch folding (SimplifyCFG-lite), dead-store elimination, dead code elimination, inlining, LICM, and InstCombine-style simplification, selected by `-O` levels (`-O0`=`optnone` through `-O3`/`-Ofast`). Astra itself accepts the same `-O` spellings (see Astra backend below).
-8. **Code generation** — the frontend (`frontend/codegen/`, `emitAsm`) emits x86-64 AT&T assembly that calls the A runtime API (`compiler/astra/runtime/a_runtime.h` externs, e.g. `a_*` helpers). The pipeline (`frontend/pipeline/`) stages the assembly as a temp `.s` and invokes the `astra` driver, which compiles/assembles that `.s` together with the C runtime (`compiler/astra/runtime/a_runtime.c`) into a native machine-code executable. `a run`/`a test` build a temp binary and execute it; `a build` writes the output executable.
+8. **Code generation** — the frontend (`frontend/codegen/`, `emitAsm`) emits x86-64 AT&T assembly that calls the A runtime API (`compiler/astra/runtime/a_runtime.h` externs, e.g. `a_*` helpers). The pipeline (`frontend/pipeline/`) stages the assembly as a temp `.s` and invokes the `astra` driver, which compiles/assembles that `.s` together with the C runtime modules (`compiler/astra/runtime/`: `a_runtime.c` + the domain `.c` modules) into a native machine-code executable. `a run`/`a test` build a temp binary and execute it; `a build` writes the output executable.
 
 ## Astra backend
 
-- The backend is **Astra** (`compiler/astra/`, a TinyCC-derived C compiler/assembler/linker toolchain). The C++ frontend is the only A compiler; it emits x86-64 AT&T assembly for A programs, and `astra` assembles/compiles that assembly plus the C runtime in `compiler/astra/runtime/` (`a_runtime.c`) into a native executable.
+- The backend is **Astra** (`compiler/astra/`, a TinyCC-derived C compiler/assembler/linker toolchain). The C++ frontend is the only A compiler; it emits x86-64 AT&T assembly for A programs, and `astra` assembles/compiles that assembly plus the C runtime in `compiler/astra/runtime/` (`a_runtime.c` + the domain `.c` modules) into a native executable.
 - `a run`, `a build`, and `a test` invoke the `astra` driver (found via `A_ASTRA`, staged `build/astra/astra` / related locations next to the executable, or `PATH`) as described in `frontend/pipeline/pipeline.cpp`.
 - Astra accepts LLVM/clang-style `-O` levels (`-O0`/`-O1`/`-O2`/`-O3`/`-Os`/`-Oz`/`-Ofast`): `-Os`/`-Oz` define `__OPTIMIZE_SIZE__`, and `-Ofast` maps to `-O3`, mirroring Clang's macro contract (the Astra codegen itself only implements `__OPTIMIZE__`). `a build -O<n>` forwards the optimization level to `astra`.
-- Python interop sources live in `compiler/astra/python/` (built as `a_python_interop`).
+- `import python:<pkg>` is handled at run time: codegen emits a `py_call` builtin and the `rt_python.c` runtime module dlopens libpython (no link-time dependency).
 
 ## Key directories
 
@@ -40,7 +40,7 @@ compiler/
     pipeline/         # frontend/pipeline orchestration
     tooling/          # formatter, docgen
 
-runtime/              # runtime support libraries/data structures
+compiler/astra/runtime/  # runtime support libraries/data structures (C modules + C++ support)
 stdlib/               # A standard library (prelude + std packages)
 tests/                # integration, IR, tooling/CLI tests
 tools/lsp/            # a-lsp server

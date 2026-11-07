@@ -61,7 +61,8 @@ struct NativeFunction;
 using NativeFunctionPtr = std::shared_ptr<NativeFunction>;
 
 // Opaque handle to an object owned by an embedded runtime (currently Python,
-// created by astra/python/python_interop.cpp). The runtime never sees the
+// via the A runtime's `py_call` support in compiler/astra/runtime/). The
+// runtime never sees the
 // concrete type: `release` is installed by the backend that created the
 // handle and is invoked from the destructor, so Python objects stay alive
 // exactly as long as A values referencing them.

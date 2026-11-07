@@ -253,7 +253,7 @@ cannot lower them. The full member tables and semantics live in
 │       ├── driver/             # Version, linking glue (driver.cpp)
 │       └── cli/                # `a run|build|check|test|fmt|doc|ir` (main.cpp)
 ├── cmake/                      # AOptions.cmake (options, warnings, LTO)
-├── runtime/                    # Values, memory models, UTF-8 strings, and file I/O
+├── compiler/astra/runtime/     # C runtime modules + C++ support (values, UTF-8, file I/O)
 ├── stdlib/                     # Module notes + A-file modules (math, json, net, …)
 │   └── std/                    # Self-hosted stdlib in A (Mojo std/ analog)
 ├── kernels/                    # A-written compute kernels (Mojo MAX analog)

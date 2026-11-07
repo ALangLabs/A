@@ -135,18 +135,34 @@ endif()
 # default library path looks for it (lib/ on Windows, the root elsewhere).
 
 file(COPY "${ASTRA_SRC}/include/" DESTINATION "${ASTRA_STAGE}/include")
-# A runtime (compiler/astra/runtime/): the frontend's emitted C includes
-# a_runtime.h and links a_runtime.c; stage both next to the support archive
-# so `astra` can compile emitted C standalone. Copied by a build-time custom
-# command (not file(COPY)) so runtime edits are picked up on rebuild.
-foreach(rt_file a_runtime.h a_runtime.c)
+# A runtime (compiler/astra/runtime/): the frontend's emitted assembly links
+# against the runtime modules (a_runtime.c dispatch/print/init plus the domain
+# .c modules and a_runtime_internal.h); stage them next to the
+# support archive so `astra` can compile emitted code standalone. Copied by
+# build-time custom commands (not file(COPY)) so runtime edits are picked up
+# on rebuild. CONFIGURE_DEPENDS re-globs when modules are added/removed, and
+# staged files whose source disappeared are removed at configure time.
+file(GLOB ASTRA_RUNTIME_SOURCES CONFIGURE_DEPENDS
+     "${ASTRA_ROOT}/runtime/*.c" "${ASTRA_ROOT}/runtime/*.h")
+file(GLOB ASTRA_RUNTIME_STAGED "${ASTRA_STAGE}/*.c" "${ASTRA_STAGE}/*.h")
+foreach(staged IN LISTS ASTRA_RUNTIME_STAGED)
+    get_filename_component(staged_name "${staged}" NAME)
+    if(NOT EXISTS "${ASTRA_ROOT}/runtime/${staged_name}")
+        file(REMOVE "${staged}")
+    endif()
+endforeach()
+set(ASTRA_RUNTIME_STAGED_OUTPUTS "")
+foreach(rt_file IN LISTS ASTRA_RUNTIME_SOURCES)
+    get_filename_component(rt_name "${rt_file}" NAME)
+    set(staged_file "${ASTRA_STAGE}/${rt_name}")
     add_custom_command(
-        OUTPUT "${ASTRA_STAGE}/${rt_file}"
+        OUTPUT "${staged_file}"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${ASTRA_ROOT}/runtime/${rt_file}" "${ASTRA_STAGE}/${rt_file}"
-        DEPENDS "${ASTRA_ROOT}/runtime/${rt_file}"
-        COMMENT "stage ${rt_file} -> astralib"
+                "${rt_file}" "${staged_file}"
+        DEPENDS "${rt_file}"
+        COMMENT "stage ${rt_name} -> astralib"
         VERBATIM)
+    list(APPEND ASTRA_RUNTIME_STAGED_OUTPUTS "${staged_file}")
 endforeach()
 if(WIN32)
     set(astra_libdir "${ASTRA_STAGE}/lib")
@@ -226,6 +242,6 @@ add_custom_command(OUTPUT "${astra_libdir}/runmain.o"
 
 add_custom_target(astra_runtime ALL
     DEPENDS "${astra_libdir}/libastra1.a" "${astra_libdir}/runmain.o"
-            "${ASTRA_STAGE}/a_runtime.h" "${ASTRA_STAGE}/a_runtime.c")
+            ${ASTRA_RUNTIME_STAGED_OUTPUTS})
 
 message(STATUS "libastra: native backend (${astra_version}) for ${astra_arch}")
