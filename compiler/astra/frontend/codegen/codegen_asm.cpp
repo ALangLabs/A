@@ -1482,20 +1482,36 @@ class AsmEmitter {
     emitBiCallSlots(id, slots);
   }
 
-  // py_call(module, member, args...): argv[0..1] are the module/member
-  // strings, argv[2..] the user args. The runtime resolves libpython.
+  // py_call(module, member, nkw, pos..., (kname, kval)*nkw): argv[0..1] are
+  // the module/member strings, argv[2] the kwargs count, then positional
+  // args, then name/value pairs. The runtime resolves libpython.
   void emitPyCall(const std::string& module, const std::string& member,
                   const CallExpr& call) {
     int ms = strLitSlot(module);
     int fs = strLitSlot(member);
-    std::vector<int> slots;
-    for (const CallArg& a : call.args) slots.push_back(evalSlot(a.value.get()));
-    Argv av = allocArgv((int)slots.size() + 2);
+    std::vector<int> posSlots;
+    std::vector<std::pair<std::string, int>> kwSlots;
+    for (const CallArg& a : call.args) {
+      int s = evalSlot(a.value.get());
+      if (a.name.empty()) {
+        posSlots.push_back(s);
+      } else {
+        kwSlots.push_back({a.name, s});
+      }
+    }
+    Argv av = allocArgv((int)posSlots.size() + 2 * (int)kwSlots.size() + 3);
     argvStore(av, 0, ms);
     argvStore(av, 1, fs);
-    for (std::size_t i = 0; i < slots.size(); ++i) argvStore(av, (int)i + 2, slots[i]);
+    argvStoreImm(av, 2, mkintA((int64_t)kwSlots.size()));
+    for (std::size_t i = 0; i < posSlots.size(); ++i)
+      argvStore(av, (int)i + 3, posSlots[i]);
+    for (std::size_t i = 0; i < kwSlots.size(); ++i) {
+      int ks = strLitSlot(kwSlots[i].first);
+      argvStore(av, (int)(3 + posSlots.size() + 2 * i), ks);
+      argvStore(av, (int)(3 + posSlots.size() + 2 * i + 1), kwSlots[i].second);
+    }
     movImm((uint64_t)builtinRuntimeId("py_call"), "%rdi");
-    movImm(slots.size() + 2, "%rsi");
+    movImm(av.n, "%rsi");
     leaSlot(argvPtr(av), "%rdx");
     emit("    call a_bi_call");
   }

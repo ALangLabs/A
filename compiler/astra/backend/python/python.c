@@ -9,6 +9,10 @@
 
 #if !defined(_WIN32)
 
+/* Iterables reporting a length above this stay opaque PyObjects instead of
+   being drained into A lists (see py_to_aval). */
+#define PY_OPAQUE_LEN_HINT 65536
+
 typedef void *PyObj;
 typedef ptrdiff_t PySsize;
 
@@ -51,6 +55,7 @@ struct PyRt {
     int (*PyDict_Next)(PyObj, PySsize *, PyObj *, PyObj *);
     PyObj (*PyObject_GetIter)(PyObj);
     PyObj (*PyIter_Next)(PyObj);
+    PySsize (*PyObject_Length)(PyObj);
     int (*PyObject_IsInstance)(PyObj, PyObj);
     void (*Py_IncRef)(PyObj);
     void (*Py_DecRef)(PyObj);
@@ -122,6 +127,7 @@ static int py_fill(void *h) {
     A_PY_SYM(PyDict_Next, "PyDict_Next");
     A_PY_SYM(PyObject_GetIter, "PyObject_GetIter");
     A_PY_SYM(PyIter_Next, "PyIter_Next");
+    A_PY_SYM(PyObject_Length, "PyObject_Length");
     A_PY_SYM(PyObject_IsInstance, "PyObject_IsInstance");
     A_PY_SYM(Py_IncRef, "Py_IncRef");
     A_PY_SYM(Py_DecRef, "Py_DecRef");
@@ -515,14 +521,25 @@ static aval py_to_aval(PyObj o) {
         }
         return s;
     } else {
-        /* generic iterable -> A list */
-        PyObj it = g_py.PyObject_GetIter(o);
-        if (it) {
-            aval r = py_iter_to_list(it);
-            g_py.Py_DecRef(it);
-            return r;
+        /* generic iterable -> A list, but only when small enough to be
+           reasonable. Large containers (tensors, datasets, big arrays)
+           stay opaque PyObjects — draining them would materialize
+           millions of wrappers, and they can still be passed back into
+           Python calls. Mirrors Mojo keeping PythonObject opaque unless
+           an explicit conversion is requested. */
+        PySsize hint = g_py.PyObject_Length(o);
+        if (hint > PY_OPAQUE_LEN_HINT) {
+            /* fall through to the opaque wrap below */
+        } else {
+            if (hint < 0) g_py.PyErr_Clear();
+            PyObj it = g_py.PyObject_GetIter(o);
+            if (it) {
+                aval r = py_iter_to_list(it);
+                g_py.Py_DecRef(it);
+                return r;
+            }
+            g_py.PyErr_Clear();
         }
-        g_py.PyErr_Clear();
         /* int-like via __index__, then float-like via __float__ */
         PyObj idx = g_py.PyNumber_Index(o);
         if (idx) {
@@ -687,9 +704,18 @@ static void py_fail(const char *what) {
     panicf("python %s failed%s%s", what, detail[0] ? ": " : "", detail);
 }
 
-/* py_call: argv = [module:str, member:str, args...]; member may be dotted. */
+/* py_call: argv = [module:str, member:str, nkw:int,
+                   pos1..posP, (kname:str, kval)*nkw].
+   member may be dotted. kwargs are passed to CPython as a real dict via
+   PyObject_Call(fn, args, kwargs_dict) — same model as Mojo's
+   PythonObject.__call__(**kwargs). */
 aval bi_py_call(uint64_t n, aval *argv) {
-    want_args("py_call", n, 2, UINT64_MAX);
+    want_args("py_call", n, 3, UINT64_MAX);
+    if (!a_is_int(argv[2])) panicf("py_call: bad kwargs count");
+    int64_t nkw = a_int_val(argv[2]);
+    if (nkw < 0 || (uint64_t)(3 + 2 * nkw) > n)
+        panicf("py_call: malformed kwargs");
+    uint64_t posc = n - 3 - (uint64_t)(2 * nkw);
     uint64_t mlen = 0, flen = 0;
     const char *modraw = str_data(argv[0], &mlen);
     const char *memraw = str_data(argv[1], &flen);
@@ -712,19 +738,45 @@ aval bi_py_call(uint64_t n, aval *argv) {
         fn = next;
         if (!fn) { free(mod); free(mem); py_fail("attribute access"); }
     }
-    PySsize nargs = (PySsize)(n - 2);
+    PySsize nargs = (PySsize)posc;
     PyObj args = g_py.PyTuple_New(nargs);
     if (!args) { g_py.Py_DecRef(fn); free(mod); free(mem); py_fail("call setup"); }
-    for (uint64_t i = 2; i < n; ++i) {
-        PyObj a = aval_to_py(argv[i]);
+    for (uint64_t i = 0; i < posc; ++i) {
+        PyObj a = aval_to_py(argv[3 + i]);
         if (!a) {
             g_py.Py_DecRef(args); g_py.Py_DecRef(fn);
             free(mod); free(mem);
             py_fail("argument conversion");
         }
-        g_py.PyTuple_SetItem(args, (PySsize)(i - 2), a); /* steals a */
+        g_py.PyTuple_SetItem(args, (PySsize)i, a); /* steals a */
     }
-    PyObj res = g_py.PyObject_Call(fn, args, NULL);
+    PyObj kw = NULL;
+    if (nkw > 0) {
+        kw = g_py.PyDict_New();
+        if (!kw) {
+            g_py.Py_DecRef(args); g_py.Py_DecRef(fn);
+            free(mod); free(mem); py_fail("kwargs setup");
+        }
+        for (int64_t k = 0; k < nkw; ++k) {
+            aval kv = argv[3 + posc + 2 * (uint64_t)k];
+            aval vv = argv[3 + posc + 2 * (uint64_t)k + 1];
+            uint64_t knlen = 0;
+            const char *kn = str_data(kv, &knlen);
+            PyObj key = g_py.PyUnicode_DecodeUTF8(kn, (PySsize)knlen, "strict");
+            PyObj val = aval_to_py(vv);
+            if (!key || !val || g_py.PyDict_SetItem(kw, key, val) < 0) {
+                if (key) g_py.Py_DecRef(key);
+                if (val) g_py.Py_DecRef(val);
+                g_py.Py_DecRef(kw); g_py.Py_DecRef(args); g_py.Py_DecRef(fn);
+                free(mod); free(mem);
+                py_fail("kwargs conversion");
+            }
+            g_py.Py_DecRef(key); /* SetItem incref'd it */
+            g_py.Py_DecRef(val); /* SetItem incref'd it */
+        }
+    }
+    PyObj res = g_py.PyObject_Call(fn, args, kw);
+    if (kw) g_py.Py_DecRef(kw);
     g_py.Py_DecRef(args);
     g_py.Py_DecRef(fn);
     free(mod); free(mem);
