@@ -2,7 +2,7 @@
 // v2 pipeline for A. The C++ frontend (lex/parse/sema/ownership/codegen/IR)
 // provides `check`, `fmt`, `doc`, and `ir`; execution and native builds emit
 // C (frontend/codegen) and delegate compilation to Astra
-// (compiler/astra/), the builtin TinyCC-fork toolchain driver.
+// (compiler/astra/), the builtin Astra-fork toolchain driver.
 #include <iosfwd>
 #include <memory>
 #include <string>

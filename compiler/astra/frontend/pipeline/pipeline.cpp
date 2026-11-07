@@ -36,11 +36,12 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
 
 // ---------------------------------------------------------------- Astra exec
 // `a run`/`a build`/`a test` are thin wrappers over the Astra toolchain
-// driver (compiler/astra/): the frontend emits C, `astra` compiles that C
-// (plus the A runtime) to machine code and links the executable.
+// driver (compiler/astra/): the frontend emits x86-64 assembly, `astra`
+// compiles/assembles that assembly together with the C A runtime
+// (a_runtime.c) to machine code and links the executable.
 
 // Locates the astra driver: A_ASTRA override, then the binary staged with
-// the runtime (build/tcclib/astra or next to this executable), then PATH.
+// the runtime (build/astralib/astra or next to this executable), then PATH.
 std::string findAstra(){
   if(const char* e=std::getenv("A_ASTRA"); e&&*e) return e;
   char exe[4096];
@@ -51,7 +52,7 @@ std::string findAstra(){
     auto pos=dir.find_last_of('/');
     if(pos!=std::string::npos){
       dir=dir.substr(0,pos);
-      for(const char* rel: {"/tcclib/astra","/astra","/tcc/astra","/../tcclib/astra"}){
+      for(const char* rel: {"/astra/astra","/astralib/../astra/astra","/astralib/astra","/astra"}){
         std::string c=dir+rel;
         if(access(c.c_str(),X_OK)==0) return c;
       }
@@ -104,16 +105,16 @@ std::string tempPath(const char* tag,const std::string& name=""){
 }
 
 // Locates the A runtime C source (compiler/astra/runtime/a_runtime.c) that
-// the emitted C links against. Candidates: $A_RUNTIME_C, next to the astra
-// binary (staged tcclib copy), the source tree relative to the astra binary
-// (build/tcc/astra -> ../../compiler/astra/runtime), and the cwd.
+// is compiled/linked with the emitted assembly. Candidates: $A_RUNTIME_C, next to the astra
+// binary (staged astralib copy), the source tree relative to the astra binary
+// (build/astra/astra -> ../../compiler/astra/runtime), and the cwd.
 bool findRuntime(const std::string& astra, std::string& runtimeC, std::string& runtimeDir) {
   std::vector<std::string> candidates;
   if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) candidates.push_back(e);
   auto addDir = [&](const std::string& d) {
     if (d.empty()) return;
     candidates.push_back(d + "/a_runtime.c");
-    candidates.push_back(d + "/../tcclib/a_runtime.c");
+    candidates.push_back(d + "/../astralib/a_runtime.c");
     candidates.push_back(d + "/../../compiler/astra/runtime/a_runtime.c");
     candidates.push_back(d + "/../../../compiler/astra/runtime/a_runtime.c");
   };
@@ -147,7 +148,7 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   return p;
 }
 // Compiles emitted assembly (plus the runtime) with astra into outPath.
-// optimizationLevel maps to the clang-style -O flag (Astra/TinyCC honors it).
+// optimizationLevel maps to the clang-style -O flag (Astra/Astra honors it).
 int astraBuild(const std::string& srcPath, const std::string& outPath, std::ostream& err, int optimizationLevel = 2) {
   std::string astra = findAstra();
   std::string runtimeC, runtimeDir;
@@ -197,8 +198,8 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
-  // Execution: the frontend emits C, Astra compiles it to a binary, and the
-  // binary runs as a child process.
+  // Execution: the frontend emits x86-64 assembly, Astra assembles/compiles it
+  // with the runtime into a binary, and the binary runs as a child process.
   return compileAndRun(m,in,out,err,false,config.optimizationLevel);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){

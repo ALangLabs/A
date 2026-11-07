@@ -60,8 +60,8 @@ cmake --build build -j
 
 # The astra driver is a C compiler; it consumes the C emitted by the
 # frontend (via `a build`), not .a sources directly:
-./build/tcc/astra -c /tmp/emitted.c -o /tmp/hello.o
-./build/tcc/astra link /tmp/hello.o -o /tmp/hello-c
+./build/astra/astra -c /tmp/emitted.c -o /tmp/hello.o
+./build/astra/astra link /tmp/hello.o -o /tmp/hello-c
 
 # Print typed SSA IR
 ./build/a ir examples/basics/hello.a

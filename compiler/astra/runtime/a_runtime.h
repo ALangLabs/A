@@ -118,6 +118,28 @@ enum {
     /* repl.quiet: suppress print/eprint output (used to replay session
        history silently inside repl.eval'd code). */
     A_BI_REPL_QUIET,
+    /* binary module: tagged-value <-> byte-array codec */
+    A_BI_BINARY_ENCODE, A_BI_BINARY_DECODE,
+    /* log module: leveled logging with optional JSON fields */
+    A_BI_LOG_SET_LEVEL, A_BI_LOG_SET_JSON,
+    A_BI_LOG_DEBUG, A_BI_LOG_INFO, A_BI_LOG_WARN, A_BI_LOG_ERROR,
+    /* metrics module: counters/gauges/histograms + text render */
+    A_BI_METRICS_COUNTER, A_BI_METRICS_GAUGE, A_BI_METRICS_HISTOGRAM,
+    A_BI_METRICS_RENDER, A_BI_METRICS_RESET,
+    /* trace module: in-process span tracking */
+    A_BI_TRACE_START, A_BI_TRACE_END, A_BI_TRACE_CURRENT,
+    A_BI_TRACE_SET_ATTRIBUTE, A_BI_TRACE_ADD_EVENT,
+    A_BI_TRACE_INJECT, A_BI_TRACE_EXTRACT, A_BI_TRACE_SPANS,
+    A_BI_TRACE_RESET,
+    /* net module: name resolution + TLS availability probe */
+    A_BI_NET_RESOLVE, A_BI_NET_TLS_AVAILABLE,
+    /* arena module: bump/pool allocators */
+    A_BI_ARENA_NEW, A_BI_ARENA_POOL, A_BI_ARENA_REGION,
+    A_BI_ARENA_ALLOC, A_BI_ARENA_RELEASE, A_BI_ARENA_RESET,
+    A_BI_ARENA_USED, A_BI_ARENA_TOTAL,
+    /* unsafe module: raw-ish container/memory access */
+    A_BI_UNSAFE_GET, A_BI_UNSAFE_SET, A_BI_UNSAFE_ADDRESS_OF,
+    A_BI_UNSAFE_LOAD, A_BI_UNSAFE_STORE, A_BI_UNSAFE_OFFSET,
     A_BI_COUNT
 };
 

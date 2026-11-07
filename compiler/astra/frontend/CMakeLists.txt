@@ -1,7 +1,7 @@
 # C++ frontend of the A toolchain (formerly compiler/stages/).
 # Everything compiler-related lives under compiler/astra/; this
 # directory holds the lex/parse/sema/IR/codegen/pipeline modules while
-# ../runtime/, ../python/ and the TinyCC fork are the C backend.
+# ../runtime/, ../python/ and the Astra fork are the C backend.
 # Modules in dependency order (each owns its CMakeLists.txt).
 add_subdirectory(diagnostics)
 add_subdirectory(lexer)

@@ -1,5 +1,5 @@
-# Astra toolchain support targets. The TinyCC fork itself is built by
-# cmake/libtcc.cmake (libtcc + the `astra` driver + staged tcclib/); this file
+# Astra toolchain support targets. The Astra fork itself is built by
+# cmake/libastra.cmake (libastra + the `astra` driver + staged astralib/); this file
 # covers the C++ pieces that live alongside it.
 
 # C++ frontend (lex/parse/sema/IR/pipeline), formerly compiler/stages/.

@@ -67,8 +67,7 @@ Measured over 7 runs against **C++ (`g++ -O2`)** and **CPython 3.13** on identic
 ### Prerequisites
 * CMake 3.20+
 * C++20 compiler (GCC 11+, Clang 14+, or MSVC 19.29+)
-* `g++` on `PATH` for `a build` — the native backend emits C++ and shells out
-  to `g++ -O3 -std=c++20`
+* The staged `astra` backend (built with the project, `build/astra/` + `build/astralib/`) for `a build`/`a run`/`a test` — the frontend emits x86-64 assembly and `astra` assembles/links it with the A runtime into a native executable (no `g++` build step)
 
 ### Build
 ```bash

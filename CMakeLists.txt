@@ -20,7 +20,7 @@ add_subdirectory(tools/lsp)
 # In-process JIT backend (Goose-style): the Astra (compiler/astra/)
 # compiles the C
 # emitter's output into memory for `a run`.
-include(cmake/libtcc.cmake)
+include(cmake/libastra.cmake)
 # Packaging
 include(GNUInstallDirs)
 install(TARGETS a RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

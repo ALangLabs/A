@@ -438,6 +438,40 @@ class AsmEmitter {
         }
       }
     }
+    // Merge inherited fields/methods from baseClass chains. Sema resolves
+    // them for type checking; codegen needs the same view so subclass
+    // constructors take base fields and method lookup finds base methods.
+    // Field order matches sema: farthest ancestor first, own fields last.
+    // Resolved per-decl (not via other StructInfo::fieldNames) so the result
+    // does not depend on structList_ ordering.
+    for (StructInfo* info : structList_) {
+      if (!info->decl) continue;
+      std::vector<const StructDecl*> chain;
+      std::set<std::string> seenNames;
+      std::string base = info->decl->baseClass;
+      while (!base.empty() && seenNames.insert(base).second) {
+        auto bit = structs_.find(base);
+        if (bit == structs_.end() || !bit->second->decl) break;
+        chain.push_back(bit->second->decl);
+        base = bit->second->decl->baseClass;
+      }
+      if (chain.empty()) continue;
+      std::vector<std::string> fields;
+      std::set<std::string> have;
+      for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+        for (const FieldDecl& f : (*it)->fields)
+          if (have.insert(f.name).second) fields.push_back(f.name);
+      for (const std::string& f : info->fieldNames)
+        if (have.insert(f).second) fields.push_back(f);
+      info->fieldNames = fields;
+      // Methods: nearest ancestor wins over farther ones; own methods were
+      // registered first and emplace() never overwrites them.
+      for (const StructDecl* anc : chain)
+        for (const auto& m : anc->methods) {
+          auto fit = fns_.find(m.get());
+          if (fit != fns_.end()) info->methods.emplace(m->name, fit->second);
+        }
+    }
   }
 
   std::int64_t evalConstIntA(const Expr* e, std::int64_t fallback) {
@@ -2389,6 +2423,21 @@ class AsmEmitter {
             }
           }
           fail("unknown module member '" + chain.back() + "'");
+          movImm(kNone);
+          return;
+        }
+        if (mb && mb->kind == BKind::Module && mb->moduleId < 0) {
+          // Native module constant: math.PI, math.E, ...
+          if (chain.size() == 1) {
+            if (const std::string* cn = nativeConstant(mb->aux, chain[0])) {
+              double v = *cn == "PI"   ? 3.14159265358979323846
+                        : *cn == "E"    ? 2.71828182845904523536
+                                        : 0.0;
+              movImm(dblBits(v));
+              return;
+            }
+          }
+          fail("unknown native module member '" + chain.back() + "'");
           movImm(kNone);
           return;
         }

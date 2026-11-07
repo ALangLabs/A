@@ -1,0 +1,490 @@
+/*
+ *  ASTRA - Tiny C Compiler
+ * 
+ *  Copyright (c) 2001-2004 Fabrice Bellard
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+
+#ifndef ONE_SOURCE
+# define ONE_SOURCE 1
+#endif
+
+#include "astra.h"
+#if ONE_SOURCE
+# include "libastra.c"
+#endif
+#include "astratools.c"
+#include <stdio.h>
+#if defined(__APPLE__)
+# include <mach-o/dyld.h>
+#endif
+
+static const char help[] =
+    "Astra "ASTRA_VERSION" - Tiny C Compiler fork for the A language\n"
+    "Usage: astra [link|cc] [options...] [-o outfile] [-c] infile(s)...\n"
+    "       astra [options...] -run infile (or --) [arguments...]\n"
+    "Commands:\n"
+    "  link          link object files into an executable (default action)\n"
+    "  cc            compile and link (default action)\n"
+    "General options:\n"
+    "  -c           compile only - generate an object file\n"
+    "  -o outfile   set output filename\n"
+    "  -run         run compiled source\n"
+    "  -fflag       set or reset (with 'no-' prefix) 'flag' (see astra -hh)\n"
+    "  -Wwarning    set or reset (with 'no-' prefix) 'warning' (see astra -hh)\n"
+    "  -w           disable all warnings\n"
+    "  -v --version show version\n"
+    "  -vv          show search paths or loaded files\n"
+    "  -h -hh       show this, show more help\n"
+    "  -bench       show compilation statistics\n"
+    "  -            use stdin pipe as infile\n"
+    "  @listfile    read arguments from listfile\n"
+    "Preprocessor options:\n"
+    "  -Idir        add include path 'dir'\n"
+    "  -Dsym[=val]  define 'sym' with value 'val'\n"
+    "  -Usym        undefine 'sym'\n"
+    "  -E           preprocess only\n"
+    "  -nostdinc    do not use standard system include paths\n"
+    "Linker options:\n"
+    "  -Ldir        add library path 'dir'\n"
+    "  -llib        link with dynamic or static library 'lib'\n"
+    "  -nostdlib    do not link with standard crt and libraries\n"
+    "  -r           generate (relocatable) object file\n"
+    "  -rdynamic    export all global symbols to dynamic linker\n"
+    "  -shared      generate a shared library/dll\n"
+    "  -soname      set name for shared library to be used at runtime\n"
+    "  -Wl,-opt[=val]  set linker option (see astra -hh)\n"
+    "Debugger options:\n"
+    "  -g           generate stab runtime debug info\n"
+    "  -gdwarf[-x]  generate dwarf runtime debug info\n"
+#ifdef ASTRA_TARGET_PE
+    "  -g.pdb       create .pdb debug database\n"
+#endif
+#ifdef CONFIG_ASTRA_BCHECK
+    "  -b           compile with built-in memory and bounds checker (implies -g)\n"
+#endif
+#ifdef CONFIG_ASTRA_BACKTRACE
+    "  -bt[N]       link with backtrace (stack dump) support [show max N callers]\n"
+#endif
+    "Misc. options:\n"
+    "  -std=version define __STDC_VERSION__ according to version (c11/gnu11)\n"
+    "  -x[c|a|b|n]  specify type of the next infile (C,ASM,BIN,NONE)\n"
+    "  -Bdir        set astra's private include/library dir\n"
+    "  -M[M]D       generate make dependency file [ignore system files]\n"
+    "  -M[M]        as above but no other output\n"
+    "  -MF file     specify dependency file name\n"
+#if defined(ASTRA_TARGET_I386) || defined(ASTRA_TARGET_X86_64)
+    "  -m32/64      defer to i386/x86_64 cross compiler\n"
+#endif
+    "Tools:\n"
+    "  create library  : astra -ar [crstvx] lib [files]\n"
+#ifdef ASTRA_TARGET_PE
+    "  create def file : astra -impdef lib.dll [-v] [-o lib.def]\n"
+#endif
+    "Discussion & bug reports:\n"
+    "  https://lists.nongnu.org/mailman/listinfo/astra-devel\n"
+    ;
+
+static const char help2[] =
+    "Tiny C Compiler "ASTRA_VERSION" - More Options\n"
+    "Special options:\n"
+    "  -P -P1                        with -E: no/alternative #line output\n"
+    "  -dD -dM                       with -E: output #define directives\n"
+    "  -pthread                      same as -D_REENTRANT and -lpthread\n"
+    "  -O0/-O1/-O2/-O3/-Os/-Oz/-Ofast  LLVM-style optimization levels (defines __OPTIMIZE__ / __OPTIMIZE_SIZE__)\n"
+    "  -On                           same as -D__OPTIMIZE__ for n > 0\n"
+    "  -Wp,-opt                      same as -opt\n"
+    "  -include file                 include 'file' above each input file\n"
+    "  -nostdlib                     do not link with standard crt/libs\n"
+    "  -isystem dir                  add 'dir' to system include path\n"
+    "  -static                       link to static libraries (not recommended)\n"
+    "  -dumpversion                  print version\n"
+    "  -print-search-dirs            print search paths\n"
+    "  -rstdin file                  with -run: use 'file' as custom stdin\n"
+    "  -dt                           with -run/-E: auto-define 'test_...' macros\n"
+    "Ignored options:\n"
+    "  -arch -C --param -pedantic -pipe -s -traditional\n"
+    "-W[no-]... warnings:\n"
+    "  all                           turn on some (*) warnings\n"
+    "  error[=warning]               stop after warning (any or specified)\n"
+    "  write-strings                 strings are const\n"
+    "  unsupported                   warn about ignored options, pragmas, etc.\n"
+    "  implicit-function-declaration warn for missing prototype (*)\n"
+    "  discarded-qualifiers          warn when const is dropped (*)\n"
+    "-f[no-]... flags:\n"
+    "  unsigned-char                 default char is unsigned\n"
+    "  signed-char                   default char is signed\n"
+    "  common                        use common section instead of bss\n"
+    "  leading-underscore            decorate extern symbols\n"
+    "  ms-extensions                 allow anonymous struct in struct\n"
+    "  dollars-in-identifiers        allow '$' in C symbols\n"
+    "  reverse-funcargs              evaluate function arguments right to left\n"
+    "  gnu89-inline                  'extern inline' is like 'static inline'\n"
+    "  asynchronous-unwind-tables    create eh_frame section [on]\n"
+    "  test-coverage                 create code coverage code\n"
+    "-m... target specific options:\n"
+    "  ms-bitfields                  use MSVC bitfield layout\n"
+#ifdef ASTRA_TARGET_ARM
+    "  float-abi                     hard/softfp on arm\n"
+#endif
+#ifdef ASTRA_TARGET_X86_64
+    "  no-sse                        disable floats on x86_64\n"
+#endif
+    "-Wl,... linker options:\n"
+    "  -nostdlib                     do not search standard library paths\n"
+    "  -[no-]whole-archive           load lib(s) fully/only as needed\n"
+    "  -export-all-symbols           same as -rdynamic\n"
+    "  -export-dynamic               same as -rdynamic\n"
+    "  -image-base= -Ttext=          set base address of executable\n"
+    "  -section-alignment=           set section alignment in executable\n"
+#ifdef ASTRA_TARGET_PE
+    "  -file-alignment=              set PE file alignment\n"
+    "  -stack=                       set PE stack reserve\n"
+    "  -large-address-aware          set related PE option\n"
+    "  -subsystem=[console/windows]  set PE subsystem\n"
+    "  -oformat=[pe-* binary]        set executable output format\n"
+    "Predefined macros:\n"
+    "  astra -E -dM - < nul\n"
+#else
+    "  -rpath=                       set dynamic library search path\n"
+    "  -enable-new-dtags             set DT_RUNPATH instead of DT_RPATH\n"
+    "  -soname=                      set DT_SONAME elf tag\n"
+#if defined(ASTRA_TARGET_MACHO)
+    "  -install_name=                set DT_SONAME elf tag (soname macOS alias)\n"
+#else
+    "  -Ipath, -dynamic-linker=path  set ELF interpreter to path\n"
+#endif
+    "  -Bsymbolic                    set DT_SYMBOLIC elf tag\n"
+    "  -oformat=[elf32/64-* binary]  set executable output format\n"
+    "  -init= -fini= -Map= -as-needed -O -z= (ignored)\n"
+    "Predefined macros:\n"
+    "  astra -E -dM - < /dev/null\n"
+#endif
+    "See also the manual for more details.\n"
+    ;
+
+static const char version[] =
+    "astra version "ASTRA_VERSION
+#ifdef ASTRA_GITHASH
+    " "ASTRA_GITHASH
+#endif
+    " ("
+#ifdef ASTRA_TARGET_I386
+        "i386"
+#elif defined ASTRA_TARGET_X86_64
+        "x86_64"
+#elif defined ASTRA_TARGET_C67
+        "C67"
+#elif defined ASTRA_TARGET_ARM
+        "ARM"
+# ifdef ASTRA_ARM_EABI
+        " eabi"
+#  ifdef ASTRA_ARM_HARDFLOAT
+        "hf"
+#  endif
+# endif
+#elif defined ASTRA_TARGET_ARM64
+        "AArch64"
+#elif defined ASTRA_TARGET_RISCV64
+        "riscv64"
+#endif
+#ifdef ASTRA_TARGET_PE
+        " Windows"
+#elif defined(ASTRA_TARGET_MACHO)
+        " Darwin"
+#elif TARGETOS_FreeBSD || TARGETOS_FreeBSD_kernel
+        " FreeBSD"
+#elif TARGETOS_OpenBSD
+        " OpenBSD"
+#elif TARGETOS_NetBSD
+        " NetBSD"
+#else
+        " Linux"
+#endif
+    ")\n"
+    ;
+
+static void print_dirs(const char *msg, char **paths, int nb_paths)
+{
+    int i;
+    printf("%s:\n%s", msg, nb_paths ? "" : "  -\n");
+    for(i = 0; i < nb_paths; i++)
+        printf("  %s\n", paths[i]);
+}
+
+static void print_search_dirs(ASTRAState *s)
+{
+    printf("install: %s\n", s->astra_lib_path);
+    /* print_dirs("programs", NULL, 0); */
+    print_dirs("include", s->sysinclude_paths, s->nb_sysinclude_paths);
+    print_dirs("libraries", s->library_paths, s->nb_library_paths);
+    printf("libastra1:\n  %s/%s\n", s->library_paths[0], CONFIG_ASTRA_CROSSPREFIX ASTRA_LIBASTRA1);
+#ifdef ASTRA_TARGET_UNIX
+    print_dirs("crt", s->crt_paths, s->nb_crt_paths);
+    printf("elfinterp:\n  %s\n",  s->elfint);
+#endif
+}
+
+static void set_environment(ASTRAState *s)
+{
+    char * path;
+
+    path = getenv("C_INCLUDE_PATH");
+    if(path != NULL) {
+        astra_add_sysinclude_path(s, path);
+    }
+    path = getenv("CPATH");
+    if(path != NULL) {
+        astra_add_include_path(s, path);
+    }
+    path = getenv("LIBRARY_PATH");
+    if(path != NULL) {
+        astra_add_library_path(s, path);
+    }
+}
+
+static char *default_outputfile(ASTRAState *s, const char *first_file)
+{
+    char buf[1024];
+    char *ext;
+    const char *name = "a";
+
+    if (first_file && strcmp(first_file, "-"))
+        name = astra_basename(first_file);
+    if (strlen(name) + 4 >= sizeof buf)
+        name = "a";
+    strcpy(buf, name);
+    ext = astra_fileextension(buf);
+#ifdef ASTRA_TARGET_PE
+    if (s->output_type == ASTRA_OUTPUT_DLL)
+        strcpy(ext, ".dll");
+    else
+    if (s->output_type == ASTRA_OUTPUT_EXE)
+        strcpy(ext, ".exe");
+    else
+#endif
+    if ((s->just_deps || s->output_type == ASTRA_OUTPUT_OBJ) && !s->option_r && *ext)
+        strcpy(ext, ".o");
+    else
+        strcpy(buf, "a.out");
+    return astra_strdup(buf);
+}
+
+static unsigned getclock_ms(void)
+{
+#ifdef _WIN32
+    return GetTickCount();
+#else
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return tv.tv_sec*1000 + (tv.tv_usec+500)/1000;
+#endif
+}
+
+/* Locate the staged Astra runtime (libastra1.a + headers) that
+   cmake/libastra.cmake places next to the driver build, so `astra` works
+   without an explicit -B. Returns NULL when nothing is found; an explicit
+   -B on the command line still overrides this default. */
+static const char *astra_libpath(void)
+{
+    static char dirbuf[4096];
+    static char probebuf[4096];
+    char exe[4096];
+#if defined(__APPLE__)
+    uint32_t sz = sizeof exe;
+    if (_NSGetExecutablePath(exe, &sz) != 0)
+        return NULL;
+#else
+    ssize_t n = readlink("/proc/self/exe", exe, sizeof exe - 1);
+    if (n <= 0)
+        return NULL;
+    exe[n] = '\0';
+#endif
+    char *slash = strrchr(exe, '/');
+    if (!slash)
+        return NULL;
+    *slash = '\0';
+    /* <exedir>, <exedir>/../astralib, <exedir>/astralib, <exedir>/.. — the staged
+       runtime layouts produced by cmake/libastra.cmake. */
+    static const char *subs[] = { "", "/../astralib", "/astralib", "/.." };
+    for (size_t i = 0; i < sizeof subs / sizeof *subs; i++) {
+        snprintf(probebuf, sizeof probebuf, "%s%s/libastra1.a", exe, subs[i]);
+        FILE *f = fopen(probebuf, "rb");
+        if (f) {
+            fclose(f);
+            snprintf(dirbuf, sizeof dirbuf, "%s%s", exe, subs[i]);
+            return dirbuf;
+        }
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv)
+{
+    /* Astra toolchain subcommands: `astra link ...` is the linker front-end
+       (a plain astra link invocation over object files); `astra cc ...` is an
+       alias for the default compile+link mode. */
+    if (argc > 1 && (!strcmp(argv[1], "link") || !strcmp(argv[1], "cc"))) {
+        memmove(&argv[1], &argv[2], (size_t)(argc - 2) * sizeof *argv);
+        argv[--argc] = NULL;
+    }
+    ASTRAState *s, *s1;
+    int ret, opt, n = 0, t = 0, done;
+    unsigned start_time = 0, end_time = 0;
+    const char *first_file;
+    int argc0 = argc;
+    char **argv0 = argv;
+    FILE *ppfp = NULL;
+
+redo:
+    argc = argc0, argv = argv0;
+    s = s1 = astra_new();
+    {
+        const char *lp = astra_libpath();
+        if (lp)
+            astra_set_lib_path(s, lp);
+    }
+    opt = astra_parse_args(s, &argc, &argv);
+
+    if (n == 0) {
+        ret = 0;
+        if (opt == OPT_HELP) {
+            fputs(help, stdout);
+            if (s->verbose)
+                goto help2;
+        } else if (opt == OPT_HELP2) {
+            help2: fputs(help2, stdout);
+        } else if (opt == OPT_M32 || opt == OPT_M64) {
+            ret = astra_tool_cross(argv, opt);
+        } else if (s->verbose)
+            printf("%s", version);
+
+        if (opt == OPT_AR)
+            ret = astra_tool_ar(argc, argv);
+#ifdef ASTRA_TARGET_PE
+        if (opt == OPT_IMPDEF)
+            ret = astra_tool_impdef(argc, argv);
+#endif
+        if (opt == OPT_PRINT_DIRS) {
+            /* initialize search dirs */
+            set_environment(s);
+            astra_set_output_type(s, ASTRA_OUTPUT_MEMORY);
+            print_search_dirs(s);
+        }
+        if (opt) {
+            if (opt < 0) err:
+                ret = 1;
+            astra_delete(s);
+            return ret;
+        }
+        if (s->nb_files == 0) {
+            astra_error_noabort("no input files");
+        } else if (s->output_type == ASTRA_OUTPUT_PREPROCESS) {
+            if (s->outfile && 0!=strcmp("-",s->outfile)) {
+                ppfp = astra_fopen(s->outfile, "wb");
+                if (!ppfp)
+                    astra_error_noabort("could not write '%s'", s->outfile);
+            }
+        } else if (s->output_type == ASTRA_OUTPUT_OBJ && !s->option_r) {
+            if (s->nb_libraries)
+                astra_error_noabort("cannot specify libraries with -c");
+            else if (s->nb_files > 1 && s->outfile)
+                astra_error_noabort("cannot specify output file with -c many files");
+        }
+        if (s->nb_errors)
+            goto err;
+        if (s->do_bench)
+            start_time = getclock_ms();
+    }
+
+    set_environment(s);
+    if (s->output_type == 0)
+        s->output_type = ASTRA_OUTPUT_EXE;
+    ret = astra_set_output_type(s, s->output_type);
+    if (ppfp)
+        s->ppfp = ppfp;
+
+    if ((s->output_type == ASTRA_OUTPUT_MEMORY
+      || s->output_type == ASTRA_OUTPUT_PREPROCESS)
+        && (s->dflag & 16)) { /* -dt option */
+        if (t)
+            s->dflag |= 32;
+        s->run_test = ++t;
+        if (n)
+            --n;
+    }
+
+    /* compile or add each files or library */
+    first_file = NULL;
+    while (0 == ret) {
+        struct filespec *f = s->files[n];
+        s->filetype = f->type;
+        if (f->type & AFF_TYPE_LIB) {
+            ret = astra_add_library(s, f->name);
+        } else {
+            if (1 == s->verbose)
+                printf("-> %s\n", f->name);
+            if (!first_file)
+                first_file = f->name;
+            ret = astra_add_file(s, f->name);
+        }
+        if (++n == s->nb_files)
+            break;
+        if (s->output_type == ASTRA_OUTPUT_OBJ && !s->option_r)
+            break;
+    }
+
+    if (s->do_bench)
+        end_time = getclock_ms();
+
+    if (s->run_test) {
+        t = 0;
+    } else if (s->output_type == ASTRA_OUTPUT_PREPROCESS) {
+        ;
+    } else if (0 == ret) {
+        if (s->output_type == ASTRA_OUTPUT_MEMORY) {
+#ifdef ASTRA_IS_NATIVE
+            ret = astra_run(s, argc, argv);
+#endif
+        } else {
+            if (!s->outfile)
+                s->outfile = default_outputfile(s, first_file);
+            if (!s->just_deps)
+                ret = astra_output_file(s, s->outfile);
+            if (!ret && s->gen_deps)
+                gen_makedeps(s, s->outfile, s->deps_outfile);
+        }
+    }
+
+    done = 1;
+    if (t)
+        done = 0; /* run more tests with -dt -run */
+    else if (ret) {
+        if (s->nb_errors)
+            ret = 1;
+        /* else keep the original exit code from astra_run() */
+    } else if (n < s->nb_files)
+        done = 0; /* compile more files with -c */
+    else if (s->do_bench)
+        astra_print_stats(s, end_time - start_time);
+
+    astra_delete(s);
+    if (!done)
+        goto redo;
+    if (ppfp)
+        astra_fclose(ppfp);
+    return ret;
+}
