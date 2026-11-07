@@ -78,7 +78,29 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "unsafe_get", bi_unsafe_get }, { "unsafe_set", bi_unsafe_set },
     { "unsafe_address_of", bi_unsafe_address_of }, { "unsafe_load", bi_unsafe_load },
     { "unsafe_store", bi_unsafe_store }, { "unsafe_offset", bi_unsafe_offset },
-    { "py_call", bi_py_call }, { "py_buffer", bi_py_buffer }
+    { "py_call", bi_py_call }, { "py_buffer", bi_py_buffer },
+    { "py_import_module", bi_py_import_module },
+    { "py_try_import_module", bi_py_try_import_module },
+    { "py_getattr", bi_py_getattr_builtin },
+    { "py_try_getattr", bi_py_try_getattr_builtin },
+    { "py_setattr", bi_py_setattr_builtin },
+    { "py_hasattr", bi_py_hasattr },
+    { "py_delattr", bi_py_delattr },
+    { "py_getitem", bi_py_getitem_builtin },
+    { "py_setitem", bi_py_setitem_builtin },
+    { "py_delitem", bi_py_delitem },
+    { "py_call_obj", bi_py_call_obj },
+    { "py_try_call_obj", bi_py_try_call_obj },
+    { "py_call_method", bi_py_call_method_builtin },
+    { "py_try_call_method", bi_py_try_call_method_builtin },
+    { "py_is_pyobject", bi_py_is_pyobject },
+    { "py_str", bi_py_str_builtin },
+    { "py_repr", bi_py_repr_builtin },
+    { "py_len", bi_py_len_builtin },
+    { "py_contains", bi_py_contains_builtin },
+    { "py_truthy", bi_py_truthy_builtin },
+    { "py_type", bi_py_type_builtin },
+    { "py_buffer_info", bi_py_buffer_info }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -168,6 +190,17 @@ aval a_list_push(aval list, aval v) {
     AArr *a = arr_of(list, "list");
     arr_push(a, v);
     return list;
+}
+aval a_list_append(aval list, aval v) {
+    AObj *o = obj_of(list);
+    if (o && o->type == T_LIST) {
+        arr_push((AArr *)o, v);
+        return A_NONE;
+    }
+    if (o && o->type == T_VIEW)
+        panicf("Cannot 'append' a view.");
+    aval args[1] = { v };
+    return a_method(list, "append", 1, 0, args);
 }
 aval a_setattr(aval obj, const char *name, aval v) {
     /* field assignment: dicts store by key; opaque Python objects go

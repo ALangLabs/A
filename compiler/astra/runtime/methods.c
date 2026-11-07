@@ -857,12 +857,10 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
                 panicf("key not found");
             }
             aval r = d->pairs[i].v;
-            memmove(d->pairs + i, d->pairs + i + 1,
-                    (size_t)(d->h.len - (uint64_t)i - 1) * sizeof(APair));
-            d->h.len--;
+            dict_remove_at(d, (uint64_t)i);
             return r;
         }
-        if (!strcmp(name, "clear")) { want_args(name, n, 0, 0); d->h.len = 0; return A_NONE; }
+        if (!strcmp(name, "clear")) { want_args(name, n, 0, 0); dict_clear(d); return A_NONE; }
         if (!strcmp(name, "copy")) {
             want_args(name, n, 0, 0);
             aval nd = a_dict_new();

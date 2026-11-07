@@ -692,6 +692,9 @@ aval a_dict_new(void) {
     d->h.len = 0;
     d->h.cap = 0;
     d->pairs = NULL;
+    d->phash = NULL;
+    d->slots = NULL;
+    d->scap = 0;
     return mkobj(&d->h);
 }
 
@@ -1199,13 +1202,13 @@ aval a_env_get(aval env, uint64_t i) {
     return e->slots[i];
 }
 
-AResult *result_new(int ok, aval value) {
+AResult *result_new(int ok, int is_option, aval value) {
     AResult *r = (AResult *)xmalloc(sizeof(AResult));
     r->h.type = T_RESULT;
     r->h.len = ok ? 1 : 0;
     r->h.cap = 0;
     r->ok = ok ? 1u : 0u;
-    r->is_option = 0;
+    r->is_option = is_option ? 1u : 0u;
     r->value = value;
     return r;
 }

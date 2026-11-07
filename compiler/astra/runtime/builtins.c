@@ -263,8 +263,8 @@ aval bi_reduce(uint64_t n, aval *argv) {
     return acc;
 }
 
-aval bi_ok(uint64_t n, aval *argv) { want_args("ok", n, 1, 1); return mkobj(result_new(1, argv[0])); }
-aval bi_err(uint64_t n, aval *argv) { want_args("err", n, 1, 1); return mkobj(result_new(0, argv[0])); }
+aval bi_ok(uint64_t n, aval *argv) { want_args("ok", n, 1, 1); return mkobj(result_new(1, 0, argv[0])); }
+aval bi_err(uint64_t n, aval *argv) { want_args("err", n, 1, 1); return mkobj(result_new(0, 0, argv[0])); }
 
 static void panic_with_msg_at(uint64_t n, aval *argv, int idx, const char *def) {
     (void)n;

@@ -144,6 +144,28 @@ enum {
     A_BI_PY_CALL,
     /* python interop: zero-copy buffer-protocol view over a PyObject */
     A_BI_PY_BUFFER,
+    A_BI_PY_IMPORT_MODULE,
+    A_BI_PY_TRY_IMPORT_MODULE,
+    A_BI_PY_GETATTR,
+    A_BI_PY_TRY_GETATTR,
+    A_BI_PY_SETATTR,
+    A_BI_PY_HASATTR,
+    A_BI_PY_DELATTR,
+    A_BI_PY_GETITEM,
+    A_BI_PY_SETITEM,
+    A_BI_PY_DELITEM,
+    A_BI_PY_CALL_OBJ,
+    A_BI_PY_TRY_CALL_OBJ,
+    A_BI_PY_CALL_METHOD,
+    A_BI_PY_TRY_CALL_METHOD,
+    A_BI_PY_IS_PYOBJECT,
+    A_BI_PY_STR,
+    A_BI_PY_REPR,
+    A_BI_PY_LEN,
+    A_BI_PY_CONTAINS,
+    A_BI_PY_TRUTHY,
+    A_BI_PY_TYPE,
+    A_BI_PY_BUFFER_INFO,
     A_BI_COUNT
 };
 

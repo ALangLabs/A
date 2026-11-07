@@ -49,7 +49,16 @@ enum {
 typedef struct { AObj h; char data[]; } AStr;
 typedef struct { AObj h; aval *items; } AArr;
 typedef struct { aval k, v; } APair;
-typedef struct { AObj h; APair *pairs; } ADict;
+/* pairs keeps insertion order; phash[i] is the cached hash of pairs[i].k;
+   slots is an open-addressed index (power-of-two scap, 0 = empty, else
+   pair index + 1) mapping hash -> pair index for O(1) dict_find. */
+typedef struct {
+    AObj h;
+    APair *pairs;
+    uint64_t *phash;
+    uint32_t *slots;
+    uint64_t scap;
+} ADict;
 typedef struct { AObj h; int64_t lo, hi, step; } ARange;
 typedef struct {
     AObj h;
@@ -159,6 +168,8 @@ void arr_push(AArr *a, aval v);
 ADict *dict_of(aval v, const char *what);
 int64_t dict_find(ADict *d, aval k);
 void dict_put(ADict *d, aval k, aval v);
+void dict_remove_at(ADict *d, uint64_t i);
+void dict_clear(ADict *d);
 int set_contains(AArr *s, aval v);
 int kind_of(aval v);
 const char *type_name_cstr(aval v);
@@ -191,7 +202,7 @@ int64_t normalize_index(int64_t idx, uint64_t len);
 AArr *view_root(aval v, int64_t *off);
 int64_t slice_bound(aval v, int64_t n, int64_t lower, int64_t upper, int64_t dflt);
 aval fnon_new_raw(uint64_t entry, aval env, const char *name, uint32_t flags, uint64_t nparams);
-AResult *result_new(int ok, aval value);
+AResult *result_new(int ok, int is_option, aval value);
 aval a_some_new(aval value);
 int is_result(aval v);
 int result_ok(aval v);
@@ -362,6 +373,28 @@ aval bi_unsafe_store(uint64_t n, aval *argv);
 aval bi_unsafe_offset(uint64_t n, aval *argv);
 aval bi_py_call(uint64_t n, aval *argv);
 aval bi_py_buffer(uint64_t n, aval *argv);
+aval bi_py_import_module(uint64_t n, aval *argv);
+aval bi_py_try_import_module(uint64_t n, aval *argv);
+aval bi_py_getattr_builtin(uint64_t n, aval *argv);
+aval bi_py_try_getattr_builtin(uint64_t n, aval *argv);
+aval bi_py_setattr_builtin(uint64_t n, aval *argv);
+aval bi_py_hasattr(uint64_t n, aval *argv);
+aval bi_py_delattr(uint64_t n, aval *argv);
+aval bi_py_getitem_builtin(uint64_t n, aval *argv);
+aval bi_py_setitem_builtin(uint64_t n, aval *argv);
+aval bi_py_delitem(uint64_t n, aval *argv);
+aval bi_py_call_obj(uint64_t n, aval *argv);
+aval bi_py_try_call_obj(uint64_t n, aval *argv);
+aval bi_py_call_method_builtin(uint64_t n, aval *argv);
+aval bi_py_try_call_method_builtin(uint64_t n, aval *argv);
+aval bi_py_is_pyobject(uint64_t n, aval *argv);
+aval bi_py_str_builtin(uint64_t n, aval *argv);
+aval bi_py_repr_builtin(uint64_t n, aval *argv);
+aval bi_py_len_builtin(uint64_t n, aval *argv);
+aval bi_py_contains_builtin(uint64_t n, aval *argv);
+aval bi_py_truthy_builtin(uint64_t n, aval *argv);
+aval bi_py_type_builtin(uint64_t n, aval *argv);
+aval bi_py_buffer_info(uint64_t n, aval *argv);
 
 /* Python interop bridge (compiler/astra/backend/python/python.c): opaque
    T_PYOBJ values behave like Python objects — attribute access, indexing,
@@ -375,6 +408,7 @@ aval a_py_len(aval obj);
 aval a_py_contains(aval obj, aval item);
 aval a_py_call(aval fn, uint64_t n, aval *argv);
 /* argv = n positional args followed by nkw (name, value) pairs. */
+aval a_py_call_kw(aval fn, uint64_t n, uint64_t nkw, aval *argv);
 aval a_py_call_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv);
 aval a_py_iter_begin(aval v);                /* T_PYOBJ-wrapped PyObject_GetIter */
 int a_py_iter_next(aval it, aval *out);      /* 1 = *out set, 0 = exhausted */
@@ -383,10 +417,19 @@ aval a_py_repr(aval obj);
 int a_py_truthy(aval obj);
 int a_py_equals(aval a, aval b);              /* PyObject_RichCompareBool(Py_EQ) */
 aval a_py_buffer_view(aval obj);              /* T_PYOBJ -> zero-copy T_PYBUF view */
+aval a_py_hasattr(aval obj, const char *name);
+aval a_py_delattr(aval obj, const char *name);
+aval a_py_delitem(aval obj, aval key);
+aval a_py_import_module(const char *name);
 aval a_printv(uint64_t n, aval *argv);
 aval a_eprintv(uint64_t n, aval *argv);
 aval a_panic_msg(const char *msg);
 aval a_list_push(aval list, aval v);
+/* Fast path for `list.append(v)` emitted by the asm backend when the
+   receiver's static type is an array: pushes directly, preserving the
+   generic a_method semantics (incl. the view-append panic) for every
+   other runtime kind. */
+aval a_list_append(aval list, aval v);
 
 /* repl quiet flag lives in rt_terminal.c; printing lives here. */
 aval bi_sin(uint64_t n, aval *argv);

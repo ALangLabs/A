@@ -203,6 +203,9 @@ aval dict_new_empty(void) {
     d->h.len = 0;
     d->h.cap = 0;
     d->pairs = NULL;
+    d->phash = NULL;
+    d->slots = NULL;
+    d->scap = 0;
     return mkobj(&d->h);
 }
 
@@ -283,7 +286,7 @@ static aval bin_decode_val(BinReader *r) {
     case BIN_OK: case BIN_ERR: {
         aval v = bin_decode_val(r);
         if (r->err) return A_NONE;
-        AResult *res = result_new(tag == BIN_OK, v);
+        AResult *res = result_new(tag == BIN_OK, 0, v);
         return mkobj(&res->h);
     }
     default: r->err = 1; return A_NONE;

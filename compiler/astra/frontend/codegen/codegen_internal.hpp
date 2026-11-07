@@ -71,6 +71,15 @@ inline int builtinRuntimeId(const std::string& name) {
       {"unsafe_address_of", 158}, {"unsafe_load", 159},
       {"unsafe_store", 160}, {"unsafe_offset", 161},
       {"py_call", 162}, {"py_buffer", 163},
+      {"py_import_module", 164}, {"py_try_import_module", 165},
+      {"py_getattr", 166}, {"py_try_getattr", 167},
+      {"py_setattr", 168}, {"py_hasattr", 169}, {"py_delattr", 170},
+      {"py_getitem", 171}, {"py_setitem", 172}, {"py_delitem", 173},
+      {"py_call_obj", 174}, {"py_try_call_obj", 175},
+      {"py_call_method", 176}, {"py_try_call_method", 177},
+      {"py_is_pyobject", 178}, {"py_str", 179}, {"py_repr", 180},
+      {"py_len", 181}, {"py_contains", 182}, {"py_truthy", 183},
+      {"py_type", 184}, {"py_buffer_info", 185},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

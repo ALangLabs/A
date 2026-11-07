@@ -381,9 +381,12 @@ class AsmEmitter {
 
   // %rax = int64 -> %rax = aval; equivalent to mkint_full (inline ints cover
   // [-2^46, 2^46), wider values box as T_INT64 via a runtime call).
-  // Requires %rdx = kTagInt. Clobbers %rcx; %rdi only on the call path.
+  // Loads kTagInt into %rdx itself: callers must NOT rely on %rdx surviving
+  // (idiv/cqto leave the remainder there). Clobbers %rcx, %rdx; %rdi only on
+  // the call path.
   void emitBoxInt64() {
     std::string callL = newLabel("boxc"), skipL = newLabel("boxs");
+    movImm(kTagInt, "%rdx");
     // v in [-2^46, 2^46) iff (v >> 46) is 0 or -1, i.e. (v>>46)+1 <=u 1.
     emit("    mov %rax, %rcx\n    sar $46, %rcx\n    inc %rcx\n"
          "    cmp $1, %rcx\n    ja " + callL + "\n");
@@ -400,36 +403,17 @@ class AsmEmitter {
     emit("    lea " + l + "(%rip), %rdi\n    call a_panic_msg\n");
   }
 
-  // Double*double fast path for + - * / (arith_int_double semantics): both
-  // operands must be untagged doubles; result canonicalizes NaN via
-  // mkdouble. Falls through to slowL for anything else.
+  // Double*double arithmetic defers to the slow runtime path: the bundled
+  // tcc-fork assembler accepts only a subset of SSE (pxor/andpd parse, but
+  // xorpd/ucomisd/addsd/subsd/mulsd/divsd are rejected as unknown opcodes),
+  // so scalar-double instructions cannot be emitted. The runtime helpers
+  // implement the full arith_int_double semantics (incl. the div-by-zero
+  // panic and NaN canonicalization).
   void emitDoubleArith(const std::string& op, int ls, int rs,
                        const std::string& slowL, const std::string& doneL,
                        const std::string& divzL) {
-    auto untagged = [&](int s, const std::string& failL) {
-      emit("    mov " + slotRef(s) + ", %rax\n    mov %rax, %rdx\n"
-           "    shr $48, %rdx\n    cmp $0xFFFF, %edx\n    je " + failL + "\n");
-    };
-    untagged(ls, slowL);
-    untagged(rs, slowL);
-    emit("    mov " + slotRef(ls) + ", %rax\n    movq %rax, %xmm0\n");
-    emit("    mov " + slotRef(rs) + ", %rax\n    movq %rax, %xmm1\n");
-    if (op == "/") {
-      // b == 0.0 (incl. -0.0) panics; NaN divisor proceeds to NaN result.
-      std::string okL = newLabel("dvok");
-      emit("    xorpd %xmm2, %xmm2\n    ucomisd %xmm2, %xmm1\n"
-           "    jp " + okL + "\n    jne " + okL + "\n    jmp " + divzL + "\n");
-      emitLabel(okL);
-      emit("    divsd %xmm1, %xmm0\n");
-    } else {
-      const char* ins = op == "+" ? "addsd" : op == "-" ? "subsd" : "mulsd";
-      emit(std::string("    ") + ins + " %xmm1, %xmm0\n");
-    }
-    std::string nanL = newLabel("dnan");
-    emit("    ucomisd %xmm0, %xmm0\n    jp " + nanL + "\n"
-         "    movq %xmm0, %rax\n    jmp " + doneL + "\n");
-    emitLabel(nanL);
-    emit("    call mkdouble\n    jmp " + doneL + "\n");
+    (void)op; (void)ls; (void)rs; (void)doneL; (void)divzL;
+    jmp(slowL);
   }
 
   // Binary arith/compare with inline int64 (and double*double) fast paths.
@@ -483,11 +467,11 @@ class AsmEmitter {
         // rhs == -1 would trap on INT64_MIN/-1; the slow path returns
         // mkdouble(2^63) for that case and -a otherwise.
         emit("    cmp $-1, %r9\n    je " + slowL + "\n");
-        emit("    mov %r8, %rax\n    cqo\n    idiv %r9\n");
+        emit("    mov %r8, %rax\n    cqto\n    idiv %r9\n");
       } else if (op == "%") {
         emit("    test %r9, %r9\n    jz " + modzL + "\n");
         emit("    cmp $-1, %r9\n    je " + slowL + "\n");
-        emit("    mov %r8, %rax\n    cqo\n    idiv %r9\n    mov %rdx, %rax\n");
+        emit("    mov %r8, %rax\n    cqto\n    idiv %r9\n    mov %rdx, %rax\n");
       } else if (op == "<<" || op == ">>") {
         // shift_amount(): amount must be an int in [0,63] else panic via
         // the slow path; << is a logical shift on the uint64 pattern, >>
@@ -549,11 +533,13 @@ class AsmEmitter {
          "    sar $17, %rdx\n    test %rdx, %rdx\n    jnz " + oneL +
          "\n    jmp " + zeroL + "\n");
     emitLabel(dblL);
-    // ucomisd vs 0.0: unordered (NaN) or not-equal -> truthy; equal
-    // (covers -0.0) -> falsy.
-    emit("    movq %rax, %xmm0\n    xorpd %xmm1, %xmm1\n"
-         "    ucomisd %xmm1, %xmm0\n    jp " + oneL + "\n    jne " + oneL +
-         "\n    jmp " + zeroL + "\n");
+    // Double truthiness via integer bit tests (the tcc-fork assembler
+    // rejects ucomisd/xorpd): only +0.0 (bits 0) and -0.0 (bits
+    // 0x8000000000000000) are falsy; every other pattern, incl. NaN, is
+    // truthy.
+    emit("    test %rax, %rax\n    jz " + zeroL + "\n");
+    movImm(0x8000000000000000ULL, "%rcx");
+    emit("    cmp %rcx, %rax\n    je " + zeroL + "\n    jmp " + oneL + "\n");
     emitLabel(slowL);
     emit("    mov %rax, %rdi\n    call a_truthy_raw_slow\n    test %rax, %rax\n"
          "    jnz " + oneL + "\n    jmp " + zeroL + "\n");
@@ -1513,8 +1499,24 @@ class AsmEmitter {
       emitLabel(endL);
       return;
     }
+    // Array/tuple-typed iterables get a direct indexed loop over the AArr
+    // items buffer (with a runtime kind guard and a generic-iterator
+    // fallback for views/other objects).
+    TypePtr itT = resolveType(st.iterable->inferredType);
+    if (itT && (itT->kind == TypeKind::Array || itT->kind == TypeKind::Tuple)) {
+      emitForArray(st);
+      return;
+    }
     // General iterable: a_iter_new / a_iter_next.
     int itV = evalSlot(st.iterable.get());
+    std::string doneL = newLabel("fend");
+    emitForIterTail(itV, st, doneL);
+    emitLabel(doneL);
+  }
+
+  // Generic `for x in <itV-slot>` loop via a_iter_new/a_iter_next; jumps to
+  // mergedL when done so callers can share a continuation label.
+  void emitForIterTail(int itV, const ForStmt& st, const std::string& mergedL) {
     int itS = allocSlot();
     loadSlot(itV, "%rdi");
     emit("    call a_iter_new\n    mov %rax, " + slotRef(itS));
@@ -1541,13 +1543,78 @@ class AsmEmitter {
     emitLabel(contL);
     jmp(loopL);
     emitLabel(endL);
+    jmp(mergedL);
+  }
+
+  // `for x in <array-typed>`: emit a runtime kind check once; AArr-backed
+  // objects (T_LIST/T_TUPLE/T_SET share {AObj; aval *items}) iterate with a
+  // pointer-bump loop that reloads len/items each pass (matching
+  // a_iter_next's live-view semantics under mutation). Anything else falls
+  // back to the generic iterator loop.
+  void emitForArray(const ForStmt& st) {
+    int objS = evalSlot(st.iterable.get());
+    std::string fastL = newLabel("afast"), slowL = newLabel("aslow"),
+            fastEndL = newLabel("afend"), mergedL = newLabel("aend");
+    loadSlot(objS);
+    emit("    mov %rax, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
+         "    jne " + slowL + "\n");
+    emit("    mov %rax, %rcx\n    and $0xF, %rcx\n    jnz " + slowL + "\n");
+    emit("    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n");
+    emit("    mov (%rcx), %eax\n    cmp $2, %eax\n    je " + fastL + "\n"
+         "    cmp $3, %eax\n    je " + fastL + "\n"
+         "    cmp $5, %eax\n    je " + fastL + "\n"
+         "    jmp " + slowL + "\n");
+    emitLabel(fastL);
+    int iS = allocSlot();
+    movImm(0, "%rcx");
+    emit("    mov %rcx, " + slotRef(iS));
+    int varS = allocSlot();
+    std::string loopL = newLabel("for");
+    std::string contL = newLabel("forc");
+    emitLabel(loopL);
+    // obj aval -> rcx = object pointer; rdx = len (u32); rax = index.
+    emit("    mov " + slotRef(objS) + ", %rax\n"
+         "    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
+         "    mov 4(%rcx), %edx\n"
+         "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
+         fastEndL + "\n");
+    emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
+         "    mov %rax, " + slotRef(varS) + "\n");
+    pushScope();
+    bindLocal(st.var, varS);
+    loopBreak_.push_back(fastEndL);
+    loopCont_.push_back(contL);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    emitBody(st.body);
+    loopDeferDepth_.pop_back();
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    popScope();
+    emitLabel(contL);
+    emit("    addq $1, " + slotRef(iS) + "\n");
+    jmp(loopL);
+    emitLabel(fastEndL);
+    jmp(mergedL);
+    emitLabel(slowL);
+    emitForIterTail(objS, st, mergedL);
+    emitLabel(mergedL);
   }
 
   void emitAssign(const AssignStmt& st) {
     if (st.target->kind == ExprKind::Ident) {
       const IdentExpr& id = static_cast<const IdentExpr&>(*st.target);
       ABinding* b = lookup(id.name);
-      if (!b) {
+      // A name that resolves to a module/builtin/capture is not a storable
+      // target (e.g. a local named `words` in `words.a`, whose entry stem
+      // is bound as a Module in the global scope): shadow it with a fresh
+      // local instead of failing in storeBinding.
+      const bool assignable = b && (b->kind == BKind::Local ||
+                                    b->kind == BKind::Param ||
+                                    b->kind == BKind::Global ||
+                                    b->kind == BKind::FnValue ||
+                                    b->kind == BKind::StructCtor ||
+                                    b->kind == BKind::EnumValue);
+      if (!assignable) {
         int sl = allocSlot();
         bindLocal(id.name, sl);
         b = lookup(id.name);
@@ -1693,7 +1760,43 @@ class AsmEmitter {
     emit("    call a_bi_call");
   }
 
+  // len(x) with an array-typed argument: read AObj.len (offset 4) inline.
+  // Whitelisted runtime types all keep the element count in h.len
+  // (T_LIST/T_TUPLE/T_DICT/T_SET/T_VIEW); T_STR stores bytes and T_RANGE
+  // stores no count, so those — and anything unexpected — fall back to
+  // the a_len runtime call. Result aval left in %rax.
+  bool tryEmitFastLen(const Expr* arg) {
+    TypePtr at = resolveType(arg->inferredType);
+    if (!at || at->kind != TypeKind::Array) return false;
+    int s = evalSlot(arg);
+    std::string fastL = newLabel("lenf"), slowL = newLabel("lens"),
+            doneL = newLabel("lend");
+    loadSlot(s);
+    emit("    mov %rax, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
+         "    jne " + slowL + "\n");
+    emit("    mov %rax, %rcx\n    and $0xF, %rcx\n    jnz " + slowL + "\n");
+    emit("    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n");
+    emit("    mov (%rcx), %eax\n    cmp $2, %eax\n    je " + fastL + "\n"
+         "    cmp $3, %eax\n    je " + fastL + "\n"
+         "    cmp $4, %eax\n    je " + fastL + "\n"
+         "    cmp $5, %eax\n    je " + fastL + "\n"
+         "    cmp $13, %eax\n    je " + fastL + "\n"
+         "    jmp " + slowL + "\n");
+    emitLabel(fastL);
+    emit("    mov 4(%rcx), %eax\n");
+    emitBoxInt64();
+    emit("    jmp " + doneL + "\n");
+    emitLabel(slowL);
+    call1slot("a_len", s);
+    emitLabel(doneL);
+    return true;
+  }
+
   void emitBiCall(int id, const CallExpr& call) {
+    if (id == 2 && call.args.size() == 1 && call.args[0].name.empty() &&
+        tryEmitFastLen(call.args[0].value.get())) {
+      return;
+    }
     std::vector<const Expr*> args = positionalArgs(call);
     std::vector<int> slots;
     for (const Expr* a : args) slots.push_back(evalSlot(a));
@@ -1757,6 +1860,20 @@ class AsmEmitter {
   // T_PYOBJ receivers consume the pairs (as Python kwargs) — every other
   // receiver kind panics on nkw > 0.
   void emitMethodCall(const Expr* objExpr, const std::string& field, const CallExpr& call) {
+    // `xs.append(v)` on an array-typed receiver: direct runtime push that
+    // skips the generic a_method name-dispatch chain. a_list_append keeps
+    // the same semantics for non-T_LIST objects (incl. the view panic).
+    if (field == "append" && call.args.size() == 1 && call.args[0].name.empty()) {
+      TypePtr ot = resolveType(objExpr->inferredType);
+      if (ot && ot->kind == TypeKind::Array) {
+        int os = evalSlot(objExpr);
+        int vs = evalSlot(call.args[0].value.get());
+        loadSlot(os, "%rdi");
+        loadSlot(vs, "%rsi");
+        emit("    call a_list_append\n");
+        return;
+      }
+    }
     int os = evalSlot(objExpr);
     std::vector<int> posSlots;
     std::vector<std::pair<std::string, int>> kwSlots;
@@ -2239,6 +2356,44 @@ class AsmEmitter {
         auto& x = static_cast<const IndexExpr&>(*e);
         int os = evalSlot(x.object.get());
         int is = evalSlot(x.index.get());
+        // xs[i] on an array-typed object: unbox the index inline, verify
+        // the receiver is an AArr-backed object (T_LIST/T_TUPLE), bounds
+        // check against h.len (with negative-index wraparound, matching
+        // normalize_index), and load items[i] directly. Anything else —
+        // non-int index, dict/string/view/other receiver — falls back to
+        // a_getitem.
+        TypePtr ot = resolveType(x.object->inferredType);
+        if (ot && ot->kind == TypeKind::Array) {
+          std::string slowL = newLabel("gis"), fastL = newLabel("gif"),
+                  panicL = newLabel("gip"), doneL = newLabel("gid"),
+                  negL = newLabel("gin");
+          movImm(kTagInt, "%rdx");
+          loadSlot(is, "%rdi");
+          emitUnboxInt("%r8", slowL);  // r8 = index int64
+          loadSlot(os, "%rdi");
+          emit("    mov %rdi, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
+               "    jne " + slowL + "\n");
+          emit("    mov %rdi, %rcx\n    and $0xF, %rcx\n    jnz " + slowL + "\n");
+          emit("    mov %rdi, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n");
+          emit("    mov (%rcx), %eax\n    cmp $2, %eax\n    je " + fastL + "\n"
+               "    cmp $3, %eax\n    je " + fastL + "\n"
+               "    jmp " + slowL + "\n");
+          emitLabel(fastL);
+          emit("    mov 4(%rcx), %edx\n");  // rdx = len (u32, zero-extended)
+          emit("    test %r8, %r8\n    jns " + negL + "_p\n"
+               "    add %rdx, %r8\n");
+          emitLabel(negL + "_p");
+          emit("    cmp %rdx, %r8\n    jae " + panicL + "\n");
+          emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%r8,8), %rax\n"
+               "    jmp " + doneL + "\n");
+          emitLabel(panicL);
+          emitPanicStr("index out of range");
+          emit("    jmp " + doneL + "\n");
+          emitLabel(slowL);
+          call2slot("a_getitem", os, is);
+          emitLabel(doneL);
+          return;
+        }
         call2slot("a_getitem", os, is);
         return;
       }
@@ -2739,9 +2894,78 @@ class AsmEmitter {
   }
 
   // `[f(x) for x in it if c]` / `{...}`: build via a_iter_new/a_iter_next and
-  // a_list_push/a_set_add, mirroring the C emitter's loop.
+  // a_list_push/a_set_add, mirroring the C emitter's loop. Array/tuple-typed
+  // iterables get the same indexed fast loop as `for` (with generic
+  // fallback); everything else uses the iterator tail directly.
   void emitComprehension(const ComprehensionExpr& x) {
     int iv = evalSlot(x.iterable.get());
+    TypePtr itT = resolveType(x.iterable->inferredType);
+    if (itT && (itT->kind == TypeKind::Array || itT->kind == TypeKind::Tuple)) {
+      std::string fastL = newLabel("cfast"), slowL = newLabel("cslow"),
+              fastEndL = newLabel("cfend"), mergedL = newLabel("cend");
+      loadSlot(iv);
+      emit("    mov %rax, %rcx\n    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n"
+           "    jne " + slowL + "\n");
+      emit("    mov %rax, %rcx\n    and $0xF, %rcx\n    jnz " + slowL + "\n");
+      emit("    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n");
+      emit("    mov (%rcx), %eax\n    cmp $2, %eax\n    je " + fastL + "\n"
+           "    cmp $3, %eax\n    je " + fastL + "\n"
+           "    cmp $5, %eax\n    je " + fastL + "\n"
+           "    jmp " + slowL + "\n");
+      emitLabel(fastL);
+      int iS = allocSlot(), accS = allocSlot(), varS = allocSlot();
+      movImm(0, "%rcx");
+      emit("    mov %rcx, " + slotRef(iS));
+      if (x.isSet) {
+        emit("    call a_set_new\n");
+      } else {
+        movImm(0, "%rdi");
+        movImm(0, "%rsi");
+        emit("    call a_list_new\n");
+      }
+      storeRax(accS);
+      pushScope();
+      movImm(kNone, "%rcx");
+      emit("    mov %rcx, " + slotRef(varS));
+      bindLocal(x.var, varS);
+      std::string loopL = newLabel("comp"), contL = newLabel("compc");
+      emitLabel(loopL);
+      emit("    mov " + slotRef(iv) + ", %rax\n"
+           "    mov %rax, %rcx\n    shl $16, %rcx\n    shr $16, %rcx\n"
+           "    mov 4(%rcx), %edx\n"
+           "    mov " + slotRef(iS) + ", %rax\n    cmp %rdx, %rax\n    jae " +
+           fastEndL + "\n");
+      emit("    mov 16(%rcx), %rcx\n    mov (%rcx,%rax,8), %rax\n"
+           "    mov %rax, " + slotRef(varS) + "\n");
+      if (x.condition) {
+        condJump(x.condition.get(), contL, false);
+      }
+      {
+        int es = evalSlot(x.element.get());
+        loadSlot(accS, "%rdi");
+        loadSlot(es, "%rsi");
+        emit(std::string("    call ") + (x.isSet ? "a_set_add" : "a_list_push") + "\n");
+      }
+      emitLabel(contL);
+      emit("    addq $1, " + slotRef(iS) + "\n");
+      jmp(loopL);
+      emitLabel(fastEndL);
+      loadSlot(accS);
+      jmp(mergedL);
+      emitLabel(slowL);
+      emitComprehensionIterTail(iv, x, mergedL);
+      emitLabel(mergedL);
+      return;
+    }
+    std::string doneL = newLabel("compd");
+    emitComprehensionIterTail(iv, x, doneL);
+    emitLabel(doneL);
+  }
+
+  // Generic comprehension loop over the iterable held in slot `iv`;
+  // jumps to mergedL when exhausted.
+  void emitComprehensionIterTail(int iv, const ComprehensionExpr& x,
+                                 const std::string& mergedL) {
     int itS = allocSlot(), accS = allocSlot(), varS = allocSlot();
     loadSlot(iv, "%rdi");
     emit("    call a_iter_new\n");
@@ -2778,6 +3002,7 @@ class AsmEmitter {
     emitLabel(endL);
     popScope();
     loadSlot(accS);
+    jmp(mergedL);
   }
 
   // `expr?`: unwrap ok/err; a propagating value returns early from the

@@ -83,12 +83,17 @@ struct PyRt {
     PySsize (*PyObject_Length)(PyObj);
     PyObj (*PyObject_GetItem)(PyObj, PyObj);
     int (*PyObject_SetItem)(PyObj, PyObj, PyObj);
+    int (*PyObject_DelItem)(PyObj, PyObj);
     int (*PyObject_SetAttrString)(PyObj, const char *, PyObj);
+    int (*PyObject_HasAttrString)(PyObj, const char *);
+    int (*PyObject_DelAttrString)(PyObj, const char *);
     int (*PySequence_Contains)(PyObj, PyObj);
     int (*PyObject_IsTrue)(PyObj);
     PyObj (*PyObject_Repr)(PyObj);
+    PyObj (*PyObject_Type)(PyObj);
     int (*PyObject_RichCompareBool)(PyObj, PyObj, int);
     int (*PyObject_IsInstance)(PyObj, PyObj);
+    int (*PyCallable_Check)(PyObj);
     void (*Py_IncRef)(PyObj);
     void (*Py_DecRef)(PyObj);
     PyObj (*PyNumber_Index)(PyObj);
@@ -105,6 +110,7 @@ struct PyRt {
     PyObj none, py_true, py_false;
     PyObj t_bool, t_long, t_float, t_unicode, t_bytes;
     PyObj t_list, t_tuple, t_dict, t_set, t_frozenset;
+    PyObj t_module, t_type;
 
     /* sys.path extras reported by the interpreter probe that won */
     char **site_dirs;
@@ -165,12 +171,17 @@ static int py_fill(void *h) {
     A_PY_SYM(PyObject_Length, "PyObject_Length");
     A_PY_SYM(PyObject_GetItem, "PyObject_GetItem");
     A_PY_SYM(PyObject_SetItem, "PyObject_SetItem");
+    A_PY_SYM(PyObject_DelItem, "PyObject_DelItem");
     A_PY_SYM(PyObject_SetAttrString, "PyObject_SetAttrString");
+    A_PY_SYM(PyObject_HasAttrString, "PyObject_HasAttrString");
+    A_PY_SYM(PyObject_DelAttrString, "PyObject_DelAttrString");
     A_PY_SYM(PySequence_Contains, "PySequence_Contains");
     A_PY_SYM(PyObject_IsTrue, "PyObject_IsTrue");
     A_PY_SYM(PyObject_Repr, "PyObject_Repr");
+    A_PY_SYM(PyObject_Type, "PyObject_Type");
     A_PY_SYM(PyObject_RichCompareBool, "PyObject_RichCompareBool");
     A_PY_SYM(PyObject_IsInstance, "PyObject_IsInstance");
+    A_PY_SYM(PyCallable_Check, "PyCallable_Check");
     A_PY_SYM(Py_IncRef, "Py_IncRef");
     A_PY_SYM(Py_DecRef, "Py_DecRef");
     A_PY_SYM(PyNumber_Index, "PyNumber_Index");
@@ -197,6 +208,8 @@ static int py_fill(void *h) {
     A_PY_DAT(t_dict, "PyDict_Type");
     A_PY_DAT(t_set, "PySet_Type");
     A_PY_DAT(t_frozenset, "PyFrozenSet_Type");
+    A_PY_DAT(t_module, "PyModule_Type");
+    A_PY_DAT(t_type, "PyType_Type");
 #undef A_PY_DAT
     return p->none && p->py_true && p->py_false && p->t_bool && p->t_long &&
            p->t_float && p->t_unicode && p->t_bytes && p->t_list && p->t_tuple &&
@@ -657,8 +670,7 @@ static PyObj aval_to_py(aval v) {
                 return g_py.PyUnicode_DecodeUTF8(s, (PySsize)len, "strict");
             }
             case T_LIST:
-            case T_TUPLE:
-            case T_SET: {
+            case T_TUPLE: {
                 AArr *a = (AArr *)o;
                 int isTuple = o->type == T_TUPLE;
                 PyObj c;
@@ -673,6 +685,22 @@ static PyObj aval_to_py(aval v) {
                     if (rc < 0) { g_py.Py_DecRef(item); g_py.Py_DecRef(c); return NULL; }
                 }
                 return c;
+            }
+            case T_SET: {
+                AArr *a = (AArr *)o;
+                PyObj s = g_py.PySet_New(NULL);
+                if (!s) return NULL;
+                for (uint64_t i = 0; i < a->h.len; ++i) {
+                    PyObj item = aval_to_py(a->items[i]);
+                    if (!item) { g_py.Py_DecRef(s); return NULL; }
+                    if (g_py.PySet_Add(s, item) < 0) {
+                        g_py.Py_DecRef(item);
+                        g_py.Py_DecRef(s);
+                        return NULL;
+                    }
+                    g_py.Py_DecRef(item);
+                }
+                return s;
             }
             case T_DICT: {
                 ADict *d = (ADict *)o;
@@ -1269,6 +1297,391 @@ aval bi_py_buffer(uint64_t n, aval *argv) {
     return a_py_buffer_view(argv[0]);
 }
 
+/* ---- extended py helpers (dynamic/explicit interop + Result variants) ---- */
+
+static aval py_err_to_aval(const char *fallback) {
+    char detail[512];
+    detail[0] = 0;
+    if (g_py.PyErr_Occurred()) {
+        PyObj t = NULL, v = NULL, tb = NULL;
+        g_py.PyErr_Fetch(&t, &v, &tb);
+        g_py.PyErr_NormalizeException(&t, &v, &tb);
+        if (v) {
+            PyObj es = g_py.PyObject_Str(v);
+            if (es) {
+                PySsize elen = 0;
+                const char *u = g_py.PyUnicode_AsUTF8AndSize(es, &elen);
+                if (u) snprintf(detail, sizeof detail, "%s", u);
+                g_py.Py_DecRef(es);
+            }
+        }
+        if (t) g_py.Py_DecRef(t);
+        if (v) g_py.Py_DecRef(v);
+        if (tb) g_py.Py_DecRef(tb);
+    } else if (fallback) {
+        snprintf(detail, sizeof detail, "%s", fallback);
+    }
+    if (!detail[0] && fallback) snprintf(detail, sizeof detail, "%s", fallback);
+    return a_str_new(detail, strlen(detail));
+}
+
+static aval py_ok(aval v) { return mkobj(result_new(1, 0, v)); }
+static aval py_errv(aval msg) { return mkobj(result_new(0, 0, msg)); }
+static aval py_err_cstr(const char *msg) { return py_errv(a_str_new(msg, strlen(msg))); }
+
+static const char *aval_cstr_tmp(aval v, uint64_t *len, char *buf, size_t bufsz) {
+    *len = 0;
+    const char *s = str_data(v, len);
+    if (!s) s = "";
+    if (*len >= bufsz) *len = bufsz - 1;
+    memcpy(buf, s, (size_t)*len);
+    buf[*len] = 0;
+    return buf;
+}
+
+aval a_py_import_module(const char *name) {
+    if (!py_ensure_ready()) panicf("python interop unavailable: %s", g_py.error);
+    int gil = g_py.PyGILState_Ensure();
+    PyObj m = g_py.PyImport_ImportModule(name);
+    if (!m) py_fail("import");
+    aval out = py_wrap_owned(m);
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+aval bi_py_import_module(uint64_t n, aval *argv) {
+    want_args("py.import", n, 1, 1);
+    uint64_t len = 0; char buf[1024];
+    aval_cstr_tmp(argv[0], &len, buf, sizeof buf);
+    return a_py_import_module(buf);
+}
+
+aval bi_py_try_import_module(uint64_t n, aval *argv) {
+    want_args("py.try_import", n, 1, 1);
+    uint64_t len = 0; char buf[1024];
+    aval_cstr_tmp(argv[0], &len, buf, sizeof buf);
+    if (!py_ensure_ready()) return py_err_cstr(g_py.error);
+    int gil = g_py.PyGILState_Ensure();
+    PyObj m = g_py.PyImport_ImportModule(buf);
+    if (!m) { aval e = py_err_to_aval("import failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
+    aval out = py_wrap_owned(m);
+    g_py.PyGILState_Release(gil);
+    return py_ok(out);
+}
+
+aval a_py_hasattr(aval obj, const char *name) {
+    APyObj *p = pyobj_of(obj, "hasattr() target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    int r = g_py.PyObject_HasAttrString ? g_py.PyObject_HasAttrString(p->obj, name) : 0;
+    if (r < 0) { g_py.PyErr_Clear(); r = 0; }
+    g_py.PyGILState_Release(gil);
+    return bool_aval(r != 0);
+}
+
+aval bi_py_hasattr(uint64_t n, aval *argv) {
+    want_args("py.hasattr", n, 2, 2);
+    uint64_t len = 0; char buf[512];
+    aval_cstr_tmp(argv[1], &len, buf, sizeof buf);
+    return a_py_hasattr(argv[0], buf);
+}
+
+aval a_py_delattr(aval obj, const char *name) {
+    APyObj *p = pyobj_of(obj, "delattr() target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    if (!g_py.PyObject_DelAttrString) { g_py.PyGILState_Release(gil); panicf("python delattr unavailable"); }
+    int rc = g_py.PyObject_DelAttrString(p->obj, name);
+    if (rc < 0) py_fail("delattr");
+    g_py.PyGILState_Release(gil);
+    return A_NONE;
+}
+
+aval bi_py_delattr(uint64_t n, aval *argv) {
+    want_args("py.delattr", n, 2, 2);
+    uint64_t len = 0; char buf[512];
+    aval_cstr_tmp(argv[1], &len, buf, sizeof buf);
+    return a_py_delattr(argv[0], buf);
+}
+
+aval a_py_delitem(aval obj, aval key) {
+    APyObj *p = pyobj_of(obj, "delitem() target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj k = aval_to_py(key);
+    if (!k) py_fail("delitem key conversion");
+    if (!g_py.PyObject_DelItem) { g_py.Py_DecRef(k); g_py.PyGILState_Release(gil); panicf("python delitem unavailable"); }
+    int rc = g_py.PyObject_DelItem(p->obj, k);
+    g_py.Py_DecRef(k);
+    if (rc < 0) py_fail("delitem");
+    g_py.PyGILState_Release(gil);
+    return A_NONE;
+}
+
+aval bi_py_delitem(uint64_t n, aval *argv) {
+    want_args("py.delitem", n, 2, 2);
+    return a_py_delitem(argv[0], argv[1]);
+}
+
+aval bi_py_getattr_builtin(uint64_t n, aval *argv) {
+    want_args("py.getattr", n, 2, 3);
+    uint64_t len = 0; char buf[512];
+    aval_cstr_tmp(argv[1], &len, buf, sizeof buf);
+    if (n == 2) return a_py_getattr(argv[0], buf);
+    /* 3 args: default on missing attribute */
+    APyObj *p = pyobj_of(argv[0], "getattr() target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj r = g_py.PyObject_GetAttrString(p->obj, buf);
+    if (!r) {
+        g_py.PyErr_Clear();
+        g_py.PyGILState_Release(gil);
+        return argv[2];
+    }
+    return py_take_result(r, gil, "attribute access");
+}
+
+aval bi_py_try_getattr_builtin(uint64_t n, aval *argv) {
+    want_args("py.try_getattr", n, 2, 2);
+    uint64_t len = 0; char buf[512];
+    aval_cstr_tmp(argv[1], &len, buf, sizeof buf);
+    if (!py_ensure_ready()) return py_err_cstr(g_py.error);
+    APyObj *p = NULL;
+    AObj *o = obj_of(argv[0]);
+    if (!o || o->type != T_PYOBJ) return py_err_cstr("getattr() target must be a Python object");
+    p = (APyObj *)o;
+    int gil = g_py.PyGILState_Ensure();
+    PyObj r = g_py.PyObject_GetAttrString(p->obj, buf);
+    if (!r) { aval e = py_err_to_aval("attribute access failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
+    aval out = py_to_aval(r);
+    g_py.Py_DecRef(r);
+    g_py.PyGILState_Release(gil);
+    return py_ok(out);
+}
+
+aval bi_py_setattr_builtin(uint64_t n, aval *argv) {
+    want_args("py.setattr", n, 3, 3);
+    uint64_t len = 0; char buf[512];
+    aval_cstr_tmp(argv[1], &len, buf, sizeof buf);
+    return a_py_setattr(argv[0], buf, argv[2]);
+}
+
+aval bi_py_getitem_builtin(uint64_t n, aval *argv) { want_args("py.getitem", n, 2, 2); return a_py_getitem(argv[0], argv[1]); }
+aval bi_py_setitem_builtin(uint64_t n, aval *argv) { want_args("py.setitem", n, 3, 3); return a_py_setitem(argv[0], argv[1], argv[2]); }
+
+static int py_collect_args(aval seq, aval **out_items, uint64_t *out_n) {
+    AObj *o = obj_of(seq);
+    *out_items = NULL; *out_n = 0;
+    if (!o) return 0;
+    if (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET) {
+        AArr *a = (AArr *)o;
+        *out_items = a->items; *out_n = a->h.len; return 1;
+    }
+    return 0;
+}
+
+aval a_py_call_kw(aval fn, uint64_t n, uint64_t nkw, aval *argv) {
+    APyObj *p = pyobj_of(fn, "call target");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    PyObj args = py_args_tuple(n, argv);
+    PyObj kw = NULL;
+    if (args && nkw) {
+        kw = py_kwargs_dict(nkw, argv + n);
+        if (!kw) { g_py.Py_DecRef(args); args = NULL; }
+    }
+    PyObj r = args ? g_py.PyObject_Call(p->obj, args, kw) : NULL;
+    if (kw) g_py.Py_DecRef(kw);
+    if (args) g_py.Py_DecRef(args);
+    return py_take_result(r, gil, "call");
+}
+
+static aval py_call_obj_impl(aval fn, aval args_seq, aval kwargs_map, int as_result) {
+    if (!py_ensure_ready()) {
+        if (as_result) return py_err_cstr(g_py.error);
+        panicf("python interop unavailable: %s", g_py.error);
+    }
+    AObj *fo = obj_of(fn);
+    if (!fo || fo->type != T_PYOBJ) {
+        if (as_result) return py_err_cstr("py.call: first argument must be a Python object");
+        panicf("py.call: first argument must be a Python object, not '%s'", type_name_cstr(fn));
+    }
+    aval *aitems = NULL; uint64_t an = 0;
+    if (!a_is_none(args_seq) && !py_collect_args(args_seq, &aitems, &an)) {
+        if (as_result) return py_err_cstr("py.call: args must be a list or tuple");
+        panicf("py.call: args must be a list or tuple, not '%s'", type_name_cstr(args_seq));
+    }
+    /* kwargs: dict/map -> (name,value) pairs */
+    aval *kpairs = NULL; uint64_t kn = 0; aval *kflat = NULL;
+    if (!a_is_none(kwargs_map)) {
+        AObj *ko = obj_of(kwargs_map);
+        if (ko && ko->type == T_DICT) {
+            ADict *d = (ADict *)ko;
+            kn = d->h.len;
+            kflat = (aval *)xmalloc((size_t)(kn ? kn * 2 : 1) * sizeof(aval));
+            for (uint64_t i = 0; i < kn; ++i) { kflat[2*i] = d->pairs[i].k; kflat[2*i+1] = d->pairs[i].v; }
+            kpairs = kflat;
+        } else if (as_result) {
+            return py_err_cstr("py.call: kwargs must be a dict/map or None");
+        } else {
+            panicf("py.call: kwargs must be a dict/map or None, not '%s'", type_name_cstr(kwargs_map));
+        }
+    }
+    int gil = g_py.PyGILState_Ensure();
+    PyObj args = py_args_tuple(an, aitems ? aitems : (aval*)NULL);
+    PyObj kw = NULL;
+    if (args && kn) {
+        kw = py_kwargs_dict(kn, kpairs);
+        if (!kw) { g_py.Py_DecRef(args); args = NULL; }
+    }
+    PyObj r = args ? g_py.PyObject_Call(((APyObj*)fo)->obj, args, kw) : NULL;
+    if (kw) g_py.Py_DecRef(kw);
+    if (args) g_py.Py_DecRef(args);
+    if (kflat) free(kflat);
+    if (!r) {
+        if (as_result) { aval e = py_err_to_aval("call failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
+        py_fail("call");
+    }
+    aval out = py_to_aval(r);
+    g_py.Py_DecRef(r);
+    g_py.PyGILState_Release(gil);
+    return as_result ? py_ok(out) : out;
+}
+
+aval bi_py_call_obj(uint64_t n, aval *argv) {
+    want_args("py.call", n, 2, 3);
+    return py_call_obj_impl(argv[0], argv[1], n >= 3 ? argv[2] : A_NONE, 0);
+}
+aval bi_py_try_call_obj(uint64_t n, aval *argv) {
+    want_args("py.try_call", n, 2, 3);
+    return py_call_obj_impl(argv[0], argv[1], n >= 3 ? argv[2] : A_NONE, 1);
+}
+
+static aval py_call_method_impl(aval obj, aval namev, aval args_seq, aval kwargs_map, int as_result) {
+    if (!py_ensure_ready()) {
+        if (as_result) return py_err_cstr(g_py.error);
+        panicf("python interop unavailable: %s", g_py.error);
+    }
+    AObj *oo = obj_of(obj);
+    if (!oo || oo->type != T_PYOBJ) {
+        if (as_result) return py_err_cstr("py.call_method: target must be a Python object");
+        panicf("py.call_method: target must be a Python object, not '%s'", type_name_cstr(obj));
+    }
+    uint64_t nlen = 0; char nbuf[512];
+    aval_cstr_tmp(namev, &nlen, nbuf, sizeof nbuf);
+    aval *aitems = NULL; uint64_t an = 0;
+    if (!a_is_none(args_seq) && !py_collect_args(args_seq, &aitems, &an)) {
+        if (as_result) return py_err_cstr("py.call_method: args must be a list or tuple");
+        panicf("py.call_method: args must be a list or tuple");
+    }
+    aval *kflat = NULL; uint64_t kn = 0;
+    if (!a_is_none(kwargs_map)) {
+        AObj *ko = obj_of(kwargs_map);
+        if (ko && ko->type == T_DICT) {
+            ADict *d = (ADict *)ko;
+            kn = d->h.len;
+            kflat = (aval *)xmalloc((size_t)(kn ? kn * 2 : 1) * sizeof(aval));
+            for (uint64_t i = 0; i < kn; ++i) { kflat[2*i] = d->pairs[i].k; kflat[2*i+1] = d->pairs[i].v; }
+        } else if (as_result) {
+            return py_err_cstr("py.call_method: kwargs must be a dict/map or None");
+        } else {
+            panicf("py.call_method: kwargs must be a dict/map or None");
+        }
+    }
+    int gil = g_py.PyGILState_Ensure();
+    PyObj m = g_py.PyObject_GetAttrString(((APyObj*)oo)->obj, nbuf);
+    if (!m) {
+        if (kflat) free(kflat);
+        if (as_result) { aval e = py_err_to_aval("attribute access failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
+        py_fail("attribute access");
+    }
+    PyObj args = py_args_tuple(an, aitems ? aitems : (aval*)NULL);
+    PyObj kw = NULL;
+    if (args && kn) {
+        kw = py_kwargs_dict(kn, kflat);
+        if (!kw) { g_py.Py_DecRef(args); args = NULL; }
+    }
+    PyObj r = args ? g_py.PyObject_Call(m, args, kw) : NULL;
+    if (kw) g_py.Py_DecRef(kw);
+    if (args) g_py.Py_DecRef(args);
+    g_py.Py_DecRef(m);
+    if (kflat) free(kflat);
+    if (!r) {
+        if (as_result) { aval e = py_err_to_aval("method call failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
+        py_fail("method call");
+    }
+    aval out = py_to_aval(r);
+    g_py.Py_DecRef(r);
+    g_py.PyGILState_Release(gil);
+    return as_result ? py_ok(out) : out;
+}
+
+aval bi_py_call_method_builtin(uint64_t n, aval *argv) {
+    want_args("py.call_method", n, 3, 4);
+    return py_call_method_impl(argv[0], argv[1], argv[2], n >= 4 ? argv[3] : A_NONE, 0);
+}
+aval bi_py_try_call_method_builtin(uint64_t n, aval *argv) {
+    want_args("py.try_call_method", n, 3, 4);
+    return py_call_method_impl(argv[0], argv[1], argv[2], n >= 4 ? argv[3] : A_NONE, 1);
+}
+
+aval bi_py_is_pyobject(uint64_t n, aval *argv) {
+    want_args("py.is_pyobject", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    return bool_aval(o && o->type == T_PYOBJ);
+}
+
+aval bi_py_str_builtin(uint64_t n, aval *argv) { want_args("py.str", n, 1, 1); return a_py_str(argv[0]); }
+aval bi_py_repr_builtin(uint64_t n, aval *argv) { want_args("py.repr", n, 1, 1); return a_py_repr(argv[0]); }
+aval bi_py_len_builtin(uint64_t n, aval *argv) { want_args("py.len", n, 1, 1); return a_py_len(argv[0]); }
+aval bi_py_contains_builtin(uint64_t n, aval *argv) { want_args("py.contains", n, 2, 2); return a_py_contains(argv[0], argv[1]); }
+aval bi_py_truthy_builtin(uint64_t n, aval *argv) {
+    want_args("py.truthy", n, 1, 1);
+    return bool_aval(a_py_truthy(argv[0]));
+}
+
+aval bi_py_type_builtin(uint64_t n, aval *argv) {
+    want_args("py.type", n, 1, 1);
+    APyObj *p = pyobj_of(argv[0], "py.type() argument");
+    py_ready_or_panic();
+    int gil = g_py.PyGILState_Ensure();
+    if (!g_py.PyObject_Type) { g_py.PyGILState_Release(gil); panicf("py.type unavailable"); }
+    PyObj t = g_py.PyObject_Type(p->obj);
+    if (!t) py_fail("type()");
+    PyObj name = g_py.PyObject_GetAttrString(t, "__name__");
+    g_py.Py_DecRef(t);
+    if (!name) py_fail("type().__name__");
+    PySsize len = 0;
+    const char *s = g_py.PyUnicode_AsUTF8AndSize(name, &len);
+    aval out = a_str_new(s ? s : "", len < 0 ? 0 : (uint64_t)len);
+    g_py.Py_DecRef(name);
+    g_py.PyGILState_Release(gil);
+    return out;
+}
+
+aval bi_py_buffer_info(uint64_t n, aval *argv) {
+    want_args("py.buffer_info", n, 1, 1);
+    AObj *o = obj_of(argv[0]);
+    if (!o || o->type != T_PYBUF)
+        panicf("py.buffer_info() argument must be a py buffer, not '%s'", type_name_cstr(argv[0]));
+    APyBuf *b = (APyBuf *)o;
+    const char *kind = "unknown";
+    switch (b->kind) {
+        case APYBUF_U8: kind = "u8"; break; case APYBUF_I8: kind = "i8"; break;
+        case APYBUF_BOOL: kind = "bool"; break; case APYBUF_U16: kind = "u16"; break;
+        case APYBUF_I16: kind = "i16"; break; case APYBUF_U32: kind = "u32"; break;
+        case APYBUF_I32: kind = "i32"; break; case APYBUF_U64: kind = "u64"; break;
+        case APYBUF_I64: kind = "i64"; break; case APYBUF_F32: kind = "f32"; break;
+        case APYBUF_F64: kind = "f64"; break; default: break;
+    }
+    aval d = a_dict_new();
+    a_dict_set(d, a_str_new("kind", 4), a_str_new(kind, strlen(kind)));
+    a_dict_set(d, a_str_new("itemsize", 8), mkint_full((int64_t)b->itemsize));
+    a_dict_set(d, a_str_new("count", 5), mkint_full((int64_t)b->count));
+    a_dict_set(d, a_str_new("readonly", 8), bool_aval(b->readonly));
+    return d;
+}
+
 #else /* _WIN32: no dlopen; keep the symbols so the builtin table links */
 
 aval bi_py_call(uint64_t n, aval *argv) {
@@ -1287,6 +1700,10 @@ static aval py_unsupported(void) {
     panicf("python interop is not supported on this platform");
     return A_NONE;
 }
+static aval py_unsupported_err(void) {
+    const char *msg = "python interop is not supported on this platform";
+    return mkobj(result_new(0, 0, a_str_new(msg, strlen(msg))));
+}
 
 aval a_py_getattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
 aval a_py_setattr(aval obj, const char *name, aval v) { (void)obj; (void)name; (void)v; return py_unsupported(); }
@@ -1295,6 +1712,7 @@ aval a_py_setitem(aval obj, aval key, aval v) { (void)obj; (void)key; (void)v; r
 aval a_py_len(aval obj) { (void)obj; return py_unsupported(); }
 aval a_py_contains(aval obj, aval item) { (void)obj; (void)item; return py_unsupported(); }
 aval a_py_call(aval fn, uint64_t n, aval *argv) { (void)fn; (void)n; (void)argv; return py_unsupported(); }
+aval a_py_call_kw(aval fn, uint64_t n, uint64_t nkw, aval *argv) { (void)fn; (void)n; (void)nkw; (void)argv; return py_unsupported(); }
 aval a_py_call_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) { (void)obj; (void)name; (void)n; (void)nkw; (void)argv; return py_unsupported(); }
 aval a_py_iter_begin(aval v) { (void)v; return py_unsupported(); }
 int a_py_iter_next(aval it, aval *out) { (void)it; (void)out; return py_unsupported(), 0; }
@@ -1303,5 +1721,32 @@ aval a_py_repr(aval obj) { (void)obj; return py_unsupported(); }
 int a_py_truthy(aval obj) { (void)obj; return py_unsupported(), 0; }
 int a_py_equals(aval a, aval b) { (void)a; (void)b; return py_unsupported(), 0; }
 aval a_py_buffer_view(aval obj) { (void)obj; return py_unsupported(); }
+aval a_py_hasattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
+aval a_py_delattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
+aval a_py_delitem(aval obj, aval key) { (void)obj; (void)key; return py_unsupported(); }
+aval a_py_import_module(const char *name) { (void)name; return py_unsupported(); }
+
+aval bi_py_import_module(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_try_import_module(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported_err(); }
+aval bi_py_getattr_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_try_getattr_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported_err(); }
+aval bi_py_setattr_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_hasattr(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_delattr(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_getitem_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_setitem_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_delitem(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_call_obj(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_try_call_obj(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported_err(); }
+aval bi_py_call_method_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_try_call_method_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported_err(); }
+aval bi_py_is_pyobject(uint64_t n, aval *argv) { (void)n; (void)argv; return bool_aval(0); }
+aval bi_py_str_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_repr_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_len_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_contains_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_truthy_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_type_builtin(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
+aval bi_py_buffer_info(uint64_t n, aval *argv) { (void)n; (void)argv; return py_unsupported(); }
 
 #endif /* !_WIN32 */
