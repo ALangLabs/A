@@ -23,6 +23,9 @@ struct PipelineConfig {
   // astra binaries are bound to the host OS, so a target OS differing from
   // the host is rejected.
   std::string target;
+  // `a test --filter <substr>`: only run test_* functions whose name
+  // contains this substring. Empty means run every test.
+  std::string testFilter;
 };
 struct CompiledModule { std::unique_ptr<ModuleGraph> graph; std::unique_ptr<SemaResult> sema; bool ok = false; };
 CompiledModule runFrontendPipeline(const std::string& path, std::string source, const PipelineConfig& config, DiagnosticSink& sink, std::ostream& diagOut, std::ostream& diagErr);

@@ -59,9 +59,11 @@ function registerCommands(context, env) {
             const doc = await savedDocument(targetUri(target)); if (!doc) return;
             runInTerminal(doc);
         }),
-        ...['build', 'test', 'fmt'].map(action => vscode.commands.registerCommand(`a.${action}`, async target => {
+        // Optional second arg: a test-name filter (`a test --filter`), used
+        // by the per-test CodeLens lenses; ignored for other actions.
+        ...['build', 'test', 'fmt'].map(action => vscode.commands.registerCommand(`a.${action}`, async (target, filter) => {
             const doc = await savedDocument(targetUri(target)); if (!doc) return;
-            await vscode.tasks.executeTask(makeTask(env, { type: 'a', action }, doc.uri));
+            await vscode.tasks.executeTask(makeTask(env, { type: 'a', action, filter }, doc.uri));
         })),
         { dispose() { try { if (runTerminal) runTerminal.dispose(); } catch {} } }
     );

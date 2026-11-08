@@ -22,10 +22,13 @@ std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
 // Emits x86-64 assembly (AT&T syntax) for astra to assemble/compile and link
 // into machine code — the host fast path (A -> asm -> machine code).
 // In test mode, `main` discovers and runs top-level `fn test_*()` functions
-// through the runtime a_test_main harness. Returns false on constructs the
-// asm backend does not cover.
+// through the runtime a_test_main harness. When `testFilter` is non-null and
+// non-empty, only test functions whose name contains the filter substring are
+// registered with the harness (unmatched tests are not called). Returns false
+// on constructs the asm backend does not cover.
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
-             std::string& error, bool testMode = false);
+             std::string& error, bool testMode = false,
+             const std::string* testFilter = nullptr);
 
 // Emits target-native assembly (A -> .s -> astra -> machine code) for the
 // given arch ("arm64"/"aarch64", "riscv64", "i386", "arm", "i8086", and
@@ -40,5 +43,6 @@ bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
 // .pdata/.xdata unwind info is emitted for asm functions.
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
                 const std::string& arch, const std::string& os,
-                std::string& out, std::string& error, bool testMode = false);
+                std::string& out, std::string& error, bool testMode = false,
+                const std::string* testFilter = nullptr);
 }  // namespace a

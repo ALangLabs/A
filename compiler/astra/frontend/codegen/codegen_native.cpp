@@ -321,8 +321,10 @@ struct ABinding {
 class NativeEmitter {
  public:
   NativeEmitter(const ModuleGraph& graph, const SemaResult& sema,
-                const NatTarget& target, bool testMode)
-      : graph_(graph), sema_(sema), t_(target), testMode_(testMode) {}
+                const NatTarget& target, bool testMode,
+                const std::string* testFilter = nullptr)
+      : graph_(graph), sema_(sema), t_(target), testMode_(testMode),
+        testFilter_(testFilter ? *testFilter : "") {}
 
   bool isStdlibModule(int moduleId) const {
     // Stdlib/prelude bodies are emitted for real: stubbing them to A_NONE
@@ -353,6 +355,7 @@ class NativeEmitter {
   const SemaResult& sema_;
   const NatTarget& t_;
   bool testMode_ = false;
+  std::string testFilter_;  // `a test --filter`: substring matched on test names
   std::string* error_ = nullptr;
   bool failed_ = false;
   int counter_ = 0;
@@ -1851,7 +1854,9 @@ class NativeEmitter {
     std::vector<FnInfo*> tests;
     for (FnInfo* f : fnList_) {
       if (!f->isMethod && f->moduleId == graph_.entry &&
-          f->name.rfind("test_", 0) == 0)
+          f->name.rfind("test_", 0) == 0 &&
+          (testFilter_.empty() ||
+           f->name.find(testFilter_) != std::string::npos))
         tests.push_back(f);
     }
     std::sort(tests.begin(), tests.end(),
@@ -2208,24 +2213,7 @@ class NativeEmitter {
   }
 
   // ---- small helpers used by emitExpr ---------------------------------------
-  static std::string utf8Encode(char32_t cp) {
-    std::string out;
-    if (cp < 0x80) out.push_back((char)cp);
-    else if (cp < 0x800) {
-      out.push_back((char)(0xC0 | (cp >> 6)));
-      out.push_back((char)(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-      out.push_back((char)(0xE0 | (cp >> 12)));
-      out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
-      out.push_back((char)(0x80 | (cp & 0x3F)));
-    } else {
-      out.push_back((char)(0xF0 | (cp >> 18)));
-      out.push_back((char)(0x80 | ((cp >> 12) & 0x3F)));
-      out.push_back((char)(0x80 | ((cp >> 6) & 0x3F)));
-      out.push_back((char)(0x80 | (cp & 0x3F)));
-    }
-    return out;
-  }
+  // utf8Encode: shared copy in the a_runtime lib (strings/utf8.hpp).
   int noneSlot() {
     int s = allocSlot();
     movImm(kTag | 0x2ULL, acc());
@@ -4476,7 +4464,8 @@ void gcAsmFunctions(std::string& src) {
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
                 const std::string& arch, const std::string& os,
-                std::string& out, std::string& error, bool testMode) {
+                std::string& out, std::string& error, bool testMode,
+                const std::string* testFilter) {
   if (const char* forced = std::getenv("A_CODEGEN");
       forced && std::string(forced) == "c") {
     error = "native backend: disabled by A_CODEGEN=c";
@@ -4486,7 +4475,7 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
   // combination keeps its existing target (or declines for emitC).
   if (arch == "x86_64" && os == "windows") {
     Win64Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   // The remaining NatTargets emit SysV-style assembly only; on Windows
@@ -4497,22 +4486,22 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
   }
   if (arch == "arm64" || arch == "aarch64") {
     Arm64Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   if (arch == "riscv64" || arch == "riscv64gc") {
     Riscv64Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   if (arch == "i386" || arch == "x86") {
     I386Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   if (arch == "arm" || arch == "arm32") {
     Arm32Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   if (arch == "i8086" || arch == "8086") {
@@ -4521,7 +4510,7 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
       return false;
     }
     I8086Target t;
-    NativeEmitter e(graph, sema, t, testMode);
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
     if (!e.run(out, error)) return false;
     // Bare-metal boot: BIOS loads sector 0 at 0x7C00. .boot contains an
     // int 13h CHS loader (AH=08h geometry + AH=02h reads) that pulls the

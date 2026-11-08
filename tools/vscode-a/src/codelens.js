@@ -17,11 +17,14 @@ function enabledFor(document) {
     return vscode.workspace.getConfiguration('a', document.uri).get('codeLens.enabled', true);
 }
 
-function lens(range, title, command, uri) {
+// extraArgs: optional command arguments appended after the file URI (the
+// per-test lenses pass the test name so `a test --filter <name>` runs just
+// that test).
+function lens(range, title, command, uri, extraArgs) {
     return new vscode.CodeLens(range, {
         title,
         command,
-        arguments: [uri.toString()],
+        arguments: [uri.toString(), ...(extraArgs || [])],
     });
 }
 
@@ -60,7 +63,7 @@ function registerRunTestCodeLens(context) {
                 for (const fn of tests) {
                     const line = fn.range.start.line;
                     lenses.push(lens(new vscode.Range(line, 0, line, 0),
-                        `$(beaker) Run Tests (${fn.name})`, 'a.test', document.uri));
+                        `$(beaker) Run Tests (${fn.name})`, 'a.test', document.uri, [fn.name]));
                 }
             }
             return lenses;

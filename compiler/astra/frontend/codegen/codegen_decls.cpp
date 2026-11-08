@@ -581,7 +581,9 @@ void AsmEmitter::emitMain() {
       std::vector<FnInfo*> tests;
       for (FnInfo* f : fnList_) {
         if (!f->isMethod && f->moduleId == graph_.entry &&
-            f->name.rfind("test_", 0) == 0) {
+            f->name.rfind("test_", 0) == 0 &&
+            (testFilter_.empty() ||
+             f->name.find(testFilter_) != std::string::npos)) {
           tests.push_back(f);
         }
       }

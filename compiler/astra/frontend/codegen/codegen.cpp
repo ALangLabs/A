@@ -105,8 +105,8 @@ std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
 }
 
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
-             std::string& error, bool testMode) {
-  detail::AsmEmitter emitter(graph, sema, testMode);
+             std::string& error, bool testMode, const std::string* testFilter) {
+  detail::AsmEmitter emitter(graph, sema, testMode, testFilter);
   return emitter.run(out, error);
 }
 

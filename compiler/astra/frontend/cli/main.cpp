@@ -25,7 +25,7 @@ void printUsage(std::ostream& os) {
      << "  run <file.a>     compile and execute a program\n"
      << "  build <file.a>   compile to a native binary (-o <bin>)\n"
      << "  check <file.a>   type-check without running\n"
-     << "  test <file.a>    run every fn test_*()\n"
+     << "  test <file.a>    run every fn test_*() (--filter <substr> runs a subset)\n"
      << "  fmt <file.a>     format source (stdout; -w to write)\n"
      << "  doc <file.a>     generate documentation (markdown; --json)\n"
      << "  ir <file.a>      print the typed SSA IR\n"
@@ -53,6 +53,7 @@ void printUsage(std::ostream& os) {
      << "                    match the host OS — astra cannot cross OSes;\n"
      << "                    a run --target i8086 uses QEMU on Linux)\n"
      << "  --no-color       disable colored diagnostics\n"
+     << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
      << "  -V, --version    print version\n";
 }
@@ -73,6 +74,7 @@ struct Options {
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;
   std::string target;
+  std::string testFilter;
   bool useColor = false;
   bool checkOnly = false;
   bool writeInPlace = false;
@@ -173,6 +175,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       options.target = argv[++i];
     } else if (arg.rfind("--target=", 0) == 0) {
       options.target = arg.substr(9);
+    } else if (arg == "--filter") {
+      if (i + 1 >= argc) { err << "error: '--filter' requires a value\n"; return false; }
+      options.testFilter = argv[++i];
+    } else if (arg.rfind("--filter=", 0) == 0) {
+      options.testFilter = arg.substr(9);
     } else if (arg == "-h" || arg == "--help") { printUsage(std::cout); std::exit(0); }
     else if (arg == "-V" || arg == "--version") { std::cout << a::kVersionLine << "\n"; std::exit(0); }
     else if (!arg.empty() && arg[0] == '-') { err << "error: unknown option '" << arg << "'\n"; return false; }
@@ -215,6 +222,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   // pipeline); `a run`/`a build -O` only forwards to the C backend.
   if (options.command == "ir" && options.optFlagSet) options.optimize = true;
   if (options.command != "ir" && options.optimize) { err << "error: '--opt' is only valid with 'ir'\n"; return false; }
+  if (options.command != "test" && !options.testFilter.empty()) { err << "error: '--filter' is only valid with 'test'\n"; return false; }
   if (options.writeInPlace && options.checkOnly) { err << "error: '--write' and '--check' cannot be combined\n"; return false; }
   options.useColor = isTerminal() && !colorDisabled;
   return true;
@@ -246,6 +254,7 @@ int main(int argc, char** argv) {
   config.modulePaths = options.modulePaths;
   config.stdlibRoot = options.stdlibRoot;
   config.target = options.target;
+  config.testFilter = options.testFilter;
   if (options.command == "run") {
     if (!options.commandCode.empty()) {
       return a::runSource("<command>", options.commandCode, config, std::cin, std::cout, std::cerr);

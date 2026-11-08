@@ -114,8 +114,10 @@ struct ARangeEnv {
 
 class AsmEmitter {
  public:
-  AsmEmitter(const ModuleGraph& graph, const SemaResult& sema, bool testMode = false)
-      : graph_(graph), sema_(sema), testMode_(testMode) {}
+  AsmEmitter(const ModuleGraph& graph, const SemaResult& sema, bool testMode = false,
+             const std::string* testFilter = nullptr)
+      : graph_(graph), sema_(sema), testMode_(testMode),
+        testFilter_(testFilter ? *testFilter : "") {}
   ~AsmEmitter() {
     for (FnInfo* f : fnList_) delete f;
     for (StructInfo* s : structList_) delete s;
@@ -176,6 +178,7 @@ class AsmEmitter {
   // emission); strength reduction scans pre-loop writes through it.
   const std::vector<StmtPtr>* curFnBody_ = nullptr;
   bool testMode_ = false;
+  std::string testFilter_;  // `a test --filter`: substring matched on test names
 
   // Small-function inlining state. Generic inlining reuses the normal aval
   // emitter with a fresh function-like scope; raw-int inlining is a separate

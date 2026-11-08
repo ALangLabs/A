@@ -145,6 +145,8 @@ function argumentsFor(action, config, options = {}) {
     }
     if (action === 'build') args.push('-o', config.output);
     if (action === 'fmt') args.push('-w');
+    // `a test --filter <name>`: per-test CodeLens runs a single test_* fn.
+    if (action === 'test' && options.filter) args.push('--filter', options.filter);
     args.push(config.file);
     return args;
 }

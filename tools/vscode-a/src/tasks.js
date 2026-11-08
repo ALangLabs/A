@@ -17,7 +17,7 @@ function makeTask(env, definition, uri, scope, name) {
     if (!env.isTrusted() || uri.scheme !== 'file') return undefined;
     const config = settings(vscode, uri, definition, typeof scope === 'object' ? scope : undefined);
     if (!ACTION_TITLES[definition.action]) return undefined;
-    const task = new vscode.Task({ ...definition, type: 'a', file: config.file }, scope || config.workspaceFolder || vscode.TaskScope.Workspace, name || ACTION_TITLES[definition.action], 'A', new vscode.ProcessExecution(config.compiler, argumentsFor(definition.action, config), { cwd: config.cwd }), '$a');
+    const task = new vscode.Task({ ...definition, type: 'a', file: config.file }, scope || config.workspaceFolder || vscode.TaskScope.Workspace, name || ACTION_TITLES[definition.action], 'A', new vscode.ProcessExecution(config.compiler, argumentsFor(definition.action, config, { filter: definition.filter }), { cwd: config.cwd }), '$a');
     if (definition.action === 'run') task.group = vscode.TaskGroup.Build;
     task.presentationOptions = { reveal: vscode.TaskRevealKind.Always, panel: vscode.TaskPanelKind.Dedicated, clear: true };
     return task;

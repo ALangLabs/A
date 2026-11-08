@@ -10,7 +10,7 @@ language server; the VS Code extension wraps both.
 | `a run <file.a>` | Compile and execute. `-c 'code'` runs inline source. |
 | `a build <file.a> -o <bin>` | Compile to a native executable (default `a.out`). |
 | `a check <file.a>` | Type-check only; `--json` for machine-readable diagnostics. |
-| `a test <file.a>` | Run every `fn test_*()`. |
+| `a test <file.a>` | Run every `fn test_*()`; `--filter <substr>` runs only tests whose name contains the substring. |
 | `a fmt <file.a>` | Format to stdout; `-w` writes in place, `--check` exits nonzero if unformatted, `--indent <n>`. |
 | `a doc <file.a>` | Generate docs (markdown; `--json`, `-o <file>`). |
 | `a ir <file.a>` | Print the typed SSA IR; `--opt` or `-O*` runs optimization passes. |
@@ -24,6 +24,10 @@ language server; the VS Code extension wraps both.
 - `-j <n>`, `--jobs <n>`, `--parallel` — parallel module checking.
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N`, `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
+- `--filter <substr>` — `a test` only: run just the `test_*` functions whose
+  name contains the substring (e.g. `a test foo.a --filter dict`). A filter
+  matching nothing prints `no tests matched` and exits 0. The filter is part
+  of the run-cache key, so different filters never share a cached binary.
 - `--target <arch>` — cross-compile target: `x86_64`
   (default; x86-64 assembly emitter on Linux/macOS SysV), `i386`, `arm`
   (ARMv7 hard-float), `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal).

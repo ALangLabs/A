@@ -587,7 +587,8 @@ inline bool disabled() {
 // Callers check CT via std::filesystem::exists on Plan::file; on a miss
 // they compile to a temp name in the cache dir and rename over `file`.
 inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
-                 int optimizationLevel, const std::string* entrySource) {
+                 int optimizationLevel, const std::string* entrySource,
+                 const std::string* testFilter = nullptr) {
   Plan p;
   if (!td.native || disabled()) return p;
   std::string astraBin, runtimeC, runtimeDir;
@@ -597,6 +598,9 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   h = mixBytes(h, td.arch);
   h = mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   h = mixInt(h, testMode ? 1 : 0);
+  // `a test --filter` changes which tests run, so it must key the cache:
+  // two different filters over the same source produce different binaries.
+  if (testMode) h = mixBytes(h, testFilter ? *testFilter : "");
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
   const char* rcc = std::getenv("A_RUNTIME_CC");
@@ -718,7 +722,7 @@ inline std::string precheckKey(const std::string& path,
   // subtree matters depends on the entry's imports: `import std:...`, bare
   // imports, `..` quoted paths, or any unparseable line all force a full
   // walk (sound); a plain file with no imports only needs its own dir and
-  // the always-loaded stdlib/prelude.a single file stat.
+  // the always-loaded std/prelude.a single file stat.
   std::string entryDir;
   {
     std::filesystem::path pp(path);
@@ -754,7 +758,7 @@ inline std::string precheckKey(const std::string& path,
     if (needFull) {
       dirs.push_back(stdRoot);
     } else {
-      h = mixFileStat(h, stdRoot + "/prelude.a");
+      h = mixFileStat(h, stdRoot + "/std/prelude.a");
     }
   }
   for (const std::string& d : dirs) walk(d, 0);
@@ -1120,7 +1124,8 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
                   bool testMode = false, int optimizationLevel = 2,
                   const std::string* keepBin = nullptr,
                   const TargetDesc* td = nullptr,
-                  const std::string* entrySource = nullptr) {
+                  const std::string* entrySource = nullptr,
+                  const std::string* testFilter = nullptr) {
   (void)in; (void)out;
   TargetDesc localTd;
   if (!td) {
@@ -1130,7 +1135,8 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   // Run cache: a hit skips emit+astra entirely (~2ms exec vs ~25ms build).
   run_cache::Plan cache;
   if ((!keepBin || keepBin->empty()) && td->native) {
-    cache = run_cache::plan(m, *td, testMode, optimizationLevel, entrySource);
+    cache = run_cache::plan(m, *td, testMode, optimizationLevel, entrySource,
+                            testFilter);
     std::error_code ec;
     if (cache.active && std::filesystem::exists(cache.file, ec)) {
       int hit = runBinary(cache.file);
@@ -1151,8 +1157,9 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   // Windows x86-64 via the Win64 MS ABI). A decline is a hard error
   // carrying the emitter's reason — there is no C fallback.
   bool asmOk = td->useAsm
-      ? emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)
-      : emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError, testMode);
+      ? emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode, testFilter)
+      : emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError,
+                   testMode, testFilter);
   if (!asmOk) {
     if (td->arch == "i8086")
       err << "error: code generation failed for i8086 (asm-only target): "
@@ -1280,7 +1287,28 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy);
+  // --filter with no matching test_* function: report and exit cleanly
+  // instead of compiling a binary that would run zero tests. Mirrors the
+  // emitter's discovery predicate (top-level FnDecl in the entry module).
+  if(!config.testFilter.empty()){
+    bool any=false;
+    const ModuleGraph& g=*m.graph;
+    if(g.entry>=0 && g.entry<(int)g.modules.size()){
+      const Module& mod=g.at(g.entry);
+      if(mod.program){
+        for(const StmtPtr& s:mod.program->statements){
+          if(s->kind==StmtKind::FnDecl){
+            const FnDecl* f=static_cast<const FnDecl*>(s.get());
+            if(f->name.rfind("test_",0)==0 &&
+               f->name.find(config.testFilter)!=std::string::npos){ any=true; break; }
+          }
+        }
+      }
+    }
+    if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kOk; }
+  }
+  return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
+                       config.testFilter.empty()?nullptr:&config.testFilter);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
