@@ -17,6 +17,7 @@ int kind_of(aval v) {
     if (!o) return K_OTHER;
     switch (o->type) {
         case T_STR: return K_STR;
+        case T_BYTES: return K_BYTES;
         case T_LIST: return K_LIST;
         case T_TUPLE: return K_TUPLE;
         case T_DICT: case T_STRUCT: return K_DICT;
@@ -55,6 +56,7 @@ const char *type_name_cstr(aval v) {
         case K_RESULT: return "result";
         case K_CHAR: return "char";
         case K_VIEW: return "view";
+        case K_BYTES: return "Bytes";
         default: return "object";
     }
 }
@@ -123,6 +125,40 @@ void format_into(Buf *b, aval v, int quote) {
             const char *p = str_data(v, &n);
             if (quote) format_quoted(b, p, (size_t)n);
             else buf_addn(b, p, (size_t)n);
+            return;
+        }
+        case K_BYTES: {
+            /* b"..." with escape sequences; payloads that are valid UTF-8 print
+               as text, everything else stays escaped so it round-trips. */
+            ABytes *by = (ABytes *)obj_of(v);
+            const char *p = by->data ? by->data : "";
+            uint64_t n = (uint64_t)by->h.len;
+            int text = a_utf8_valid(p, n) && !quote;
+            if (text) {
+                for (uint64_t i = 0; i < n; ++i) buf_addc(b, p[i]);
+                return;
+            }
+            buf_addc(b, 'b');
+            buf_addc(b, '"');
+            for (uint64_t i = 0; i < n; ++i) {
+                unsigned char c = (unsigned char)p[i];
+                switch (c) {
+                    case '"': buf_adds(b, "\\\""); break;
+                    case '\\': buf_adds(b, "\\\\"); break;
+                    case '\n': buf_adds(b, "\\n"); break;
+                    case '\t': buf_adds(b, "\\t"); break;
+                    case '\r': buf_adds(b, "\\r"); break;
+                    default:
+                        if (c >= 0x20 && c < 0x7f) buf_addc(b, (char)c);
+                        else {
+                            char hex[8];
+                            snprintf(hex, sizeof(hex), "\\x%02x", c);
+                            buf_adds(b, hex);
+                        }
+                        break;
+                }
+            }
+            buf_addc(b, '"');
             return;
         }
         case K_CHAR: {

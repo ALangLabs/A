@@ -1,0 +1,28 @@
+# Bytes: the first-class byte buffer (len/index/store/slice/iterate/concat).
+import std:core
+from std:bytes import utf8_decode
+
+fn main():
+    b: Bytes = Bytes("hey")
+    print(len(b))
+    print(b[0])
+    print(type(b))
+    b[0] = 72
+    print(core.bytes_to_str(b)!)
+    print(b[0..2])
+    print(list(b))
+    print(b + Bytes("!"))
+    total = 0
+    for c in b:
+        total = total + c
+    print(total)
+
+    raw: Bytes = Bytes(3)
+    raw[0] = 255
+    raw[1] = 0
+    raw[2] = 128
+    print(repr(raw))
+    print(core.bytes_to_str(raw) == None)
+    print(utf8_decode(raw) == None)
+    print(len(Bytes(1024)))
+    print(Bytes([65, 66]) == Bytes("AB"))

@@ -174,7 +174,7 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     if (call.args.size() < (all ? 1u : 2u) || call.args.size() > hi) {
       builtinArityError(name, call, static_cast<int>(hi));
       inferCallArgTypes(call);
-      return typeTuple({typeOptional(typeString()), typeArray(typeInt(64, true))});
+      return typeTuple({typeOptional(typeString()), typeBytes()});
     }
     requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
                    "The socket handle");
@@ -182,10 +182,37 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     if (!all)
       requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
                      "The byte count");
-    if (call.args.size() > prefixAt)
-      checkArgAgainst(*call.args[prefixAt].value, typeArray(typeInt(64, true)),
-                      "as the buffered body prefix");
-    return typeTuple({typeOptional(typeString()), typeArray(typeInt(64, true))});
+    if (call.args.size() > prefixAt) {
+      TypePtr pre = inferExpr(*call.args[prefixAt].value);
+      if (resolveType(pre)->kind != TypeKind::Bytes)
+        checkArgAgainst(*call.args[prefixAt].value, typeArray(typeInt(64, true)),
+                        "as the buffered body prefix");
+    }
+    return typeTuple({typeOptional(typeString()), typeBytes()});
+  }
+
+  if (name == "net_recv_buf" || name == "net_recv_buf_all") {
+    bool all = name == "net_recv_buf_all";
+    std::size_t lo = all ? 1u : 2u;
+    std::size_t hi = all ? 2u : 3u;
+    if (call.args.size() < lo || call.args.size() > hi) {
+      builtinArityError(name, call, static_cast<int>(hi));
+      inferCallArgTypes(call);
+      return typeBytes();
+    }
+    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                   "The socket handle");
+    std::size_t prefixAt = all ? 1u : 2u;
+    if (!all)
+      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                     "The byte count");
+    if (call.args.size() > prefixAt) {
+      TypePtr pre = inferExpr(*call.args[prefixAt].value);
+      if (resolveType(pre)->kind != TypeKind::Bytes)
+        checkArgAgainst(*call.args[prefixAt].value, typeArray(typeInt(64, true)),
+                        "as the buffered body prefix");
+    }
+    return typeBytes();
   }
 
   if (name == "net_recv_exact") {

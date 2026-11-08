@@ -75,7 +75,8 @@ inline bool isKnownBuiltin(const std::string& name) {
       "arena_reset", "arena_used", "arena_total", "move", "copy",
       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
       "unsafe_offset", "py_buffer",
-      "Some", "Ok", "Err", "ic", "repr",
+      "Some", "Ok", "Err", "ic", "repr", "Bytes",
+      "bytes_new", "bytes_append", "bytes_to_str",
       "__repr__", "__debug_repr__", "__ic_format__",
       // LLVM-style intrinsics
       "ctz", "clz", "popcount", "bswap", "rotl", "rotr",

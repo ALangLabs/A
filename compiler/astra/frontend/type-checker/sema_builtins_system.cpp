@@ -132,8 +132,11 @@ TypePtr Sema::checkBuiltinSystem(const std::string& name, CallExpr& call) {
       inferCallArgTypes(call);
       return typeOptional(typeString());
     }
-    checkArgAgainst(*call.args[0].value, typeArray(typeInt(64, true)),
-                    "as the bytes to decode");
+    TypePtr arg = inferExpr(*call.args[0].value);
+    TypePtr res = resolveType(arg);
+    if (res->kind != TypeKind::Bytes)
+      checkArgAgainst(*call.args[0].value, typeArray(typeInt(64, true)),
+                      "as the bytes to decode");
     return typeOptional(typeString());
   }
 

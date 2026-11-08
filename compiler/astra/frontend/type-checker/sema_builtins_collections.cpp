@@ -103,6 +103,8 @@ TypePtr Sema::checkBuiltinCollections(const std::string& name, CallExpr& call) {
         return resolved->elem;  // iterating a map yields its keys
       case TypeKind::String:
         return typeChar();
+      case TypeKind::Bytes:
+        return typeInt(64, true);
       case TypeKind::Tuple:
         return freshVar(Constraint::None, arg.span,
                         "the element type iterated by '" + fn + "'");

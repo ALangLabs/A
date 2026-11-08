@@ -142,6 +142,7 @@ aval a_len(aval v) {
             return mkint_full(u8_count(s->data, s->h.len));
         }
         case K_VIEW: return mkint_full(((AView *)obj_of(v))->len);
+        case K_BYTES: return mkint_full(((ABytes *)obj_of(v))->h.len);
         case K_LIST:
         case K_TUPLE:
         case K_SET:

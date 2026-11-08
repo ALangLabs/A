@@ -173,6 +173,14 @@ aval binary_arith(aval l, aval r, char op, const char *opname) {
     if (op == '+' ) {
         if (kind_of(l) == K_STR) return concat_str(l, r, 1);
         if (kind_of(r) == K_STR) return concat_str(r, l, 0);
+        if (kind_of(l) == K_BYTES && kind_of(r) == K_BYTES) {
+            ABytes *a = (ABytes *)obj_of(l), *b2 = (ABytes *)obj_of(r);
+            aval out = a_bytes_new((uint64_t)a->h.len + (uint64_t)b2->h.len);
+            ABytes *o = a_bytes_obj(out);
+            a_bytes_append(o, a->data ? a->data : "", (uint64_t)a->h.len);
+            a_bytes_append(o, b2->data ? b2->data : "", (uint64_t)b2->h.len);
+            return out;
+        }
         if (kind_of(l) == K_LIST && kind_of(r) == K_LIST) return concat_arr(l, r);
         if (kind_of(l) == K_TUPLE && kind_of(r) == K_TUPLE) return concat_arr(l, r);
     }

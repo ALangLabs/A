@@ -37,6 +37,15 @@ inline void addCoreDocs(StringMap<BuiltinDoc>& docs) {
                              "Validating one-pass UTF-8 decode of an [i64] byte array; None when malformed."}},
       {"str_encode_utf8", {"str_encode_utf8", "core.bytes_utf8_encode(s) -> [i64]",
                            "One-pass UTF-8 byte array of a string (std:bytes hot path)."}},
+      {"bytes_new", {"bytes_new", "core.bytes_new([x]) -> Bytes",
+                     "Build a Bytes buffer: no argument is empty, an i64 is that many zero "
+                     "bytes, String/[i64]/Bytes copy their contents. The bare Bytes(x) form "
+                     "is the same constructor."}},
+      {"bytes_append", {"bytes_append", "core.bytes_append(dst, src) -> None",
+                        "Grow a Bytes in place; src may be Bytes, String, [i64] or a single "
+                        "byte value."}},
+      {"bytes_to_str", {"bytes_to_str", "core.bytes_to_str(b) -> String?",
+                        "UTF-8 text of a Bytes value; None when the payload is not valid UTF-8."}},
   });
 }
 

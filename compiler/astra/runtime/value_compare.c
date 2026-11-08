@@ -12,6 +12,12 @@ int values_equal(aval a, aval b) {
         return num_to_double(a) == num_to_double(b);
     }
     if (a == b) return 1;
+    if (ka == K_BYTES || kb == K_BYTES) {
+        ABytes *xa = (ABytes *)obj_of(a), *xb = (ABytes *)obj_of(b);
+        if (ka != K_BYTES || kb != K_BYTES) return 0;
+        if (xa->h.len != xb->h.len) return 0;
+        return memcmp(xa->data, xb->data, (size_t)xa->h.len) == 0;
+    }
     /* Views compare as the underlying slice (view == list if elements match). */
     if (ka == K_VIEW || kb == K_VIEW) {
         if (ka != K_VIEW && ka != K_LIST && ka != K_TUPLE) return 0;

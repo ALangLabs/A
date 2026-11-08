@@ -98,6 +98,11 @@ aval a_getitem(aval obj, aval idx) {
             AArr *root = view_root(obj, &base);
             return root->items[(size_t)(base + i)];
         }
+        case K_BYTES: {
+            ABytes *b = (ABytes *)obj_of(obj);
+            int64_t i = normalize_index(expect_int64(idx, "index"), b->h.len);
+            return mkint_full((unsigned char)b->data[i]);
+        }
         case K_CHAR: {
             panicf("object of type 'char' is not subscriptable");
             return A_NONE;
@@ -161,6 +166,15 @@ aval a_setitem(aval obj, aval idx, aval val) {
         }
         case K_DICT: {
             dict_put((ADict *)obj_of(obj), idx, val);
+            return val;
+        }
+        case K_BYTES: {
+            ABytes *b = (ABytes *)obj_of(obj);
+            int64_t i = normalize_index(expect_int64(idx, "index"), b->h.len);
+            int64_t v = expect_int64(val, "a byte value");
+            if (v < 0 || v > 255)
+                panicf("byte value must be in 0..255, got %lld", (long long)v);
+            b->data[i] = (char)v;
             return val;
         }
         default:
@@ -286,11 +300,12 @@ int64_t slice_bound(aval v, int64_t n, int64_t lower, int64_t upper,
 
 aval a_slice(aval obj, aval lo, aval hi, aval step) {
     int k = kind_of(obj);
-    if (k != K_STR && k != K_LIST && k != K_TUPLE && k != K_VIEW)
+    if (k != K_STR && k != K_LIST && k != K_TUPLE && k != K_VIEW && k != K_BYTES)
         panicf("object of type '%s' is not sliceable", type_name_cstr(obj));
     AObj *o = obj_of(obj);
     uint64_t len;
-    if (o->type == T_STR)
+    if (o->type == T_BYTES) len = ((ABytes *)o)->h.len;
+    else if (o->type == T_STR)
         len = u8_count(((AStr *)o)->data, ((AStr *)o)->h.len);
     else if (o->type == T_VIEW)
         len = (uint64_t)((AView *)o)->len;
@@ -307,6 +322,25 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         stop = slice_bound(hi, n, -1, n - 1, -1);
     }
     AVec v = { NULL, 0, 0 };
+    if (o->type == T_BYTES) {
+        /* Byte slice: a fresh Bytes (slicing is rare next to recv/decode, so
+           copying keeps the object model simple and the payload independent). */
+        ABytes *b = (ABytes *)o;
+        int64_t cnt = st == 1 ? (stop - start > 0 ? stop - start : 0)
+                              : (st > 0 ? (stop - start + st - 1) / st : (start - stop - st - 1) / -st);
+        if (cnt < 0) cnt = 0;
+        aval out = a_bytes_new((uint64_t)cnt);
+        ABytes *dst = a_bytes_obj(out);
+        int64_t w = 0;
+        for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
+            dst->data[w++] = b->data[(uint64_t)i];
+            if (st > 0) { if (i > INT64_MAX - st) break; i += st; }
+            else { if (i < INT64_MIN - st) break; i += st; }
+        }
+        dst->h.len = (uint32_t)w;
+        dst->data[w] = 0;
+        return out;
+    }
     if (o->type == T_STR) {
         AStr *s = (AStr *)o;
         Buf b;
@@ -379,6 +413,7 @@ aval a_iter_new(aval v) {
         case K_SET:
         case K_STR:
         case K_DICT:
+        case K_BYTES:
             return mkobj(&it->h);
         case K_RANGE: {
             ARange *r = (ARange *)obj_of(v);
@@ -457,6 +492,8 @@ aval a_iter_next(aval it, aval *out) {
         len = (uint64_t)vw_src->len;
     } else if (so->type == T_STR || so->type == T_CHAR) {
         len = u8_count(((AStr *)so)->data, ((AStr *)so)->h.len);
+    } else if (so->type == T_BYTES) {
+        len = ((ABytes *)so)->h.len;
     } else {
         AArr *a = (AArr *)so;
         len = a->h.len;
@@ -470,6 +507,9 @@ aval a_iter_next(aval it, aval *out) {
     else if (vw_src) {
         AArr *root = view_root(src, &vw_base);
         *out = root->items[(size_t)(vw_base + (int64_t)i)];
+    }
+    else if (so->type == T_BYTES) {
+        *out = mkint_full((unsigned char)((ABytes *)so)->data[i]);
     }
     else if (so->type == T_STR || so->type == T_CHAR) {
         AStr *s = (AStr *)so;

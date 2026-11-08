@@ -129,7 +129,12 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "str_encode_utf8", bi_str_encode_utf8 },
     { "net_recv_exact", bi_net_recv_exact },
     { "net_recv_body", bi_net_recv_body },
-    { "net_recv_body_all", bi_net_recv_body_all }
+    { "net_recv_body_all", bi_net_recv_body_all },
+    { "bytes_new", bi_bytes_new },
+    { "bytes_append", bi_bytes_append },
+    { "bytes_to_str", bi_bytes_to_str },
+    { "net_recv_buf", bi_net_recv_buf },
+    { "net_recv_buf_all", bi_net_recv_buf_all }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

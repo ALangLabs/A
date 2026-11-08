@@ -30,7 +30,8 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     TypePtr type = inferExpr(*call.args[0].value);
     TypePtr resolved = resolveType(type);
     if (resolved->kind == TypeKind::String || resolved->kind == TypeKind::Array ||
-        resolved->kind == TypeKind::Map || resolved->kind == TypeKind::Set) {
+        resolved->kind == TypeKind::Map || resolved->kind == TypeKind::Set ||
+        resolved->kind == TypeKind::Bytes) {
       return typeInt(64, true);
     }
     if (resolved->kind == TypeKind::Var) {
@@ -41,6 +42,49 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
                   "'len' works on strings, arrays, maps, and sets.");
     }
     return typeInt(64, true);
+  }
+
+  if (name == "Bytes" || name == "bytes_new") {
+    // Bytes() empty, Bytes(n) zero-filled, Bytes("s") UTF-8 of s,
+    // Bytes([i64]) one byte per element, Bytes(other) copy.
+    if (call.args.size() > 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeBytes();
+    }
+    if (!call.args.empty()) {
+      TypePtr arg = inferExpr(*call.args[0].value);
+      TypePtr res = resolveType(arg);
+      if (res->kind == TypeKind::Float || res->kind == TypeKind::Bool ||
+          res->kind == TypeKind::Void || res->kind == TypeKind::Map ||
+          res->kind == TypeKind::Optional || res->kind == TypeKind::Result) {
+        sink_.error(call.args[0].value->span,
+                    "'" + name + "' cannot build from " + typePhrase(res) + ".",
+                    "Pass a length (i64), a String, an [i64] byte array, or Bytes.");
+      }
+    }
+    return typeBytes();
+  }
+
+  if (name == "bytes_append") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeVoid();
+    }
+    checkArgAgainst(*call.args[0].value, typeBytes(), "as the buffer to append to");
+    inferExpr(*call.args[1].value);
+    return typeVoid();
+  }
+
+  if (name == "bytes_to_str") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeOptional(typeString());
+    }
+    inferExpr(*call.args[0].value);
+    return typeOptional(typeString());
   }
 
   if (name == "set") {

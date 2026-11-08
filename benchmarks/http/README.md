@@ -71,11 +71,39 @@ Progression for this benchmark, 1 MiB bodies: **94 -> 388 MB/s** (4.1x),
 10 MiB bodies: **108 -> 610 MB/s** (5.6x), against a raw-socket C++ baseline of
 807 / 1542 MB/s.
 
+## The `Bytes` type: the structural fix
+
+The gap that was left after the fast paths above was representation: an A
+`[i64]` byte array stores 8 bytes per payload byte plus a pass that widens each
+byte into a tagged value. `Bytes` is now a first-class value type — a growable
+`char *` buffer with a length, O(1) `len`, index get/set, slicing, iteration,
+equality and `+`. Same 1 MiB payload over one loopback socket:
+
+| representation | 1 MiB read | MB/s |
+|---|---:|---:|
+| `[i64]` (`net.recv_exact`) | 12 ms | 83 |
+| `Bytes` (`net.recv_buf`) | 1 ms | 1000 |
+
+`net.recv_buf` allocates the `Bytes` first and lets `recv()` fill it, so the
+payload is written once by the kernel and never copied or widened. `std:http`
+now uses it for every byte path (`Response.body_bytes` is a `Bytes`,
+`_read_n`/`_read_chunked`/`_read_to_close` all return one), and the whole client
+benchmark moved with it:
+
+| payload | A before `Bytes` | A after |
+|---|---:|---:|
+| 1 MiB | 388 MB/s | 322-390 MB/s (same text path; the binary path 83 -> 1000 MB/s) |
+| 10 MiB | 610 MB/s | 583-620 MB/s |
+| 1 MiB binary body | 200 MB/s | 200 MB/s end-to-end, 5 ms/req |
+
+Bulk bodies were already dominated by the connect (A has no keep-alive pool);
+the win shows on binary payloads, which used to cost 8x the memory and are now
+straight `recv()` into the destination buffer.
+
 ## If A needs to close the rest
 
-1. **A `bytes` value type backed by `char*`/`(ptr,len)`** instead of `[i64]`.
-   Binary bodies stop costing 8x memory and 8x copy; this is the last real
-   structural gap for bulk transfers.
+1. ~~A `bytes` value type backed by `char*`/`(ptr,len)`~~ — done: `Bytes` is a
+   first-class type (see above).
 2. **Connection pooling** (`Connection: keep-alive` reuse) — worth 1.4-2.2 GB/s
    for the other two clients on 1 MiB bodies; A currently connects per request.
 3. **Value unboxing / type specialization in the compiler.** Measured on this

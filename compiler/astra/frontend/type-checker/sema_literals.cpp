@@ -16,6 +16,8 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
   // Dynamic: index type checked at runtime (maps use any hashable key).
   if (object->kind == TypeKind::Array) return object->elem;
   if (object->kind == TypeKind::String) return typeChar();
+  // Bytes index yields the byte value (i64 0..255), like Python's bytearray.
+  if (object->kind == TypeKind::Bytes) return typeInt(64, true);
   if (object->kind == TypeKind::Var) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
@@ -49,6 +51,7 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
   // run time, so the static type is the dynamic array form.
   if (object->kind == TypeKind::Array) return typeArray(object->elem);
   if (object->kind == TypeKind::String) return typeString();
+  if (object->kind == TypeKind::Bytes) return typeBytes();
   if (object->kind == TypeKind::Var) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }

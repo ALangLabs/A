@@ -28,11 +28,13 @@ Note: `range(5)` is **not** a function — write `0..5` range literals instead.
 
 `math` (sqrt/abs/min/max/pow/trig/log/floor/ceil/round/trunc/random + `PI`,`E`),
 `io` (print/eprint/input/flush), `fs` (file ops), `strings`, `collections`,
-`core` (panic/assert/assert_eq/bytes_utf8_decode/bytes_utf8_encode), `time` (now/sleep), `json`, `binary`,
+`core` (panic/assert/assert_eq/bytes_utf8_decode/bytes_utf8_encode/
+bytes_new/bytes_append/bytes_to_str), `time` (now/sleep), `json`, `binary`,
 `testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_listen/tcp_connect/accept/
 send/recv/recv_status/close/set_timeout/set_nonblocking/poll/local_port/
 udp_socket/udp_bind/udp_send/udp_recv/tls_connect/tls_wrap/tls_available/
-send_bytes/recv_bytes/inflate_bytes/inflate_available), `terminal`,
+send_bytes/recv_bytes/recv_buf/recv_buf_all/recv_body/recv_body_all/recv_exact/
+inflate_bytes/inflate_available), `terminal`,
 `env` (`get` only), `repl` (eval/quiet), `py` (Python bridge), `unsafe`,
 `arena`, `kernel_ops`.
 
@@ -42,7 +44,34 @@ empty string when it is unset — it is *not* an `Optional`.
 `core.bytes_utf8_decode(bytes) -> String?` and `core.bytes_utf8_encode(s) ->
 [i64]` are the single-pass native conversions behind `std:bytes`
 `utf8_decode`/`utf8_encode`; they exist so a multi-megabyte body decodes in
-microseconds instead of allocating one string per byte.
+microseconds instead of allocating one string per byte. Both also accept a
+`Bytes` value.
+
+## Bytes
+
+`Bytes` is the first-class byte buffer — a growable `char *` with an O(1)
+length, not an `[i64]` array (which costs 8 bytes per payload byte plus an
+expansion pass). Construct it with `Bytes()` (empty), `Bytes(n)` (n zero
+bytes), `Bytes("text")` (UTF-8 of a string), `Bytes([1, 2, 3])` (one byte per
+element) or `Bytes(other)` (copy).
+
+```
+b: Bytes = Bytes("hey")
+len(b)            # 3, O(1)
+b[0]              # 104 (i64 0..255)
+b[0] = 72         # store (panics outside 0..255)
+b[0..2]           # Bytes slice (copy)
+for c in b        # iterates byte values
+b == other        # byte-wise equality; b + b concatenates
+str(b)            # UTF-8 text when valid, else the escaped b"..." form
+```
+
+`core.bytes_append(dst, src)` grows `dst` in place and accepts a `Bytes`, a
+`String`, an `[i64]` byte array, or a single integer; `core.bytes_to_str(b)`
+returns `String?` (`None` when the payload is not valid UTF-8). `net.recv_buf`
+/ `net.recv_buf_all` read a socket straight into a `Bytes` (one allocation, one
+kernel copy: ~500 MB/s on loopback vs ~83 MB/s for the packed `[i64]` form),
+and `net.recv_body` returns the binary half of an HTTP body as `Bytes`.
 
 Prefer `import std:<pkg>` for the ergonomic stdlib wrappers — see
 [stdlib](stdlib.md).

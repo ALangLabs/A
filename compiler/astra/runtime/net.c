@@ -581,6 +581,14 @@ aval bi_net_udp_recv(uint64_t n, aval *argv) {
 
 /* Reads a [i64] byte list into a malloc'd buffer (values clamped to 0..255). */
 static char *net_bytes_in(aval v, uint64_t *len) {
+    if (a_bytes_is(v)) {
+        uint64_t blen = 0;
+        const char *bp = a_bytes_data(v, &blen);
+        char *buf = (char *)xmalloc(blen ? blen : 1);
+        if (blen) memcpy(buf, bp, (size_t)blen);
+        *len = blen;
+        return buf;
+    }
     aval tmp = collect_iterable(v);
     AArr *a = (AArr *)obj_of(tmp);
     char *buf = (char *)xmalloc(a->h.len ? a->h.len : 1);
@@ -672,6 +680,13 @@ aval bi_net_recv_exact(uint64_t n, aval *argv) {
 /* Copy an [i64] byte prefix into `dst` (at most `room` bytes); returns the
    number of bytes copied. */
 static size_t net_prefix_in(aval v, char *dst, size_t room) {
+    if (a_bytes_is(v)) {
+        uint64_t blen = 0;
+        const char *bp = a_bytes_data(v, &blen);
+        if (blen > room) blen = room;
+        if (blen) memcpy(dst, bp, (size_t)blen);
+        return (size_t)blen;
+    }
     AArr *a = (AArr *)obj_of(v);
     if (!a || room == 0) return 0;
     size_t n = a->h.len < room ? (size_t)a->h.len : room;
@@ -686,26 +701,79 @@ static size_t net_prefix_in(aval v, char *dst, size_t room) {
 }
 
 /* Copy n chars into packed int64 storage (the [i64] byte-array shape). */
-static aval net_bytes_from_chars(const char *buf, size_t got) {
-    int64_t *ints = (int64_t *)xmalloc((got ? got : 1) * sizeof(int64_t));
-    for (size_t i = 0; i < got; ++i) ints[i] = (unsigned char)buf[i];
-    return a_list_take_i64(ints, got);
-}
-
 static aval net_body_result(char *buf, size_t got) {
     aval parts[2];
     if (a_utf8_valid(buf, got)) {
         parts[0] = a_str_new(buf, got);
-        parts[1] = a_list_from_i64(NULL, 0);
+        parts[1] = a_bytes_new(0);
     } else {
         parts[0] = A_NONE;
-        parts[1] = net_bytes_from_chars(buf, got);
+        /* Binary payload: hand back the buffer we just filled, unchanged
+           (one allocation, no int64 expansion). */
+        parts[1] = a_bytes_take(buf, got, got + 1);
     }
-    free(buf);
+    if (parts[0] != A_NONE) free(buf);  /* text path copies into the String */
     return a_tuple_new(2, parts);
 }
 
-/* net.recv_body(handle, byteCount) -> (String?, [i64])
+/* net.recv_buf(handle, byteCount[, prefixBytes]) -> Bytes
+
+   The binary counterpart of recv_body: allocates the Bytes value first and
+   reads the payload straight into it, so the buffer is filled by the kernel
+   and never copied or widened to int64. */
+aval bi_net_recv_buf(uint64_t n, aval *argv) {
+    want_args("net.recv_buf", n, 2, 3);
+    NetSock *s = net_sock_get(argv[0], "net.recv_buf");
+    int64_t want = expect_int64(argv[1], "net.recv_buf byteCount");
+    if (want < 0) want = 0;
+    aval pre_av = (n >= 3 && argv[2] != A_NONE) ? argv[2] : A_NONE;
+    aval out = a_bytes_new((uint64_t)want);
+    ABytes *b = a_bytes_obj(out);
+    size_t got = net_prefix_in(pre_av, b->data, (size_t)want);
+    while (got < (size_t)want) {
+        size_t chunk = (size_t)want - got;
+        if (chunk > 262144) chunk = 262144;
+        ssize_t r = s->ssl ? net_ssl_read(s->ssl, b->data + got, (int)chunk)
+                           : recv(s->fd, b->data + got, chunk, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    b->h.len = (uint32_t)got;
+    b->data[got] = 0;
+    return out;
+}
+
+/* net.recv_buf_all(handle[, prefixBytes]) -> Bytes: close-delimited payload. */
+aval bi_net_recv_buf_all(uint64_t n, aval *argv) {
+    want_args("net.recv_buf_all", n, 1, 2);
+    NetSock *s = net_sock_get(argv[0], "net.recv_buf_all");
+    aval pre_av = (n >= 2 && argv[1] != A_NONE) ? argv[1] : A_NONE;
+    aval out = a_bytes_new(65536);
+    ABytes *b = a_bytes_obj(out);
+    if (pre_av != A_NONE) {
+        AArr *pa = (AArr *)obj_of(pre_av);
+        if (pa) {
+            a_bytes_grow(b, (uint64_t)pa->h.len);
+            size_t got = net_prefix_in(pre_av, b->data, (size_t)pa->h.len);
+            b->h.len = (uint32_t)got;
+        }
+    }
+    for (;;) {
+        a_bytes_grow(b, (uint64_t)b->h.len + 262144);
+        size_t chunk = (size_t)(b->h.cap - 1) - (size_t)b->h.len;
+        if (chunk > 262144) chunk = 262144;
+        ssize_t r = s->ssl ? net_ssl_read(s->ssl, b->data + b->h.len, (int)chunk)
+                           : recv(s->fd, b->data + b->h.len, chunk, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        b->h.len = (uint32_t)((uint64_t)b->h.len + (uint64_t)r);
+    }
+    b->data[b->h.len] = 0;
+    return out;
+}
+
+/* net.recv_body(handle, byteCount) -> (String?, Bytes)
 
    Text fast path: the body is read straight into an uninitialised String of
    exactly `want` bytes, so a 1 MiB text body costs one kernel copy and one
@@ -722,7 +790,7 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
        would decode UTF-8 and drop invalid bytes). */
     aval pre_av = (n >= 3 && argv[2] != A_NONE) ? argv[2] : A_NONE;
     if (want == 0) {
-        aval empty[2] = { a_str_new("", 0), a_list_from_i64(NULL, 0) };
+        aval empty[2] = { a_str_new("", 0), a_bytes_new(0) };
         return a_tuple_new(2, empty);
     }
     aval sv = a_str_new_uninit((uint64_t)want);
@@ -739,21 +807,23 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
         got += (size_t)r;
     }
     if (got == (size_t)want && a_utf8_valid(dst, got)) {
-        aval parts[2] = { sv, a_list_from_i64(NULL, 0) };
+        aval parts[2] = { sv, a_bytes_new(0) };
         return a_tuple_new(2, parts);
     }
     aval parts[2];
     if (a_utf8_valid(dst, got)) {
         parts[0] = got == (uint64_t)want ? sv : a_str_new(dst, got);
-        parts[1] = a_list_from_i64(NULL, 0);
+        parts[1] = a_bytes_new(0);
     } else {
+        /* Binary: the String buffer cannot be adopted, so copy it into a
+           Bytes value and drop the provisional String. */
         parts[0] = A_NONE;
-        parts[1] = net_bytes_from_chars(dst, got);
+        parts[1] = a_bytes_from(dst, got);
     }
     return a_tuple_new(2, parts);
 }
 
-/* net.recv_body_all(handle) -> (String?, [i64]) — close-delimited bodies. */
+/* net.recv_body_all(handle) -> (String?, Bytes) — close-delimited bodies. */
 aval bi_net_recv_body_all(uint64_t n, aval *argv) {
     want_args("net.recv_body_all", n, 1, 2);
     NetSock *s = net_sock_get(argv[0], "net.recv_body_all");
@@ -834,8 +904,20 @@ aval bi_net_inflate_bytes(uint64_t n, aval *argv) {
     net_zlib_probe();
     if (!g_net_zlib_ok) panicf("net.inflate_bytes: zlib not available");
     int wbits = (int)expect_int64(argv[1], "net.inflate_bytes windowBits");
-    uint64_t len;
-    char *src = net_bytes_in(argv[0], &len);
+    uint64_t len = 0;
+    char *src = NULL;
+    int src_bytes = 0;   /* Bytes input: copy out, result handoff is per-call */
+    if (a_bytes_is(argv[0])) {
+        uint64_t blen = 0;
+        const char *bp = a_bytes_data(argv[0], &blen);
+        src = (char *)xmalloc(blen ? blen : 1);
+        if (blen) memcpy(src, bp, (size_t)blen);
+        len = blen;
+        src_bytes = 1;
+    } else {
+        src = net_bytes_in(argv[0], &len);
+    }
+    (void)src_bytes;
     uint64_t cap = len * 4 > 4096 ? len * 4 : 4096;
     char *out = (char *)xmalloc(cap);
     uint64_t got = 0;
@@ -869,7 +951,6 @@ aval bi_net_inflate_bytes(uint64_t n, aval *argv) {
         free(out);
         panicf("net.inflate_bytes: corrupt or truncated compressed data");
     }
-    aval result = net_bytes_out(out, got);
-    free(out);
+    aval result = a_bytes_take(out, got, cap);
     return result;
 }

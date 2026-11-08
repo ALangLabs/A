@@ -86,6 +86,7 @@ static char *conv_bytes_in(aval v, uint64_t *out_len, int *bad) {
 
 aval bi_bytes_decode_utf8(uint64_t n, aval *argv) {
     want_args("bytes_decode_utf8", n, 1, 1);
+    if (a_bytes_is(argv[0])) return a_bytes_to_str(argv[0]);
     uint64_t len = 0;
     int bad = 0;
     char *raw = conv_bytes_in(argv[0], &len, &bad);

@@ -37,6 +37,9 @@ enum class TypeKind {
   // runtime stores it as an integer handle; only print/eprint (via file=)
   // and close() inspect it.
   IO,
+  // First-class byte buffer (Bytes(...)): a growable char buffer. Indexing
+  // yields i64 0..255, iteration yields bytes, and len() is O(1).
+  Bytes,
   Var,
 };
 
@@ -140,6 +143,7 @@ inline TypePtr typeSet(TypePtr elem) {
 inline TypePtr typeAllocator() { return makeType(TypeKind::Allocator); }
 inline TypePtr typeJson() { return makeType(TypeKind::Json); }
 inline TypePtr typeIO() { return makeType(TypeKind::IO); }
+inline TypePtr typeBytes() { return makeType(TypeKind::Bytes); }
 
 inline TypePtr typePointer(TypePtr elem) {
   auto type = makeType(TypeKind::Pointer);
@@ -214,6 +218,7 @@ inline TypePtr builtinTypeByName(const std::string& name) {
   if (name == "Allocator") return typeAllocator();
   if (name == "Json") return typeJson();
   if (name == "IO") return typeIO();
+  if (name == "Bytes") return typeBytes();
   if (name == "Pointer") return typePointer(typeError());
   if (name == "i8") return typeInt(8, true);
   if (name == "i16") return typeInt(16, true);
@@ -259,6 +264,7 @@ inline std::string typeName(const TypePtr& type) {
     case TypeKind::Pointer: return "Pointer<" + typeName(t->elem) + ">";
     case TypeKind::Json: return "Json";
     case TypeKind::IO: return "IO";
+    case TypeKind::Bytes: return "Bytes";
     case TypeKind::Tuple: {
       std::string s = "(";
       for (std::size_t i = 0; i < t->params.size(); ++i) {

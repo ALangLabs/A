@@ -52,10 +52,13 @@ typedef struct AObj {
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
     T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
-    T_PYBUF, T_STRUCT
+    T_PYBUF, T_STRUCT, T_BYTES
 };
 
 typedef struct { AObj h; char data[]; } AStr;
+/* First-class bytes: h.len is the byte count, h.cap the allocation size,
+   `data` is NUL-terminated for C interop (length is authoritative). */
+typedef struct { AObj h; char *data; } ABytes;
 typedef struct { AObj h; aval *items; int64_t *iitems; uint32_t flags; } AArr;
 typedef struct { aval k, v; } APair;
 /* pairs keeps insertion order; phash[i] is the cached hash of pairs[i].k;
@@ -139,7 +142,8 @@ typedef struct {
 
 enum {
     K_NONE, K_BOOL, K_INT, K_FLOAT, K_STR, K_LIST, K_TUPLE, K_DICT,
-    K_SET, K_RANGE, K_ITER, K_FNON, K_ENV, K_RESULT, K_OTHER, K_CHAR, K_VIEW
+    K_SET, K_RANGE, K_ITER, K_FNON, K_ENV, K_RESULT, K_OTHER, K_CHAR, K_VIEW,
+    K_BYTES
 };
 
 
@@ -171,6 +175,22 @@ void buf_addi64(Buf *b, int64_t v);
 aval buf_take(Buf *b);
 AStr *str_of(aval v, const char *what);
 aval a_str_new(const char *p, uint64_t len);
+ABytes *a_bytes_obj(aval v);
+int a_bytes_is(aval v);
+aval a_bytes_new(uint64_t cap);
+aval a_bytes_from(const char *p, uint64_t n);
+aval a_bytes_take(char *p, uint64_t n, uint64_t cap);
+void a_bytes_grow(ABytes *b, uint64_t need);
+void a_bytes_append(ABytes *b, const char *p, uint64_t n);
+void a_bytes_pushc(ABytes *b, int c);
+char *a_bytes_data(aval v, uint64_t *len);
+aval a_bytes_to_str(aval v);
+/* builtins (bytes_obj.c) */
+aval bi_bytes_new(uint64_t n, aval *argv);
+aval bi_bytes_append(uint64_t n, aval *argv);
+aval bi_bytes_to_str(uint64_t n, aval *argv);
+aval bi_net_recv_buf(uint64_t n, aval *argv);
+aval bi_net_recv_buf_all(uint64_t n, aval *argv);
 aval a_str_new_uninit(uint64_t len);
 aval a_char_new(const char *p, uint64_t len);
 const char *str_data(aval v, uint64_t *len);
