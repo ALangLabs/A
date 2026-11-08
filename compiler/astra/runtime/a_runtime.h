@@ -449,6 +449,7 @@ aval a_tuple_new(uint64_t n, aval *items);
 aval a_dict_new(void);
 aval a_dict_set(aval d, aval k, aval v);
 aval a_dict_get(aval d, aval k, aval dflt);     /* dflt may be A_NONE */
+aval a_dict_has(aval d, aval k);                /* a_bool(key in d) */
 aval a_set_new(void);
 aval a_set_add(aval s, aval v);
 aval a_range_new(aval lo, aval hi, aval step);

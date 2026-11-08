@@ -151,6 +151,11 @@ aval a_dict_get(aval d, aval k, aval dflt) {
     return i >= 0 ? m->pairs[i].v : dflt;
 }
 
+aval a_dict_has(aval d, aval k) {
+    ADict *m = dict_of(d, "dict");
+    return a_bool(dict_find(m, k) >= 0);
+}
+
 aval a_set_new(void) {
     AArr *s = (AArr *)xmalloc(sizeof(AArr));
     s->h.type = T_SET;

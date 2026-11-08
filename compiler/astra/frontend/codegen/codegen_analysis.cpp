@@ -371,7 +371,12 @@ bool AsmEmitter::emitRawExprImpl(const Expr* e, int out) {
         std::string setL = newLabel("spr"), doneL = newLabel("spd");
         loadSlot(b->specFlag);
         emit("    test %rax, %rax\n    jnz " + setL + "\n");
-        copySlot(b->slot, out);
+        // Both arms must agree on the register-cache fact at doneL, or a
+        // later loadSlot(out) can be elided on one path while the value is
+        // live in a different register (a counter compared in a loop
+        // condition once compared the demotion flag and never exited).
+        loadSlot(b->slot);
+        storeRax(out);
         emit("    jmp " + doneL + "\n");
         emitLabel(setL);
         loadSlot(b->specAval, "%rdi");
@@ -1305,16 +1310,84 @@ void AsmEmitter::rangeBlock(const std::vector<StmtPtr>& stmts, ARangeEnv& env) {
 // stabilize; continue/break exits are accumulated into cont/brk and joined
 // into the head/post envs so mid-body states are never lost. Non-converged
 // variables are poisoned to unknown before the recording pass.
+void AsmEmitter::rangeNarrowCond(const Expr* cond, ARangeEnv& env) {
+    if (!cond) return;
+    if (cond->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*cond);
+      if (b.op == "and") {  // both sides hold inside the body
+        rangeNarrowCond(b.lhs.get(), env);
+        rangeNarrowCond(b.rhs.get(), env);
+        return;
+      }
+      if (b.op == "or") return;  // either side may be false: no facts
+      const Expr* le = b.lhs.get();
+      const Expr* re = b.rhs.get();
+      if (!le || !re) return;
+      std::string op = b.op;
+      const Expr* idE = nullptr;
+      const Expr* valE = nullptr;
+      if (le->kind == ExprKind::Ident) {
+        idE = le;
+        valE = re;
+      } else if (re->kind == ExprKind::Ident) {
+        // c < i  ==  i > c: flip to keep the ident on the left.
+        idE = re;
+        valE = le;
+        static const std::unordered_map<std::string, std::string> kFlip = {
+            {"<", ">"}, {"<=", ">="}, {">", "<"}, {">=", "<="},
+            {"==", "=="}, {"!=", "!="}};
+        auto f = kFlip.find(op);
+        if (f == kFlip.end()) return;
+        op = f->second;
+      } else {
+        return;
+      }
+      ARange other =
+          exprRangeIn(valE, [&env](const std::string& n) { return env.find(n); });
+      if (!other.known) return;
+      const std::string& nm = static_cast<const IdentExpr&>(*idE).name;
+      ARange cur = env.find(nm);
+      __int128 lo = cur.known ? cur.lo : rngI64Min();
+      __int128 hi = cur.known ? cur.hi : rngI64Max();
+      if (op == "<") {
+        if (other.hi <= rngI64Min()) return;  // empty: not a useful fact
+        hi = hi < other.hi - 1 ? hi : other.hi - 1;
+      } else if (op == "<=") {
+        hi = hi < other.hi ? hi : other.hi;
+      } else if (op == ">") {
+        if (other.lo >= rngI64Max()) return;
+        lo = lo > other.lo + 1 ? lo : other.lo + 1;
+      } else if (op == ">=") {
+        lo = lo > other.lo ? lo : other.lo;
+      } else if (op == "==") {
+        // Intersect: the value equals `other`, so both bounds apply.
+        if (other.lo > lo) lo = other.lo;
+        if (other.hi < hi) hi = other.hi;
+      } else {
+        return;
+      }
+      if (lo > hi) return;  // contradictory: leave the interval alone
+      if (!env.assign(nm, rngSpan(lo, hi))) env.bindTop(nm, rngSpan(lo, hi));
+      return;
+    }
+    if (cond->kind == ExprKind::Unary) return;  // `not` carries no facts here
+}
 void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* varName,
-                 const ARange* varRange, ARangeEnv& env) {
+                 const ARange* varRange, ARangeEnv& env, const Expr* cond) {
     static constexpr int kMaxRangeIter = 8;
     const int postDepth = (int)env.scopes.size();
+    // Loop-entry facts, before the condition narrows the body entry.
+    ARangeEnv entry = env;
     if (varName) {
       env.scopes.emplace_back();
       env.scopes.back()[*varName] = varRange ? *varRange : ARange{};
     }
     const int headDepth = (int)env.scopes.size();
     ARangeEnv head = env;
+    // Every iteration's body starts with the loop condition true: fold in the
+    // bounds it implies so counters keep proven ranges (this is what keeps
+    // while-loop bodies on the raw int64 path).
+    if (cond) rangeNarrowCond(cond, head);
     ARangeEnv cont, brk;
     bool hasCont = false, hasBrk = false;
     rangeLoops_.push_back({&head, &cont, &brk, headDepth, postDepth,
@@ -1338,6 +1411,11 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
         rangeBlock(body, bodyEnv);
         rangeJoinInto(head, bodyEnv);
         if (hasCont) rangeJoinInto(head, cont);
+        // Re-impose the condition's facts after every join: they hold at the
+        // loop head by construction (an iteration only starts when the
+        // condition is true), and without this the counter creeps upward one
+        // increment per fixpoint step and the widening pass has to poison it.
+        if (cond) rangeNarrowCond(cond, head);
         if (varName && varRange)
           head.scopes[postDepth][*varName] = *varRange;  // rebound each iter
         if (rangeEnvEq(head, prev)) {
@@ -1382,6 +1460,7 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
         rangeBlock(body, bodyEnv);
         rangeJoinInto(head, bodyEnv);
         if (hasCont) rangeJoinInto(head, cont);
+        if (cond) rangeNarrowCond(cond, head);
         if (varName && varRange)
           head.scopes[postDepth][*varName] = *varRange;
         if (rangeEnvEq(head, prev)) break;
@@ -1401,8 +1480,10 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
       rangeBlock(body, fin);
     }
     // Post-loop env: head states (truncated to pre-loop depth) joined with
-    // break exits. The for-var scope is dropped.
-    ARangeEnv post = rangeTruncate(head, postDepth);
+    // break exits. The for-var scope is dropped. With a narrowed condition
+    // the head also carries body-entry facts that do not hold on exit, so
+    // start the post state from the loop-entry env instead.
+    ARangeEnv post = rangeTruncate(cond ? entry : head, postDepth);
     if (hasBrk) rangeJoinInto(post, brk);
     env.scopes = std::move(post.scopes);
   }
@@ -1583,7 +1664,7 @@ void AsmEmitter::rangeStmt(const Stmt* s, ARangeEnv& env) {
       case StmtKind::While: {
         const WhileStmt& st = static_cast<const WhileStmt&>(*s);
         rangePoisonExpr(st.cond.get(), env);
-        rangeLoop(st.body, nullptr, nullptr, env);
+        rangeLoop(st.body, nullptr, nullptr, env, st.cond.get());
         return;
       }
       case StmtKind::DoWhile: {

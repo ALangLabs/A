@@ -32,6 +32,19 @@ static uint64_t mix64(uint64_t x) {
     return x;
 }
 
+/* Key equality for probe steps. Every scalar that A can compare by value is
+   canonical in its aval form: an inline int has one bit pattern per value,
+   and A_NONE/A_TRUE/A_FALSE are constants. So a matching pair of avals is
+   an answer without touching values_equal, and two distinct inline ints are
+   unequal by the same argument. This removes a call per probe, which was
+   most of the per-operation cost of int-keyed maps (the common case in
+   counters, memo tables and histogram code). */
+static inline int dict_key_eq(aval a, aval b) {
+    if (a == b) return 1;
+    if (a_is_int(a) && a_is_int(b)) return 0;
+    return values_equal(a, b);
+}
+
 static uint64_t dict_key_hash(aval k) {
     if (is_num(k)) {
         double d = num_to_double(k);
@@ -94,11 +107,27 @@ static int64_t dict_find_h(ADict *d, aval k, uint64_t h) {
     uint64_t s = h & mask;
     while (d->slots[s]) {
         uint32_t i = d->slots[s] - 1;
-        if (d->phash[i] == h && values_equal(d->pairs[i].k, k))
+        if (d->phash[i] == h && dict_key_eq(d->pairs[i].k, k))
             return (int64_t)i;
         s = (s + 1) & mask;
     }
     return -1;
+}
+
+/* Probe once for `k`, returning the pair index (>= 0) or, when absent, the
+   slot where it must be inserted encoded as -(slot + 1). Callers that insert
+   on absence therefore never re-walk the probe chain: finding a key and
+   finding its insertion point are the same scan. */
+static int64_t dict_probe(ADict *d, aval k, uint64_t h) {
+    uint64_t mask = d->scap ? d->scap - 1 : 0;
+    uint64_t s = h & mask;
+    while (d->scap && d->slots[s]) {
+        uint32_t i = d->slots[s] - 1;
+        if (d->phash[i] == h && dict_key_eq(d->pairs[i].k, k))
+            return (int64_t)i;
+        s = (s + 1) & mask;
+    }
+    return -(int64_t)(s + 1);
 }
 
 int64_t dict_find(ADict *d, aval k) {
@@ -107,12 +136,17 @@ int64_t dict_find(ADict *d, aval k) {
 
 void dict_put(ADict *d, aval k, aval v) {
     uint64_t h = dict_key_hash(k);
-    int64_t i = dict_find_h(d, k, h);
-    if (i >= 0) {
-        d->pairs[i].v = v;
-        return;
+    int64_t slot = -1;  /* insertion slot from this probe, -1 = unknown */
+    if (d->scap) {
+        int64_t r = dict_probe(d, k, h);
+        if (r >= 0) {
+            d->pairs[r].v = v;
+            return;
+        }
+        slot = -r - 1;
     }
     if (d->h.len == UINT32_MAX) panicf("dict too large");
+    uint64_t scap0 = d->scap;
     dict_reserve(d, (uint64_t)d->h.len + 1);
     uint64_t idx = d->h.len;
     d->pairs[idx].k = k;
@@ -120,8 +154,13 @@ void dict_put(ADict *d, aval k, aval v) {
     d->phash[idx] = h;
     d->h.len++;
     uint64_t mask = d->scap - 1;
-    uint64_t s = h & mask;
-    while (d->slots[s]) s = (s + 1) & mask;
+    uint64_t s;
+    if (d->scap == scap0 && slot >= 0) {
+        s = (uint64_t)slot;  /* same table: reuse the probed empty slot */
+    } else {
+        s = h & mask;  /* rehash moved every slot: walk the new chain */
+        while (d->slots[s]) s = (s + 1) & mask;
+    }
     d->slots[s] = (uint32_t)(idx + 1);
 }
 

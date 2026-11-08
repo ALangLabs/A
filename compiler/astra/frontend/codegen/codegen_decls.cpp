@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <sstream>
@@ -466,6 +467,18 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     specNames_.clear();
     nameRanges_.clear();
     computePromoteSet(f->decl);
+    if (const char* dbg = std::getenv("A_DEBUG_PROMOTE"); dbg && *dbg) {
+      std::string line = "promote " + f->name + ":";
+      for (const std::string& nm : promoteNames_)
+        line += " " + nm + (specNames_.count(nm) ? "(spec)" : "");
+      std::fprintf(stderr, "%s\n", line.c_str());
+      for (const std::string& nm : promoteNames_) {
+        auto it = nameRanges_.find(nm);
+        const bool known = it != nameRanges_.end() && it->second.known;
+        std::fprintf(stderr, "  range %s: %s\n", nm.c_str(),
+                     known ? "known" : "unknown");
+      }
+    }
     // Strength reduction scans pre-loop writes via the current body.
     const std::vector<StmtPtr>* savedBody = curFnBody_;
     curFnBody_ = f->decl ? &f->decl->body : nullptr;
