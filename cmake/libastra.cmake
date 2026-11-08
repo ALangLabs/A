@@ -547,10 +547,13 @@ foreach(xarch IN LISTS ASTRA_ALL_ARCHES)
             VERBATIM)
         list(APPEND xobjs "${obj}")
     endforeach()
+    # DEPENDS on the driver target directly: i8086 has no lib1 objects, so
+    # without it the archive races astra_driver_i8086 and fails with
+    # "astra/astra-i8086: No such file or directory" on parallel builds.
     add_custom_command(OUTPUT "${XLIBDIR}/libastra1.a"
         COMMAND "${ASTRA_BUILD}/astra-${xarch}${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
                 "${XLIBDIR}/libastra1.a" ${xobjs}
-        DEPENDS ${xobjs}
+        DEPENDS astra_driver_${xarch} ${xobjs}
         COMMENT "astra-${xarch} -ar libastra1.a"
         VERBATIM)
 
