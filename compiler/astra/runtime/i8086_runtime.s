@@ -6,7 +6,24 @@
 
     .section .text
     .globl a_runtime_init
+# Zero [_edata, _end): .bss is SHT_NOBITS so the flat loader never writes
+# it — without this it contains stale RAM instead of the zero-init the
+# language expects. _edata/_end are linker-provided symbols; the range also
+# covers the align gap between .data and .bss (harmless to clear).
 a_runtime_init:
+    pushl %ebp
+    movl %esp, %ebp
+    movl $_edata, %esi
+    movl $_end, %edi
+    cmpl %edi, %esi
+    jae .Lrt_bss_done
+.Lbss_zero:
+    movl $0, (%esi)
+    addl $4, %esi
+    cmpl %edi, %esi
+    jb .Lbss_zero
+.Lrt_bss_done:
+    popl %ebp
     ret
 
 # .Lunbox: esi=p_lo edi=p_hi32(aval hi) -> esi=i_lo edi=i_hi (sign-extended)
@@ -580,14 +597,29 @@ a_bi_call:
     call .Lputc
     incl %ecx
     jmp .Lb_loop
-.Lb_even:                   # even low word: none/false/true or '?'
+.Lb_even:                   # even low word: none/false/true, ptr, or '?'
     cmpl $2, %ebx
     je .Lb_cnone
     cmpl $4, %ebx
     je .Lb_cfalse
     cmpl $6, %ebx
     je .Lb_ctrue
+    testl $0xF, %ebx          # 16-aligned nonzero -> heap object ptr
+    jz .Lb_cstr
     jmp .Lb_q
+.Lb_cstr:                    # ebx = obj ptr; AObj{type,len,cap}+data@16
+    movl %ebx, %edi           # edi = obj base (edi was masked tag, free)
+    movl (%edi), %eax
+    cmpl $1, %eax             # T_STR only for now
+    jne .Lb_q
+    movl 4(%edi), %ebx        # len
+    movl %edi, %esi
+    addl $16, %esi            # data ptr (avoid lea: addr32 prefix quirks)
+    pushl %ecx
+    call .Lb_printn
+    popl %ecx
+    incl %ecx
+    jmp .Lb_loop
 .Lb_cnone:
     pushl %ecx
     movl $str_none, %esi
@@ -717,6 +749,13 @@ str_true:  .ascii "true"
     .section .data
     .globl serial_init
 serial_init: .byte 0
+    # Bump-allocator arena: flat physical addresses (DS=0). The heap lives
+    # in unused RAM below the stack segment (SS=0x9000 => 0x90000..0x9F000);
+    # .data VMA == physical load address so absolute refs are correct.
+    .globl heap_cur
+    .globl heap_end
+heap_cur: .long 0x80000
+heap_end: .long 0x8F000
 
 # ---- stubs: unimplemented builtins return A_NONE ------------------------
 # A_NONE = 0xFFFF000000000002
@@ -726,9 +765,54 @@ a_dict_new:
     movl $0xFFFF0000, %edx
     ret
     .globl a_str_new
+# a_str_new(char *p @8(%ebp) [4B], uint64 len @12(%ebp) [8B]) -> aval
+# Bump-allocates AStr {u32 type=1, u32 len, u64 cap, char data[]}: 16-byte
+# header + len bytes + NUL, whole object 16-aligned so the returned aval
+# (A_TAG | ptr) satisfies the pointer payload rules. Exhaustion -> A_NONE.
 a_str_new:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 8(%ebp), %esi         # src ptr (flat physical, DS=0)
+    movl 12(%ebp), %ebx        # len lo32
+    movl 16(%ebp), %ecx        # len hi32
+    testl %ecx, %ecx
+    jnz .Lsn_fail              # len >= 4G unsupported
+    movl %ebx, %eax
+    addl $32, %eax            # 16 hdr + len + 1 NUL + pad-to-16 (round UP)
+    andl $0xFFFFFFF0, %eax
+    movl heap_cur, %edi
+    movl heap_end, %ecx
+    movl %edi, %edx
+    addl %eax, %edx
+    cmpl %ecx, %edx
+    ja .Lsn_fail
+    movl %edx, heap_cur
+    movl $1, (%edi)            # T_STR
+    movl %ebx, 4(%edi)         # len
+    movl %ebx, %eax
+    incl %eax
+    movl %eax, 8(%edi)         # cap = len + 1
+    movl %edi, %ecx
+    addl $16, %ecx             # dst = data
+.Lsn_copy:
+    testl %ebx, %ebx
+    jz .Lsn_nul
+    movb (%esi), %al
+    movb %al, (%ecx)
+    incl %esi
+    incl %ecx
+    decl %ebx
+    jmp .Lsn_copy
+.Lsn_nul:
+    movb $0, (%ecx)
+    movl %edi, %eax            # aval lo = obj ptr
+    movl $0xFFFF0000, %edx     # aval hi = A_TAG
+    popl %ebp
+    ret
+.Lsn_fail:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
+    popl %ebp
     ret
     .globl a_dict_set
 a_dict_set:
