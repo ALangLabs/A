@@ -753,6 +753,32 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
       emitBoxInt64();
       return;
     }
+    // FP fast path: both operands are statically float, so their avals
+    // hold raw IEEE-754 double bits and no int boxing can occur (same
+    // type-trust discipline as the int raw path above). Compute in xmm
+    // and canonicalize NaN exactly like the runtime's a_double_canon
+    // (NaN -> 0x7FF8000000000000). Result aval is the raw bits in %rax.
+    if ((op == "+" || op == "-" || op == "*") &&
+        exprIsFloat(x.lhs.get()) && exprIsFloat(x.rhs.get())) {
+      int ls = evalSlot(x.lhs.get());
+      int rs = evalSlot(x.rhs.get());
+      loadSlot(ls);
+      emit("    movq %rax, %xmm0\n");
+      loadSlot(rs);
+      emit("    movq %rax, %xmm1\n");
+      emit(std::string("    ") +
+           (op == "+" ? "addsd %xmm1, %xmm0\n" :
+            op == "-" ? "subsd %xmm1, %xmm0\n" : "mulsd %xmm1, %xmm0\n"));
+      std::string doneL = newLabel("fpc"), nanL = newLabel("fpnan");
+      emit("    ucomisd %xmm0, %xmm0\n");
+      emit("    jp " + nanL + "\n");
+      emit("    movq %xmm0, %rax\n");
+      emit("    jmp " + doneL + "\n");
+      emitLabel(nanL);
+      emit("    mov $0x7ff8000000000000, %rax\n");
+      emitLabel(doneL);
+      return;
+    }
     int ls = evalSlot(x.lhs.get());
     int rs = evalSlot(x.rhs.get());
     emitArith(op, ls, rs);

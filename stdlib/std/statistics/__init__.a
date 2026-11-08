@@ -9,8 +9,7 @@
 #   * On invalid input (empty data, insufficient points), functions
 #     `panic` with a message (A has no StatisticsError exceptions).
 #   * `fmean` ignores weights (not supported in this subset).
-#   * `median_grouped`, `multimode`, `quantiles`, covariance/correlation,
-#     linear regression are not implemented.
+#   * `median_grouped` and weighted `fmean` are not implemented.
 
 import std:math
 import std:core
@@ -143,3 +142,123 @@ fn harmonic_mean(data):
             core.panic("harmonic_mean requires positive data points")
         denom = denom + 1.0 / v
     return float(len(data)) / denom
+
+fn multimode(data):
+    "All most-frequent data points, in order of first occurrence."
+    _check_nonempty(data, "multimode")
+    counts = {}
+    order = []
+    for x in data:
+        k = str(x)
+        if counts.contains(k):
+            counts[k] = counts[k] + 1
+        else:
+            counts[k] = 1
+            order.append(x)
+    best_count = -1
+    for x in order:
+        c = counts[str(x)]
+        if c > best_count:
+            best_count = c
+    modes = []
+    seen = {}
+    for x in order:
+        k = str(x)
+        if counts[k] == best_count and not seen.contains(k):
+            seen[k] = true
+            modes.append(x)
+    return modes
+
+fn _quantile_point(xs, h):
+    # xs sorted ascending; h is a 1-based position in (0, len(xs)) possibly fractional.
+    n = len(xs)
+    if h <= 1.0:
+        return _to_float(xs[0])
+    if h >= float(n):
+        return _to_float(xs[n - 1])
+    j = int(math.floor(h))
+    gamma = h - float(j)
+    lo = _to_float(xs[j - 1])
+    hi = _to_float(xs[j])
+    return (1.0 - gamma) * lo + gamma * hi
+
+fn quantiles(data, n, method = "exclusive"):
+    """Cut points dividing data into n equal-probability intervals.
+
+    method is 'exclusive' (default; h = (len+1)*i/n) or 'inclusive'
+    (h = (len-1)*i/n + 1), matching CPython statistics.quantiles."""
+    _check_nonempty(data, "quantiles")
+    if n < 1:
+        core.panic("quantiles requires n >= 1")
+    if method != "exclusive" and method != "inclusive":
+        core.panic("quantiles method must be 'exclusive' or 'inclusive'")
+    xs = _sorted_copy(data)
+    count = len(xs)
+    out = []
+    i = 1
+    while i < n:
+        fi = float(i)
+        fn_ = float(n)
+        h = 0.0
+        if method == "exclusive":
+            h = (float(count) + 1.0) * fi / fn_
+        else:
+            h = (float(count) - 1.0) * fi / fn_ + 1.0
+        out.append(_quantile_point(xs, h))
+        i = i + 1
+    return out
+
+fn covariance(data1, data2):
+    "Sample covariance of two equally-sized numeric datasets (ddof=1)."
+    if len(data1) != len(data2):
+        core.panic("covariance requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("covariance requires at least two data points")
+    mx = mean(data1)
+    my = mean(data2)
+    ss = 0.0
+    i = 0
+    while i < n:
+        dx = _to_float(data1[i]) - mx
+        dy = _to_float(data2[i]) - my
+        ss = ss + dx * dy
+        i = i + 1
+    return ss / float(n - 1)
+
+fn correlation(data1, data2):
+    "Pearson correlation coefficient of two equally-sized datasets."
+    if len(data1) != len(data2):
+        core.panic("correlation requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("correlation requires at least two data points")
+    vx = pvariance(data1) * float(n) / float(n - 1)
+    vy = pvariance(data2) * float(n) / float(n - 1)
+    if vx == 0.0 or vy == 0.0:
+        core.panic("correlation requires non-constant input")
+    return covariance(data1, data2) / math.sqrt(vx * vy)
+
+fn linear_regression(data1, data2):
+    """Simple linear regression of data2 on data1 -> [slope, intercept].
+
+    slope = cov(x, y) / var(x) (sample variances); intercept = my - slope*mx.
+    Panics when x has zero variance (CPython raises StatisticsError)."""
+    if len(data1) != len(data2):
+        core.panic("linear_regression requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("linear_regression requires at least two data points")
+    mx = mean(data1)
+    my = mean(data2)
+    vx = pvariance(data1) * float(n) / float(n - 1)
+    if vx == 0.0:
+        core.panic("linear_regression requires non-constant x")
+    sxy = 0.0
+    i = 0
+    while i < n:
+        sxy = sxy + (_to_float(data1[i]) - mx) * (_to_float(data2[i]) - my)
+        i = i + 1
+    slope = sxy / float(n - 1) / vx
+    intercept = my - slope * mx
+    return [slope, intercept]

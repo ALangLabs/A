@@ -260,3 +260,49 @@ fn shorten(text, width, placeholder):
             return _substr(result, 0, cut) + ph
         i = i + 1
     return line
+
+fn _indent_lines(lines, first_prefix, rest_prefix):
+    out = []
+    i = 0
+    while i < len(lines):
+        if i == 0:
+            out.append(first_prefix + str(lines[i]))
+        else:
+            out.append(rest_prefix + str(lines[i]))
+        i = i + 1
+    return out
+
+"""
+wrap_indented(text, width, initial_indent, subsequent_indent)
+-> wrap() honouring Python's initial_indent/subsequent_indent: the first
+line carries initial_indent, the rest subsequent_indent, and `width`
+includes the indent (body is wrapped at width minus the wider indent).
+"""
+fn wrap_indented(text, width, initial_indent, subsequent_indent):
+    w = int(width)
+    if w < 1:
+        w = 1
+    ip = str(initial_indent)
+    sp = str(subsequent_indent)
+    body = w - len(sp)
+    if len(ip) > len(sp):
+        body = w - len(ip)
+    if body < 1:
+        body = 1
+    lines = wrap(text, body)
+    return _indent_lines(lines, ip, sp)
+
+"""
+fill_indented(text, width, initial_indent, subsequent_indent)
+-> fill() with indents; lines joined by newlines.
+"""
+fn fill_indented(text, width, initial_indent, subsequent_indent):
+    lines = wrap_indented(text, width, initial_indent, subsequent_indent)
+    out = ""
+    i = 0
+    while i < len(lines):
+        if i > 0:
+            out = out + "\n"
+        out = out + str(lines[i])
+        i = i + 1
+    return out

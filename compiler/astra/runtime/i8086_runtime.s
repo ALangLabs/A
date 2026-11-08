@@ -1652,7 +1652,7 @@ a_range_new:
     jz .Lan_fail
     movl %eax, %edi             # obj
     movl %esi, (%edi)           # type
-    movl 4(%esp), %eax          # n
+    movl (%esp), %eax           # n (pushed ebx; 4(%esp) is saved ebp)
     movl %eax, 4(%edi)          # len
     movl %eax, 8(%edi)          # cap = n
     movl $0, 12(%edi)
@@ -1662,7 +1662,7 @@ a_range_new:
     movl $0, 24(%edi)           # iitems = NULL (not packed)
     movl $0, 32(%edi)           # flags = 0
     movl 16(%ebp), %ecx         # src aval array (flat ptr)
-    movl 4(%esp), %edx
+    movl (%esp), %edx
     shll $3, %edx               # nbytes
     movl %edi, %ebx
     addl $40, %ebx              # dst cursor
@@ -1780,11 +1780,23 @@ a_dict_set:
     # key flat ptr = ebp + 0x90000 + 16
     movl %ebp, %edi
     addl $0x90010, %edi
+    pushl %eax
+    movl $'S', %eax
+    call .Lputc
+    popl %eax
     call .Ldict_find          # esi preserved, eax = idx/-1
+    pushl %eax
+    movl $'F', %eax
+    call .Lputc
+    popl %eax
     testl %eax, %eax
     jns .Lds_replace
     # append: ensure cap
     call .Ldict_ensure
+    pushl %eax
+    movl $'E', %eax
+    call .Lputc
+    popl %eax
     testl %eax, %eax
     jz .Lds_none
     movl 4(%esi), %ecx        # len = pair index
@@ -2624,6 +2636,7 @@ a_iter_new:
     movl $0, 44(%edi)
     movl $0, 48(%edi)           # step
     movl $0, 52(%edi)
+    movl (%esi), %ecx           # reload src type (.Lalloc clobbered ecx)
     cmpl $6, %ecx
     jne .Lin_new_done
     # range: cur=lo@16, end=hi@24, step=step@32 of src obj (esi)
@@ -2773,6 +2786,7 @@ a_iter_next:
     xorl %eax, %eax
     xorl %edx, %edx
 .Lxn_out:
+    movl %ebp, %esp            # drop the iter/out pushes (and any str path)
     popl %ebp
     ret
 

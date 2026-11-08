@@ -140,6 +140,32 @@ class Fraction:
     fn to_float(self):
         return float(self.n) / float(self.d)
 
+    fn pow(self, e: i64):
+        "self ** e for integer e (Python Fraction ** int -> Fraction)."
+        if e == 0:
+            return _mk(1, 1)
+        neg_exp = false
+        ee = e
+        if ee < 0:
+            neg_exp = true
+            ee = -ee
+        result = _mk(1, 1)
+        base = self
+        while ee > 0:
+            if ee % 2 == 1:
+                result = result.mul(base)
+            base = base.mul(base)
+            ee = ee / 2
+        if neg_exp:
+            if result.n == 0:
+                core.panic("Fraction: 0 cannot be raised to a negative power")
+            return _mk(result.d, result.n)
+        return result
+
+    fn as_integer_ratio(self):
+        """-> [n, d] — the reduced numerator/denominator pair."""
+        return [self.n, self.d]
+
     fn to_string(self):
         if self.d == 1:
             return str(self.n)
@@ -196,3 +222,129 @@ fn _as_fraction(v):
     if k == "null":
         core.panic("Fraction: unsupported operand type")
     return _mk(0, 1)
+
+# --- string parsing -------------------------------------------------------------
+
+fn _is_digit_ch(ch):
+    return ch >= "0" and ch <= "9"
+
+"""_parse_int_str(s) -> i64 for an optionally signed digit string; panics otherwise."""
+fn _parse_int_str(s: String) -> i64:
+    src = str(s)
+    n = len(src)
+    i = 0
+    sign = 1
+    if i < n and (str(src[i]) == "-" or str(src[i]) == "+"):
+        if str(src[i]) == "-":
+            sign = -1
+        i = i + 1
+    if i >= n:
+        core.panic("Fraction: invalid integer '" + src + "'")
+    v = 0
+    while i < n:
+        ch = str(src[i])
+        if not _is_digit_ch(ch):
+            core.panic("Fraction: invalid integer '" + src + "'")
+        v = v * 10 + int(ch)
+        i = i + 1
+    return sign * v
+
+fn _pow10i(e: i64) -> i64:
+    r = 1
+    i = 0
+    while i < e:
+        r = r * 10
+        i = i + 1
+    return r
+
+"""
+Fraction_from_str(s) -> Fraction parsed from a string.
+
+Accepts the forms Python's Fraction(str) accepts:
+  "n"        integer
+  "-n" / "+n" signed integer
+  "n/d"      fraction of two integers (either may be signed)
+  "a.b"      decimal
+  "a.bE-e"   decimal with exponent (e/E, optional sign)
+Leading/trailing whitespace is ignored. Anything else panics.
+"""
+fn Fraction_from_str(s: String):
+    src = str(s).strip()
+    n = len(src)
+    if n == 0:
+        core.panic("Fraction: invalid literal")
+    # fraction form "num/den"
+    slash = src.find("/")
+    if slash >= 0:
+        num_s = _substr_str(src, 0, slash)
+        den_s = _substr_str(src, slash + 1, n)
+        return _mk(_parse_int_str(num_s), _parse_int_str(den_s))
+    # decimal / scientific form
+    i = 0
+    sign = 1
+    if str(src[i]) == "-" or str(src[i]) == "+":
+        if str(src[i]) == "-":
+            sign = -1
+        i = i + 1
+    digits = ""
+    frac_len = 0
+    seen_dot = false
+    seen_digit = false
+    while i < n:
+        ch = str(src[i])
+        if _is_digit_ch(ch):
+            digits = digits + ch
+            seen_digit = true
+            if seen_dot:
+                frac_len = frac_len + 1
+            i = i + 1
+            continue
+        if ch == "." and not seen_dot:
+            seen_dot = true
+            i = i + 1
+            continue
+        break
+    if not seen_digit:
+        core.panic("Fraction: invalid literal '" + src + "'")
+    # optional exponent
+    exp_val = 0
+    if i < n and (str(src[i]) == "e" or str(src[i]) == "E"):
+        i = i + 1
+        esign = 1
+        if i < n and (str(src[i]) == "-" or str(src[i]) == "+"):
+            if str(src[i]) == "-":
+                esign = -1
+            i = i + 1
+        if i >= n:
+            core.panic("Fraction: invalid literal '" + src + "'")
+        ev = 0
+        edigits = 0
+        while i < n:
+            ch = str(src[i])
+            if not _is_digit_ch(ch):
+                core.panic("Fraction: invalid literal '" + src + "'")
+            ev = ev * 10 + int(ch)
+            edigits = edigits + 1
+            i = i + 1
+        if edigits == 0:
+            core.panic("Fraction: invalid literal '" + src + "'")
+        exp_val = esign * ev
+    if i != n:
+        core.panic("Fraction: invalid literal '" + src + "'")
+    num = _parse_int_str(digits)
+    if num == 0:
+        return _mk(0, 1)
+    num = sign * num
+    # value = num * 10^(exp_val - frac_len)
+    scale = exp_val - frac_len
+    if scale >= 0:
+        return _mk(num * _pow10i(scale), 1)
+    return _mk(num, _pow10i(-scale))
+
+fn _substr_str(s, start, end):
+    out = ""
+    i = start
+    while i < end:
+        out = out + str(s[i])
+        i = i + 1
+    return out

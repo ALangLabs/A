@@ -42,5 +42,5 @@ fn table(headers: [str], rows: [[str]]) -> str:
 fn join_rows(rows: [i64]) -> str:
     out = []
     for r in rows:
-        out.append(str(r))
-    return table(["row"], [out])
+        out.append([str(r)])
+    return table(["row"], out)

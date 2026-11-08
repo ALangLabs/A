@@ -355,7 +355,7 @@ void AsmEmitter::emitRangeIncr(int curS, int endS, int stepS) {
 // neither i nor xs). The runtime helper reproduces a_setitem's
 // normalize_index panics element-by-element.
 bool AsmEmitter::tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS) {
-    if (st.body.size() != 1) return false;
+    if (st.body.size() != 1) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: body size %zu\n", st.body.size()); return false; }
     const Stmt* bs = st.body[0].get();
     if (!bs || bs->kind != StmtKind::Assign) return false;
     const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
@@ -385,6 +385,182 @@ bool AsmEmitter::tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS
     loadSlot(stepS, "%rcx");
     loadSlot(vS, "%r8");
     emit("    call a_list_fill_range\n");
+    return true;
+  }
+
+bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int stepS) {
+    if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: ENTER\n");
+    // Only the counted-range fast path has curS/endS/stepS as int64s.
+    const Expr* loE = nullptr;
+    const Expr* hiE = nullptr;
+    const Expr* stE = nullptr;
+    const Expr* iter = st.iterable.get();
+    if (iter && iter->kind == ExprKind::Range) {
+      const RangeExpr& re = static_cast<const RangeExpr&>(*iter);
+      loE = re.start.get();
+      hiE = re.end.get();
+      stE = re.step.get();
+    } else if (iter && iter->kind == ExprKind::Binary &&
+               static_cast<const BinaryExpr&>(*iter).op == "..") {
+      const BinaryExpr& be = static_cast<const BinaryExpr&>(*iter);
+      loE = be.lhs.get();
+      hiE = be.rhs.get();
+    }
+    if (!loE || !hiE) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: no lo/hi\n"); return false; }
+    // Step must be exactly 1 (defaulted or literal): the general stepped
+    // series has harsher range bookkeeping that is not worth the risk.
+    if (stE && !(stE->kind == ExprKind::IntLit &&
+                 static_cast<const IntLitExpr*>(stE)->value == 1)) {
+      if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: step not 1 (kind %d)\n", (int)stE->kind);
+      return false;
+    }
+    (void)stepS;
+    if (st.body.size() != 1) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: body size %zu\n", st.body.size()); return false; }
+    const Stmt* bs = st.body[0].get();
+    if (!bs || bs->kind != StmtKind::Assign) return false;
+    const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
+    const Expr* targetE = as.target.get();
+    if (!targetE || targetE->kind != ExprKind::Ident || !as.value)
+      return false;
+    const std::string& accName =
+        static_cast<const IdentExpr*>(targetE)->name;
+    if (accName == st.var) return false;
+    const Expr* v = as.value.get();
+    if (as.op == "=") {
+      // `acc = acc + <term>`: lhs must be the accumulator itself.
+      if (v->kind != ExprKind::Binary ||
+          static_cast<const BinaryExpr*>(v)->op != "+")
+        return false;
+      const BinaryExpr& bb = *static_cast<const BinaryExpr*>(v);
+      if (!(bb.lhs->kind == ExprKind::Ident &&
+            static_cast<const IdentExpr*>(bb.lhs.get())->name == accName))
+        return false;
+      v = bb.rhs.get();
+    } else if (as.op != "+=") {
+      if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: op %s not +=\n", as.op.c_str());
+      return false;
+    }
+    // Term: the loop variable, optionally times a non-negative constant.
+    int64_t c = 1;
+    if (v->kind == ExprKind::Ident) {
+      if (static_cast<const IdentExpr*>(v)->name != st.var) return false;
+    } else if (v->kind == ExprKind::Binary &&
+               static_cast<const BinaryExpr*>(v)->op == "*") {
+      const BinaryExpr& mb = *static_cast<const BinaryExpr*>(v);
+      const Expr *vv = nullptr, *cc = nullptr;
+      if (mb.lhs->kind == ExprKind::Ident &&
+          static_cast<const IdentExpr*>(mb.lhs.get())->name == st.var) {
+        cc = mb.rhs.get(); vv = mb.lhs.get();
+        (void)vv;
+      } else if (mb.rhs->kind == ExprKind::Ident &&
+                 static_cast<const IdentExpr*>(mb.rhs.get())->name == st.var) {
+        cc = mb.lhs.get(); vv = mb.rhs.get();
+        (void)vv;
+      }
+      if (!cc || cc->kind != ExprKind::IntLit) return false;
+      c = static_cast<const IntLitExpr*>(cc)->value;
+      if (c < 0) return false;  // monotone terms only
+    } else {
+      return false;
+    }
+    // The accumulator binding must hold raw int64 values so the closed form
+    // can be stored back directly; `rawInt` is only set by the promotion
+    // machinery on int-typed bindings, so it doubles as the int-type proof
+    // (an Assign target carries no inferredType).
+    ABinding* acc = lookup(accName);
+    if (!acc || (acc->kind != BKind::Local && acc->kind != BKind::Param) ||
+        !acc->rawInt)
+      return false;
+#ifdef __GNUC__
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wpedantic"
+#endif
+    ARange lr = exprRangeFlat(loE), hr = exprRangeFlat(hiE);
+    ARange accR;
+    {
+      auto it = nameRanges_.find(accName);
+      fprintf(stderr, "accum: nameRanges_ has %d entries:", (int)nameRanges_.size());
+      for (auto& kv : nameRanges_) fprintf(stderr, " <%s%s>", kv.first.c_str(), kv.second.known ? "!" : "?");
+      fprintf(stderr, "; total: %s\n",
+              it == nameRanges_.end() ? "<absent>" : (it->second.known ? "known" : "unknown"));
+    }
+    if (getenv("A_DEBUG_ACCUM")) {
+      fprintf(stderr, "accum: lr known=%d [%lld,%lld] hr known=%d [%lld,%lld] accRanges=%d\n",
+              (int)lr.known, (long long)lr.lo, (long long)lr.hi,
+              (int)hr.known, (long long)hr.lo, (long long)hr.hi,
+              (int)nameRangeKnown(accName, accR));
+      if (nameRangeKnown(accName, accR))
+        fprintf(stderr, "accum: accR [%lld,%lld]\n", (long long)accR.lo, (long long)accR.hi);
+    }
+    if (!lr.known || !hr.known || !nameRangeKnown(accName, accR)) return false;
+    if (lr.lo < 0) return false;  // terms must be non-negative
+    // Iteration count and (first+last) are both non-negative. Bound the
+    // runtime intermediates: the product N*(L+H-1) must fit int64, and so
+    // must the final acc + c*product/2.
+    const __int128 kMaxI128 = static_cast<__int128>(INT64_MAX);
+    __int128 mMax = hr.hi > lr.lo ? hr.hi - lr.lo : 0;
+    __int128 tMax = lr.hi + hr.hi - 1;
+    __int128 prodMax = tMax * mMax;
+    __int128 resMax = prodMax / 2;
+    // ---- emit: res = c * max(0, H-L) * (L+H-1) / 2, then acc += res ----
+    if (tMax < 0 || tMax > kMaxI128 || prodMax > kMaxI128) return false;
+    if (c > 0 && static_cast<__int128>(c) * resMax > kMaxI128) return false;
+    if (accR.hi + (c > 0 ? static_cast<__int128>(c) * resMax : 0) > kMaxI128)
+      return false;
+#ifdef __GNUC__
+#pragma GCC diagnostic pop
+#endif
+    // ---- emit: res = c * max(0, H-L) * (L+H-1) / 2, then acc += res ----
+    rawInvAll();  // slotRef traffic bypasses the reg cache below
+    int nS = allocSlot(), tS = allocSlot(), rS = allocSlot();
+    std::string posL = newLabel("srpos");
+    // N = max(0, H - L)
+    emit("    mov " + slotRef(endS) + ", %rax\n");
+    emit("    sub " + slotRef(curS) + ", %rax\n");
+    emit("    test %rax, %rax\n");
+    emit("    jns " + posL + "\n");
+    emit("    xor %eax, %eax\n");
+    emitLabel(posL);
+    storeRax(nS);
+    // T = L + H - 1
+    emit("    mov " + slotRef(curS) + ", %rax\n");
+    emit("    add " + slotRef(endS) + ", %rax\n");
+    emit("    sub $1, %rax\n");
+    storeRax(tS);
+    // P = N * T (proven non-overflowing)
+    loadSlot(nS);
+    emit("    imul " + slotRef(tS) + "\n");
+    storeRax(tS);
+    // res = P / 2, then * c
+    loadSlot(tS);
+    emit("    shr $1, %rax\n");
+    if (c != 1) {
+      movImm(static_cast<uint64_t>(c), "%rcx");
+      emit("    imul %rcx\n");
+    }
+    storeRax(rS);
+    // acc += res, honoring the speculative representation.
+    if (acc->specRaw) {
+      std::string avalL = newLabel("sraval"), doneL = newLabel("srdone");
+      loadSlot(acc->specFlag);
+      emit("    test %rax, %rax\n");
+      emit("    jnz " + avalL + "\n");
+      loadSlot(acc->slot);
+      emit("    add " + slotRef(rS) + ", %rax\n");
+      storeRax(acc->slot);
+      emit("    mov $0x0, %rcx\n");
+      emit("    mov %rcx, " + slotRef(acc->specFlag) + "\n");
+      emitLabel(avalL);
+      loadSlot(acc->specAval, "%rdi");
+      loadSlot(rS, "%rsi");
+      emit("    call a_add_slow\n");
+      storeRax(acc->specAval);
+      emitLabel(doneL);
+    } else {
+      loadSlot(acc->slot);
+      emit("    add " + slotRef(rS) + ", %rax\n");
+      storeRax(acc->slot);
+    }
     return true;
   }
 
@@ -432,6 +608,10 @@ void AsmEmitter::emitFor(const ForStmt& st) {
       // one runtime bulk-fill call (checked after the step==0 panic so
       // that behaviour is preserved).
       if (tryEmitForFill(st, curS, endS, stepS)) return;
+      // Strength reduction: `for i in lo..hi: acc += i*c` becomes the
+      // closed form (see tryEmitForAccum). Runs after the step==0 panic
+      // and the fill check for the same evaluation-order discipline.
+      if (tryEmitForAccum(st, curS, endS, stepS)) return;
       int varS = allocSlot();
       std::string loopL = newLabel("for");
       std::string contL = newLabel("forc");
@@ -1119,6 +1299,11 @@ void AsmEmitter::emitAssign(const AssignStmt& st) {
 bool AsmEmitter::exprIsInt(const Expr* e) const {
     TypePtr t = e ? resolveType(e->inferredType) : nullptr;
     return t && t->kind == TypeKind::Int;
+  }
+
+bool AsmEmitter::exprIsFloat(const Expr* e) const {
+    TypePtr t = e ? resolveType(e->inferredType) : nullptr;
+    return t && t->kind == TypeKind::Float;
   }
 
 }  // namespace a::detail

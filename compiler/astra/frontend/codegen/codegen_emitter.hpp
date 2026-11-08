@@ -596,6 +596,20 @@ class AsmEmitter {
   // normalize_index panics element-by-element.
     bool tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS);
 
+  // Strength reduction: `for i in lo..hi: acc += i` (or `acc = acc + i`,
+  // optionally scaled by a non-negative constant and summed with += forms
+  // on both sides of the assignment) folds into the closed form
+  // `acc += c * N * (lo + hi - 1) / 2` with N = max(0, hi - lo), for
+  // step-1 range loops. curS/endS/stepS are the evaluated int64 range
+  // slots from emitFor. The fold is only emitted when range analysis
+  // proves the whole accumulation stays inside int64 (A promotes an
+  // overflowing int + to a double, which would hide behind a closed
+  // form), so iteration-by-iteration semantics equal the closed form
+  // bit-for-bit. The accumulator may be a plain promoted raw local or a
+  // speculative one (specRaw); the demoted branch goes through
+  // a_add_slow so a live aval accumulator sees the same value either way.
+    bool tryEmitForAccum(const ForStmt& st, int curS, int endS, int stepS);
+
     void emitFor(const ForStmt& st);
 
   // Generic `for x in <itV-slot>` loop via a_iter_new/a_iter_next; jumps to
@@ -644,6 +658,8 @@ class AsmEmitter {
   // body at a direct call site cannot change name resolution, control flow, or
   // ownership behaviour. Anything doubtful disables inlining for that fn.
     bool exprIsInt(const Expr* e) const;
+
+    bool exprIsFloat(const Expr* e) const;
 
     void scanInlineExpr(InlineScan& sc, const Expr* e);
 

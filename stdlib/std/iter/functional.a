@@ -306,3 +306,80 @@ fn islice(xs, start, stop = -1, step = 1):
         out.append(xs[i])
         i = i + step
     return out
+
+"""
+zip_longest(a, b, fill = None) -> pairs [ai, bi] up to the longer input;
+missing elements are `fill` (Python itertools.zip_longest with two
+iterables; A has no *args so only the 2-way variant is provided).
+"""
+fn zip_longest(a, b, fill = None):
+    na = len(a)
+    nb = len(b)
+    n = na
+    if nb > n:
+        n = nb
+    out = []
+    i = 0
+    while i < n:
+        p = []
+        if i < na:
+            p.append(a[i])
+        else:
+            p.append(fill)
+        if i < nb:
+            p.append(b[i])
+        else:
+            p.append(fill)
+        out.append(p)
+        i = i + 1
+    return out
+
+"""
+compress(data, selectors) -> elements of `data` whose corresponding
+selector is truthy (Python itertools.compress).
+"""
+fn compress(data, selectors):
+    out = []
+    n = len(selectors)
+    if len(data) < n:
+        n = len(data)
+    i = 0
+    while i < n:
+        if selectors[i]:
+            out.append(data[i])
+        i = i + 1
+    return out
+
+"""
+filterfalse(pred, xs) -> elements where pred(x) is false
+(Python itertools.filterfalse; `filter` keeps truthy).
+"""
+fn filterfalse(pred, xs):
+    out = []
+    for x in xs:
+        if not pred(x):
+            out.append(x)
+    return out
+
+"""
+tee(xs) -> [xs.copy(), xs.copy()] — two independent materialized
+iterators (Python itertools.tee is lazy; here both are eager copies).
+"""
+fn tee(xs):
+    return [xs.copy(), xs.copy()]
+
+"""
+indexed(xs, start = 0) -> [[i, x], ...] pairs (Python enumerate).
+The builtin `enumerate` name is taken, so this is the itertools-style
+helper; `start` offsets the first index.
+"""
+fn indexed(xs, start = 0):
+    out = []
+    i = 0
+    while i < len(xs):
+        p = []
+        p.append(start + i)
+        p.append(xs[i])
+        out.append(p)
+        i = i + 1
+    return out

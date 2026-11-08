@@ -243,3 +243,54 @@ fn repeat_seq(a, n):
 
 fn repeat(a, n):
     return repeat_seq(a, n)
+
+# -- call ------------------------------------------------------------------------
+
+# `call(f, args)` applies function value `f` to the elements of `args`.
+# Backed by std.functools._apply (arity-dispatched, max 8 args).
+from "std/functools/_apply.a" import _apply
+
+fn call(f, args):
+    return _apply(f, args)
+
+# -- in-place operation aliases -----------------------------------------------------
+#
+# Python's iadd/isub/... prefer __i*__ dunders and fall back to the plain
+# binary op. A has no dunder protocol and arrays/maps are reference types,
+# so these are simple aliases of the corresponding binary functions.
+
+fn iadd(a, b):
+    return add(a, b)
+
+fn isub(a, b):
+    return sub(a, b)
+
+fn imul(a, b):
+    return mul(a, b)
+
+fn itruediv(a, b):
+    return truediv(a, b)
+
+fn ifloordiv(a, b):
+    return floordiv(a, b)
+
+fn imod(a, b):
+    return mod(a, b)
+
+fn ipow(a, b):
+    return pow(a, b)
+
+fn ilshift(a, b):
+    return lshift(a, b)
+
+fn irshift(a, b):
+    return rshift(a, b)
+
+fn iand(a, b):
+    return and_(a, b)
+
+fn ior(a, b):
+    return or_(a, b)
+
+fn ixor(a, b):
+    return xor(a, b)

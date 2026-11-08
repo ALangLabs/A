@@ -205,6 +205,49 @@ class Deque<T>:
                 self.append(xs[j])
             j = j + 1
 
+    """
+    insert(i, x) -> insert x before position i and return nothing
+    (Python `insert`). Negative i counts from the left end
+    (-len <= i <= len); out-of-range panics like IndexError. When the
+    deque is at maxlen the opposite end is discarded, matching CPython.
+    O(n).
+    """
+    fn insert(self, i, x):
+        n = self._len()
+        idx = i
+        if idx < 0:
+            idx = idx + n
+        if idx < 0 or idx > n:
+            core.panic("deque index out of range")
+        xs = self.to_list()
+        # splice x in at idx
+        out = []
+        j = 0
+        while j < idx:
+            out.append(xs[j])
+            j = j + 1
+        out.append(x)
+        while j < n:
+            out.append(xs[j])
+            j = j + 1
+        # rebuild honouring maxlen: drop from the end opposite the insert
+        keep_from = 0
+        keep_to = len(out)
+        if self.maxlen >= 0 and len(out) > self.maxlen:
+            overflow = len(out) - self.maxlen
+            if idx <= n / 2:
+                # inserted near the left: drop from the right
+                keep_to = keep_to - overflow
+            else:
+                # inserted near the right: drop from the left
+                keep_from = keep_from + overflow
+        self.clear()
+        j = keep_from
+        while j < keep_to:
+            self.right.append(out[j])
+            j = j + 1
+        self._enforce_maxlen("right")
+
     """contains(x) -> true when x is in the deque (Python `x in d`)."""
     fn contains(self, x):
         for v in self.to_list():

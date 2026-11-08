@@ -39,6 +39,16 @@ class OrderedDict:
     fn contains(self, k):
         return k in self.data
 
+    """
+    setdefault(k, v) -> return the value for k, inserting v when k is
+    absent (Python `od.setdefault(k, v)`).
+    """
+    fn setdefault(self, k, v):
+        if k in self.data:
+            return self.data[k]
+        self.data[k] = v
+        return v
+
     """pop(k) -> remove k and return its value; runtime error when absent."""
     fn pop(self, k):
         if k not in self.data:

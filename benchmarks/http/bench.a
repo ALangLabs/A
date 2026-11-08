@@ -4,6 +4,7 @@
 # stdlib int parser.
 from std:http import get
 import std:time
+import std:core
 
 N = 300
 PATH = "/tiny"

@@ -1,7 +1,7 @@
 # std.string - port of CPython Lib/string.py (constants + selected helpers).
 #
 # Pure-A subset. Provides ASCII character classification constants and
-# `capwords`. `Formatter`/`Template` are not ported.
+# `capwords`. `Template` is provided below; `Formatter` is not ported.
 #
 # Deviations from CPython:
 #   * `capwords(s, sep)` takes exactly 2 args (A has no default params).
@@ -112,3 +112,128 @@ fn capwords(s, sep):
         out = out + caps[i]
         i = i + 1
     return out
+
+# --- string.Template port -------------------------------------------------------
+#
+# Python `string.Template`: `$identifier` and `${identifier}` placeholders
+# substituted from a mapping; `$$` is a literal delimiter. Deviations:
+#   * delimiter must be a single character (Python allows str but only
+#     single-char delimiters are meaningful in practice).
+#   * idpattern is fixed to Python's default `[_a-z][_a-z0-9]*`
+#     (case-insensitive); custom idpatterns are not supported.
+#   * substitute() panics on a missing key (Python raises KeyError).
+#     Invalid placeholders (a lone '$' or '$' before a non-identifier
+#     char) are left as literal text in both modes, matching CPython;
+#     only malformed '${...}' forms panic.
+#   * The mapping must be an A map/dict; attribute-style objects are not
+#     supported.
+
+import std:core
+
+fn _tmpl_is_alpha(ch):
+    return (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
+
+fn _tmpl_is_digit(ch):
+    return ch >= "0" and ch <= "9"
+
+fn _tmpl_is_id_start(ch):
+    return _tmpl_is_alpha(ch) or ch == "_"
+
+fn _tmpl_is_id_char(ch):
+    return _tmpl_is_alpha(ch) or _tmpl_is_digit(ch) or ch == "_"
+
+fn _tmpl_braced(src, i, n, delim, mapping, safe, out):
+    # src[i] == '{'; find closing '}' from i+1. Returns new index or -1.
+    key = ""
+    j = i + 1
+    while j < n:
+        ch = str(src[j])
+        if ch == "\}":
+            if len(key) == 0:
+                core.panic("Template: invalid placeholder")
+            if key in mapping:
+                out[0] = out[0] + str(mapping[key])
+                return j + 1
+            if safe:
+                return -1
+            core.panic("Template: key '" + key + "' not found")
+            return -1
+        key = key + ch
+        j = j + 1
+    core.panic("Template: invalid placeholder (unterminated brace)")
+    return -1
+
+fn _tmpl_named(src, i, n, mapping, safe, out):
+    # src[i] is the delimiter; read an identifier starting at i+1.
+    key = ""
+    j = i + 1
+    first = true
+    while j < n:
+        ch = str(src[j])
+        if first:
+            if not _tmpl_is_id_start(ch):
+                break
+        else:
+            if not _tmpl_is_id_char(ch):
+                break
+        key = key + ch
+        first = false
+        j = j + 1
+    if len(key) == 0:
+        return -1
+    if key in mapping:
+        out[0] = out[0] + str(mapping[key])
+        return j
+    if safe:
+        return -1
+    core.panic("Template: key '" + key + "' not found")
+    return -1
+
+fn _template_substitute(src, delim, mapping, safe):
+    s = str(src)
+    d = str(delim)
+    n = len(s)
+    out = [""]
+    i = 0
+    while i < n:
+        ch = str(s[i])
+        if ch == d and len(d) == 1:
+            if i + 1 < n and str(s[i + 1]) == d:
+                out[0] = out[0] + d
+                i = i + 2
+                continue
+            nxt = -1
+            if i + 1 < n and str(s[i + 1]) == "\{":
+                nxt = _tmpl_braced(s, i + 1, n, d, mapping, safe, out)
+            else:
+                nxt = _tmpl_named(s, i, n, mapping, safe, out)
+            if nxt < 0:
+                # safe_substitute: emit the '$' literally and continue
+                out[0] = out[0] + d
+                i = i + 1
+                continue
+            i = nxt
+            continue
+        out[0] = out[0] + ch
+        i = i + 1
+    return out[0]
+
+"""
+Template: string.Template port — `$name`/`${name}` substitution.
+Construct via `Template_new(template)` or `Template_new(template, delim)`.
+"""
+class Template:
+    template
+    delimiter
+
+    """substitute(mapping) -> string with placeholders replaced; panics on missing keys."""
+    fn substitute(self, mapping):
+        return _template_substitute(self.template, self.delimiter, mapping, false)
+
+    """safe_substitute(mapping) -> like substitute but leaves unknown placeholders as-is."""
+    fn safe_substitute(self, mapping):
+        return _template_substitute(self.template, self.delimiter, mapping, true)
+
+"""Template_new(template, delimiter = "$") -> Template."""
+fn Template_new(template, delimiter = "$"):
+    return Template(str(template), str(delimiter))
