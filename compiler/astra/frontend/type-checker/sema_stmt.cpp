@@ -122,10 +122,26 @@ void Sema::checkLet(LetStmt& stmt) {
     if (!unify(initType, declared)) {
       reportMismatch(initType, declared, stmt.init->span,
                      "in the initializer for '" + stmt.name + "'");
+      variableType = declared;
     } else {
       checkFixedArrayLength(*stmt.init, declared);
+      variableType = declared;
+      // `int` and `float` are sizeless hints: when the initializer has a
+      // concrete numeric type the binding adopts its width (int stays int,
+      // float widens an int initializer to f64). Explicit-width spellings
+      // like i32/u8/f32 keep their declared type.
+      if (auto* named = dynamic_cast<NamedTypeExpr*>(stmt.type.get());
+          named && named->qualifiers.empty() && named->typeArgs.empty()) {
+        TypePtr initResolved = resolveType(initType);
+        if (named->name == "int" && initResolved &&
+            initResolved->kind == TypeKind::Int) {
+          variableType = initType;
+        } else if (named->name == "float" && initResolved) {
+          if (initResolved->kind == TypeKind::Float) variableType = initType;
+          if (initResolved->kind == TypeKind::Int) variableType = typeFloat(64);
+        }
+      }
     }
-    variableType = declared;
   } else if (resolveType(initType)->kind == TypeKind::Void) {
     sink_.error(stmt.init->span,
                 "Cannot initialize '" + stmt.name + "' with a void value.");
