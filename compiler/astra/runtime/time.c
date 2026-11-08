@@ -7,19 +7,27 @@
 aval bi_time_now(uint64_t n, aval *argv) {
     (void)argv;
     want_args("now", n, 0, 0);
+#if defined(_WIN32)
+    return mkint_full(a_win_time_ms());
+#else
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return mkint_full((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
 }
 
 aval bi_time_sleep(uint64_t n, aval *argv) {
     want_args("sleep", n, 1, 1);
     int64_t ms = expect_int64(argv[0], "sleep() milliseconds");
     if (ms < 0) ms = 0;
+#if defined(_WIN32)
+    a_win_sleep_ms(ms);
+#else
     struct timespec ts;
     ts.tv_sec = (time_t)(ms / 1000);
     ts.tv_nsec = (long)(ms % 1000) * 1000000L;
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
+#endif
     return A_NONE;
 }
 

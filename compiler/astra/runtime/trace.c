@@ -27,9 +27,13 @@ static ASpan *span_find(uint64_t id) {
 }
 
 static int64_t now_ms(void) {
+#if defined(_WIN32)
+    return a_win_mono_ms();
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
 }
 
 aval bi_trace_start(uint64_t n, aval *argv) {

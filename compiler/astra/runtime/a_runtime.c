@@ -314,5 +314,21 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
     printf("\n%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;
 }
+#else
+/* Windows: no fork/pipe, so tests run serially in-process. A panicking
+   test still aborts the suite (panicf exits the process), matching the
+   single-test failure semantics of the POSIX harness minus isolation. */
+int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
+    int passed = 0, failed = 0;
+    for (uint64_t i = 0; i < n; ++i) {
+        aval argv[1];
+        argv[0] = A_NONE;
+        fns[i](argv);
+        printf("ok %s\n", names[i]);
+        ++passed;
+    }
+    printf("\n%d passed, %d failed\n", passed, failed);
+    return failed ? 1 : 0;
+}
 #endif
 

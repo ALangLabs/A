@@ -29,6 +29,29 @@
 #include <sys/socket.h>
 #endif
 
+#if defined(_WIN32) && !defined(_WIN64)
+/* 32-bit Windows CRT malloc only guarantees 8-byte alignment, but heap
+   objects must be 16-byte aligned for NaN-boxing (mkobj panics otherwise).
+   Route every runtime allocation through the aligned CRT entry points.
+   All runtime .c files share this header, so malloc/free/realloc stay
+   paired: every allocation and every release goes through _aligned_*. */
+#include <malloc.h>
+#define malloc(n) _aligned_malloc((n), 16)
+#define realloc(p, n) _aligned_realloc((p), (n), 16)
+#define free(p) _aligned_free(p)
+#endif
+
+#if defined(_WIN32)
+/* msvcrt.dll exports vsnprintf but not snprintf (that lives in libmingwex,
+   which is not shipped); the runtime provides the C99 wrapper. */
+int snprintf(char *s, size_t n, const char *format, ...);
+/* Win32 timing helpers implemented in core_util.c (declared directly so
+   no TU needs windows.h). */
+int64_t a_win_time_ms(void);    /* wall clock, Unix epoch milliseconds */
+int64_t a_win_mono_ms(void);    /* monotonic milliseconds (QPC) */
+void a_win_sleep_ms(int64_t ms);
+#endif
+
 /* object model */
 /* ------------------------------------------------------------------ */
 /* object model                                                        */

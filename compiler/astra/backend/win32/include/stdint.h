@@ -42,6 +42,15 @@ typedef int  int32_t;
 typedef unsigned   uint32_t;
 typedef long long  int64_t;
 typedef unsigned long long   uint64_t;
+/* Pointer-sized integers (ISO C 7.18.1.4): LLP64 Windows needs __int64
+   on 64-bit targets; 32-bit targets use int. */
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+typedef __int64 intptr_t;
+typedef unsigned __int64 uintptr_t;
+#else
+typedef int intptr_t;
+typedef unsigned int uintptr_t;
+#endif
 #endif
 
 /* 7.18.1.2  Minimum-width integer types */

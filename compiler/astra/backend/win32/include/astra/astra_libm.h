@@ -270,7 +270,7 @@ __CRT_INLINE long double __cdecl nanl(const char* s) {
 
 /* Following are math functions missing from msvcrt.dll, and not defined
  * in math.h or above. Functions still remaining:
- * remquo(), remainder(), fma(), erf(), erfc(), nearbyint().
+ * remquo(), remainder(), erf(), erfc(), nearbyint().
  * In <stdlib.h>: lldiv().
  */
 
@@ -613,6 +613,40 @@ __CRT_INLINE long double __cdecl tgammal(long double x) {
 }
 __CRT_INLINE long double __cdecl lgammal(long double x) {
   return lgamma(x);
+}
+
+/* fma(x, y, z): msvcrt.dll has no fma export. Software version using
+ * Dekker's error-free two-product for x*y plus a Knuth TwoSum residual
+ * against z, so the multiply-add is evaluated with a single rounding in
+ * the common case. Operands outside the normal range where the Dekker
+ * split is reliable (subnormals, values whose intermediate splitter
+ * multiply could overflow, non-finite results) fall back to the plain
+ * x*y+z expression, which is still correctly rounded whenever no
+ * cancellation needs the residual term. */
+__CRT_INLINE double __cdecl fma (double x, double y, double z) {
+  double p = x * y;
+  double ax = fabs(x), ay = fabs(y);
+  /* Bounds: |v| >= ~2^-500 keeps the Dekker split exact (no subnormal
+     inputs); |v| <= ~2^990 keeps splitter*v finite. */
+  if (!isfinite(p) || !isfinite(z) ||
+      ax < 3e-151 || ay < 3e-151 || ax > 1e298 || ay > 1e298)
+    return x * y + z;
+  const double splitter = 134217729.0; /* 2^27 + 1 */
+  double cx = splitter * x, cy = splitter * y;
+  double xh = cx - (cx - x), xl = x - xh;
+  double yh = cy - (cy - y), yl = y - yh;
+  double err = ((xh * yh - p) + xh * yl + xl * yh) + xl * yl;
+  double s = p + z;
+  double bp = s - p;
+  double err2 = (p - (s - bp)) + (z - bp);
+  return s + (err + err2);
+}
+
+__CRT_INLINE float __cdecl fmaf (float x, float y, float z) {
+  return fma(x, y, z);
+}
+__CRT_INLINE long double __cdecl fmal (long double x, long double y, long double z) {
+  return fma(x, y, z);
 }
 
 #endif /* _ASTRA_LIBM_H_ */
