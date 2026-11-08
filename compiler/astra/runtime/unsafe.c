@@ -19,6 +19,14 @@ static uint64_t ptr_id(aval v) {
 aval bi_unsafe_get(uint64_t n, aval *argv) {
     want_args("unsafe.get", n, 2, 2);
     AObj *o = obj_of(argv[0]);
+    /* The second argument is an integer index for sequences/strings but a
+       dictionary key for maps, so it is only converted where needed. */
+    if (o && is_dict_t(o->type)) {
+        ADict *d = (ADict *)o;
+        int64_t idx = dict_find(d, argv[1]);
+        if (idx < 0) return A_NONE;
+        return d->pairs[idx].v;
+    }
     int64_t i = int_val_full(argv[1]);
     if (o && (o->type == T_LIST || o->type == T_TUPLE)) {
         AArr *a = (AArr *)o;
@@ -29,12 +37,6 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
         AArr *a = (AArr *)o;
         if (i < 0 || (uint64_t)i >= a->h.len) panicf("unsafe.get: index out of bounds");
         return a->items[i];
-    }
-    if (o && is_dict_t(o->type)) {
-        ADict *d = (ADict *)o;
-        int64_t idx = dict_find(d, argv[1]);
-        if (idx < 0) return A_NONE;
-        return d->pairs[idx].v;
     }
     if (o && (o->type == T_STR || o->type == T_CHAR)) {
         uint64_t len;
@@ -51,6 +53,10 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
 aval bi_unsafe_set(uint64_t n, aval *argv) {
     want_args("unsafe.set", n, 3, 3);
     AObj *o = obj_of(argv[0]);
+    if (o && is_dict_t(o->type)) {
+        dict_put((ADict *)o, argv[1], argv[2]);
+        return A_NONE;
+    }
     int64_t i = int_val_full(argv[1]);
     if (o && (o->type == T_LIST || o->type == T_TUPLE)) {
         AArr *a = (AArr *)o;
@@ -65,10 +71,6 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
         }
         if ((a->flags & ARR_F_F64) && !a_is_double(argv[2])) a->flags &= ~ARR_F_F64;
         a->items[i] = argv[2];
-        return A_NONE;
-    }
-    if (o && is_dict_t(o->type)) {
-        dict_put((ADict *)o, argv[1], argv[2]);
         return A_NONE;
     }
     panicf("unsafe.set: unsupported container '%s'", type_name_cstr(argv[0]));

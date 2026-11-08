@@ -140,6 +140,95 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     return typeString();
   }
 
+  if (name == "bool") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeBool();
+    }
+    TypePtr type = inferExpr(*call.args[0].value);
+    if (resolveType(type)->kind == TypeKind::Void) {
+      sink_.error(call.args[0].value->span, "Cannot convert a void value to bool.");
+    }
+    return typeBool();
+  }
+
+  if (name == "type") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeString();
+    }
+    TypePtr type = inferExpr(*call.args[0].value);
+    if (resolveType(type)->kind == TypeKind::Void) {
+      sink_.error(call.args[0].value->span,
+                  "Cannot convert a void value to a type name.");
+    }
+    return typeString();
+  }
+
+  if (name == "isinstance") {
+    // The runtime compares against runtime type-name strings ("int",
+    // "list", "str", struct names, ...), so the second argument is a String.
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeBool();
+    }
+    TypePtr value = inferExpr(*call.args[0].value);
+    if (resolveType(value)->kind == TypeKind::Void) {
+      sink_.error(call.args[0].value->span,
+                  "Cannot take the type of a void value.");
+    }
+    TypePtr typeNameArg = inferExpr(*call.args[1].value);
+    if (!unify(typeNameArg, typeString())) {
+      reportMismatch(typeNameArg, typeString(), call.args[1].value->span,
+                     "in the type name passed to 'isinstance'");
+    }
+    return typeBool();
+  }
+
+  if (name == "some") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeOptional(typeError());
+    }
+    TypePtr value = inferExpr(*call.args[0].value);
+    if (resolveType(value)->kind == TypeKind::Void) {
+      sink_.error(call.args[0].value->span, "Cannot wrap a void value in 'some'.");
+    }
+    return typeOptional(value);
+  }
+
+  if (name == "ok") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      TypePtr e = freshVar(Constraint::None, call.span, "the error type of 'Result'");
+      e->allowUnresolved = true;
+      return typeResult(typeError(), e);
+    }
+    TypePtr value = inferExpr(*call.args[0].value);
+    TypePtr e = freshVar(Constraint::None, call.span, "the error type of 'Result'");
+    e->allowUnresolved = true;
+    return typeResult(value, e);
+  }
+
+  if (name == "err") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      TypePtr t = freshVar(Constraint::None, call.span, "the value type of 'Result'");
+      t->allowUnresolved = true;
+      return typeResult(t, typeError());
+    }
+    TypePtr error = inferExpr(*call.args[0].value);
+    TypePtr t = freshVar(Constraint::None, call.span, "the value type of 'Result'");
+    t->allowUnresolved = true;
+    return typeResult(t, error);
+  }
+
   if (name == "Some") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);

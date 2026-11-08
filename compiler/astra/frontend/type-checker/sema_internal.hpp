@@ -55,7 +55,8 @@ inline bool isMathBuiltin(const std::string& name) {
 inline bool isKnownBuiltin(const std::string& name) {
   static const char* names[] = {
       "print",    "eprint",   "input",     "len",      "str",      "abs",
-      "int",      "float",    "min",       "max",      "pow",      "flush",
+      "int",      "float",    "bool",      "min",      "max",      "pow",
+      "flush",    "type",     "isinstance",
       "read_file", "write_file",
       "read_bytes", "write_bytes",
       "append_file", "file_exists", "file_size", "dot", "matvec", "matvec_t",
@@ -66,7 +67,10 @@ inline bool isKnownBuiltin(const std::string& name) {
       "open", "close",
       "assert_eq", "map",  "filter",   "reduce",   "any",
       "all",      "sum",      "join",      "random",   "random_int", "atan2",
-      "set",      "unsafe_get", "unsafe_set",
+      "set",      "tuple",    "list",      "dict",     "range",
+      "sorted",   "reversed", "enumerate", "zip",
+      "some",     "ok",       "err",
+      "unsafe_get", "unsafe_set",
       "arena_new", "arena_pool", "arena_region", "arena_alloc", "arena_release",
       "arena_reset", "arena_used", "arena_total", "move", "copy",
       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
