@@ -50,7 +50,8 @@ Strings interpolate with `{expr}`: `"sum = {2 + 3}"`, `"Hello, {name}!"`.
 | Type | Notes |
 | --- | --- |
 | `bool`, `char`, `String`/`str` | `char` is a Unicode code point; strings are UTF-8 with methods (`strip`, `upper`, `split`, `contains`, `startswith`, `endswith`, `join`, `lower`, …) |
-| `int`/`i64`, `i8 i16 i32`, `u8 u16 u32 u64`, `float`/`f64`, `f32` | sized ints/floats; literals default to `i64`/`f64` |
+| `int`, `float` | canonical numeric types — `int` is a signed 64-bit integer, `float` a 64-bit double; literals and arithmetic default to them |
+| `i8 i16 i32 i64`, `u8 u16 u32 u64`, `f32` | explicit-width types for low-level/FFI code; `i64`/`f64` spell the same types as `int`/`float` |
 | `[T]` / `[T; N]` | dynamic and fixed-size arrays |
 | `(a, b, …)` | tuples |
 | `map<K, V>`, `set<T>` | dictionaries and sets |

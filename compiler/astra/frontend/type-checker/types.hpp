@@ -70,6 +70,11 @@ struct Type {
   // `x = 5000000000` keeps its historical i32 default instead of erroring.
   bool implicitDefault = false;
   bool allowUnresolved = false;  // e.g. the element type of a bare `None`
+  // True when this type was written explicitly in source (a variable/field/
+  // parameter/return annotation) rather than inferred. Type errors are only
+  // hard-failed against annotated types, so dynamically inferred container
+  // element types keep the language's Python-style permissiveness.
+  bool fromAnnotation = false;
   std::string varDescription;
   Span varSpan;
   TypePtr link;
@@ -247,8 +252,13 @@ inline std::string typeName(const TypePtr& type) {
     case TypeKind::Char: return "char";
     case TypeKind::String: return "String";
     case TypeKind::Int:
+      // The 64-bit defaults display as the canonical `int`/`float` names;
+      // explicit-width types keep their spellings.
+      if (t->bits == 64 && t->isSigned) return "int";
       return (t->isSigned ? "i" : "u") + std::to_string(t->bits);
-    case TypeKind::Float: return "f" + std::to_string(t->bits);
+    case TypeKind::Float:
+      if (t->bits == 64) return "float";
+      return "f" + std::to_string(t->bits);
     case TypeKind::Array: {
       if (t->length < 0) return "[" + typeName(t->elem) + "]";
       std::string dims;
