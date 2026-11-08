@@ -13,7 +13,11 @@ from python:json import loads, dumps
 
 `python:<pkg>` imports resolve through the `py` native module (`py.import_module`,
 `py.try_import`, `py.getattr`, `py.call_method`, … — see
-[builtins](builtins.md)).
+[builtins](builtins.md)). This works on every codegen path: the x86-64
+`emitAsm` emitter, the per-arch `emitNative` emitters (non-x86-64
+`--target` builds), and the portable `emitC` fallback all bind
+`PyModule`/`PyFunc` values and lower calls through the runtime `py_call`
+builtin, so Python interop is no longer asm/C-only.
 
 ## Calling and attributes
 

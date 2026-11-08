@@ -29,6 +29,13 @@ from python:json import loads
   `from std:enum import Enum`. Plain `import std:enum` binds a keyword name
   — prefer `as` aliasing or the `from` form.
 - Modules are namespaced; `import "lib/mathx.a"` binds `mathx.*` members.
+- Package `__init__.a` re-exports resolve on every backend: a package can
+  forward names with `from "impl.a" import name`, and attribute access
+  through the package binding follows the re-export to the module that
+  actually declares it (shared `a::resolveModuleMember` in `emitC` and
+  `emitAsm`, mirrored in `emitNative`). Example:
+  `import "lib/pkg/__init__.a" as pkg` then `pkg.greet()` calls the
+  function re-exported by `pkg/__init__.a`.
 - Import cycles and missing modules are compile errors.
 
 ## Module files

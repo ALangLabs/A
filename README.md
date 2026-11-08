@@ -190,7 +190,11 @@ arithmetic/comparisons and decimal `print` of ints; other builtins are
 stubs returning `none` (non-int `print` args show `?`). Real-mode CS:IP is
 16-bit, so `.text` must fit in a single 64 KiB code segment at 0x10000 —
 the emitter dead-strips unreachable functions to stay under it. The astra
-i8086 driver is built on Linux hosts only. `a run --target i8086` builds
+i8086 driver is built on Linux hosts only. Known gaps: string literals
+currently read the wrong memory pending a linker address fix, and
+`while` loops, methods, and lambdas are broken (the runtime stubs behind
+them return `none`) — only straight-line tagged-int code is reliable.
+`a run --target i8086` builds
 the image and executes it under `qemu-system-i386` (COM1 on stdio,
 isa-debug-exit on port 0xF4); `a test`/`a repl` still reject it.
 `tests/integration/i8086_image.sh` is the automated harness — it builds an

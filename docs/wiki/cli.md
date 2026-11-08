@@ -54,10 +54,17 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
   CS:IP is 16-bit, so `.text` must fit a single 64 KiB segment at
   0x10000; the emitter dead-strips unreachable functions to stay under it.
 - Runtime is the hand-written subset in
-  `compiler/astra/runtime/i8086_runtime.s`: tagged-int arithmetic and
-  comparisons plus decimal `print` of ints. `print` writes to COM1
-  (0x3F8); other builtins are stubs returning `none` (non-int `print`
-  args show `?`).
+  `compiler/astra/runtime/i8086_runtime.s`: tagged-int (boxed-int)
+  arithmetic and comparisons plus decimal `print` of ints — `none`,
+  `true`/`false` values work too. `print` writes to COM1
+  (0x3F8); every other builtin is a stub returning `none` (non-int
+  `print` args show `?`).
+- Known gaps: **string literals are currently broken** — they read the
+  wrong memory pending a linker address fix, so `print("hi")` yields
+  `none`; do not rely on strings in i8086 programs. `while` loops,
+  methods, and lambdas are also known-broken (the runtime stubs behind
+  them return `none`/misbehave). Only straight-line tagged-int code is
+  reliable today.
 - Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
   wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
   `tests/integration/i8086_image.sh` is the automated harness. Manual run:
