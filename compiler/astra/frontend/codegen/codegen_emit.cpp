@@ -117,8 +117,8 @@ void AsmEmitter::storeRax(int slot) {
 void AsmEmitter::loadSlot(int slot, const char* reg) {
     auto xi = loopXmm_.find(slot);
     if (xi != loopXmm_.end()) {
-      emit(std::string("    movq %xmm") + std::to_string(xi->second) + ", " +
-           reg);
+      emit(std::string("    movq %xmm") + std::to_string(xi->second) +
+           ", " + reg);
       if (rawRegOn()) {
         int c = rawRegCode(reg);
         if (c >= 0) {
@@ -146,12 +146,27 @@ void AsmEmitter::loadSlot(int slot, const char* reg) {
     emit(std::string("    mov ") + slotRef(slot) + ", " + reg);
   }
 
+// Slot bits -> xmm register for SSE math: resident slots move reg->reg
+// (movq), others load the aval word straight from the frame (movsd).
+// Direct `movsd slotRef(...)` sites must route through here or they read
+// a stale frame slot while the register is authoritative.
+void AsmEmitter::loadSlotXmm(int slot, const char* xmm) {
+    auto xi = loopXmm_.find(slot);
+    if (xi != loopXmm_.end()) {
+      emit(std::string("    movq %xmm") + std::to_string(xi->second) + ", " +
+           xmm + "\n");
+      return;
+    }
+    emit("    movsd " + slotRef(slot) + ", " + xmm + "\n");
+  }
+
 void AsmEmitter::leaSlot(int slot, const char* reg) {
     emit(std::string("    lea ") + slotRef(slot) + ", " + reg);
   }
 
 // mem -> mem is impossible on x86; route slot copies through %rcx.
 void AsmEmitter::copySlot(int from, int to) {
+    if (from == to) return;  // identity: keeps register claims valid too
     // Counter mirrored in %r10 (see curGprSlot_): the frame slot may be
     // stale between calls, so read straight from the register.
     if (from == curGprSlot_ && from != to) {
@@ -539,9 +554,9 @@ void AsmEmitter::emitDoubleArith(const std::string& op, int ls, int rs,
       emit("    add %rcx, %rcx\n    jz " + divzL + "\n");
     }
     int t = allocSlot();
-    emit("    movsd " + slotRef(ls) + ", %xmm0\n"
-         "    movsd " + slotRef(rs) + ", %xmm1\n"
-         "    " + std::string(it->second) + " %xmm1, %xmm0\n");
+    loadSlotXmm(ls, "%xmm0");
+    loadSlotXmm(rs, "%xmm1");
+    emit(std::string("    ") + std::string(it->second) + " %xmm1, %xmm0\n");
     emitXmm0ToAval(t, doneL);
   }
 
@@ -563,9 +578,9 @@ void AsmEmitter::emitDoubleCmp(const std::string& op, int ls, int rs,
     }
     rawInvAll();
     emitDoublePairCheck(ls, rs, slowL);
-    emit("    movsd " + slotRef(ls) + ", %xmm0\n"
-         "    movsd " + slotRef(rs) + ", %xmm1\n"
-         "    xor %eax, %eax\n");
+    loadSlotXmm(ls, "%xmm0");
+    loadSlotXmm(rs, "%xmm1");
+    emit("    xor %eax, %eax\n");
     if (op == "==" || op == "!=") {
       // ucomisd %xmm1,%xmm0 compares lhs(xmm0) vs rhs(xmm1): unordered
       // sets ZF=PF=1, so == needs setnp&sete and != needs setp|setne.
@@ -720,11 +735,12 @@ void AsmEmitter::loopXmmReload() {
     }
   }
 
-// Install every in-scope raw-int/spec binding (up to xmm15) into an xmm
-// register for the duration of a pure loop body. Returns a marker for
-// loopXmmExit. Bindings not touched by the body simply waste a register;
-// correctness never depends on use.
-int AsmEmitter::loopXmmEnter() {
+// Install in-scope bindings into xmm registers for the duration of a
+// loop. Raw-int/spec bindings always qualify; includeAval additionally
+// admits plain locals/params (call-free loops only — see the header).
+// Returns a marker for loopXmmExit. Bindings not touched by the body
+// simply waste a register; correctness never depends on use.
+int AsmEmitter::loopXmmEnter(bool includeAval) {
     const int marker = (int)loopXmmAdded_.size();
     // Nested loops keep the outer residency but do not install new xmm
     // registers: mixing two residency sets corrupts loop-carried values.
@@ -740,7 +756,7 @@ int AsmEmitter::loopXmmEnter() {
         ABinding& b = kv.second;
         if (b.slot < 0 || loopXmm_.count(b.slot)) continue;
         if (b.kind != BKind::Local && b.kind != BKind::Param) continue;
-        if (!b.rawInt && !b.specRaw) continue;
+        if (!includeAval && !b.rawInt && !b.specRaw) continue;
         while (next <= 15 && !xmmFree(next)) ++next;
         if (next > 15) return marker;
         loadSlot(b.slot);

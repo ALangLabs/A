@@ -1561,9 +1561,9 @@ void AsmEmitter::emitAssign(const AssignStmt& st) {
           }
           emit("    jmp " + dblL + "\n");
           emitLabel(dblL);
-          rawInvAll();  // direct movsd traffic bypasses the reg cache
-          emit("    movsd " + slotRef(cs) + ", %xmm0\n"
-               "    movsd " + slotRef(rs) + ", %xmm1\n");
+          rawInvAll();  // direct mov traffic below bypasses the reg cache
+          loadSlotXmm(cs, "%xmm0");
+          loadSlotXmm(rs, "%xmm1");
           emit(std::string("    ") +
                (baseOp == "+" ? "addsd %xmm1, %xmm0\n"
                 : baseOp == "-" ? "subsd %xmm1, %xmm0\n"
@@ -1585,7 +1585,9 @@ void AsmEmitter::emitAssign(const AssignStmt& st) {
           // slot copy per op-assign (store-forwarding stalls).
           if ((b->kind == BKind::Local || b->kind == BKind::Param) &&
               !b->dropFn) {
-            emit("    mov %rax, " + slotRef(b->slot) + "\n");
+            // storeRax keeps XMM residency coherent (movq %rax,%xmmN
+            // instead of a frame-slot write when the slot is resident).
+            storeRax(b->slot);
             vs = b->slot;
           } else {
             vs = allocSlot();

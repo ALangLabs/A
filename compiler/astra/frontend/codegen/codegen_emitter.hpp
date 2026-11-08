@@ -302,11 +302,22 @@ class AsmEmitter {
   // (which could hold the call's result).
     void loopXmmReload();
 
-  // Install every in-scope raw-int/spec binding (up to xmm15) into an xmm
-  // register for the duration of a pure loop body. Returns a marker for
-  // loopXmmExit. Bindings not touched by the body simply waste a register;
-  // correctness never depends on use.
-    int loopXmmEnter();
+  // Install in-scope bindings into xmm registers for the duration of a
+  // loop. Raw-int/spec bindings always qualify; includeAval additionally
+  // admits plain locals/params (their aval words move through xmm just
+  // fine — every access must go through the slot helpers, which the
+  // direct-slotRef sites in emitAssign/emitDoubleArith/emitDoubleCmp are
+  // routed around via loadSlotXmm/storeRax). Only pass true for loops
+  // whose body+cond cannot execute calls: emit() spills ALL residents
+  // around every call, so call-heavy bodies would pay flush traffic per
+  // iteration. Returns a marker for loopXmmExit.
+    int loopXmmEnter(bool includeAval = false);
+
+  // Slot bits -> xmm register for SSE math: resident slots move
+  // reg->reg (movq), others load the aval word straight from the frame
+  // (movsd). Used everywhere a raw `movsd slotRef(...)` would otherwise
+  // bypass residency and read a stale frame slot.
+    void loadSlotXmm(int slot, const char* xmm);
 
   // Flush resident values back to their slots and drop this loop level's
   // residency (outer loops' entries survive for nested loops).
@@ -769,6 +780,25 @@ class AsmEmitter {
     bool emitRawExpr(const Expr* e, int out);
 
     bool emitRawExprImpl(const Expr* e, int out);
+
+  // Leaf raw int64 materialization: IntLit (fitting) and idents bound to
+  // raw int64 slots (rawInt locals, rawVars_ entries) can go straight into
+  // a register, skipping the temp-slot store/load round-trip. specRaw and
+  // aval bindings are excluded (their reads need the flag check / boxing).
+    bool rawLeafOk(const Expr* e);
+
+    bool emitRawLeafReg(const Expr* e, const char* reg);
+
+  // `L <op> R -> out` with both operands raw leaves and op in the
+  // non-trapping set emitRawBin handles with a single instruction
+  // (+,-,*,&,|,^): emits lhs->%rax, rhs->%rcx, the op, storeRax(out).
+    bool emitRawLeafPair(const BinaryExpr& b, int out);
+
+  // Same op set with exactly ONE leaf operand: the composite side goes
+  // through emitRawExpr to a temp slot (result forwards through the reg
+  // cache), the leaf materializes directly into its operand register —
+  // `x + 1`, `acc & mask` skip one temp-slot round-trip.
+    bool emitRawLeafMixed(const BinaryExpr& b, int out);
 
     void emitRawBin(const std::string& op, int ls, int rs, int out);
 

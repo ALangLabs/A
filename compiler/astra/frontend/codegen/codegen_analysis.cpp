@@ -96,7 +96,21 @@ bool AsmEmitter::tryRawCondJump(const Expr* cond, const std::string& label,
           {"==", "je"}, {"!=", "jne"}, {"<", "jl"},
           {"<=", "jle"}, {">", "jg"}, {">=", "jge"}};
       auto it = kJcc.find(b.op);
+      static const std::unordered_map<std::string, const char*> kInv = {
+          {"je", "jne"}, {"jne", "je"}, {"jl", "jge"}, {"jle", "jg"},
+          {"jg", "jle"}, {"jge", "jl"}};
       if (it != kJcc.end() && rawCmpOk(b)) {
+        // Leaf operands (raw int idents/literals) materialize straight
+        // into %rax/%rcx — the `while i < n` head with no temp slots.
+        if (rawLeafOk(b.lhs.get()) && rawLeafOk(b.rhs.get())) {
+          emitRawLeafReg(b.lhs.get(), "%rax");
+          emitRawLeafReg(b.rhs.get(), "%rcx");
+          emit("    cmp %rcx, %rax\n");
+          const char* cc = it->second;
+          if (!jumpIfTrue) cc = kInv.at(cc);
+          emit(std::string("    ") + cc + " " + label + "\n");
+          return true;
+        }
         int ls = allocSlot(), rs = allocSlot();
         // One shared reg-cache region for both operands + the compare
         // loads, so rhs results forward straight into %rcx.
@@ -109,9 +123,6 @@ bool AsmEmitter::tryRawCondJump(const Expr* cond, const std::string& label,
         --rawRegDepth_;
         rawRegOf_.clear();
         emit("    cmp %rcx, %rax\n");
-        static const std::unordered_map<std::string, const char*> kInv = {
-            {"je", "jne"}, {"jne", "je"}, {"jl", "jge"}, {"jle", "jg"},
-            {"jg", "jle"}, {"jge", "jl"}};
         const char* cc = it->second;
         if (!jumpIfTrue) cc = kInv.at(cc);
         emit(std::string("    ") + cc + " " + label + "\n");
@@ -344,6 +355,105 @@ bool AsmEmitter::emitRawExpr(const Expr* e, int out) {
     return ok;
   }
 
+// Leaf raw int64 materialization predicate — mirrors emitRawLeafReg's
+// acceptance exactly (it must be side-effect free so callers can check
+// both operands before emitting either).
+bool AsmEmitter::rawLeafOk(const Expr* e) {
+    if (!e) return false;
+    if (e->kind == ExprKind::IntLit)
+      return rawIntLitFits(static_cast<const IntLitExpr&>(*e).value);
+    if (e->kind != ExprKind::Ident) return false;
+    const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+    if (rawVars_.count(nm)) return true;
+    ABinding* b = lookup(nm);
+    // rawInt locals hold int64 in their slot; specRaw needs the flag
+    // check and aval bindings need boxing — neither is a leaf.
+    return b && b->slot >= 0 && b->rawInt && !b->specRaw;
+  }
+
+// Materialize a rawLeafOk expr directly into `reg` (a GPR name like
+// "%rax"): fitting literals via movImm, raw slots via the residency-
+// aware slot reads (xmm mirror / %r10 counter / plain load).
+bool AsmEmitter::emitRawLeafReg(const Expr* e, const char* reg) {
+    if (!e || failed_) return false;
+    if (e->kind == ExprKind::IntLit) {
+      std::int64_t v = static_cast<const IntLitExpr&>(*e).value;
+      if (!rawIntLitFits(v)) return false;
+      movImm((uint64_t)v, reg);
+      return true;
+    }
+    const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+    auto rv = rawVars_.find(nm);
+    if (rv != rawVars_.end()) {
+      loadSlot(rv->second, reg);
+      return true;
+    }
+    ABinding* b = lookup(nm);
+    if (!b || b->slot < 0 || !b->rawInt || b->specRaw) return false;
+    auto xr = loopXmm_.find(b->slot);
+    if (xr != loopXmm_.end()) {
+      emit(std::string("    movq %xmm") + std::to_string(xr->second) +
+           ", " + reg + "\n");
+      int c = rawRegCode(reg);
+      if (c >= 0) rawDropReg(c);  // reg rewritten outside the helpers
+      return true;
+    }
+    if (b->slot == curGprSlot_) {
+      emit(std::string("    mov %r10, ") + reg + "\n");
+      int c = rawRegCode(reg);
+      if (c >= 0) rawDropReg(c);
+      return true;
+    }
+    loadSlot(b->slot, reg);
+    return true;
+  }
+
+// `L <op> R -> out` for leaf operands and the ops emitRawBin handles
+// with one instruction: skips the per-node temp slots entirely — the
+// common `i = i + 1` / `s*31 + i` shapes stay in registers end to end.
+bool AsmEmitter::emitRawLeafPair(const BinaryExpr& b, int out) {
+    static const std::unordered_map<std::string, const char*> kInsn = {
+        {"+", "add"}, {"-", "sub"}, {"*", "imul"},
+        {"&", "and"}, {"|", "or"}, {"^", "xor"}};
+    auto it = kInsn.find(b.op);
+    if (it == kInsn.end()) return false;
+    // +,-,* reach here only under rawSafeExpr's no-overflow proof (same
+    // invariant emitRawBin relies on); & | ^ cannot overflow at all.
+    if (!rawLeafOk(b.lhs.get()) || !rawLeafOk(b.rhs.get())) return false;
+    emitRawLeafReg(b.lhs.get(), "%rax");
+    emitRawLeafReg(b.rhs.get(), "%rcx");
+    emit(std::string("    ") + it->second + " %rcx, %rax\n");
+    if (rawRegOn()) { rawDropReg(kRRax); rawDropReg(kRRcx); }
+    storeRax(out);
+    return true;
+  }
+
+// Exactly one leaf operand: emit the composite side first (its result
+// slot claim survives the leaf's register pick in the common case), then
+// the leaf straight into its operand register, then the slot into the
+// other — one temp slot instead of two, one load instead of two.
+bool AsmEmitter::emitRawLeafMixed(const BinaryExpr& b, int out) {
+    static const std::unordered_map<std::string, const char*> kInsn = {
+        {"+", "add"}, {"-", "sub"}, {"*", "imul"},
+        {"&", "and"}, {"|", "or"}, {"^", "xor"}};
+    auto it = kInsn.find(b.op);
+    if (it == kInsn.end()) return false;
+    const bool lhsLeaf = rawLeafOk(b.lhs.get());
+    const bool rhsLeaf = rawLeafOk(b.rhs.get());
+    if (lhsLeaf == rhsLeaf) return false;  // both/neither: other paths
+    const Expr* leaf = lhsLeaf ? b.lhs.get() : b.rhs.get();
+    const Expr* other = lhsLeaf ? b.rhs.get() : b.lhs.get();
+    int os = allocSlot();
+    if (!emitRawExpr(other, os)) return false;
+    // lhs leaf -> %rax, rhs leaf -> %rcx (matches emitRawBin's layout).
+    emitRawLeafReg(leaf, lhsLeaf ? "%rax" : "%rcx");
+    loadSlot(os, lhsLeaf ? "%rcx" : "%rax");
+    emit(std::string("    ") + it->second + " %rcx, %rax\n");
+    if (rawRegOn()) { rawDropReg(kRRax); rawDropReg(kRRcx); }
+    storeRax(out);
+    return true;
+  }
+
 bool AsmEmitter::emitRawExprImpl(const Expr* e, int out) {
     if (!e || failed_) return false;
     if (e->kind == ExprKind::IntLit) {
@@ -430,6 +540,10 @@ bool AsmEmitter::emitRawExprImpl(const Expr* e, int out) {
     }
     if (e->kind == ExprKind::Binary) {
       const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+      // Leaf-operand fast paths: both-leaf pairs and single-leaf mixes
+      // (`i+1`, `s*31`, `x & mask`) compute with fewer temp slots.
+      if (emitRawLeafPair(b, out)) return true;
+      if (emitRawLeafMixed(b, out)) return true;
       int ls = allocSlot(), rs = allocSlot();
       if (!emitRawExpr(b.lhs.get(), ls) || !emitRawExpr(b.rhs.get(), rs))
         return false;
