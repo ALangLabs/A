@@ -1,7 +1,7 @@
 # std.http selftest — urls.a / client.a helpers plus the net socket layer.
 # Run: ./build/a test stdlib/std/http/selftest.a
-from "urls.a" import UrlParts, urlsplit, urlunsplit
-from "client.a" import _headers_map, _parse_hex, _dechunk, _is_redirect_status
+from "urls.a" import UrlParts, urlsplit, urlunsplit, quote, urlencode
+from "client.a" import _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport
 import std:net
 
 fn assert_eq(a, b):
@@ -116,3 +116,61 @@ fn test_tcp_listen_nonblocking():
     assert_eq(net.accept(l), -1)          # nothing pending on a fresh listener
     assert_eq(len(net.poll([l], 0)), 0)   # ...and nothing readable
     net.close(l)
+
+fn test_quote_urlencode():
+    assert_eq(quote("a b/c&d"), "a%20b%2Fc%26d")
+    assert_eq(quote("plain-._~09"), "plain-._~09")
+    assert_eq(urlencode({"q": "a b"}), "q=a%20b")
+
+fn test_b_find_and_slice():
+    buf = [1, 2, 13, 10, 3, 13, 10]
+    assert_eq(_b_find_from(buf, [13, 10], 0), 2)
+    assert_eq(_b_find_from(buf, [13, 10], 3), 5)
+    assert_eq(_b_find_from(buf, [9, 9], 0), -1)
+    s = _b_slice(buf, 1, 4)
+    assert_eq(len(s), 3)
+    s.extend([7])                       # must be a real list, not a view
+    assert_eq(len(s), 4)
+    assert_eq(join([str(x) for x in _b_slice(buf, 5, 99)], ","), "13,10")
+
+fn test_dechunk_bytes():
+    # "5\r\nhello\r\n4\r\na\r\nb\r\n0\r\n\r\n" as bytes
+    s = [53, 13, 10, 104, 101, 108, 108, 111, 13, 10, 52, 13, 10, 97, 13, 10, 98, 13, 10,
+         48, 13, 10, 13, 10]
+    out = _dechunk_bytes(s)
+    assert_eq(len(out), 9)
+    assert_eq(join([str(x) for x in out], ","), "104,101,108,108,111,97,13,10,98")
+
+fn test_split_hostport():
+    (h, p) = _split_hostport("proxy.local:3128")
+    assert_eq(h, "proxy.local")
+    assert_eq(p, 3128)
+    (h2, p2) = _split_hostport("proxy.local")
+    assert_eq(h2, "proxy.local")
+    assert_eq(p2, 80)
+
+fn test_net_byte_io():
+    l = net.tcp_listen("127.0.0.1", 0)
+    assert(l > 0)
+    port = net.local_port(l)
+    c = net.tcp_connect("127.0.0.1", port)
+    assert(c > 0)
+    s = net.accept(l)
+    assert(s > 0)
+    assert_eq(net.send_bytes(c, [0, 1, 255]), 3)
+    net.set_timeout(s, 1000)
+    got = net.recv_bytes(s, 16)
+    assert_eq(join([str(x) for x in got], ","), "0,1,255")
+    assert_eq(net.recv_status(s), 0)
+    net.close(c)
+    net.close(s)
+    net.close(l)
+
+fn test_inflate_gzip():
+    if net.inflate_available():
+        # gzip("hello gzip body")
+        gz = [31, 139, 8, 0, 54, 49, 240, 106, 2, 255, 203, 72, 205, 201, 201, 87, 72,
+              175, 202, 44, 80, 72, 202, 79, 169, 4, 0, 173, 214, 201, 76, 15, 0, 0, 0]
+        out = net.inflate_bytes(gz, 47)
+        assert_eq(len(out), 15)
+        assert_eq(out[0], 104)
