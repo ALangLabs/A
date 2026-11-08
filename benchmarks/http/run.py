@@ -13,7 +13,7 @@ import argparse, os, subprocess, sys, tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(os.path.dirname(HERE))
-A = os.path.join(ROOT, "build", "a")
+A = os.environ.get("A_BIN") or os.path.join(ROOT, "build", "a")
 PORT = 8901
 WORKLOADS = [("/tiny", 300), ("/k16", 200), ("/m1", 20), ("/m10", 5)]
 
@@ -26,13 +26,13 @@ PATH = "%s"
 fn main():
     url = "http://127.0.0.1:%d" + PATH
     warm = get(url, None, None, 30000)
-    print("warm=" + str(len(warm.body_bytes)))
+    print("warm=" + str(len(warm.body) + len(warm.body_bytes)))
     total = 0
     t0 = time.now()
     i = 0
     while i < N:
         r = get(url, None, None, 30000)
-        total = total + len(r.body_bytes)
+        total = total + len(r.body) + len(r.body_bytes)
         i = i + 1
     t1 = time.now()
     print("TIME {t1 - t0} {total}")

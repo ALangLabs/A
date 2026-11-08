@@ -85,13 +85,22 @@ default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`).
 
 ## Run cache
 
-`a run`, `a test`, and the REPL reuse a content-addressed compiled
-binary across invocations. The key hashes every module source, the
-runtime files, the astra binary, target/opt level, codegen-forcing
-environment, and toolchain version, so any edit invalidates the entry;
-repeat runs cost ~2 ms (exec) instead of ~20 ms (compile). Set
-`A_NO_CACHE=1` to always recompile. Covered by
+`a run` and the REPL reuse a content-addressed compiled binary across
+invocations. The key hashes every module source, the runtime files,
+the astra binary, target/opt level, codegen-forcing environment and
+toolchain version, so any edit invalidates the entry. Repeat runs
+cost ~2 ms (source validation) + binary exec instead of ~20 ms
+(compile). Set `A_NO_CACHE=1` to always recompile. Covered by
 `tests/integration/cache_test.sh` (the `run-cache` CTest entry).
+
+`a run <file.a>` additionally skips the frontend on repeat runs via
+a depfile-style precheck: a bounded stat snapshot of every `.a`
+file under the entry dir, module search dirs, and the stdlib
+(plus the per-string deps recorded on the first compile). On a hit
+it execs the cached binary directly and replays the recorded
+compile-time diagnostics (sidecar `.diag`), so warnings like unused
+variables fire exactly as on a cold run. Any source, module, or
+search-path change yields a fresh key.
 
 ## Editor support
 

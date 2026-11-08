@@ -179,12 +179,17 @@ fn _recv_chunk(conn):
             conn._fail("socket error reading {conn.host}:{conn.port}")
     return chunk
 
-"""_fill_until(conn, pat) -> index of pat in the buffer, reading until found."""
-fn _fill_until(conn, pat: [i64]):
+"""_fill_until(conn, pat, cap) -> index of pat in the buffer, reading until found."""
+fn _fill_until(conn, pat: [i64], cap: i64):
     i = _b_find_from(conn._buf, pat, 0)
     while i < 0:
-        chunk = _recv_chunk(conn)
+        chunk = net.recv_bytes(conn.sock, cap)
         if len(chunk) == 0:
+            st = net.recv_status(conn.sock)
+            if st == 3:
+                conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+            if st == 2:
+                conn._fail("socket error reading {conn.host}:{conn.port}")
             break
         conn._buf.extend(chunk)
         i = _b_find_from(conn._buf, pat, 0)
@@ -227,7 +232,7 @@ fn _read_n(conn, n: i64):
 
 """_read_line(conn) -> [i64] up to and including CRLF ([] on EOF)."""
 fn _read_line(conn):
-    i = _fill_until(conn, [13, 10])
+    i = _fill_until(conn, [13, 10], 4096)
     if i < 0:
         out = conn._buf
         conn._buf = []
@@ -238,7 +243,10 @@ fn _read_line(conn):
 
 """_read_headers(conn) -> [String] status line + header lines (ASCII)."""
 fn _read_headers(conn):
-    i = _fill_until(conn, [13, 10, 13, 10])
+    # A small read cap keeps the over-read (bytes of the body that arrive in
+    # the same packet) short: whatever lands here is handed to the body reader
+    # as a String prefix instead of being expanded to an [i64] array.
+    i = _fill_until(conn, [13, 10, 13, 10], 4096)
     raw = []
     if i < 0:
         # EOF before header terminator: treat everything as headers
@@ -331,9 +339,11 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
         n = int(cl)
         if n <= 0:
             return BodyParts("", [])
-        if want_bytes or len(conn._buf) > 0:
+        if want_bytes:
             return BodyParts("", _read_n(conn, n))
-        (text, raw) = net.recv_body(conn.sock, n)
+        pre = b2s(conn._buf)
+        conn._buf = []
+        (text, raw) = net.recv_body(conn.sock, n, pre)
         if text != None:
             if len(text) < n:
                 _short_read(conn, len(text), n)
@@ -341,10 +351,12 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
         if len(raw) < n:
             _short_read(conn, len(raw), n)
         return BodyParts("", raw)
-    if want_bytes or len(conn._buf) > 0:
+    if want_bytes:
         return BodyParts("", _read_to_close(conn))
     # close-delimited: read straight into a flat buffer until EOF
-    (text, raw) = net.recv_body_all(conn.sock)
+    pre = b2s(conn._buf)
+    conn._buf = []
+    (text, raw) = net.recv_body_all(conn.sock, pre)
     if text != None:
         return BodyParts(text, [])
     return BodyParts("", raw)
