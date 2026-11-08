@@ -866,7 +866,7 @@ bool AsmEmitter::accEntryRange(const std::string& accName, const ForStmt& st,
             ARange r = ls.init ? exprRangeIn(ls.init.get(), unknownLookup)
                                : ARange{};
             if (!r.known) { poisoned = true; return; }
-            rngJoin(out, r);
+            if (found) rngJoin(out, r); else out = r;
             found = true;
           }
           break;
@@ -880,7 +880,7 @@ bool AsmEmitter::accEntryRange(const std::string& accName, const ForStmt& st,
             ARange r = as.value ? exprRangeIn(as.value.get(), unknownLookup)
                                 : ARange{};
             if (!r.known) { poisoned = true; return; }
-            rngJoin(out, r);
+            if (found) rngJoin(out, r); else out = r;
             found = true;
           }
           break;

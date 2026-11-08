@@ -502,7 +502,8 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
     std::string posL = newLabel("srpos");
     // N = max(0, H - L)
     emit("    mov " + slotRef(endS) + ", %rax\n");
-    emit("    sub " + slotRef(curS) + ", %rax\n");
+    emit("    mov " + slotRef(curS) + ", %rcx\n");
+    emit("    sub %rcx, %rax\n");
     emit("    test %rax, %rax\n");
     emit("    jns " + posL + "\n");
     emit("    xor %eax, %eax\n");
@@ -510,12 +511,14 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
     storeRax(nS);
     // T = L + H - 1
     emit("    mov " + slotRef(curS) + ", %rax\n");
-    emit("    add " + slotRef(endS) + ", %rax\n");
+    emit("    mov " + slotRef(endS) + ", %rcx\n");
+    emit("    add %rcx, %rax\n");
     emit("    sub $1, %rax\n");
     storeRax(tS);
     // P = N * T (proven non-overflowing)
     loadSlot(nS);
-    emit("    imul " + slotRef(tS) + "\n");
+    emit("    mov " + slotRef(tS) + ", %rcx\n");
+    emit("    imul %rcx\n");
     storeRax(tS);
     // res = P / 2, then * c
     loadSlot(tS);
@@ -532,7 +535,8 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
       emit("    test %rax, %rax\n");
       emit("    jnz " + avalL + "\n");
       loadSlot(acc->slot);
-      emit("    add " + slotRef(rS) + ", %rax\n");
+      emit("    mov " + slotRef(rS) + ", %rcx\n");
+      emit("    add %rcx, %rax\n");
       storeRax(acc->slot);
       emit("    mov $0x0, %rcx\n");
       emit("    mov %rcx, " + slotRef(acc->specFlag) + "\n");
@@ -544,7 +548,8 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
       emitLabel(doneL);
     } else {
       loadSlot(acc->slot);
-      emit("    add " + slotRef(rS) + ", %rax\n");
+      emit("    mov " + slotRef(rS) + ", %rcx\n");
+      emit("    add %rcx, %rax\n");
       storeRax(acc->slot);
     }
     return true;
