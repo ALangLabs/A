@@ -237,17 +237,21 @@ static int (*p_net_SSL_shutdown)(NET_SSL *);
 static void (*p_net_SSL_free)(NET_SSL *);
 static void (*p_net_SSL_CTX_free)(NET_SSL_CTX *);
 /* Optional: SNI, peer hostname check, verify result. NULL when the loaded
-   OpenSSL is too old to export them. */
+   OpenSSL is too old to export them. SNI goes through SSL_ctrl because
+   SSL_set_tlsext_host_name is a public macro, not an exported symbol. */
 typedef int (*net_ssl_verify_cb)(int, void *);
 static int (*p_net_SSL_CTX_set_verify)(NET_SSL_CTX *, int, net_ssl_verify_cb);
 static int (*p_net_SSL_CTX_set_default_verify_paths)(NET_SSL_CTX *);
-static int (*p_net_SSL_set_tlsext_host_name)(NET_SSL *, const char *);
+static long (*p_net_SSL_ctrl)(NET_SSL *, int, long, void *);
 static int (*p_net_SSL_set1_host)(NET_SSL *, const char *);
 static long (*p_net_SSL_get_verify_result)(NET_SSL *);
 static NET_SSL_CTX *g_net_ssl_ctx = NULL;
 static int g_net_ssl_tried = 0;
 
 #define NET_SSL_VERIFY_PEER 0x01
+/* OpenSSL constants for the SNI SSL_ctrl call (ssl.h defines these as macros). */
+#define NET_SSL_CTRL_SET_TLSEXT_HOSTNAME 55
+#define NET_TLSEXT_NAMETYPE_host_name 0
 
 static int net_ssl_sym(void *h, const char *name, void **slot) {
     void *p = dlsym(h, name);
@@ -283,8 +287,7 @@ static int net_tls_probe(void) {
     net_ssl_sym(h, "SSL_CTX_set_verify", (void **)&p_net_SSL_CTX_set_verify);
     net_ssl_sym(h, "SSL_CTX_set_default_verify_paths",
                 (void **)&p_net_SSL_CTX_set_default_verify_paths);
-    net_ssl_sym(h, "SSL_set_tlsext_host_name",
-                (void **)&p_net_SSL_set_tlsext_host_name);
+    net_ssl_sym(h, "SSL_ctrl", (void **)&p_net_SSL_ctrl);
     net_ssl_sym(h, "SSL_set1_host", (void **)&p_net_SSL_set1_host);
     net_ssl_sym(h, "SSL_get_verify_result",
                 (void **)&p_net_SSL_get_verify_result);
@@ -322,9 +325,11 @@ aval bi_net_tls_connect(uint64_t n, aval *argv) {
     if (fd < 0) return mkint_full(-1);
     NET_SSL *ssl = p_net_SSL_new(g_net_ssl_ctx);
     if (ssl) {
-        /* SNI + expected peer hostname for cert verification. */
-        if (p_net_SSL_set_tlsext_host_name)
-            p_net_SSL_set_tlsext_host_name(ssl, host);
+        /* SNI + expected peer hostname for cert verification. Virtual-hosted
+           servers abort the handshake when SNI is missing. */
+        if (p_net_SSL_ctrl)
+            p_net_SSL_ctrl(ssl, NET_SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                           NET_TLSEXT_NAMETYPE_host_name, host);
         if (p_net_SSL_set1_host)
             p_net_SSL_set1_host(ssl, host);
     }
@@ -345,3 +350,179 @@ aval bi_net_tls_connect(uint64_t n, aval *argv) {
     return mkint_full(h);
 }
 
+
+/* ------------------------------------------------------------------ */
+/* net: listening sockets, readiness, UDP                              */
+/* ------------------------------------------------------------------ */
+
+aval bi_net_tcp_listen(uint64_t n, aval *argv) {
+    want_args("net.tcp_listen", n, 2, 2);
+    char host[256], port[16];
+    net_host_port(argv[0], argv[1], host, sizeof host, port, sizeof port);
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = AI_PASSIVE;
+    if (getaddrinfo(host[0] ? host : NULL, port, &hints, &res) != 0 || !res)
+        return mkint_full(-1);
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s < 0) continue;
+        int one = 1;
+        setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+        if (bind(s, ai->ai_addr, ai->ai_addrlen) == 0 && listen(s, 128) == 0) {
+            fd = s;
+            break;
+        }
+        close(s);
+    }
+    freeaddrinfo(res);
+    if (fd < 0) return mkint_full(-1);
+    int h = net_sock_new(fd);
+    if (!h) { close(fd); return mkint_full(-1); }
+    return mkint_full(h);
+}
+
+aval bi_net_accept(uint64_t n, aval *argv) {
+    want_args("net.accept", n, 1, 1);
+    NetSock *s = net_sock_get(argv[0], "net.accept");
+    int fd = accept(s->fd, NULL, NULL);
+    if (fd < 0) return mkint_full(-1);
+    int h = net_sock_new(fd);
+    if (!h) { close(fd); return mkint_full(-1); }
+    return mkint_full(h);
+}
+
+aval bi_net_set_nonblocking(uint64_t n, aval *argv) {
+    want_args("net.set_nonblocking", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.set_nonblocking");
+    int flags = fcntl(s->fd, F_GETFL, 0);
+    if (flags < 0) return A_NONE;
+    if (truthy(argv[1])) flags |= O_NONBLOCK;
+    else flags &= ~O_NONBLOCK;
+    fcntl(s->fd, F_SETFL, flags);
+    return A_NONE;
+}
+
+aval bi_net_poll(uint64_t n, aval *argv) {
+    want_args("net.poll", n, 2, 2);
+    int64_t ms = expect_int64(argv[1], "net.poll timeout");
+    if (ms < 0) ms = 0;
+    aval tmp = collect_iterable(argv[0]);
+    AArr *a = (AArr *)obj_of(tmp);
+    aval *ready = NULL;
+    size_t cnt = 0, cap = 0;
+    struct pollfd *fds = (struct pollfd *)xmalloc((a->h.len ? a->h.len : 1) * sizeof *fds);
+    for (uint64_t i = 0; i < a->h.len; ++i) {
+        int64_t h = expect_int64(arr_elem(a, i), "net.poll handle");
+        fds[i].fd = (h >= 1 && h <= NET_MAX_SOCKS && g_socks[h - 1].used) ? g_socks[h - 1].fd : -1;
+        fds[i].events = POLLIN;
+        fds[i].revents = 0;
+    }
+    if (poll(fds, (nfds_t)a->h.len, (int)ms) > 0) {
+        for (uint64_t i = 0; i < a->h.len; ++i) {
+            if (!fds[i].revents) continue;
+            if (cnt == cap) {
+                cap = cap ? cap * 2 : 8;
+                ready = (aval *)xrealloc(ready, cap * sizeof(aval));
+            }
+            ready[cnt++] = arr_elem(a, i);
+        }
+    }
+    free(fds);
+    aval out = list_from_vec(ready, (uint64_t)cnt, 0);
+    free(ready);
+    return out;
+}
+
+aval bi_net_udp_socket(uint64_t n, aval *argv) {
+    want_args("net.udp_socket", n, 0, 0);
+    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) return mkint_full(-1);
+    int h = net_sock_new(fd);
+    if (!h) { close(fd); return mkint_full(-1); }
+    return mkint_full(h);
+}
+
+aval bi_net_udp_bind(uint64_t n, aval *argv) {
+    want_args("net.udp_bind", n, 3, 3);
+    NetSock *s = net_sock_get(argv[0], "net.udp_bind");
+    uint64_t al;
+    const char *addr = str_data(argv[1], &al);
+    int64_t port = expect_int64(argv[2], "net.udp_bind port");
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    hints.ai_flags = AI_PASSIVE;
+    char portbuf[16];
+    snprintf(portbuf, sizeof portbuf, "%lld", (long long)port);
+    char addrbuf[256];
+    if (al >= sizeof addrbuf) panicf("net.udp_bind: address too long");
+    memcpy(addrbuf, addr, al);
+    addrbuf[al] = '\0';
+    if (getaddrinfo(addrbuf[0] ? addrbuf : NULL, portbuf, &hints, &res) != 0 || !res)
+        return A_NONE;
+    bind(s->fd, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    return A_NONE;
+}
+
+aval bi_net_udp_send(uint64_t n, aval *argv) {
+    want_args("net.udp_send", n, 4, 4);
+    NetSock *s = net_sock_get(argv[0], "net.udp_send");
+    uint64_t hl;
+    const char *h = str_data(argv[1], &hl);
+    char host[256], port[16];
+    if (hl >= sizeof host) panicf("net.udp_send: host too long");
+    memcpy(host, h, hl);
+    host[hl] = '\0';
+    snprintf(port, sizeof port, "%lld", (long long)expect_int64(argv[2], "net.udp_send port"));
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return mkint_full(-1);
+    uint64_t len;
+    const char *data = str_data(argv[3], &len);
+    ssize_t sent = sendto(s->fd, data, len, 0, res->ai_addr, res->ai_addrlen);
+    freeaddrinfo(res);
+    return mkint_full(sent < 0 ? -1 : (int64_t)sent);
+}
+
+aval bi_net_udp_recv(uint64_t n, aval *argv) {
+    want_args("net.udp_recv", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.udp_recv");
+    int64_t maxb = expect_int64(argv[1], "net.udp_recv maxBytes");
+    if (maxb <= 0) maxb = 1;
+    if (maxb > (1 << 20)) maxb = 1 << 20;
+    char *buf = (char *)xmalloc((size_t)maxb);
+    struct sockaddr_storage from;
+    socklen_t fl = sizeof from;
+    ssize_t r = recvfrom(s->fd, buf, (size_t)maxb, 0, (struct sockaddr *)&from, &fl);
+    aval items[3];
+    if (r < 0) {
+        s->recv_status = (errno == EAGAIN || errno == EWOULDBLOCK) ? NET_RX_TIMEOUT
+                                                                  : NET_RX_ERR;
+        items[0] = a_str_new("", 0);
+        items[1] = a_str_new("", 0);
+        items[2] = mkint_full(0);
+    } else {
+        char hostbuf[INET6_ADDRSTRLEN] = "";
+        int port = 0;
+        getnameinfo((struct sockaddr *)&from, fl, hostbuf, sizeof hostbuf, NULL, 0,
+                    NI_NUMERICHOST);
+        if (from.ss_family == AF_INET)
+            port = ntohs(((struct sockaddr_in *)&from)->sin_port);
+        else if (from.ss_family == AF_INET6)
+            port = ntohs(((struct sockaddr_in6 *)&from)->sin6_port);
+        s->recv_status = NET_RX_OK;
+        items[0] = a_str_new(buf, (uint64_t)r);
+        items[1] = a_str_new(hostbuf, strlen(hostbuf));
+        items[2] = mkint_full(port);
+    }
+    free(buf);
+    return list_from_vec(items, 3, 1);
+}

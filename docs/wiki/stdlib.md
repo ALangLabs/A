@@ -24,7 +24,7 @@ system as user code (verified against `stdlib/std/` layout).
 | `memory` | `arena_new`, `arena_pool`, `alloc`, `used`, `total` |
 | `http` | Synchronous HTTP/1.1 client: `get`, `post`, `put`, `patch`, `delete`, `head`, `request`, `http_connection`, `https_connection`, `urlsplit`, `urlunsplit`, `Response` (`.status`, `.headers`, `.body`, `.text()`, `.json()`, `.raise_for_status()`, `.is_ok`). Follows redirects; handles Content-Length, chunked, and close-delimited bodies. Import members directly (`from std:http import get`) — module-attribute access on the package also works. |
 | `bytes`, `binary` | Byte-array (`[i64]` 0-255) utilities: `utf8_encode`/`utf8_decode`, `s2b`/`b2s`, `chr`/`ord`, varint codec — pair with `fs.read_bytes`/`write_bytes` for binary IO |
-| `iter`, `functools`, `operator`, `pprint`, `textwrap`, `shlex`, `keyword`, `statistics`, `fractions`, `heapq`, `copy`, `comptime`, `format` (csv/table), `getopt`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `http`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `enum`, `prelude` |
+| `iter`, `functools`, `operator`, `pprint`, `textwrap`, `shlex`, `keyword`, `statistics`, `fractions`, `heapq`, `copy`, `comptime`, `format` (csv/table), `getopt`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `enum`, `prelude` |
 
 Many packages are thin A wrappers over the native modules in
 [builtins](builtins.md); others are pure A.

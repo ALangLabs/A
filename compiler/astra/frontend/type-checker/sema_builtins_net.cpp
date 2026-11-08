@@ -151,55 +151,6 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     return typeBool();
   }
 
-  // ---------------------------------------------------------- http module
-
-  if (name == "http_get" || name == "http_post") {
-    const std::size_t expected = name == "http_get" ? 1 : 2;
-    TypePtr response = typeTuple(
-        {typeInt(64, true), typeMap(typeString(), typeString()), typeString()});
-    if (call.args.size() != expected) {
-      builtinArityError(name, call, expected);
-      inferCallArgTypes(call);
-      return response;
-    }
-    checkArgAgainst(*call.args[0].value, typeString(), "as the URL");
-    if (name == "http_post") checkArgAgainst(*call.args[1].value, typeString(), "as the body");
-    return response;
-  }
-
-  if (name == "http_request") {
-    TypePtr response = typeTuple(
-        {typeInt(64, true), typeMap(typeString(), typeString()), typeString()});
-    if (call.args.size() != 5) {
-      builtinArityError(name, call, 5);
-      inferCallArgTypes(call);
-      return response;
-    }
-    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
-                   "The socket handle");
-    checkArgAgainst(*call.args[1].value, typeString(), "as the HTTP method");
-    checkArgAgainst(*call.args[2].value, typeString(), "as the request path");
-    checkArgAgainst(*call.args[3].value, typeMap(typeString(), typeString()),
-                    "as the request headers");
-    checkArgAgainst(*call.args[4].value, typeString(), "as the request body");
-    return response;
-  }
-
-  if (name == "http_serve" || name == "http_serve_once") {
-    TypePtr handler = typeFunction(
-        {typeString(), typeString(), typeMap(typeString(), typeString()), typeString()},
-        typeTuple({typeInt(64, true), typeMap(typeString(), typeString()), typeString()}));
-    if (call.args.size() != 2) {
-      builtinArityError(name, call, 2);
-      inferCallArgTypes(call);
-      return name == "http_serve" ? typeVoid() : typeBool();
-    }
-    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
-                   "The listening socket handle");
-    checkArgAgainst(*call.args[1].value, handler, "in the HTTP handler");
-    return name == "http_serve" ? typeVoid() : typeBool();
-  }
-
   // ------------------------------------------------------------- kernels
   // CPU kernel builtins behind the `kernels` package. The interpreter validates
   // shapes at run time; here we only fix the result shape so wrappers can stay

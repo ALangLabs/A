@@ -40,19 +40,6 @@ inline void addNetDocs(StringMap<BuiltinDoc>& docs) {
                               "Whether the toolchain was built with TLS support."}},
       {"net_recv_status", {"net_recv_status", "net.recv_status(handle) -> i64",
                             "Last recv outcome: 0 ok, 1 EOF, 2 error, 3 timeout; -1 bad handle."}},
-
-      // http
-      {"http_get", {"http_get", "http.get(url) -> (i64, {String: String}, String)",
-                     "GET request; returns status, headers, and body."}},
-      {"http_post", {"http_post", "http.post(url, body) -> (i64, {String: String}, String)",
-                      "POST request; returns status, headers, and body."}},
-      {"http_request", {"http_request",
-                         "http.request(socket, method, path, headers, body) -> (i64, {String: String}, String)",
-                         "One request over an established net socket."}},
-      {"http_serve", {"http_serve", "http.serve(listener, handler)",
-                       "Serves connections until a handler returns status 0."}},
-      {"http_serve_once", {"http_serve_once", "http.serve_once(listener, handler) -> bool",
-                            "Handles one connection; true when it was served."}},
   });
 }
 

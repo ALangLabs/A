@@ -91,6 +91,10 @@ inline int builtinRuntimeId(const std::string& name) {
       {"net_tls_connect", 202},
       {"net_recv_status", 203},
       {"read_bytes", 204}, {"write_bytes", 205},
+      {"net_tcp_listen", 206}, {"net_accept", 207},
+      {"net_set_nonblocking", 208}, {"net_poll", 209},
+      {"net_udp_socket", 210}, {"net_udp_bind", 211},
+      {"net_udp_send", 212}, {"net_udp_recv", 213},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

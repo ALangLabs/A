@@ -124,7 +124,6 @@ module_members = {
             "recv", "close", "local_port", "set_timeout", "set_nonblocking",
             "poll", "udp_socket", "udp_bind", "udp_send", "udp_recv",
             "tls_connect", "tls_available"],
-    "http": ["get", "post", "request", "serve", "serve_once"],
     "terminal": ["isatty", "raw_mode", "read_char", "read_char_ms", "write",
                  "flush", "size", "home"],
     "env": ["get"],
@@ -136,7 +135,7 @@ module_members = {
 
 module_names = ["math", "io", "fs", "strings", "collections", "core",
                 "time", "json", "binary", "testing", "log", "metrics",
-                "trace", "net", "http", "terminal", "env", "repl", "arena",
+                "trace", "net", "terminal", "env", "repl", "arena",
                 "unsafe", "prelude", "simd", "iter", "format", "test",
                 "comptime", "gpu", "memory", "traits", "kernels"]
 

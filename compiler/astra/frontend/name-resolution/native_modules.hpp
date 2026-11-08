@@ -268,8 +268,8 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
 // LLVM and native backends cannot lower these and fall back to the interpreter.
 inline bool isStdlibBuiltin(const std::string& name) {
   static const char* prefixes[] = {"json_",     "binary_",   "testing_", "log_",
-                                   "metrics_",  "trace_",    "net_",    "http_",
-                                   "terminal_", "env_",      "repl_",   "kernels_"};
+                                   "metrics_",  "trace_",    "net_",    "terminal_",
+                                   "env_",      "repl_",     "kernels_"};
   for (const char* prefix : prefixes) {
     const std::string_view p(prefix);
     if (name.size() >= p.size() && name.compare(0, p.size(), p) == 0) return true;

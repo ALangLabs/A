@@ -29,9 +29,9 @@ Note: `range(5)` is **not** a function — write `0..5` range literals instead.
 `math` (sqrt/abs/min/max/pow/trig/log/floor/ceil/round/trunc/random + `PI`,`E`),
 `io` (print/eprint/input/flush), `fs` (file ops), `strings`, `collections`,
 `core` (panic/assert/assert_eq), `time` (now/sleep), `json`, `binary`,
-`testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_connect/send/recv/
-recv_status/close/set_timeout/local_port/tls_connect/tls_available), `http`
-(native get/post/request/serve stubs — prefer `std:http` below), `terminal`,
+`testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_listen/tcp_connect/accept/send/
+recv/recv_status/close/set_timeout/set_nonblocking/poll/local_port/udp_socket/
+udp_bind/udp_send/udp_recv/tls_connect/tls_available), `terminal`,
 `env`, `repl` (eval/quiet), `py` (Python bridge), `unsafe`, `arena`,
 `kernel_ops`.
 

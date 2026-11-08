@@ -8,15 +8,15 @@
 #   resp = conn.getresponse()                      # -> Response
 #   resp.status, resp.reason, resp.headers, resp.body
 #
-#   resp = http_get("http://example.com/")         # one-shot helpers
-#   resp = http_post(url, data="...", json={...})
+#   resp = get("http://example.com/")              # one-shot helpers
+#   resp = post(url, data="...", json={...})
 #
 # shortcut: bodies are A strings (UTF-8); binary payloads are not supported.
 # shortcut: recv() returns "" on EOF *and* on timeout — bodies delimited by
 #   connection close rely on the server closing promptly.
 import std:net
 import std:core
-import std:json
+from std:json import parse as parse_json, stringify as stringify_json
 from "urls.a" import urlsplit, urlunsplit, UrlParts
 
 class Response:
@@ -32,7 +32,7 @@ class Response:
         return self.body
 
     fn json(self):
-        return json.parse(self.body)
+        return parse_json(self.body)
 
     """raise_for_status() -> panics when status >= 400 (requests analogue)."""
     fn raise_for_status(self):
@@ -195,6 +195,7 @@ class HTTPConnection:
     sock: i64
     connected: bool
     _buf: String        # read buffer (private by convention)
+    _method: String     # last request method (HEAD responses carry no body)
 
     fn _fail(self, msg):
         core.panic("http: " + msg)
@@ -223,6 +224,7 @@ class HTTPConnection:
     # Send an HTTP request; body is a String or None.
     fn request(self, method: String, path: String, body = None, headers = None):
         self.connect()
+        self._method = method.upper()
         h = ""
         if headers != None:
             for kv in headers.items():
@@ -260,7 +262,9 @@ class HTTPConnection:
         if len(parts) >= 3:
             reason = parts[2]
         hdrs = _headers_map(lines[1..])
-        body = _read_body(self, hdrs)
+        body = ""
+        if self._method != "HEAD" and status != 204 and status != 304 and status >= 200:
+            body = _read_body(self, hdrs)
         self.close()
         enc = hdrs.get("content-type", "")
         encoding = "utf-8"
@@ -271,11 +275,11 @@ class HTTPConnection:
 
 """http_connection(host, port=80, timeout=0) -> HTTPConnection"""
 fn http_connection(host: String, port = 80, timeout = 0):
-    return HTTPConnection(host, port, timeout, false, -1, false, "")
+    return HTTPConnection(host, port, timeout, false, -1, false, "", "")
 
 """https_connection(host, port=443, timeout=0) -> HTTPConnection"""
 fn https_connection(host: String, port = 443, timeout = 0):
-    return HTTPConnection(host, port, timeout, true, -1, false, "")
+    return HTTPConnection(host, port, timeout, true, -1, false, "", "")
 
 """_conn_for(url, timeout) -> (HTTPConnection, UrlParts) or panics."""
 fn _conn_for(url: String, timeout: i64):
@@ -355,12 +359,12 @@ fn get(url: String, headers = None, params = None, timeout = 0,
     return request("GET", url, None, headers, params, timeout, allow_redirects)
 
 """post(url, data=None, json=None, **kwargs) -> Response"""
-fn post(url: String, data = None, json_data = None, headers = None,
+fn post(url: String, data = None, json = None, headers = None,
          params = None, timeout = 0):
     b = data
     h = headers
-    if json_data != None:
-        b = json.stringify(json_data)
+    if json != None:
+        b = stringify_json(json)
         if h == None:
             h = {}
         h["Content-Type"] = "application/json"
