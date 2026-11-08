@@ -3077,13 +3077,6 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     return e.run(out, error);
   }
   if (arch == "riscv64" || arch == "riscv64gc") {
-    // Opt-in while riscv64 native emission is being stabilized.
-    const char* f = std::getenv("A_CODEGEN");
-    if (!(f && std::string(f) == "native") &&
-        !std::getenv("A_NATIVE_RISCV64")) {
-      error = "native backend: riscv64 opt-in (set A_CODEGEN=native)";
-      return false;
-    }
     Riscv64Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
