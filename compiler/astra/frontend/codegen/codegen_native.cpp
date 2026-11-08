@@ -3436,11 +3436,12 @@ struct Arm32Target : NatTarget {
   }
   void loadSym(std::string& o, const std::string& sym, const std::string& r) const override {
     int d = offOf(r);
+    // Keep the symbol address in r12; load both words via r3.
     o += "    movw r12, " + sym + "\n    movt r12, " + sym + "\n";
-    o += "    ldr r12, [r12]\n";
-    str32(o, "r12", d);
-    o += "    ldr r12, [r12, #4]\n";
-    str32(o, "r12", d + 4);
+    o += "    ldr r3, [r12]\n";
+    str32(o, "r3", d);
+    o += "    ldr r3, [r12, #4]\n";
+    str32(o, "r3", d + 4);
   }
   void storeSym(std::string& o, const std::string& sym, const std::string& r) const override {
     int d = offOf(r);
@@ -3644,13 +3645,6 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     return e.run(out, error);
   }
   if (arch == "arm" || arch == "arm32") {
-    // ARM32 native emission is opt-in until complex-case coverage is
-    // verified; emitC remains the default for this target.
-    const char* cg = std::getenv("A_CODEGEN");
-    if (!cg || std::string(cg) != "native") {
-      error = "native backend: arm32 requires A_CODEGEN=native";
-      return false;
-    }
     if (testMode) {
       error = "native backend: arm32 test mode unsupported";
       return false;

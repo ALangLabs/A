@@ -104,7 +104,10 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "json_set", bi_json_set }, { "json_delete", bi_json_delete },
     { "struct_name", bi_struct_name }, { "struct_methods", bi_struct_methods },
     { "fn_signature", bi_fn_signature }, { "fn_doc", bi_fn_doc },
-    { "file_size", bi_file_size }
+    { "file_size", bi_file_size },
+    { "linalg_dot", bi_linalg_dot },
+    { "linalg_matvec", bi_linalg_matvec },
+    { "linalg_matvec_t", bi_linalg_matvec_t }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

@@ -4,6 +4,17 @@ namespace a {
 
 TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
 
+  if (name == "linalg_dot" || name == "linalg_matvec" || name == "linalg_matvec_t") {
+    const std::size_t expected = name == "linalg_dot" ? 2 : 5;
+    if (call.args.size() != expected) {
+      builtinArityError(name, call, expected);
+      inferCallArgTypes(call);
+      return name == "linalg_dot" ? typeFloat() : typeArray(typeFloat());
+    }
+    for (std::size_t i = 0; i < call.args.size(); i++) inferExpr(*call.args[i].value);
+    return name == "linalg_dot" ? typeFloat() : typeArray(typeFloat());
+  }
+
   if (name == "unsafe_get" || name == "unsafe_set") {
     const std::size_t expected = name == "unsafe_get" ? 2 : 3;
     if (call.args.size() != expected) {

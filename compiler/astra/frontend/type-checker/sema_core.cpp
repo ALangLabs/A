@@ -76,7 +76,7 @@ std::string Sema::suggestName(const std::string& name) const {
       "random_int", "range", "set", "tuple", "list", "dict", "map", "filter",
       "any", "all", "some", "ok", "err", "panic", "assert", "assert_eq",
       "input", "read_file", "write_file", "append_file", "file_exists",
-      "file_size", "list_dir", "remove_file", "create_dir", "remove_dir",
+      "file_size", "linalg_dot", "linalg_matvec", "linalg_matvec_t", "list_dir", "remove_file", "create_dir", "remove_dir",
       "rename",
       "current_dir", "repr", "type", "isinstance", "join", "sorted",
       "reversed", "enumerate", "zip", "reduce", "flush", "env_get", "now",
