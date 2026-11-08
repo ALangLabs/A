@@ -43,6 +43,43 @@ inline bool isConversionBuiltin(const std::string& name) {
   return false;
 }
 
+// If `expr` is an integer literal (possibly behind unary '-'), writes its
+// mathematical value to `out`, sets `negated` when a '-' was applied, and
+// returns true. Used by conversion builtins (`u8(-1)`) for range checks.
+inline bool intLiteralValue(const Expr& expr, std::int64_t& out, bool& negated) {
+  const Expr* cur = &expr;
+  bool neg = false;
+  while (true) {
+    const auto* un = dynamic_cast<const UnaryExpr*>(cur);
+    if (!un || un->op != "-" || un->postfix || !un->operand) break;
+    neg = !neg;
+    cur = un->operand.get();
+  }
+  if (const auto* lit = dynamic_cast<const IntLitExpr*>(cur)) {
+    // Guard the INT64_MIN edge (reachable via hex literals like 0x8000...).
+    out = neg && lit->value != INT64_MIN ? -lit->value : lit->value;
+    negated = neg;
+    return true;
+  }
+  return false;
+}
+
+// True when `value` is representable by the sized integer `type` (TypeKind::Int
+// with bits/isSigned set). `negated` marks values produced by an explicit
+// unary '-', which matters for u64: a raw literal is a 64-bit pattern (any
+// bit pattern is valid), while `-1` is not.
+inline bool sizedIntHolds(const TypePtr& type, std::int64_t value, bool negated) {
+  const int bits = type->bits < 1 ? 64 : type->bits;
+  if (type->isSigned) {
+    if (bits >= 64) return true;
+    const std::int64_t lo = -(std::int64_t{1} << (bits - 1));
+    const std::int64_t hi = (std::int64_t{1} << (bits - 1)) - 1;
+    return value >= lo && value <= hi;
+  }
+  if (bits >= 64) return !negated || value >= 0;
+  return value >= 0 && value <= ((std::int64_t{1} << bits) - 1);
+}
+
 inline bool isMathBuiltin(const std::string& name) {
   static const char* names[] = {"sqrt", "sin",  "cos",   "tan",   "exp",  "log",
                                 "floor", "ceil", "round", "trunc", "log2", "log10"};

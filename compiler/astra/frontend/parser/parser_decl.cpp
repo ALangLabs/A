@@ -1,6 +1,31 @@
 #include "parser/parser_internal.hpp"
 
 namespace a {
+
+void Parser::parseTypeParams(std::vector<std::string>& typeParams,
+                             std::vector<std::string>& bounds,
+                             std::vector<Span>& boundSpans) {
+  // Current token is '<'.
+  advance();
+  while (!check(Tok::Gt) && !check(Tok::Eof)) {
+    const Token& tp = expect(Tok::Ident, "a type parameter name");
+    typeParams.push_back(tp.lexeme);
+    if (match(Tok::Colon)) {
+      // Inline trait bounds: `T: Speak` or `T: Speak + Sized`. Comma still
+      // separates type parameters, so `+` is the bound separator (as in
+      // Rust); each bound name lands in the declaration's constraint list.
+      while (true) {
+        const Token& bound = expect(Tok::Ident, "a trait name after ':'");
+        bounds.push_back(bound.lexeme);
+        boundSpans.push_back(bound.span);
+        if (!match(Tok::Plus)) break;
+      }
+    }
+    if (!match(Tok::Comma)) break;
+  }
+  expect(Tok::Gt, "'>' after type parameters");
+}
+
 StmtPtr Parser::parseFnDecl() {
   Span start = cur().span;
   expect(Tok::KwFn, "'fn'");
@@ -10,13 +35,8 @@ StmtPtr Parser::parseFnDecl() {
   decl->name = nameTok.lexeme;
   decl->nameSpan = nameTok.span;
 
-  if (match(Tok::Lt)) {
-    while (!check(Tok::Gt) && !check(Tok::Eof)) {
-      const Token& tp = expect(Tok::Ident, "a type parameter name");
-      decl->typeParams.push_back(tp.lexeme);
-      if (!match(Tok::Comma)) break;
-    }
-    expect(Tok::Gt, "'>' after type parameters");
+  if (check(Tok::Lt)) {
+    parseTypeParams(decl->typeParams, decl->whereClause, decl->whereSpans);
   }
 
   expect(Tok::LParen, "'(' after the function name");
@@ -58,6 +78,7 @@ StmtPtr Parser::parseFnDecl() {
     while (true) {
       const Token& wTok = expect(Tok::Ident, "a trait name after 'where'");
       decl->whereClause.push_back(wTok.lexeme);
+      decl->whereSpans.push_back(wTok.span);
       if (!match(Tok::Comma)) break;
     }
   }
@@ -249,13 +270,8 @@ StmtPtr Parser::parseTraitDecl() {
   decl->name = nameTok.lexeme;
   decl->nameSpan = nameTok.span;
 
-  if (match(Tok::Lt)) {
-    while (!check(Tok::Gt) && !check(Tok::Eof)) {
-      const Token& tp = expect(Tok::Ident, "a type parameter name");
-      decl->typeParams.push_back(tp.lexeme);
-      if (!match(Tok::Comma)) break;
-    }
-    expect(Tok::Gt, "'>' after type parameters");
+  if (check(Tok::Lt)) {
+    parseTypeParams(decl->typeParams, decl->whereClause, decl->whereSpans);
   }
 
   // Trait inheritance: trait Equatable(Comparable):
@@ -272,6 +288,7 @@ StmtPtr Parser::parseTraitDecl() {
     while (true) {
       const Token& wTok = expect(Tok::Ident, "a trait name after 'where'");
       decl->whereClause.push_back(wTok.lexeme);
+      decl->whereSpans.push_back(wTok.span);
       if (!match(Tok::Comma)) break;
     }
   }

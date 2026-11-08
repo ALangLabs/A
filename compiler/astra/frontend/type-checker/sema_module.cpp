@@ -386,7 +386,7 @@ void Sema::registerModule(Module& module) {
       if (found == functionsByName_.end() || found->second != decl) continue;
       registerFunctionSignature(*decl);
       checkWhereClause(decl->whereClause, decl->whereSpan,
-                       "function '" + decl->name + "'");
+                       "function '" + decl->name + "'", &decl->whereSpans);
     }
   }
 
@@ -401,6 +401,10 @@ void Sema::registerModule(Module& module) {
 
 void Sema::checkModule(Module& module) {
   currentModule_ = module.id;
+  // Literals recorded before this point belong to earlier modules (or to
+  // registration, which does not infer expressions); only this module's
+  // literals are range-checked below.
+  const std::size_t literalMark = numericLiterals_.size();
   auto foundState = moduleStates_.find(module.id);
   if (foundState != moduleStates_.end()) {
     moduleAliases_ = foundState->second.moduleAliases;
@@ -453,6 +457,7 @@ void Sema::checkModule(Module& module) {
   }
 
   checkTypeVariables();
+  checkLiteralRanges(literalMark);
   checkDeclaredVariables();
   checkReturnPaths();
 

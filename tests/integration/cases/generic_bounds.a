@@ -1,0 +1,40 @@
+"""Inline trait bounds: `fn f<T: Trait>` and `fn f<T: A + B>` behave like `where`."""
+trait Speak:
+    fn speak(self) -> String
+
+trait Loud:
+    fn volume(self) -> i64
+
+class Dog:
+    fn speak(self) -> String:
+        return "woof"
+
+    fn volume(self) -> i64:
+        return 11
+
+impl Speak for Dog:
+    pass
+
+impl Loud for Dog:
+    pass
+
+fn talk<T: Speak>(x: T) -> String:
+    return x.speak()
+
+fn talk_loud<T: Speak + Loud>(x: T) -> String:
+    return x.speak() + "@" + str(x.volume())
+
+fn mixed<T: Speak, U>(x: T, y: U) -> U:
+    return y
+
+fn both_forms<T: Speak>(x: T) -> String where Speak:
+    return x.speak()
+
+trait Wrap<T: Speak>:
+    fn wrap(self, x: T) -> String
+
+d = Dog()
+print(talk(d))
+print(talk_loud(d))
+print(mixed(d, 7))
+print(both_forms(d))

@@ -1,0 +1,3 @@
+The value 256 does not fit in type 'u8'.
+The value -129 does not fit in type 'i8'.
+The value -1 does not fit in type 'u8'.

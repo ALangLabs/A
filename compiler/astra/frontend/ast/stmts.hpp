@@ -149,6 +149,10 @@ struct FnDecl : Stmt {
   std::vector<ParamDecl> params;
   TypeExprPtr returnType;  // may be null
   std::vector<std::string> whereClause;  // trait constraints after `where`
+  // Parallel to whereClause: the source span of each constraint name, used for
+  // per-name diagnostics. Bounds written inline (`fn f[T: Trait]`) share the
+  // same list, so their spans land here too.
+  std::vector<Span> whereSpans;
   Span whereSpan;
   std::vector<StmtPtr> body;
   int moduleId = -1;  // module owning the function, filled in by Sema
@@ -222,6 +226,7 @@ struct TraitDecl : Stmt {
   std::vector<TraitSig> methods;
   std::vector<std::string> parents;       // trait inheritance: trait B(A)
   std::vector<std::string> whereClause;   // `trait C where A` constraints
+  std::vector<Span> whereSpans;           // parallel to whereClause
   std::string doc;  // docstring: first string-literal statement in the body
 };
 

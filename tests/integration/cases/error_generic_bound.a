@@ -1,0 +1,2 @@
+fn bad<T: Missing>(x: T) -> T:
+    return x

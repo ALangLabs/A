@@ -1,5 +1,7 @@
 #include "type-checker/sema_internal.hpp"
 
+#include <cmath>
+
 namespace a {
 
 TypePtr Sema::checkBuiltinNumeric(const std::string& name, CallExpr& call) {
@@ -110,14 +112,33 @@ TypePtr Sema::checkBuiltinNumeric(const std::string& name, CallExpr& call) {
   }
 
   if (isConversionBuiltin(name)) {
+    TypePtr target = builtinTypeByName(name);
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);
       inferCallArgTypes(call);
-      return builtinTypeByName(name);
+      return target;
     }
     TypePtr type = inferExpr(*call.args[0].value);
     requireNumeric(type, call.args[0].value->span, "The argument of '" + name + "'");
-    return builtinTypeByName(name);
+    // Constant arguments to sized-int conversions must fit the target; other
+    // values keep the existing runtime-truncation semantics.
+    if (target && target->kind == TypeKind::Int) {
+      std::int64_t value = 0;
+      bool negated = false;
+      if (intLiteralValue(*call.args[0].value, value, negated)) {
+        checkSizedIntRange(call.args[0].value->span, value, negated, target);
+      } else if (const auto* flit =
+                     dynamic_cast<const FloatLitExpr*>(call.args[0].value.get())) {
+        // Float-to-int conversions truncate toward zero (i64(3.9) == 3).
+        if (std::isfinite(flit->value) &&
+            std::abs(flit->value) <= 9.0e18) {
+          const std::int64_t truncated = static_cast<std::int64_t>(flit->value);
+          checkSizedIntRange(call.args[0].value->span, truncated, truncated < 0,
+                             target);
+        }
+      }
+    }
+    return target;
   }
 
   // --------------------------------------------- LLVM-style intrinsics

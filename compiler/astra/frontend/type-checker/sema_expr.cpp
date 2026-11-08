@@ -12,11 +12,13 @@ TypePtr Sema::inferExpr(Expr& expr) {
 
 TypePtr Sema::inferExprImpl(Expr& expr) {
   if (auto* node = dynamic_cast<IntLitExpr*>(&expr)) {
-    (void)node;
+    // Record for the end-of-module sized-type range check; exprTypes_ is
+    // filled by inferExpr, so its presence means this node was seen before.
+    if (!exprTypes_.count(&expr)) numericLiterals_.push_back(node);
     return freshVar(Constraint::Integer, expr.span, "an integer literal", /*allowDefault=*/true);
   }
   if (auto* node = dynamic_cast<FloatLitExpr*>(&expr)) {
-    (void)node;
+    if (!exprTypes_.count(&expr)) numericLiterals_.push_back(node);
     return freshVar(Constraint::Floating, expr.span, "a float literal", /*allowDefault=*/true);
   }
   if (dynamic_cast<BoolLitExpr*>(&expr)) return typeBool();
@@ -225,6 +227,24 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
       return typeError();
     }
     return typeBool();
+  }
+
+  // Record the effective value of literals behind unary '-' (and '--'-style
+  // double negation) so the range check sees `-1`, not `1`. Nested minuses
+  // are folded here; each inner unary already recorded its own override.
+  if (expr.op == "-" && !expr.postfix) {
+    const Expr* cur = expr.operand.get();
+    bool neg = true;
+    while (true) {
+      const auto* un = dynamic_cast<const UnaryExpr*>(cur);
+      if (!un || un->op != "-" || un->postfix || !un->operand) break;
+      neg = !neg;
+      cur = un->operand.get();
+    }
+    if (const auto* lit = dynamic_cast<const IntLitExpr*>(cur)) {
+      literalValueOverrides_[lit] =
+          neg && lit->value != INT64_MIN ? -lit->value : lit->value;
+    }
   }
 
   TypePtr resolved = resolveType(operand);

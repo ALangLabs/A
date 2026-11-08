@@ -1,0 +1,3 @@
+The value 70000 does not fit in type 'u16'.
+The value 300 does not fit in type 'u8'.
+The value -1 does not fit in type 'u8'.

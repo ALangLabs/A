@@ -1,0 +1,7 @@
+fn take(x: u8) -> u8:
+    return x
+
+xs: [u16] = [1, 70000]
+print(take(300))
+print(u8(-1))
+print(u8(255), i8(-128))

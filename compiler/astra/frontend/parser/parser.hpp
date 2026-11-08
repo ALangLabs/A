@@ -70,6 +70,13 @@ class Parser {
 
   ParamDecl parseParam(bool allowDefault = false);
   TypeExprPtr parseTypeExpr();
+  // Parses a `<...>` generic parameter list (current token is '<'). Each
+  // parameter is `Name` or `Name: Bound` / `Name: BoundA + BoundB`; bound
+  // trait names are appended to `bounds` (parallel spans in `boundSpans`) so
+  // they get the same constraint semantics as a `where` clause.
+  void parseTypeParams(std::vector<std::string>& typeParams,
+                       std::vector<std::string>& bounds,
+                       std::vector<Span>& boundSpans);
 
   ExprPtr parseExpression(int minPrec = 0);
   ExprPtr parsePrefix();

@@ -440,12 +440,17 @@ const StructDecl* Sema::findStructDecl(const std::string& name) {
 }
 
 void Sema::checkWhereClause(const std::vector<std::string>& traits, Span span,
-                            const std::string& what) {
-  for (const std::string& name : traits) {
-    if (findTrait(name) == nullptr) {
-      sink_.error(span.valid() ? span : Span(),
-                  "Unknown trait '" + name + "' in the 'where' clause of " + what + ".",
-                  "Declare it with 'trait " + name + ":' before it is used as a constraint.");
+                            const std::string& what,
+                            const std::vector<Span>* traitSpans) {
+  for (std::size_t i = 0; i < traits.size(); ++i) {
+    Span at = span;
+    if (traitSpans && i < traitSpans->size() && (*traitSpans)[i].valid()) {
+      at = (*traitSpans)[i];
+    }
+    if (findTrait(traits[i]) == nullptr) {
+      sink_.error(at.valid() ? at : Span(),
+                  "Unknown trait '" + traits[i] + "' in the 'where' clause of " + what + ".",
+                  "Declare it with 'trait " + traits[i] + ":' before it is used as a constraint.");
     }
   }
 }
@@ -453,7 +458,8 @@ void Sema::checkWhereClause(const std::vector<std::string>& traits, Span span,
 void Sema::checkTraitDecl(TraitDecl& decl) {
   checkWhereClause(decl.parents, decl.nameSpan,
                    "trait '" + decl.name + "'");
-  checkWhereClause(decl.whereClause, decl.nameSpan, "trait '" + decl.name + "'");
+  checkWhereClause(decl.whereClause, decl.nameSpan, "trait '" + decl.name + "'",
+                   &decl.whereSpans);
 
   StringMap<Span> seen;
   for (const TraitSig& sig : decl.methods) {

@@ -65,6 +65,10 @@ struct Type {
   int varId = 0;
   Constraint constraint = Constraint::None;
   bool allowDefault = false;
+  // Set on the concrete type a type variable defaults to (e.g. an unconstrained
+  // integer literal becoming i32). Literal range checks skip these so
+  // `x = 5000000000` keeps its historical i32 default instead of erroring.
+  bool implicitDefault = false;
   bool allowUnresolved = false;  // e.g. the element type of a bare `None`
   std::string varDescription;
   Span varSpan;

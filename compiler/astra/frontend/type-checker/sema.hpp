@@ -230,7 +230,8 @@ class Sema {
   void checkTraitDecl(TraitDecl& decl);
   void checkImpl(ImplDecl& decl);
   void checkWhereClause(const std::vector<std::string>& traits, Span span,
-                        const std::string& what);
+                        const std::string& what,
+                        const std::vector<Span>* traitSpans = nullptr);
   bool structSatisfiesTrait(const StructDecl& type, const TraitDecl& trait);
 
   // statements
@@ -335,6 +336,13 @@ class Sema {
   void checkTypeVariables();
   void checkDeclaredVariables();
   void checkReturnPaths();
+  // Range-checks numeric literals recorded since `begin` now that their type
+  // variables have been resolved/defaulted (e.g. `x: u8 = 300` is an error).
+  void checkLiteralRanges(std::size_t begin);
+  // Reports an error when `value` cannot be represented by sized int `type`.
+  // Returns true when an error was reported.
+  bool checkSizedIntRange(Span span, std::int64_t value, bool negated,
+                          const TypePtr& type);
   bool blockReturns(const std::vector<StmtPtr>& body);
   bool statementReturns(const Stmt& stmt);
 
@@ -362,6 +370,12 @@ class Sema {
   std::unordered_map<const FnDecl*, std::vector<TypePtr>> fnParamTypes_;
   std::unordered_map<const FnDecl*, TypePtr> fnReturnTypes_;
   std::vector<VarInfo> typeVariables_;
+  // Numeric literal expressions seen during body checking, in order. Checked
+  // for sized-type range errors at the end of each module's checkModule.
+  std::vector<const Expr*> numericLiterals_;
+  // Effective (sign-adjusted) values for literals behind unary '-', keyed by
+  // the IntLitExpr node. `-(-5)` flips the sign back to positive.
+  std::unordered_map<const Expr*, std::int64_t> literalValueOverrides_;
   std::vector<DeclaredVarInfo> declaredVariables_;
   std::vector<std::pair<const FnDecl*, TypePtr>> checkedFunctions_;
   std::unordered_map<const Expr*, TypePtr> exprTypes_;
