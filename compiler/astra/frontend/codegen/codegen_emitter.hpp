@@ -617,6 +617,15 @@ class AsmEmitter {
   // a_add_slow so a live aval accumulator sees the same value either way.
     bool tryEmitForAccum(const ForStmt& st, int curS, int endS, int stepS);
 
+  // Register-resident float accumulation over a counted range:
+  // `for i in lo..hi[..step]: acc += <Float expr>` keeps acc in an XMM
+  // register for the whole loop (loaded once, stored once at exit),
+  // deleting the per-iteration aval copies and add dance of the generic
+  // path. Eligible only for the integer range fast path with a plain
+  // (non-raw, non-speculative) Local accumulator and a statically-float
+  // addend.
+    bool tryEmitForFloatAccum(const ForStmt& st, int curS, int endS, int stepS);
+
   // Upper bound on the accumulator's value at the start of the loop:
   // union of the ranges of every `=`-style write to it that textually
   // precedes the loop in the current function body. Returns false when

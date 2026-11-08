@@ -568,6 +568,134 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
     return true;
   }
 
+bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
+                                int stepS) {
+    // Counted range loops only.
+    const Expr* loE = nullptr;
+    const Expr* hiE = nullptr;
+    const Expr* iter = st.iterable.get();
+    if (iter && iter->kind == ExprKind::Range) {
+      const RangeExpr& re = static_cast<const RangeExpr&>(*iter);
+      loE = re.start.get();
+      hiE = re.end.get();
+    } else if (iter && iter->kind == ExprKind::Binary &&
+               static_cast<const BinaryExpr&>(*iter).op == "..") {
+      const BinaryExpr& be = static_cast<const BinaryExpr&>(*iter);
+      loE = be.lhs.get();
+      hiE = be.rhs.get();
+    }
+    if (!loE || !hiE) return false;
+    if (st.body.size() != 1) return false;
+    const Stmt* bs = st.body[0].get();
+    if (!bs || bs->kind != StmtKind::Assign) return false;
+    const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
+    if (as.op != "+=" || !as.target || !as.value ||
+        as.target->kind != ExprKind::Ident)
+      return false;
+    const std::string& accName =
+        static_cast<const IdentExpr*>(as.target.get())->name;
+    if (accName == st.var) return false;
+    if (!exprIsFloat(as.value.get())) return false;
+    ABinding* acc = lookup(accName);
+    if (!acc || acc->kind != BKind::Local || acc->rawInt || acc->specRaw ||
+        acc->dropFn)
+      return false;
+    // Choose a free XMM register for the resident accumulator. The loop
+    // var and other promoted bindings take registers via loopXmm_ 
+    // (installed by loopXmmEnter below); scratch uses xmm0/xmm1.
+    int xmmMark = loopXmmEnter();
+    auto xmmFree = [&](int x) {
+      for (const auto& kv : loopXmm_)
+        if (kv.second == x) return false;
+      return true;
+    };
+    int accReg = -1;
+    for (int x = 3; x <= 15; ++x)
+      if (xmmFree(x)) { accReg = x; break; }
+    if (accReg < 0) { loopXmmExit(xmmMark); return false; }
+    const std::string xr = "%xmm" + std::to_string(accReg);
+    // Join the residency set so call-flush/reload and the exit flush both
+    // maintain the accumulator automatically thereafter.
+    loopXmm_[acc->slot] = accReg;
+    loopXmmAdded_.push_back(acc->slot);
+    // Preheader: `acc` must hold an untagged double. For an int entry,
+    // one a_add_slow(acc, 0.0) promotes it exactly like the first loop
+    // iteration would (and panics with the exact runtime message for
+    // non-numeric values); the accumulator is then a double forever.
+    std::string trampL = newLabel("fatramp"), loopL = newLabel("for"),
+                contL = newLabel("forc"), endL = newLabel("fend"),
+                bodyL = newLabel("forb"), doneL = newLabel("fadone"),
+                nanL = newLabel("fanil");
+    loadSlot(acc->slot, "%rcx");
+    emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + trampL + "\n");
+    emit(std::string("    movq %rcx, ") + xr + "\n");
+    emit("    jmp " + loopL + "\n");
+    emitLabel(trampL);
+    // acc is NOT currently a double: promote via the runtime add exactly
+    // once, then it is a double for the remainder of the loop.
+    loadSlot(acc->slot, "%rdi");
+    movImm(0, "%rsi");  // aval 0.0
+    emit("    call a_add_slow\n");
+    storeRax(acc->slot);
+    loadSlot(acc->slot, "%rcx");
+    emit(std::string("    movq %rcx, ") + xr + "\n");
+    emitLabel(loopL);
+    // continue while (step>0 ? cur<end : cur>end)
+    emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
+         ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
+    emit("    test %rdx, %rdx\n    jns " + bodyL + "_p\n");
+    emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
+    emitLabel(bodyL + "_p");
+    emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
+    // Loop variable at every iteration (mirrors the generic counted path).
+    int varS = allocSlot();
+    emitLabel(bodyL);
+    copySlot(curS, varS);
+    pushScope();
+    bindLocal(st.var, varS);
+    if (promoteNames_.count(st.var)) {
+      ABinding* vb = lookup(st.var);
+      if (vb) vb->rawInt = true;
+    }
+    loopBreak_.push_back(endL);
+    loopCont_.push_back(contL);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    // Body: rs = eval(expr); acc += rs in %xmmR with NaN canonicalization.
+    int rs = evalSlot(as.value.get());
+    rawInvAll();  // direct movsd traffic below bypasses the reg cache
+    emit("    movsd " + slotRef(rs) + ", %xmm0\n");
+    emit(std::string("    addsd %xmm0, ") + xr + "\n");
+    emit("    ucomisd " + xr + ", " + xr + "\n");
+    emit("    jp " + nanL + "\n");
+    emit("    jmp " + doneL + "\n");
+    emitLabel(nanL);
+    movImm(kCanonNaN);
+    emit(std::string("    movq %rax, ") + xr + "\n");
+    emitLabel(doneL);
+    loopDeferDepth_.pop_back();
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    popScope();
+    emitLabel(contL);
+    int64_t stepConst = 0;
+    {
+      const Expr* stE = nullptr;
+      if (iter && iter->kind == ExprKind::Range)
+        stE = static_cast<const RangeExpr&>(*iter).step.get();
+      if (stE == nullptr)
+        stepConst = 1;
+      else if (stE->kind == ExprKind::IntLit) {
+        int64_t v = static_cast<const IntLitExpr*>(stE)->value;
+        if (v == 1 || v == -1) stepConst = v;
+      }
+    }
+    emitRangeIncr(curS, endS, stepS, stepConst);
+    jmp(loopL);
+    emitLabel(endL);
+    loopXmmExit(xmmMark);  // flushes the resident accumulator to its slot
+    return true;
+  }
+
 void AsmEmitter::emitFor(const ForStmt& st) {
     // Fast path: `for x in lo..hi[..step]` as a native counted int64 loop.
     const Expr* loE = nullptr;
@@ -616,6 +744,10 @@ void AsmEmitter::emitFor(const ForStmt& st) {
       // closed form (see tryEmitForAccum). Runs after the step==0 panic
       // and the fill check for the same evaluation-order discipline.
       if (tryEmitForAccum(st, curS, endS, stepS)) return;
+      // Register-resident float accumulator (see tryEmitForFloatAccum):
+      // counted range, single `acc += <Float expr>` body with a plain
+      // local `acc` — runs the loop with acc in an XMM register.
+      if (tryEmitForFloatAccum(st, curS, endS, stepS)) return;
       int varS = allocSlot();
       std::string loopL = newLabel("for");
       std::string contL = newLabel("forc");
