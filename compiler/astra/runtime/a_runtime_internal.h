@@ -42,6 +42,19 @@
 #if defined(_WIN32) || defined(__TINYC__)
 #define A_PAR_REAL 0
 #endif
+
+/* Per-thread scratch state. When the worker pool is real (A_PAR_REAL),
+   runtime helpers reachable from parallel kernels (map/filter/sum/linalg)
+   must not share mutable globals: traceback frames, the small-string bump
+   arenas and the int->str cache each get a __thread copy so pool workers
+   never race the main thread. On serial-only builds the macro is empty and
+   the state stays a plain global (MSVC has no __thread; TinyCC-built
+   runtimes are single-threaded anyway). */
+#if A_PAR_REAL
+#define A_RT_TLS __thread
+#else
+#define A_RT_TLS
+#endif
 #if defined(_WIN32) && !defined(_WIN64)
 /* 32-bit Windows CRT malloc only guarantees 8-byte alignment, but heap
    objects must be 16-byte aligned for NaN-boxing (mkobj panics otherwise).
@@ -58,8 +71,7 @@
 /* msvcrt.dll exports vsnprintf but not snprintf (that lives in libmingwex,
    which is not shipped); the runtime provides the C99 wrapper. */
 int snprintf(char *s, size_t n, const char *format, ...);
-/* Win32 timing helpers implemented in core_util.c (declared directly so
-   no TU needs windows.h). */
+/* Win32 timing helpers implemented in core_util.c. */
 int64_t a_win_time_ms(void);    /* wall clock, Unix epoch milliseconds */
 int64_t a_win_mono_ms(void);    /* monotonic milliseconds (QPC) */
 void a_win_sleep_ms(int64_t ms);
@@ -67,9 +79,9 @@ void a_win_sleep_ms(int64_t ms);
 /* Win32 API surface used by fs.c and terminal.c. Declared directly (the
    same approach core_util.c uses for the timing helpers) so runtime TUs
    do not need windows.h; kernel32 imports resolve through
-   backend/win32/lib/kernel32.def and the CRT helpers (_read, _mktemp,
-   _spawnvp, _putenv) through msvcrt.def. WINAPI is __stdcall on 32-bit
-   Windows and empty on Win64; BOOL is int, HANDLE is void*, DWORD is
+   backend/win32/lib/kernel32.def and the CRT helpers (_read, _spawnvp,
+   _putenv) through msvcrt.def. WINAPI is __stdcall on 32-bit Windows
+   and empty on Win64; BOOL is int, HANDLE is void*, DWORD is
    unsigned long. */
 #if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
 #define A_WINAPI
@@ -105,8 +117,7 @@ extern int A_WINAPI FindNextFileA(void *hFindFile, void *lpFindFileData);
 extern int A_WINAPI FindClose(void *hFindFile);
 extern unsigned long A_WINAPI GetLastError(void);
 /* msvcrt helpers (cdecl, no A_WINAPI): fd-level read for terminal input,
-   temp-name generation and PATH-searching child spawn for repl.eval,
-   and env mutation. */
+   PATH-searching child spawn for repl.eval, and env mutation. */
 extern int _read(int _FileHandle, void *_DstBuf, unsigned long _MaxCharCount);
 extern char *_mktemp(char *_TemplateName);
 extern intptr_t _spawnvp(int _Mode, const char *_Filename,
@@ -183,9 +194,9 @@ typedef struct { AObj h; char data[]; } AStr;
 
 /* len() on a string is a code-point count, i.e. a UTF-8 scan. The result is
    cached in the otherwise-unused high half of the string's cap word (the low
-   half stays len+1, so `data` keeps a fixed offset that generated code may
-   address directly). Stored as count+1; 0 means "not computed yet", which is
-   what every constructor but a_str_i64() and concat_str() set. */
+   half stays len+1, and `data` therefore stays at a fixed offset that
+   generated code may address directly). Stored count+1; 0 means "not
+   computed yet", which is what every constructor but a_str_i64() sets. */
 #define ASTR_CP_MASK UINT64_C(0xFFFFFFFF00000000)
 static inline uint32_t astr_cp_cached(const AStr *s) {
     return (uint32_t)(s->h.cap >> 32);
@@ -292,7 +303,6 @@ typedef struct { aval *p; size_t len, cap; } AVec;
 /* shared helpers (defined across the rt_*.c modules) */
 void panicf(const char *fmt, ...);
 void *xmalloc(size_t n);
-/* Arena chunks: mmap + MADV_HUGEPAGE where available (see core_util.c). */
 char *xarena(size_t n);
 void *xrealloc(void *p, size_t n);
 char *xstrndup(const char *s, size_t n);

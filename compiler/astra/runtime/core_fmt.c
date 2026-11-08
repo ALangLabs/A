@@ -1,10 +1,14 @@
 #include "a_runtime_internal.h"
 
-static aval g_int_str_cache[4096];
-/* 2 MiB (one huge page) per chunk, from the mmap arena. */
+/* A_RT_TLS: both the cache and the bump arena are per-thread under
+   A_PAR_REAL so str()/repr() are safe to call from pool workers. The
+   cache entries are immutable AStr objects; per-thread copies only cost
+   a little duplicated memory (32 KiB TLS each). */
+static A_RT_TLS aval g_int_str_cache[4096];
+/* 2 MiB: one huge page per chunk, so refills are cheap. */
 static const size_t kSmallStrChunk = 2u << 20;
-static char *g_small_str = NULL;
-static char *g_small_str_end = NULL;
+static A_RT_TLS char *g_small_str = NULL;
+static A_RT_TLS char *g_small_str_end = NULL;
 
 /* ------------------------------------------------------------------ */
 /* type names / formatting                                             */
@@ -172,13 +176,17 @@ void format_into(Buf *b, aval v, int quote) {
             return;
         }
         case K_VIEW: {
+            /* Read-only element access (arr_elem handles packed storage):
+               formatting must not mutate the value — str()/repr() are on
+               the parallel-builtin whitelist, so they may run on pool
+               workers where arr_ensure_aval's in-place packed->aval
+               conversion would race. */
             AView *vw = (AView *)obj_of(v);
             AArr *a = (AArr *)obj_of(vw->parent);
-            arr_ensure_aval(a);
             buf_addc(b, vw->is_tuple ? '(' : '[');
             for (int64_t i = 0; i < vw->len; ++i) {
                 if (i) buf_adds(b, ", ");
-                format_into(b, a->items[(size_t)(vw->off + i)], 1);
+                format_into(b, arr_elem(a, (uint64_t)(vw->off + i)), 1);
             }
             buf_addc(b, vw->is_tuple ? ')' : ']');
             return;
@@ -186,12 +194,11 @@ void format_into(Buf *b, aval v, int quote) {
         case K_LIST:
         case K_TUPLE: {
             AArr *a = (AArr *)obj_of(v);
-            arr_ensure_aval(a);
             buf_addc(b, '[');
             if (kind_of(v) == K_TUPLE) b->p[b->len - 1] = '(';
             for (uint64_t i = 0; i < a->h.len; ++i) {
                 if (i) buf_adds(b, ", ");
-                format_into(b, a->items[i], 1);
+                format_into(b, arr_elem(a, i), 1);
             }
             buf_addc(b, kind_of(v) == K_TUPLE ? ')' : ']');
             return;
@@ -230,7 +237,7 @@ void format_into(Buf *b, aval v, int quote) {
             buf_addc(b, '{');
             for (uint64_t i = 0; i < a->h.len; ++i) {
                 if (i) buf_adds(b, ", ");
-                format_into(b, a->items[i], 1);
+                format_into(b, arr_elem(a, i), 1);
             }
             buf_addc(b, '}');
             return;

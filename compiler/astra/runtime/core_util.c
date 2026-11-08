@@ -17,9 +17,11 @@ typedef struct {
     int line;
 } AFrame;
 
-static AFrame *g_frames;
-static size_t g_nframes;
-static size_t g_capframes;
+/* A_RT_TLS: pool workers pushing frames concurrently must not share the
+   traceback stack (rt_pool.c safety contract). */
+static A_RT_TLS AFrame *g_frames;
+static A_RT_TLS size_t g_nframes;
+static A_RT_TLS size_t g_capframes;
 
 void a_frame_push(const char *name, const char *file, int line) {
     if (g_nframes == g_capframes) {
@@ -90,7 +92,7 @@ void *xmalloc(size_t n) {
    memory continuously; when a minor fault costs microseconds (VMs, hardened
    hosts) that page traffic, not the bump pointer, is what an allocation
    costs. Huge pages cut the fault count by ~500x. Falls back to the heap
-   where mmap/huge pages are unavailable; untouched pages cost nothing. */
+   where mmap/huge pages are unavailable, and untouched pages cost nothing. */
 char *xarena(size_t n) {
 #if defined(__linux__) && defined(MAP_ANONYMOUS)
     void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
@@ -242,20 +244,6 @@ int snprintf(char *s, size_t n, const char *format, ...) {
     va_end(ap);
     return r;
 }
-
-/* Minimal kernel32 prototypes, declared directly so runtime TUs do not
-   need windows.h. FILETIME is passed as an opaque 8-byte buffer and
-   LARGE_INTEGER as int64_t; both are layout-compatible. WINAPI is
-   __stdcall on 32-bit Windows and empty on Win64. */
-#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
-#define A_WINAPI
-#else
-#define A_WINAPI __stdcall
-#endif
-extern void A_WINAPI GetSystemTimeAsFileTime(void *lpSystemTimeAsFileTime);
-extern int A_WINAPI QueryPerformanceCounter(long long *lpPerformanceCount);
-extern int A_WINAPI QueryPerformanceFrequency(long long *lpPerformanceFrequency);
-extern void A_WINAPI Sleep(unsigned long dwMilliseconds);
 
 /* FILETIME counts 100 ns intervals since 1601-01-01 UTC; the Unix epoch
    offset is 11644473600 s. */

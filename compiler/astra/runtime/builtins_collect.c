@@ -9,9 +9,9 @@
    - sum(): packed int64 storage, integer addition is associative, and we
      prove no overflow (which would promote to double and reorder results).
    - map()/filter(): the callable must be a *builtin* fnon from a whitelist
-     of pure unary numeric kernels. Arbitrary A closures are rejected:
-     generated code mutates frame stacks/closure envs that are not
-     thread-safe, so calling them from pool workers would race. */
+     of pure unary functions (see par_pure_builtin). Arbitrary A closures
+     are rejected: generated code mutates frame stacks/closure envs that
+     are not thread-safe, so calling them from pool workers would race. */
 
 static uint64_t iabs_u64(int64_t v) {
     return v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
@@ -47,19 +47,55 @@ static void sum_par_chunk_av(void *vctx, int64_t lo, int64_t hi) {
     c->parts[lo / c->grain] = s;
 }
 
+/* Whitelist: pure unary builtins that (a) accept exactly one argument,
+   (b) never consume or mutate their argument or any shared runtime/user
+   state, and (c) only touch thread-safe runtime paths (xmalloc, the
+   mutex-guarded int box, per-thread string arenas — see A_RT_TLS).
+
+   Deliberately EXCLUDED:
+   - Iterable consumers (min, max, sum, list, tuple, set, dict, sorted,
+     reversed, enumerate, zip, join): they drain iterator state or sort
+     in place, so the same object appearing twice in the input (or an
+     iterator element) would race / change observable behavior.
+   - Stateful/IO builtins (print, input, random*, net_*, write_*,
+     remove_*, log_*, metrics_*, trace_*, terminal_*, unsafe_*, arena_*,
+     py_*, repl_*, env_get, time_*): shared globals, PRNG state, or side
+     effects that make parallel evaluation observably different.
+   - Multi-argument builtins: they would panic on the single map argument
+     anyway, so whitelisting them buys nothing. */
 static int par_pure_builtin(aval fn, a_builtin_fn *out) {
     AObj *o = obj_of(fn);
     if (!o || o->type != T_FNON) return 0;
     AFnon *f = (AFnon *)o;
     if (!(f->flags & FNON_BUILTIN)) return 0;
     a_builtin_fn bf = (a_builtin_fn)(uintptr_t)f->entry;
-    /* Whitelist: pure unary numeric builtins — no globals, no allocation
-       beyond the (mutex-guarded) int box and NaN-boxed doubles. */
     static const a_builtin_fn ok[] = {
-        bi_abs, bi_sqrt, bi_sin, bi_cos, bi_tan, bi_exp, bi_log,
-        bi_floor, bi_ceil, bi_trunc, bi_round, bi_fabs,
+        /* math kernels */
+        bi_abs, bi_sqrt, bi_sin, bi_cos, bi_tan, bi_asin, bi_acos, bi_atan,
+        bi_exp, bi_log, bi_log2, bi_log10, bi_floor, bi_ceil, bi_trunc,
+        bi_round, bi_fabs,
+        /* integer / bit kernels */
         bi_i8, bi_i16, bi_i32, bi_u8, bi_u16, bi_u32, bi_f32,
-        bi_ctz, bi_clz, bi_popcount, bi_bswap
+        bi_ctz, bi_clz, bi_popcount, bi_bswap,
+        /* conversions and predicates (read-only on their argument;
+           str/repr format containers via arr_elem, never mutate) */
+        bi_len, bi_str, bi_int, bi_float, bi_bool, bi_repr, bi_type,
+        bi_expect, bi_likely, bi_unlikely,
+        /* non-consuming value constructors / wrappers */
+        bi_range, bi_some, bi_ok, bi_err,
+        /* function/struct introspection */
+        bi_struct_name, bi_struct_methods, bi_fn_signature, bi_fn_doc,
+        /* json.* one-argument helpers (stateless parser/formatter) */
+        bi_json_parse, bi_json_stringify, bi_json_pretty,
+        bi_json_is_valid, bi_json_kind, bi_json_len, bi_json_keys,
+        bi_json_as_str, bi_json_as_int, bi_json_as_float, bi_json_as_bool,
+        bi_json_as_array, bi_json_as_map,
+        /* bytes / binary codecs (allocate fresh results) */
+        bi_bytes_new, bi_bytes_to_str, bi_bytes_decode_utf8,
+        bi_str_encode_utf8, bi_binary_decode,
+        /* read-only filesystem probes (thread-safe syscalls) */
+        bi_read_file, bi_read_bytes, bi_file_exists, bi_file_size,
+        bi_list_dir
     };
     for (size_t i = 0; i < sizeof(ok) / sizeof(ok[0]); ++i)
         if (bf == ok[i]) { *out = bf; return 1; }
@@ -337,6 +373,9 @@ aval bi_enumerate(uint64_t n, aval *argv) {
     int64_t start = n == 2 ? expect_int64(argv[1], "enumerate() start") : 0;
     aval t = collect_iterable(argv[0]);
     AArr *a = (AArr *)obj_of(t);
+    /* Deliberately serial: each element costs two small mallocs
+       (AArr + items), and spreading them over pool workers measurably
+       loses to glibc arena contention (~1.5x slower at 2M elements). */
     AVec out = { NULL, 0, 0 };
     for (uint64_t i = 0; i < a->h.len; ++i) {
         aval pair[2] = { mkint_full(start + (int64_t)i), a->items[i] };

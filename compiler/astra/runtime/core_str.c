@@ -15,10 +15,12 @@ AStr *str_of(aval v, const char *what) {
    and other short conversions dominate allocation-heavy benchmarks, and
    AStr objects are never individually freed. Large strings still use
    xmalloc so a few big allocations cannot waste arena space. */
-/* 2 MiB (one huge page) per chunk, from the mmap arena. */
+/* 2 MiB: one huge page per chunk, so refills are cheap. */
 static const size_t kSmallStrChunk = 2u << 20;
-static char *g_small_str = NULL;
-static char *g_small_str_end = NULL;
+/* A_RT_TLS: the bump cursor is per-thread so parallel map/filter workers
+   can allocate small strings without racing (rt_pool.c safety contract). */
+static A_RT_TLS char *g_small_str = NULL;
+static A_RT_TLS char *g_small_str_end = NULL;
 
 aval a_str_new(const char *p, uint64_t len) {
     if (len && !p) panicf("null string data");

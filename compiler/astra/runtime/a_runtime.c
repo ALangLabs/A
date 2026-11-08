@@ -141,11 +141,27 @@ static aval g_builtin_objs[A_BI_COUNT];
 
 aval a_builtin(uint64_t id) {
     if (id >= A_BI_COUNT) panicf("invalid builtin id %llu", (unsigned long long)id);
+#if A_PAR_REAL
+    /* Lazy init runs on pool workers too (generated code resolves builtins
+       through a_builtin on whatever thread executes it). Publish with
+       acquire/release so a racing thread never observes a half-built FNON;
+       a lost CAS just leaks one extra immutable fnon object. */
+    aval v = __atomic_load_n(&g_builtin_objs[id], __ATOMIC_ACQUIRE);
+    if (v) return v;
+    aval nv = fnon_new_raw((uint64_t)(uintptr_t)g_builtins[id].fn,
+                           A_NONE, g_builtins[id].name,
+                           FNON_BUILTIN, NPARAMS_UNKNOWN);
+    aval expected = 0;
+    __atomic_compare_exchange_n(&g_builtin_objs[id], &expected, nv, 0,
+                                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    return __atomic_load_n(&g_builtin_objs[id], __ATOMIC_ACQUIRE);
+#else
     if (g_builtin_objs[id] == 0)
         g_builtin_objs[id] = fnon_new_raw((uint64_t)(uintptr_t)g_builtins[id].fn,
                                           A_NONE, g_builtins[id].name,
                                           FNON_BUILTIN, NPARAMS_UNKNOWN);
     return g_builtin_objs[id];
+#endif
 }
 
 aval a_bi_call(uint64_t id, uint64_t n, aval *argv) {
