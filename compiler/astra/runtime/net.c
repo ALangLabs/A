@@ -666,34 +666,25 @@ aval bi_net_recv_exact(uint64_t n, aval *argv) {
     return a_list_take_i64(items, got);
 }
 
-/* Read until EOF into a fresh buffer, after copying `pre` (body bytes the
-   header reader already consumed). */
-static char *net_read_to_buf_prefixed(NetSock *s, const char *pre, uint64_t prelen,
-                                     size_t *got_out) {
-    size_t cap = prelen + 65536;
-    char *buf = (char *)xmalloc(cap);
-    size_t got = 0;
-    if (prelen) { memcpy(buf, pre, (size_t)prelen); got = (size_t)prelen; }
-    for (;;) {
-        if (got == cap) {
-            cap *= 2;
-            buf = (char *)xrealloc(buf, cap);
-        }
-        size_t chunk = cap - got;
-        if (chunk > 262144) chunk = 262144;
-        ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf + got, (int)chunk)
-                           : recv(s->fd, buf + got, chunk, 0);
-        if (r < 0 && errno == EINTR) continue;
-        if (r <= 0) break;
-        got += (size_t)r;
-    }
-    *got_out = got;
-    return buf;
-}
-
 /* Body result shared by recv_body/recv_body_all: a (String?, [i64]) pair with
    exactly one side filled. Text payloads stay a flat char buffer end to end;
    only payloads that are not UTF-8 pay for int64 byte storage (8x memory). */
+/* Copy an [i64] byte prefix into `dst` (at most `room` bytes); returns the
+   number of bytes copied. */
+static size_t net_prefix_in(aval v, char *dst, size_t room) {
+    AArr *a = (AArr *)obj_of(v);
+    if (!a || room == 0) return 0;
+    size_t n = a->h.len < room ? (size_t)a->h.len : room;
+    if (arr_packed(a)) {
+        for (size_t i = 0; i < n; ++i) dst[i] = (char)(a->iitems[i] & 0xff);
+        return n;
+    }
+    arr_ensure_aval(a);
+    for (size_t i = 0; i < n; ++i)
+        dst[i] = (char)(expect_int64(a->items[i], "a byte value") & 0xff);
+    return n;
+}
+
 /* Copy n chars into packed int64 storage (the [i64] byte-array shape). */
 static aval net_bytes_from_chars(const char *buf, size_t got) {
     int64_t *ints = (int64_t *)xmalloc((got ? got : 1) * sizeof(int64_t));
@@ -726,14 +717,10 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
     NetSock *s = net_sock_get(argv[0], "net.recv_body");
     int64_t want = expect_int64(argv[1], "net.recv_body byteCount");
     if (want < 0) want = 0;
-    /* Optional prefix: body bytes the header reader already buffered. */
-    const char *pre = NULL;
-    uint64_t prelen = 0;
-    if (n >= 3 && argv[2] != A_NONE) {
-        pre = str_data(argv[2], &prelen);
-        if (!pre) { pre = ""; prelen = 0; }
-        if (prelen > (uint64_t)want) prelen = (uint64_t)want;
-    }
+    /* Optional prefix: body bytes the header reader already buffered. Passed
+       as [i64] bytes so binary payloads survive exactly (a String conversion
+       would decode UTF-8 and drop invalid bytes). */
+    aval pre_av = (n >= 3 && argv[2] != A_NONE) ? argv[2] : A_NONE;
     if (want == 0) {
         aval empty[2] = { a_str_new("", 0), a_list_from_i64(NULL, 0) };
         return a_tuple_new(2, empty);
@@ -741,11 +728,7 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
     aval sv = a_str_new_uninit((uint64_t)want);
     uint64_t svlen = 0;
     char *dst = str_mut_data(sv, &svlen);
-    size_t got = 0;
-    if (prelen) {
-        memcpy(dst, pre, (size_t)prelen);
-        got = (size_t)prelen;
-    }
+    size_t got = net_prefix_in(pre_av, dst, (size_t)want);
     while (got < (size_t)want) {
         size_t chunk = (size_t)want - got;
         if (chunk > 262144) chunk = 262144;
@@ -774,14 +757,22 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
 aval bi_net_recv_body_all(uint64_t n, aval *argv) {
     want_args("net.recv_body_all", n, 1, 2);
     NetSock *s = net_sock_get(argv[0], "net.recv_body_all");
-    uint64_t prelen = 0;
-    const char *pre = NULL;
-    if (n >= 2 && argv[1] != A_NONE) {
-        pre = str_data(argv[1], &prelen);
-        if (!pre) { pre = ""; prelen = 0; }
+    aval pre_av = (n >= 2 && argv[1] != A_NONE) ? argv[1] : A_NONE;
+    AArr *pa = (AArr *)obj_of(pre_av);
+    size_t prelen = pa ? (size_t)pa->h.len : 0;
+    char *buf = (char *)xmalloc(prelen + 65536);
+    size_t got = net_prefix_in(pre_av, buf, prelen);
+    size_t cap = prelen + 65536;
+    for (;;) {
+        if (got == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap); }
+        size_t chunk = cap - got;
+        if (chunk > 262144) chunk = 262144;
+        ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf + got, (int)chunk)
+                           : recv(s->fd, buf + got, chunk, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
     }
-    size_t got = 0;
-    char *buf = net_read_to_buf_prefixed(s, pre, prelen, &got);
     return net_body_result(buf, got);
 }
 

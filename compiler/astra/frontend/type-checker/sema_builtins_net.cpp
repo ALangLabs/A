@@ -183,7 +183,7 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
       requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
                      "The byte count");
     if (call.args.size() > prefixAt)
-      checkArgAgainst(*call.args[prefixAt].value, typeString(),
+      checkArgAgainst(*call.args[prefixAt].value, typeArray(typeInt(64, true)),
                       "as the buffered body prefix");
     return typeTuple({typeOptional(typeString()), typeArray(typeInt(64, true))});
   }

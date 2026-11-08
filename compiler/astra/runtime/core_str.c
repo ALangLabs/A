@@ -172,13 +172,20 @@ const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
 int64_t str_find(aval hay, aval needle, int64_t start, int reverse) {
     uint64_t hn, nn;
     const char *h = str_data(hay, &hn), *n = str_data(needle, &nn);
-    uint64_t total_cp = u8_count(h, hn);
+    /* The codepoint count is only needed for negative starts, empty needles
+       and the "start past the end" check: counting the whole haystack first
+       made every contains()/find() two full passes. */
     int64_t st = start;
-    if (st < 0) st += (int64_t)total_cp;
-    if (st < 0) st = 0;
-    if (st > (int64_t)total_cp) return -1;
-    if (nn == 0) return st;
-    uint64_t st_byte = cp_to_byte(h, hn, st);
+    if (st < 0) {
+        st += (int64_t)u8_count(h, hn);
+        if (st < 0) st = 0;
+    }
+    if (nn == 0) {
+        if (st > (int64_t)u8_count(h, hn)) return -1;
+        return st;
+    }
+    uint64_t st_byte = st == 0 ? 0 : cp_to_byte(h, hn, st);
+    if (st_byte >= hn) return -1;
     if (!reverse) {
         size_t pos = 0;
         const char *p = find_bytes(h, (size_t)hn, n, (size_t)nn, st_byte, &pos);

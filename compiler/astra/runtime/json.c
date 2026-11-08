@@ -80,6 +80,28 @@ static int jhex4(JParser *ps) {
 
 static aval jstring(JParser *ps) {
     if (!jexpect(ps, '"')) return A_NONE;
+    /* No-escape fast path: the whole string is a slice of the input, so it
+       can be copied straight into a String instead of grown byte by byte
+       through a Buf. Keys and most values have no escapes. */
+    {
+        const char *start = ps->p;
+        const char *q = start;
+        int escaped = 0;
+        while (q < ps->end) {
+            unsigned char ch = (unsigned char)*q;
+            if (ch == '"') break;
+            if (ch == '\\') { escaped = 1; break; }
+            if (ch < 0x20) { ps->err = 1; return A_NONE; }
+            ++q;
+        }
+        if (q >= ps->end) { ps->err = 1; return A_NONE; }
+        if (!escaped) {
+            aval out = a_str_new(start, (uint64_t)(q - start));
+            ps->p = q + 1;
+            return out;
+        }
+        ps->p = start;  /* rewind: the escape path below re-reads from here */
+    }
     Buf b;
     buf_init(&b);
     while (ps->p < ps->end) {

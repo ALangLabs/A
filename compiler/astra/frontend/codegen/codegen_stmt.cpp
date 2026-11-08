@@ -1182,11 +1182,63 @@ void AsmEmitter::emitAssign(const AssignStmt& st) {
       int vs;
       if (st.op != "=") {
         std::string baseOp = st.op.substr(0, st.op.size() - 1);
-        int cs = evalSlot(st.target.get());
-        int rs = evalSlot(st.value.get());
-        emitArith(baseOp, cs, rs);  // rax = cur <op> val
-        vs = allocSlot();
-        storeRax(vs);
+        // FP fast lane: when both operands are untagged doubles at
+        // runtime (tag test, no static-type trust), compute addsd etc.
+        // with NaN canonicalization exactly as a_double_canon does.
+        // Anything else (ints, mixed, objects) uses the generic aval
+        // path, which handles promotion to double identically.
+        if (baseOp == "+" || baseOp == "-" || baseOp == "*") {
+          // Plain locals read their own slot directly (no temp copy).
+          int cs = (b->kind == BKind::Local || b->kind == BKind::Param)
+                       ? b->slot
+                       : evalSlot(st.target.get());
+          int rs = evalSlot(st.value.get());
+          std::string dblL = newLabel("fpdbl"), pastL = newLabel("fpast"),
+                      doneL = newLabel("fpdone"), nanL = newLabel("fpnan");
+          for (int s : {cs, rs}) {
+            loadSlot(s, "%rcx");
+            emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " +
+                 pastL + "\n");
+          }
+          emit("    jmp " + dblL + "\n");
+          emitLabel(dblL);
+          rawInvAll();  // direct movsd traffic bypasses the reg cache
+          emit("    movsd " + slotRef(cs) + ", %xmm0\n"
+               "    movsd " + slotRef(rs) + ", %xmm1\n");
+          emit(std::string("    ") +
+               (baseOp == "+" ? "addsd %xmm1, %xmm0\n"
+                : baseOp == "-" ? "subsd %xmm1, %xmm0\n"
+                                : "mulsd %xmm1, %xmm0\n"));
+          emit("    ucomisd %xmm0, %xmm0\n");
+          emit("    jp " + nanL + "\n");
+          emit("    movq %xmm0, %rax\n");
+          emit("    jmp " + doneL + "\n");
+          emitLabel(nanL);
+          movImm(kCanonNaN);
+          emit("    jmp " + doneL + "\n");
+          emitLabel(pastL);
+          // Tag check failed (ints/mixed/objects): generic aval path,
+          // reusing the already-evaluated operand slots.
+          emitArith(baseOp, cs, rs);
+          emitLabel(doneL);
+          // Plain locals (and params) without an old value to drop store
+          // the result straight into their own slot, skipping a temp
+          // slot copy per op-assign (store-forwarding stalls).
+          if ((b->kind == BKind::Local || b->kind == BKind::Param) &&
+              !b->dropFn) {
+            emit("    mov %rax, " + slotRef(b->slot) + "\n");
+            vs = b->slot;
+          } else {
+            vs = allocSlot();
+            storeRax(vs);
+          }
+        } else {
+          int cs = evalSlot(st.target.get());
+          int rs = evalSlot(st.value.get());
+          emitArith(baseOp, cs, rs);  // rax = cur <op> val
+          vs = allocSlot();
+          storeRax(vs);
+        }
       } else {
         vs = evalSlot(st.value.get());
       }
