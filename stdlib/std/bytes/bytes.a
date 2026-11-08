@@ -117,13 +117,20 @@ utf8_decode(bytes) -> String? decoding UTF-8; None on malformed input
 (bad continuation bytes, overlong forms, surrogates, > U+10FFFF).
 """
 fn utf8_decode(bytes: [i64]) -> String?:
-    out = ""
+    # native single pass: the per-byte chr() loop below costs ~1s per MiB, and
+    # HTTP bodies go through here. Kept as the fallback shape for reference
+    # where the native runtime is unavailable.
+    return core.bytes_utf8_decode(bytes)
+
+"""_utf8_decode_slow(bytes) -> reference implementation (unused, kept for clarity)."""
+fn _utf8_decode_slow(bytes: [i64]) -> String?:
+    parts = []
     i = 0
     n = len(bytes)
     while i < n:
         b0 = bytes[i]
         if b0 < 128:
-            out = out + (chr(b0) ?? "")
+            parts.append(chr(b0) ?? "")
             i = i + 1
         elif b0 >= 192 and b0 < 224:
             if i + 1 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192:
@@ -131,7 +138,7 @@ fn utf8_decode(bytes: [i64]) -> String?:
             cp = (b0 - 192) * 64 + (bytes[i + 1] - 128)
             if cp < 128:
                 return None
-            out = out + (chr(cp) ?? "")
+            parts.append(chr(cp) ?? "")
             i = i + 2
         elif b0 >= 224 and b0 < 240:
             if i + 2 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192:
@@ -139,7 +146,7 @@ fn utf8_decode(bytes: [i64]) -> String?:
             cp = (b0 - 224) * 4096 + (bytes[i + 1] - 128) * 64 + (bytes[i + 2] - 128)
             if cp < 2048 or (cp >= 55296 and cp <= 57343):
                 return None
-            out = out + (chr(cp) ?? "")
+            parts.append(chr(cp) ?? "")
             i = i + 3
         elif b0 >= 240 and b0 < 248:
             if i + 3 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192 or bytes[i + 3] < 128 or bytes[i + 3] >= 192:
@@ -147,11 +154,11 @@ fn utf8_decode(bytes: [i64]) -> String?:
             cp = (b0 - 240) * 262144 + (bytes[i + 1] - 128) * 4096 + (bytes[i + 2] - 128) * 64 + (bytes[i + 3] - 128)
             if cp < 65536 or cp > 1114111:
                 return None
-            out = out + (chr(cp) ?? "")
+            parts.append(chr(cp) ?? "")
             i = i + 4
         else:
             return None
-    return out
+    return join(parts, "")
 
 """
 b2s(bytes) -> String interpreting each byte value as a Latin-1 code point
@@ -159,10 +166,10 @@ b2s(bytes) -> String interpreting each byte value as a Latin-1 code point
 by quopri-style codecs; for real UTF-8 text use utf8_decode.
 """
 fn b2s(bytes: [i64]):
-    out = ""
+    parts = []
     for b in bytes:
-        out = out + (chr(b) ?? "")
-    return out
+        parts.append(chr(b) ?? "")
+    return join(parts, "")
 
 """s2b(s) -> [i64] Latin-1 bytes of the string (each char must be <= U+00FF)."""
 fn s2b(s: String):
@@ -173,3 +180,7 @@ fn s2b(s: String):
             core.panic("s2b: character above U+00FF; use utf8_encode")
         out.append(cp)
     return out
+
+"""s2b_fast(s) -> [i64] UTF-8 bytes via the native runtime (no per-char alloc)."""
+fn s2b_fast(s: String):
+    return core.bytes_utf8_encode(s)

@@ -109,7 +109,8 @@ int builtinRuntimeId(const std::string& name) {
       {"net_udp_send", 212}, {"net_udp_recv", 213},
       {"net_send_bytes", 214}, {"net_recv_bytes", 215},
       {"net_tls_wrap", 216}, {"net_inflate_bytes", 217},
-      {"net_inflate_available", 218},
+            {"net_inflate_available", 218},
+      {"bytes_decode_utf8", 222}, {"str_encode_utf8", 223},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -1799,14 +1800,8 @@ class Emitter {
             fail("native module function not supported: " + mb->aux + "." + f.field);
             return "A_NONE";
           }
-          // Native builtin via module (std:math sqrt, etc.)
-          int bid = builtinRuntimeId(f.field);
-          if (bid >= 0) {
-            auto args = positionalArgs(call, out);
-            std::string arr = buildArgv(args, false);
-            return "a_bi_call(" + std::to_string(bid) + ", " +
-                   std::to_string(args.size()) + ", " + arr + ")";
-          }
+          // File module (following __init__ re-exports). The member wins
+          // over a builtin with the same name; builtins are the fallback.
           // Function in that module (following __init__ re-exports).
           auto rm = resolveModuleMember(mb->moduleId, f.field);
           for (FnInfo* fi : fnList_) {
@@ -1830,6 +1825,17 @@ class Emitter {
             std::string arr = buildArgv(args, false);
             return "a_call(" + git->second + ", " + std::to_string(args.size()) +
                    ", " + arr + ")";
+          }
+          // Member not defined in the file module: fall back to the builtin
+          // with the same name (std:math sqrt, etc.).
+          {
+            int bid = builtinRuntimeId(f.field);
+            if (bid >= 0) {
+              auto args = positionalArgs(call, out);
+              std::string arr = buildArgv(args, false);
+              return "a_bi_call(" + std::to_string(bid) + ", " +
+                     std::to_string(args.size()) + ", " + arr + ")";
+            }
           }
         }
       }

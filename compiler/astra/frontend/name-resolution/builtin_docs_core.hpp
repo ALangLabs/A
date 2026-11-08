@@ -33,6 +33,10 @@ inline void addCoreDocs(StringMap<BuiltinDoc>& docs) {
                         "Compile-time signature text \"name(p1, p2)\" for a function value; name only when unknown."}},
       {"fn_doc", {"fn_doc", "fn_doc(fn) -> String",
                   "Docstring attached to a function at compile time; empty string when absent."}},
+      {"bytes_decode_utf8", {"bytes_decode_utf8", "core.bytes_utf8_decode(bytes) -> String?",
+                             "Validating one-pass UTF-8 decode of an [i64] byte array; None when malformed."}},
+      {"str_encode_utf8", {"str_encode_utf8", "core.bytes_utf8_encode(s) -> [i64]",
+                           "One-pass UTF-8 byte array of a string (std:bytes hot path)."}},
   });
 }
 

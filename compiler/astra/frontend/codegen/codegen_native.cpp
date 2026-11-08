@@ -256,7 +256,8 @@ int builtinRuntimeId(const std::string& name) {
       {"net_udp_send", 212}, {"net_udp_recv", 213},
       {"net_send_bytes", 214}, {"net_recv_bytes", 215},
       {"net_tls_wrap", 216}, {"net_inflate_bytes", 217},
-      {"net_inflate_available", 218},
+            {"net_inflate_available", 218},
+      {"bytes_decode_utf8", 222}, {"str_encode_utf8", 223},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -3041,9 +3042,9 @@ class NativeEmitter {
             }
             if (mb && mb->kind == BKind::Module) {
               if (mb->moduleId >= 0) {
-                // A module member: mod.fn / mod.Struct / mod.CONST
-                int bid = builtinRuntimeId(fx.field);
-                if (bid >= 0) { emitBiCall(bid, args); return; }
+                // A module member: mod.fn / mod.Struct / mod.CONST. Resolve
+                // the member first; a builtin with the same name is only a
+                // fallback (kernels.matmul is the A function).
                 // Follow __init__ re-exports to the declaring module.
                 auto rm = resolveModuleMember(mb->moduleId, fx.field);
                 if (FnInfo* mf = findModuleFn(rm.first, rm.second)) {
@@ -3074,6 +3075,10 @@ class NativeEmitter {
                   callSym("a_call");
                   return;
                 }
+                // Member not defined in the file module: fall back to the
+                // builtin with the same name.
+                int bid = builtinRuntimeId(fx.field);
+                if (bid >= 0) { emitBiCall(bid, args); return; }
                 fail("native: unknown module member '" + mid + "." + fx.field + "'");
                 return;
               }

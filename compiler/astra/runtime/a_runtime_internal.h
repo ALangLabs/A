@@ -415,6 +415,9 @@ aval bi_net_recv_bytes(uint64_t n, aval *argv);
 aval bi_net_tls_wrap(uint64_t n, aval *argv);
 aval bi_net_inflate_bytes(uint64_t n, aval *argv);
 aval bi_net_inflate_available(uint64_t n, aval *argv);
+/* bytes_conv.c: linear-time bytes <-> string conversion */
+aval bi_bytes_decode_utf8(uint64_t n, aval *argv);
+aval bi_str_encode_utf8(uint64_t n, aval *argv);
 aval bi_read_bytes(uint64_t n, aval *argv);
 aval bi_write_bytes(uint64_t n, aval *argv);
 aval bi_arena_new(uint64_t n, aval *argv);

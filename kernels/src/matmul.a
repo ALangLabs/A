@@ -28,6 +28,34 @@ fn matmul(a, b):
         out.append(row)
     return out
 
+fn matmul_blocked(a, b, tile):
+    # Cache-blocked matmul (Mojo/CBLAS-style tiling in pure A): the k loop
+    # is outermost per output row and the j loop runs in `tile`-wide blocks,
+    # so the active output row segments stay cache-hot while rows of B
+    # stream sequentially — the ikj order used by tuned dense kernels.
+    # Same contract and result as matmul(), but with fewer cache misses on
+    # large matrices. `tile` must be a positive integer.
+    out = []
+    if len(a) == 0:
+        return out
+    for i in 0..len(a):
+        row = []
+        for j in 0..len(b[0]):
+            row.append(0)
+        out.append(row)
+    for i in 0..len(a):
+        j0 = 0
+        while j0 < len(b[0]):
+            j1 = j0 + tile
+            if j1 > len(b[0]):
+                j1 = len(b[0])
+            for k in 0..len(b):
+                a_ik = a[i][k]
+                for j in j0..j1:
+                    out[i][j] += a_ik * b[k][j]
+            j0 = j1
+    return out
+
 fn transpose(mat):
     out = []
     if len(mat) == 0:

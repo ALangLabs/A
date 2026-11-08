@@ -187,16 +187,19 @@ fn _fill_until(conn, pat: [i64]):
 
 """_read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer."""
 fn _read_n(conn, n: i64):
-    while len(conn._buf) < n:
+    out = _b_slice(conn._buf, 0, n)
+    conn._buf = _b_slice(conn._buf, len(out), len(conn._buf))
+    while len(out) < n:
         chunk = _recv_chunk(conn)
         if len(chunk) == 0:
             break
-        conn._buf.extend(chunk)
-    take = n
-    if take > len(conn._buf):
-        take = len(conn._buf)
-    out = _b_slice(conn._buf, 0, take)
-    conn._buf = _b_slice(conn._buf, take, len(conn._buf))
+        need = n - len(out)
+        if len(chunk) <= need:
+            out.extend(chunk)
+        else:
+            # keep the surplus (pipelined response bytes) for the next read
+            out.extend(_b_slice(chunk, 0, need))
+            conn._buf = _b_slice(chunk, need, len(chunk))
     return out
 
 """_read_line(conn) -> [i64] up to and including CRLF ([] on EOF)."""

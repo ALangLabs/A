@@ -1030,13 +1030,8 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
         if (mb && mb->kind == BKind::Module) {
           // Native modules resolve through the nativeModules() spec first:
           // member names may shadow builtin names (unsafe.set vs set).
-          if (mb->moduleId >= 0) {
-            int bid = builtinRuntimeId(f.field);
-            if (bid >= 0) {
-              emitBiCall(bid, call);
-              return;
-            }
-          }
+          // File modules resolve members through resolveModuleMember below;
+          // builtins with the same member name are only a fallback.
           if (mb->moduleId < 0) {
             // Native module member: resolve module.member -> builtin name
             // via the nativeModules() spec, then dispatch a_bi_call.
@@ -1097,6 +1092,15 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
             }
             emit("    call a_call\n");
             return;
+          }
+          // Member not defined in the file module: fall back to the builtin
+          // with the same name (nativeModules-style access via a file name).
+          {
+            int bid = builtinRuntimeId(f.field);
+            if (bid >= 0) {
+              emitBiCall(bid, call);
+              return;
+            }
           }
           fail("unknown module member '" + f.field + "'");
           return;

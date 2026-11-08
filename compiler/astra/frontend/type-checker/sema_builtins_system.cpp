@@ -126,6 +126,27 @@ TypePtr Sema::checkBuiltinSystem(const std::string& name, CallExpr& call) {
     return typeString();
   }
 
+  if (name == "bytes_decode_utf8") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeOptional(typeString());
+    }
+    checkArgAgainst(*call.args[0].value, typeArray(typeInt(64, true)),
+                    "as the bytes to decode");
+    return typeOptional(typeString());
+  }
+
+  if (name == "str_encode_utf8") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeArray(typeInt(64, true));
+    }
+    checkArgAgainst(*call.args[0].value, typeString(), "as the string to encode");
+    return typeArray(typeInt(64, true));
+  }
+
   if (name == "struct_methods") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);
