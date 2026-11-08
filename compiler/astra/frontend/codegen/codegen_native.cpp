@@ -3149,11 +3149,22 @@ struct Riscv64Target : NatTarget {
   void prologue(std::string& o, int frameBytes) const override {
     frameBytes = alignFrame(frameBytes);
     o += "    addi sp, sp, -" + std::to_string(frameBytes) + "\n";
-    o += "    sd ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
+    // sd/ld imm is ±2048; large frames need an explicit address.
+    if (frameBytes - 8 <= 2047)
+      o += "    sd ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
+    else {
+      o += "    li t4, " + std::to_string(frameBytes - 8) + "\n";
+      o += "    add t4, sp, t4\n    sd ra, 0(t4)\n";
+    }
   }
   void epilogue(std::string& o, int frameBytes) const override {
     frameBytes = alignFrame(frameBytes);
-    o += "    ld ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
+    if (frameBytes - 8 <= 2047)
+      o += "    ld ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
+    else {
+      o += "    li t4, " + std::to_string(frameBytes - 8) + "\n";
+      o += "    add t4, sp, t4\n    ld ra, 0(t4)\n";
+    }
     o += "    addi sp, sp, " + std::to_string(frameBytes) + "\n";
     o += "    ret\n";
   }
@@ -3188,10 +3199,22 @@ struct Riscv64Target : NatTarget {
     if (d != s) o += "    mv " + d + ", " + s + "\n";
   }
   void loadSlot(std::string& o, int slot, const std::string& r) const override {
-    o += "    ld " + r + ", " + slotRef(slot) + "\n";
+    int64_t off = 8 * (int64_t)slot;
+    if (off >= -2048 && off <= 2047) {
+      o += "    ld " + r + ", " + slotRef(slot) + "\n";
+    } else {
+      o += "    li t4, " + std::to_string(off) + "\n";
+      o += "    add t4, sp, t4\n    ld " + r + ", 0(t4)\n";
+    }
   }
   void storeSlot(std::string& o, const std::string& r, int slot) const override {
-    o += "    sd " + r + ", " + slotRef(slot) + "\n";
+    int64_t off = 8 * (int64_t)slot;
+    if (off >= -2048 && off <= 2047) {
+      o += "    sd " + r + ", " + slotRef(slot) + "\n";
+    } else {
+      o += "    li t4, " + std::to_string(off) + "\n";
+      o += "    add t4, sp, t4\n    sd " + r + ", 0(t4)\n";
+    }
   }
   void loadSlotAt(std::string& o, const std::string& baseReg,
                   int64_t byteOff, const std::string& dstReg) const override {
@@ -3205,7 +3228,8 @@ struct Riscv64Target : NatTarget {
     }
   }
   void copySlot(std::string& o, int from, int to) const override {
-    o += "    ld t5, " + slotRef(from) + "\n    sd t5, " + slotRef(to) + "\n";
+    loadSlot(o, from, "t5");
+    storeSlot(o, "t5", to);
   }
   void leaSlot(std::string& o, int slot, const std::string& r) const override {
     int64_t off = 8 * (int64_t)slot;
