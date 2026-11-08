@@ -38,12 +38,12 @@ std::vector<std::string> environmentPaths() {
   return paths;
 }
 
+}  // namespace
+
 std::string stemOf(const std::string& path) {
   std::string stem = fs::path(path).stem().string();
   return stem.empty() ? "module" : stem;
 }
-
-}  // namespace
 
 std::string defaultStdlibRoot() {
   if (const char* env = std::getenv("A_STDLIB"); env && *env) return env;
@@ -70,7 +70,7 @@ std::string defaultStdlibRoot() {
     if (!ec) {
       std::vector<fs::path> found;
       for (fs::path up = cwd; !up.empty(); up = up.parent_path()) { found.push_back(up / "stdlib"); if (up == up.parent_path()) break; }
-      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "prelude.a", e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
+      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / "prelude.a", e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
       for (const auto& f : found) candidates.push_back(f);
     }
   }
@@ -124,10 +124,8 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
   // everywhere. Programs compiled without a stdlib on disk are unaffected.
   std::error_code exists;
   const fs::path stdRoot = fs::path(options_.stdlibRoot);
-  for (const auto& candidate : {stdRoot / "prelude.a",
-                                stdRoot / "std" / "prelude" / "prelude.a",
-                                stdRoot / "std" / "prelude" / "__init__.a",
-                                stdRoot / "std" / "prelude.a"}) {
+  for (const auto& candidate : {stdRoot / "std" / "prelude.a",
+                                stdRoot / "prelude.a"}) {
     if (fs::exists(candidate, exists)) {
       graph_.preludeId = loadModule(candidate.string(), candidate.string(), nullptr);
       break;

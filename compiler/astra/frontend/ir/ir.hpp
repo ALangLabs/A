@@ -68,8 +68,6 @@ enum class Op {
   Opaque,
 };
 
-const char* opName(Op op);
-
 struct Inst {
   Op op = Op::Opaque;
   int id = -1;  // SSA value id; assigned per function

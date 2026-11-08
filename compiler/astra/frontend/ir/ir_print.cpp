@@ -4,6 +4,7 @@
 #include <sstream>
 #include <string>
 
+#include "strings/float_text.hpp"
 #include "strings/utf8.hpp"
 
 namespace a {
@@ -28,12 +29,6 @@ std::string quoteText(const std::string& text) {
   }
   out += '"';
   return out;
-}
-
-std::string floatText(double value) {
-  std::ostringstream stream;
-  stream << value;
-  return stream.str();
 }
 
 void printInst(std::ostream& os, const Inst& inst) {

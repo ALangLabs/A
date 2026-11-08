@@ -10,6 +10,8 @@
 
 #include "ast/ast.hpp"
 #include "ast/builtins.hpp"
+#include "strings/float_text.hpp"
+#include "strings/utf8.hpp"
 
 namespace a {
 
@@ -160,42 +162,6 @@ inline std::string cEscape(const std::string& s) {
     }
   }
   return out;
-}
-
-inline std::string utf8Encode(char32_t cp) {
-  std::string out;
-  if (cp < 0x80) {
-    out.push_back(static_cast<char>(cp));
-  } else if (cp < 0x800) {
-    out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
-    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-  } else if (cp < 0x10000) {
-    out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
-    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-  } else {
-    out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
-    out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
-    out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
-    out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
-  }
-  return out;
-}
-
-inline std::string floatText(double v) {
-  char buf[64];
-  std::snprintf(buf, sizeof buf, "%.17g", v);
-  std::string s = buf;
-  if (s.find_first_of(".eEnN") == std::string::npos) s += ".0";
-  return s;
-}
-
-inline std::string stemOf(const std::string& path) {
-  auto slash = path.find_last_of("/\\");
-  std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
-  auto dot = base.find_last_of('.');
-  if (dot != std::string::npos) base.resize(dot);
-  return base;
 }
 
 struct FnInfo {

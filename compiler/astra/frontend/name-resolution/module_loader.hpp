@@ -72,4 +72,8 @@ class ModuleLoader {
 // executable location, then ./stdlib.
 std::string defaultStdlibRoot();
 
+// Module stem shared by the loader and codegen: basename without extension,
+// "module" when empty.
+std::string stemOf(const std::string& path);
+
 }  // namespace a

@@ -19,50 +19,6 @@
 namespace a {
 namespace ir {
 
-const char* opName(Op op) {
-  switch (op) {
-    case Op::ConstInt: return "const";
-    case Op::ConstFloat: return "const";
-    case Op::ConstBool: return "const";
-    case Op::ConstChar: return "const";
-    case Op::ConstString: return "const";
-    case Op::Param: return "param";
-    case Op::Phi: return "phi";
-    case Op::Copy: return "copy";
-    case Op::Binary: return "binary";
-    case Op::Unary: return "unary";
-    case Op::Select: return "select";
-    case Op::Call: return "call";
-    case Op::CallValue: return "call_value";
-    case Op::Index: return "index";
-    case Op::Slice: return "slice";
-    case Op::Field: return "field";
-    case Op::Array: return "array";
-    case Op::Tuple: return "tuple";
-    case Op::Map: return "map";
-    case Op::Set: return "set";
-    case Op::Range: return "range";
-    case Op::StringConcat: return "concat";
-    case Op::IterInit: return "iter_init";
-    case Op::IterHasNext: return "iter_has_next";
-    case Op::IterNext: return "iter_next";
-    case Op::TupleGet: return "tuple_get";
-    case Op::StoreIndex: return "store_index";
-    case Op::StoreField: return "store_field";
-    case Op::Global: return "global";
-    case Op::FuncRef: return "func";
-    case Op::Lambda: return "lambda";
-    case Op::Cast: return "cast";
-    case Op::GetElementPtr: return "getelementptr";
-    case Op::ExtractValue: return "extractvalue";
-    case Op::InsertValue: return "insertvalue";
-    case Op::Freeze: return "freeze";
-    case Op::Fma: return "fma";
-    case Op::Opaque: return "opaque";
-  }
-  return "?";
-}
-
 TypePtr defaultType(const TypePtr& type) {
   TypePtr resolved = resolveType(type);
   if (!resolved) return nullptr;

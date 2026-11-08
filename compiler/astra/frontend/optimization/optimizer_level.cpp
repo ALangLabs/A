@@ -27,32 +27,6 @@ bool parseOptLevel(const std::string& flag, OptLevel& level) {
   return true;
 }
 
-const char* optLevelName(OptLevel level) {
-  switch (level) {
-    case OptLevel::O0: return "O0";
-    case OptLevel::O1: return "O1";
-    case OptLevel::O2: return "O2";
-    case OptLevel::O3: return "O3";
-    case OptLevel::Os: return "Os";
-    case OptLevel::Oz: return "Oz";
-    case OptLevel::Ofast: return "Ofast";
-  }
-  return "O2";
-}
-
-int optLevelToInt(OptLevel level) {
-  switch (level) {
-    case OptLevel::O0: return 0;
-    case OptLevel::O1: return 1;
-    case OptLevel::O2: return 2;
-    case OptLevel::O3: return 3;
-    case OptLevel::Os: return 1;
-    case OptLevel::Oz: return 1;
-    case OptLevel::Ofast: return 3;
-  }
-  return 2;
-}
-
 bool optLevelFromInt(int value, OptLevel& level) {
   switch (value) {
     case 0: level = OptLevel::O0; return true;

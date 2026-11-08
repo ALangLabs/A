@@ -12,8 +12,6 @@ enum class OptLevel : int { O0 = 0, O1 = 1, O2 = 2, O3 = 3, Os = -1, Oz = -2, Of
 // Parses "-O0".." -O3", "-Os", "-Oz", "-Ofast" (and "--opt-level=N").
 // Returns false on an unrecognized spelling.
 bool parseOptLevel(const std::string& flag, OptLevel& level);
-const char* optLevelName(OptLevel level);
-int optLevelToInt(OptLevel level);
 bool optLevelFromInt(int value, OptLevel& level);
 
 // Optimization statistics collected while a pass walks the program.

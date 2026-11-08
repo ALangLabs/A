@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstdint>
-#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -93,12 +92,6 @@ class Sema {
   // Type-var unification is serialised by a global lock, so results are
   // identical to analyze(), just faster on multi-module programs.
   SemaResult analyzeParallel(int jobs);
-  // Non-blocking entry point for LSP/CLI: runs analyzeParallel() on a
-  // background thread so the caller (editor, CLI) never blocks on checking.
-  struct AsyncHandle {
-    std::future<SemaResult> future;
-  };
-  std::shared_ptr<AsyncHandle> analyzeAsync(int jobs = 0);
 
  private:
   struct VarSym {

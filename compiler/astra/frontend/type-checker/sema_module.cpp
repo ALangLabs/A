@@ -257,19 +257,6 @@ void Sema::analyzeModule(Module& module) {
   checkModule(module);
 }
 
-std::shared_ptr<Sema::AsyncHandle> Sema::analyzeAsync(int jobs) {
-  auto handle = std::make_shared<AsyncHandle>();
-  // Move a clone that owns a copy of the graph/sink references; the caller
-  // keeps its graph alive until wait() is called.
-  ModuleGraph& graph = graph_;
-  DiagnosticSink& sink = sink_;
-  handle->future = std::async(std::launch::async, [&graph, &sink, jobs] {
-    Sema worker(graph, sink);
-    return worker.analyzeParallel(jobs);
-  });
-  return handle;
-}
-
 void Sema::registerModule(Module& module) {
   currentModule_ = module.id;
   scopes_.clear();

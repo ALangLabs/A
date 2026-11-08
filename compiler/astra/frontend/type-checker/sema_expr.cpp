@@ -301,8 +301,6 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     requireInteger(lhs, expr.lhs->span, "The range start");
     requireInteger(rhs, expr.rhs->span, "The range end");
     if (!unify(lhs, rhs)) {
-      (void)0; if (false) sink_.error(expr.opSpan, "Range endpoints must have the same integer type, found " +
-                                   typeName(lhs) + " and " + typeName(rhs) + ".");
       return typeError();
     }
     return typeRange(lhs);
@@ -312,9 +310,6 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     requireInteger(lhs, expr.lhs->span, "The left operand of '" + op + "'");
     requireInteger(rhs, expr.rhs->span, "The right operand of '" + op + "'");
     if (!unify(lhs, rhs)) {
-      (void)0; if (false) sink_.error(expr.opSpan, "Operator '" + op + "' requires both operands to have the same "
-                               "integer type, found " + typePhrase(lhs) + " and " +
-                                   typePhrase(rhs) + ".");
       return typeError();
     }
     return lhs;

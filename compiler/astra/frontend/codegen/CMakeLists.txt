@@ -10,5 +10,5 @@ add_library(a_codegen STATIC
   codegen_native.cpp
   codegen_stmt.cpp
 )
-target_link_libraries(a_codegen PUBLIC a_type_checker a_project_options)
+target_link_libraries(a_codegen PUBLIC a_type_checker a_runtime a_project_options)
 add_library(a::codegen ALIAS a_codegen)
