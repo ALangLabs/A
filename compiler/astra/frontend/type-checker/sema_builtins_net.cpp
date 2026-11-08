@@ -26,7 +26,8 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     return typeInt(64, true);
   }
 
-  if (name == "net_accept" || name == "net_local_port" || name == "net_close") {
+  if (name == "net_accept" || name == "net_local_port" || name == "net_close" ||
+      name == "net_recv_status") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);
       inferCallArgTypes(call);

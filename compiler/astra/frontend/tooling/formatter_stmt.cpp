@@ -109,7 +109,8 @@ void Formatter::emitBlockStatement(const Stmt& statement, int level, int nextLin
 
 void Formatter::emitFunction(const FnDecl& decl, int level, int nextLine, int& lastLine) {
     emitDocstring(decl.doc, level);
-    std::string header = signatureText(decl) + ":";
+    std::string header = signatureText(
+        decl, [this, level](const Expr& e) { return exprText(e, 0, level + 1); }) + ":";
     emitHeader(header, level, decl.span, lastLine);
     lastLine = emitStatements(decl.body, level + 1, nextLine, decl.span.line);
   }
@@ -260,7 +261,10 @@ void Formatter::emitTrait(const TraitDecl& decl, int level, int nextLine, int& l
       const int next = i + 1 < decl.methods.size() ? decl.methods[i + 1].span.line : nextLine;
       emitLeadingComments(sig.span.line, level + 1, lastLine);
       ensureGap(sig.span.line, lastLine);
-      std::string text = "fn " + sig.name + paramsText(sig.params);
+      std::string text = "fn " + sig.name +
+          paramsText(sig.params, [this, level](const Expr& e) {
+            return exprText(e, 0, level + 2);
+          });
       if (sig.returnType) text += " -> " + typeText(sig.returnType.get());
       emitDocstring(sig.doc, level + 1);
       output_ += indentText(level + 1) + text + '\n';

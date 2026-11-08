@@ -1,0 +1,381 @@
+# std.http.client — HTTP/1.1 client (Python http.client / requests-lite).
+#
+# Built on the native `net` module: net.tcp_connect / net.tls_connect /
+# net.send / net.recv / net.close / net.set_timeout.
+#
+#   conn = http_connection("example.com")        # or https_connection(...)
+#   conn.request("GET", "/path", headers={"X": "y"})
+#   resp = conn.getresponse()                      # -> Response
+#   resp.status, resp.reason, resp.headers, resp.body
+#
+#   resp = http_get("http://example.com/")         # one-shot helpers
+#   resp = http_post(url, data="...", json={...})
+#
+# shortcut: bodies are A strings (UTF-8); binary payloads are not supported.
+# shortcut: recv() returns "" on EOF *and* on timeout — bodies delimited by
+#   connection close rely on the server closing promptly.
+import std:net
+import std:core
+import std:json
+from "urls.a" import urlsplit, urlunsplit, UrlParts
+
+class Response:
+    status: i64
+    reason: String
+    headers: {String: String}
+    body: String
+    url: String
+    encoding: String
+    is_ok: bool
+
+    fn text(self):
+        return self.body
+
+    fn json(self):
+        return json.parse(self.body)
+
+    """raise_for_status() -> panics when status >= 400 (requests analogue)."""
+    fn raise_for_status(self):
+        if self.status >= 400:
+            core.panic("http: {self.status} {self.reason} for url '{self.url}'")
+
+"""_headers_map(lines) -> {String: String} lowercased names, last wins."""
+fn _headers_map(lines: [String]):
+    m = {}
+    for line in lines:
+        i = line.find(":")
+        if i <= 0:
+            continue
+        name = line[0..i].strip().lower()
+        m[name] = line[i + 1..].strip()
+    return m
+
+"""_hex_val(c) -> i64, -1 when not a hex digit (c is a 1-char string)."""
+fn _hex_val(c: String):
+    d = "0123456789abcdef".find(c.lower())
+    return d
+
+"""_parse_hex(s) -> i64 value of hex string s (leading ws skipped)."""
+fn _parse_hex(s: String):
+    val = 0
+    started = false
+    for c in s.chars():
+        d = _hex_val(str(c))
+        if d < 0:
+            if started:
+                break
+            continue
+        started = true
+        val = val * 16 + d
+    return val
+
+"""
+_dechunk(s) -> String decoding a complete chunked transfer body (pure).
+Chunk data may itself contain "\r\n", so this walks by byte offsets.
+"""
+fn _dechunk(s: String):
+    body = ""
+    pos = 0
+    n = len(s)
+    while pos < n:
+        e = s.find("\r\n", pos)
+        if e < 0:
+            break
+        size = _parse_hex(s[pos..e])
+        pos = e + 2
+        if size <= 0:
+            break
+        if pos + size > n:
+            size = n - pos
+        body = body + s[pos..pos + size]
+        pos = pos + size + 2
+    return body
+
+"""_is_redirect_status(status) -> bool (requests REDIRECT_STATI)."""
+fn _is_redirect_status(status: i64):
+    return status == 301 or status == 302 or status == 303 or status == 307 or status == 308
+
+"""
+_read_n(conn, n) -> String reading exactly n bytes via the recv buffer.
+"""
+fn _read_n(conn, n: i64):
+    out = ""
+    while len(conn._buf) < n:
+        chunk = net.recv(conn.sock, 65536)
+        if chunk == "":
+            break
+        conn._buf = conn._buf + chunk
+    take = n
+    if take > len(conn._buf):
+        take = len(conn._buf)
+    out = conn._buf[0..take]
+    conn._buf = conn._buf[take..]
+    return out
+
+"""_read_line(conn) -> String up to and including "\r\n" ("" on EOF)."""
+fn _read_line(conn):
+    while conn._buf.find("\r\n") < 0:
+        chunk = net.recv(conn.sock, 65536)
+        if chunk == "":
+            break
+        conn._buf = conn._buf + chunk
+    i = conn._buf.find("\r\n")
+    if i < 0:
+        out = conn._buf
+        conn._buf = ""
+        return out
+    out = conn._buf[0..i + 2]
+    conn._buf = conn._buf[i + 2..]
+    return out
+
+"""_read_headers(conn) -> ([String] raw lines, first line excluded? no: all)."""
+fn _read_headers(conn):
+    while conn._buf.find("\r\n\r\n") < 0:
+        chunk = net.recv(conn.sock, 65536)
+        if chunk == "":
+            break
+        conn._buf = conn._buf + chunk
+    i = conn._buf.find("\r\n\r\n")
+    raw = ""
+    if i < 0:
+        # EOF before header terminator: treat everything as headers
+        raw = conn._buf
+        conn._buf = ""
+    else:
+        raw = conn._buf[0..i + 4]
+        conn._buf = conn._buf[i + 4..]
+    lines = raw.split("\r\n")
+    # drop trailing empty strings
+    while len(lines) > 0 and lines[len(lines) - 1] == "":
+        lines.pop()
+    return lines
+
+"""_read_body(conn, headers) -> String body per framing rules."""
+fn _read_body(conn, headers):
+    te = headers.get("transfer-encoding")
+    if te != None and te.lower().contains("chunked"):
+        # RFC 7230: chunked beats content-length when both are present
+        raw = ""
+        while true:
+            size_line = _read_line(conn)
+            if size_line == "":
+                break
+            raw = raw + size_line
+            size = _parse_hex(size_line)
+            if size <= 0:
+                # consume trailers until blank line
+                while true:
+                    t = _read_line(conn)
+                    if t == "" or t == "\r\n":
+                        break
+                break
+            raw = raw + _read_n(conn, size)
+            raw = raw + _read_line(conn)  # trailing CRLF after chunk data
+        return _dechunk(raw)
+    cl = headers.get("content-length")
+    if cl != None:
+        n = int(cl)
+        if n < 0:
+            n = 0
+        return _read_n(conn, n)
+    # read until close
+    body = ""
+    while true:
+        chunk = net.recv(conn.sock, 65536)
+        if chunk == "":
+            break
+        body = body + chunk
+    return body
+
+class HTTPConnection:
+    host: String
+    port: i64
+    timeout: i64        # milliseconds, 0 = block forever
+    tls: bool
+    sock: i64
+    connected: bool
+    _buf: String        # read buffer (private by convention)
+
+    fn _fail(self, msg):
+        core.panic("http: " + msg)
+
+    fn connect(self):
+        if self.connected:
+            return self
+        if self.tls:
+            if not net.tls_available():
+                self._fail("TLS not available (libssl not found)")
+            self.sock = net.tls_connect(self.host, str(self.port))
+        else:
+            self.sock = net.tcp_connect(self.host, str(self.port))
+        if self.sock < 0:
+            self._fail("connect failed: {self.host}:{self.port}")
+        if self.timeout > 0:
+            net.set_timeout(self.sock, self.timeout)
+        self.connected = true
+        return self
+
+    fn close(self):
+        if self.connected:
+            net.close(self.sock)
+            self.connected = false
+
+    # Send an HTTP request; body is a String or None.
+    fn request(self, method: String, path: String, body = None, headers = None):
+        self.connect()
+        h = ""
+        if headers != None:
+            for kv in headers.items():
+                h = h + kv[0] + ": " + kv[1] + "\r\n"
+        has_body = body != None and body != ""
+        need_cl = has_body
+        if headers != None:
+            if headers.get("content-length") != None or headers.get("Content-Length") != None:
+                need_cl = false
+        if has_body and need_cl:
+            h = h + "Content-Length: " + str(len(body ?? "")) + "\r\n"
+        req = method + " " + path + " HTTP/1.1\r\n"
+        req = req + "Host: " + self.host + "\r\n"
+        req = req + "User-Agent: a-http/0.1\r\n"
+        req = req + "Accept: */*\r\n"
+        req = req + "Connection: close\r\n"
+        req = req + h
+        req = req + "\r\n"
+        net.send(self.sock, req)
+        if has_body:
+            net.send(self.sock, body)
+        return self
+
+    fn getresponse(self):
+        self.connect()
+        lines = _read_headers(self)
+        if len(lines) == 0:
+            self._fail("empty response (connection closed?)")
+        status_line = lines[0]
+        parts = status_line.split(" ", 2)
+        status = 0
+        if len(parts) >= 2:
+            status = int(parts[1])
+        reason = ""
+        if len(parts) >= 3:
+            reason = parts[2]
+        hdrs = _headers_map(lines[1..])
+        body = _read_body(self, hdrs)
+        self.close()
+        enc = hdrs.get("content-type", "")
+        encoding = "utf-8"
+        if enc.contains("charset="):
+            i = enc.find("charset=")
+            encoding = enc[i + 8..].split(";")[0].strip()
+        return Response(status, reason, hdrs, body, "", encoding, status >= 200 and status < 400)
+
+"""http_connection(host, port=80, timeout=0) -> HTTPConnection"""
+fn http_connection(host: String, port = 80, timeout = 0):
+    return HTTPConnection(host, port, timeout, false, -1, false, "")
+
+"""https_connection(host, port=443, timeout=0) -> HTTPConnection"""
+fn https_connection(host: String, port = 443, timeout = 0):
+    return HTTPConnection(host, port, timeout, true, -1, false, "")
+
+"""_conn_for(url, timeout) -> (HTTPConnection, UrlParts) or panics."""
+fn _conn_for(url: String, timeout: i64):
+    parts = urlsplit(url)
+    if parts == None:
+        core.panic("http: bad url '{url}'")
+    p = parts!
+    if p.scheme == "https":
+        return (https_connection(p.host, p.port, timeout), p)
+    return (http_connection(p.host, p.port, timeout), p)
+
+"""
+request(method, url, body=None, headers=None, params=None, timeout=0,
+        allow_redirects=true, max_redirects=10) -> Response
+One-shot request following redirects. params is a {String: String} map
+appended as a query string (not percent-encoded — shortcut).
+"""
+fn request(method: String, url: String, body = None, headers = None,
+           params = None, timeout = 0, allow_redirects = true, max_redirects = 10):
+    u = url
+    m = method.upper()
+    b = body
+    redirects = 0
+    while true:
+        if params != None and len(params) > 0:
+            sep = "?"
+            if u.contains("?"):
+                sep = "&"
+            for kv in params.items():
+                u = u + sep + kv[0] + "=" + kv[1]
+                sep = "&"
+            params = None
+        (conn, parts) = _conn_for(u, timeout)
+        qpath = parts.path
+        if parts.query != "":
+            qpath = parts.path + "?" + parts.query
+        conn.request(m, qpath, b, headers)
+        resp = conn.getresponse()
+        resp.url = u
+        is_redirect = _is_redirect_status(resp.status)
+        if allow_redirects and redirects < max_redirects and is_redirect:
+            loc = resp.headers.get("location")
+            if loc != None and loc != "":
+                redirects = redirects + 1
+                # 303 and POST->301/302 become GET without a body
+                to_get = resp.status == 303 or (m == "POST" and resp.status != 307 and resp.status != 308)
+                if to_get:
+                    m = "GET"
+                    b = None
+                base = parts.scheme + "://" + parts.host
+                if parts.port > 0 and parts.port != _default_port_for(parts.scheme):
+                    base = base + ":" + str(parts.port)
+                if loc.startswith("//"):
+                    u = parts.scheme + ":" + loc
+                elif loc.startswith("/"):
+                    u = base + loc
+                elif loc.startswith("http://") or loc.startswith("https://"):
+                    u = loc
+                else:
+                    u = base + "/" + loc
+                continue
+        return resp
+    # unreachable: while true always returns or continues
+    return Response(0, "", {}, "", "", "utf-8", false)
+
+"""_default_port_for(scheme) -> i64 local helper (mirrors urls._default_port)."""
+fn _default_port_for(scheme: String):
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return 0
+
+"""get(url, **kwargs) -> Response"""
+fn get(url: String, headers = None, params = None, timeout = 0,
+        allow_redirects = true):
+    return request("GET", url, None, headers, params, timeout, allow_redirects)
+
+"""post(url, data=None, json=None, **kwargs) -> Response"""
+fn post(url: String, data = None, json_data = None, headers = None,
+         params = None, timeout = 0):
+    b = data
+    h = headers
+    if json_data != None:
+        b = json.stringify(json_data)
+        if h == None:
+            h = {}
+        h["Content-Type"] = "application/json"
+    return request("POST", url, b, h, params, timeout)
+
+"""delete/put/patch/head helpers."""
+fn delete(url: String, headers = None, params = None, timeout = 0):
+    return request("DELETE", url, None, headers, params, timeout)
+
+fn put(url: String, data = None, headers = None, params = None, timeout = 0):
+    return request("PUT", url, data, headers, params, timeout)
+
+fn patch(url: String, data = None, headers = None, params = None, timeout = 0):
+    return request("PATCH", url, data, headers, params, timeout)
+
+fn head(url: String, headers = None, params = None, timeout = 0):
+    return request("HEAD", url, None, headers, params, timeout)
+

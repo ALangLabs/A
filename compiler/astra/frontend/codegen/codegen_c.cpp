@@ -94,6 +94,11 @@ int builtinRuntimeId(const std::string& name) {
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
       {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
+      {"net_tcp_connect", 196}, {"net_send", 197}, {"net_recv", 198},
+      {"net_close", 199}, {"net_set_timeout", 200}, {"net_local_port", 201},
+      {"net_tls_connect", 202},
+      {"net_recv_status", 203},
+      {"read_bytes", 204}, {"write_bytes", 205},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -646,6 +651,57 @@ class Emitter {
     }
   }
 
+  // Follow `from "x.a" import name` re-exports (package __init__ modules) to
+  // the module that actually declares `name`. Returns {moduleId, name};
+  // unchanged when there is no re-export. Native/python re-exports are not
+  // followed (shortcut: module values have no runtime representation).
+  std::pair<int, std::string> resolveModuleMember(int moduleId,
+                                                  const std::string& name) {
+    std::string cur = name;
+    for (int depth = 0; moduleId >= 0 && depth < 16; ++depth) {
+      if (moduleId >= (int)graph_.modules.size()) break;
+      const Module& mod = graph_.at(moduleId);
+      if (!mod.program) break;
+      bool declared = false;
+      for (const StmtPtr& s : mod.program->statements) {
+        if ((s->kind == StmtKind::FnDecl &&
+             static_cast<const FnDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::StructDecl &&
+             static_cast<const StructDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::EnumDecl &&
+             static_cast<const EnumDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::Let &&
+             static_cast<const LetStmt*>(s.get())->name == cur)) {
+          declared = true;
+          break;
+        }
+      }
+      if (declared) break;
+      int nextId = -1;
+      std::string nextName;
+      for (const StmtPtr& s : mod.program->statements) {
+        if (s->kind != StmtKind::FromImport) continue;
+        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
+          continue;
+        for (const auto& item : im->items) {
+          // `import x as y` re-exports under the alias; recurse on the
+          // source name in the source module.
+          if (item.name == cur || (!item.alias.empty() && item.alias == cur)) {
+            nextId = im->moduleId;
+            nextName = item.name;
+            break;
+          }
+        }
+        if (nextId >= 0) break;
+      }
+      if (nextId < 0) break;
+      moduleId = nextId;
+      cur = nextName;
+    }
+    return {moduleId, cur};
+  }
+
   // ---- function / main emission ------------------------------------------
   // Traceback frame info: module path + def line for a_frame_push().
   std::string frameFile(int moduleId) const {
@@ -842,6 +898,21 @@ class Emitter {
       bindModuleImportStmts(mod);
       curModuleId_ = mod.id;
       emitBody(mod.program->statements, fn, true);
+    }
+    // `fn main()` entry point: invoked once after all module top-levels,
+    // entry module only. Never runs for imports or under `a test`.
+    for (FnInfo* f : fnList_) {
+      if (f->isMethod || f->moduleId != graph_.entry || f->name != "main") continue;
+      int np = (int)f->paramNames.size();
+      fn << "{ aval __a_main_argv[" << (np + 1) << "]; __a_main_argv[0] = A_NONE;\n";
+      for (int i = 0; i < np; ++i) {
+        if (f->variadic && i == np - 1)
+          fn << "__a_main_argv[" << (i + 1) << "] = a_list_new(0, NULL);\n";
+        else
+          fn << "__a_main_argv[" << (i + 1) << "] = A_TAG;\n";
+      }
+      fn << f->cname << "(__a_main_argv); }\n";
+      break;
     }
     if (testMode_) {
       // Run a single named test (argv[1]) or all tests.
@@ -1437,15 +1508,17 @@ class Emitter {
                 }
               }
               // Top-level let / fn / struct in that module: c.LIMIT
+              // (following `from x import y` re-exports in __init__ files).
               if (chain.size() == 1) {
-                auto it = topLevelGlobals_.find(std::to_string(mb->moduleId) + ":" + chain[0]);
+                auto rm = resolveModuleMember(mb->moduleId, chain[0]);
+                auto it = topLevelGlobals_.find(std::to_string(rm.first) + ":" + rm.second);
                 if (it != topLevelGlobals_.end()) return it->second;
                 for (FnInfo* fi : fnList_) {
-                  if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == chain[0])
+                  if (!fi->isMethod && fi->moduleId == rm.first && fi->name == rm.second)
                     return fi->globalVar;
                 }
                 for (StructInfo* st : structList_) {
-                  if (st->moduleId == mb->moduleId && st->name == chain[0])
+                  if (st->moduleId == rm.first && st->name == rm.second)
                     return st->globalVar;
                 }
               }
@@ -1810,20 +1883,29 @@ class Emitter {
             return "a_bi_call(" + std::to_string(bid) + ", " +
                    std::to_string(args.size()) + ", " + arr + ")";
           }
-          // Function in that module.
+          // Function in that module (following __init__ re-exports).
+          auto rm = resolveModuleMember(mb->moduleId, f.field);
           for (FnInfo* fi : fnList_) {
-            if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == f.field) {
+            if (!fi->isMethod && fi->moduleId == rm.first && fi->name == rm.second) {
               auto args = orderArgs(call, fi->paramNames, out, fi->variadic ? (int)fi->paramNames.size()-1 : -1);
               std::string arr = buildArgv(args, true);
               return fi->cname + "(" + arr + ")";
             }
           }
           for (StructInfo* st : structList_) {
-            if (st->moduleId == mb->moduleId && st->name == f.field) {
+            if (st->moduleId == rm.first && st->name == rm.second) {
               auto args = orderArgs(call, st->fieldNames, out, -1, "A_NONE");
               std::string arr = buildArgv(args, true);
               return st->ctorCname + "(" + arr + ")";
             }
+          }
+          // Module-level let holding a callable: mod.handler(...).
+          auto git = topLevelGlobals_.find(std::to_string(rm.first) + ":" + rm.second);
+          if (git != topLevelGlobals_.end()) {
+            auto args = positionalArgs(call, out);
+            std::string arr = buildArgv(args, false);
+            return "a_call(" + git->second + ", " + std::to_string(args.size()) +
+                   ", " + arr + ")";
           }
         }
       }

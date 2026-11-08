@@ -32,4 +32,3 @@ fn main():
     print(nested(4))
     print(nested(100))
 
-main()

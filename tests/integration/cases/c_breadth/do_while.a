@@ -9,4 +9,3 @@ fn main():
         j += 1
     while j < 0
     print(j)
-main()

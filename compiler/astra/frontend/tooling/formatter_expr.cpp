@@ -239,7 +239,8 @@ std::string Formatter::sliceText(const SliceExpr& slice, int parent, int indent)
   }
 
 std::string Formatter::lambdaText(const LambdaExpr& lambda, int parent, int indent) {
-    std::string text = "fn" + paramsText(lambda.params);
+    std::string text = "fn" + paramsText(lambda.params,
+        [this, indent](const Expr& e) { return exprText(e, 0, indent + 1); });
     if (lambda.returnType) text += " -> " + typeText(lambda.returnType.get());
     text += " => " + exprText(*lambda.body, 0, indent);
     return postfixWrap(text, parent, 0);

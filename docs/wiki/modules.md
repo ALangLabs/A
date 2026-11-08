@@ -35,3 +35,16 @@ from python:json import loads
 
 Any `.a` file is a module; `examples/modules/lib/mathx.a` shows a typical
 fixture. Top-level statements run once at import.
+
+## Entry point: `fn main()`
+
+If the entry file (the one passed to `a run`/`a build`) declares `fn main()`,
+it is invoked automatically once all module top-level statements have run —
+imports initialize first, then `main()`. No explicit `main()` call is needed,
+and calling it yourself runs it twice.
+
+`fn main` is never invoked for imported modules: a library that happens to
+define `main` stays inert when imported. `a test` skips `main` entirely and
+drives `fn test_*()` instead. Parameters are optional — omitted arguments
+behave like a normal call with missing args (defaults apply; a trailing
+`*args` collects an empty list).

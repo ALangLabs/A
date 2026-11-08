@@ -12,4 +12,3 @@ fn main():
             print(i)
         print(i)
 
-main()

@@ -50,6 +50,47 @@ static aval write_file_impl(aval pathv, aval textv, const char *mode, const char
 aval bi_write_file(uint64_t n, aval *argv) { want_args("write_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "wb", "write_file"); }
 aval bi_append_file(uint64_t n, aval *argv) { want_args("append_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "ab", "append_file"); }
 
+aval bi_read_bytes(uint64_t n, aval *argv) {
+    want_args("read_bytes", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+    size_t len;
+    char *data = read_all_file(path, &len);
+    AVec out = { NULL, 0, 0 };
+    for (size_t i = 0; i < len; ++i)
+        avec_push(&out, a_mkint((unsigned char)data[i]));
+    aval r = list_from_vec(out.p, (uint64_t)out.len, 0);
+    free(out.p);
+    free(data);
+    return r;
+}
+
+aval bi_write_bytes(uint64_t n, aval *argv) {
+    want_args("write_bytes", n, 2, 2);
+    const char *path = path_arg(argv[0], "path");
+    AArr *a = arr_of(argv[1], "write_bytes bytes");
+    uint64_t len = a->h.len;
+    char *buf = (char *)xmalloc(len ? len : 1);
+    for (uint64_t i = 0; i < len; ++i) {
+        int64_t v = expect_int64(arr_elem(a, i), "write_bytes byte");
+        if (v < 0 || v > 255) {
+            free(buf);
+            panicf("write_bytes: byte value %lld out of range 0-255",
+                   (long long)v);
+        }
+        buf[i] = (char)v;
+    }
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(buf); panicf("cannot open file '%s'", path); }
+    if (len && fwrite(buf, 1, (size_t)len, f) != len) {
+        fclose(f);
+        free(buf);
+        panicf("cannot write file '%s'", path);
+    }
+    fclose(f);
+    free(buf);
+    return A_NONE;
+}
+
 aval bi_file_size(uint64_t n, aval *argv) {
     want_args("file_size", n, 1, 1);
     const char *path = path_arg(argv[0], "path");

@@ -9,4 +9,3 @@ fn main():
     for i in 0..10..4:
         total += i
     print(total)
-main()

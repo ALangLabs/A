@@ -86,6 +86,11 @@ inline int builtinRuntimeId(const std::string& name) {
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
       {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
+      {"net_tcp_connect", 196}, {"net_send", 197}, {"net_recv", 198},
+      {"net_close", 199}, {"net_set_timeout", 200}, {"net_local_port", 201},
+      {"net_tls_connect", 202},
+      {"net_recv_status", 203},
+      {"read_bytes", 204}, {"write_bytes", 205},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

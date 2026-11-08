@@ -6,4 +6,3 @@ fn main():
     print('\u{1F600}')
     print("\u{41}\u{42}")
     print(len("\a\b\f\v"))
-main()

@@ -89,6 +89,39 @@ TypePtr Sema::checkBuiltinIo(const std::string& name, CallExpr& call) {
     return typeVoid();
   }
 
+  if (name == "read_bytes") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeArray(typeInt(64, true));
+    }
+    TypePtr type = inferExpr(*call.args[0].value);
+    if (!unify(type, typeString())) {
+      reportMismatch(type, typeString(), call.args[0].value->span,
+                     "in the path passed to 'read_bytes'");
+    }
+    return typeArray(typeInt(64, true));
+  }
+
+  if (name == "write_bytes") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeVoid();
+    }
+    TypePtr path = inferExpr(*call.args[0].value);
+    if (!unify(path, typeString())) {
+      reportMismatch(path, typeString(), call.args[0].value->span,
+                     "in the path passed to 'write_bytes'");
+    }
+    TypePtr bytes = inferExpr(*call.args[1].value);
+    if (!unify(bytes, typeArray(typeInt(64, true)))) {
+      reportMismatch(bytes, typeArray(typeInt(64, true)), call.args[1].value->span,
+                     "in the bytes passed to 'write_bytes'");
+    }
+    return typeVoid();
+  }
+
   if (name == "file_exists") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);

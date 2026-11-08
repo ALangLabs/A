@@ -25,4 +25,3 @@ fn main():
     print(describe(Color.Purple))
     c = Color.Blue
     print(c + 1)
-main()

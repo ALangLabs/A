@@ -574,22 +574,25 @@ int astraBuild(const std::string& arch, const std::string& srcPath, const std::s
         "-o", outPath};
     int rc = runAstra(arch, args);
     if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
-    // Pad to one boot sector and stamp the 0xAA55 signature. Images
-    // larger than 512 bytes need a multi-sector loader (not yet
-    // implemented) — warn so the limitation is visible.
+    // Pad to a whole number of 512-byte sectors, stamp the boot signature,
+    // and record the sector count at offset 0x1F8 for the .boot loader
+    // (which loads sectors 1..n-1 via int 13h AH=42h).
     std::error_code ec;
     auto sz = std::filesystem::file_size(outPath, ec);
     if (!ec) {
-      if (sz > 512) {
-        err << "warning: i8086 image is " << sz << " bytes (>512); only the "
-               "first sector will be loaded by the BIOS boot path\n";
-      }
+      const std::uint64_t sectors = (sz + 511) / 512;
+      const std::uint64_t padded = sectors * 512;
       std::fstream f(outPath, std::ios::in | std::ios::out | std::ios::binary);
       if (f) {
-        if (sz < 512) {
-          std::string pad(512 - (size_t)sz, '\x90');
+        if (sz < padded) {
+          std::string pad((std::size_t)(padded - sz), '\x90');
           f.seekp(0, std::ios::end); f.write(pad.data(), (std::streamsize)pad.size());
         }
+        const std::uint32_t ns = (std::uint32_t)sectors;
+        f.seekp(0x1F8);
+        char nb[4] = {(char)(ns & 0xFF), (char)((ns >> 8) & 0xFF),
+                      (char)((ns >> 16) & 0xFF), (char)((ns >> 24) & 0xFF)};
+        f.write(nb, 4);
         f.seekp(510);
         char sig[2] = {(char)0x55, (char)0xAA};
         f.write(sig, 2);

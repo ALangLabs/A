@@ -4,4 +4,3 @@ enum Color:
 
 fn main():
     print(Color.Pink)
-main()

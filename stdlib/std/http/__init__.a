@@ -1,4 +1,7 @@
-# This package is backed by the native module `http` implemented in the
-# toolchain (see compiler/astra/frontend/name-resolution/native_modules.hpp and
-# compiler/astra/frontend/backend/stdlib/builtins.cpp). `import http` resolves to
-# the native implementation.
+# std.http — HTTP/1.1 client package (Python http.client / requests-lite).
+#
+#   from std:http import get, post, request, http_connection, https_connection
+#   resp = get("https://example.com/")
+#   resp.status, resp.headers, resp.body, resp.text(), resp.json()
+from "client.a" import Response, HTTPConnection, http_connection, https_connection, request, get, post, delete, put, patch, head
+from "urls.a" import UrlParts, urlsplit, urlunsplit

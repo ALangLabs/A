@@ -1,0 +1,88 @@
+# std.http.urls — URL parsing (Python urllib.parse.urlsplit analogue).
+#
+# urlsplit(url) -> UrlParts {scheme, host, port, path, query}
+# Defaults: http -> 80, https -> 443. Returns None on unparseable input.
+
+class UrlParts:
+    scheme: String
+    host: String
+    port: i64
+    path: String
+    query: String
+
+"""_default_port(scheme) -> i64"""
+fn _default_port(scheme: String):
+    if scheme == "https":
+        return 443
+    if scheme == "http":
+        return 80
+    return 0
+
+"""
+_split_port(authority) -> (host, port_or_-1). Splits on the last ':' and
+keeps the host side verbatim (IPv6 literals are not specially handled).
+"""
+fn _split_port(authority: String):
+    i = authority.rfind(":")
+    if i < 0:
+        return (authority, -1)
+    host = authority[0..i]
+    port_s = authority[i + 1..]
+    if port_s == "" or not port_s.isdigit():
+        return (authority, -1)
+    return (host, int(port_s))
+
+"""
+urlsplit(url) -> UrlParts? parsing "scheme://host[:port]/path?query".
+Only http/https are meaningful; other schemes still parse but port defaults
+to 0. None when the URL has no "://" or empty host.
+"""
+fn urlsplit(url: String):
+    s = url.strip()
+    i = s.find("://")
+    if i < 0:
+        return None
+    scheme = s[0..i].lower()
+    rest = s[i + 3..]
+    # strip fragment and query from the tail search space
+    end = len(rest)
+    h = rest.find("#")
+    if h >= 0:
+        end = h
+    q = rest.find("?")
+    qend = end
+    if q >= 0 and q < end:
+        qend = q
+    slash = rest.find("/")
+    auth_end = qend
+    if slash >= 0 and slash < qend:
+        auth_end = slash
+    authority = rest[0..auth_end]
+    at = authority.rfind("@")
+    hostport = authority
+    if at >= 0:
+        hostport = authority[at + 1..]
+    (host, port) = _split_port(hostport)
+    if host == "":
+        return None
+    if port < 0:
+        port = _default_port(scheme)
+    tail = rest[auth_end..end]
+    path = tail
+    query = ""
+    if q >= 0 and q < end:
+        query = rest[q + 1..end]
+        path = rest[auth_end..q]
+    if path == "":
+        path = "/"
+    return Some(UrlParts(scheme, host, port, path, query))
+
+"""urlunsplit(parts) -> String"""
+fn urlunsplit(parts: UrlParts):
+    u = parts.scheme + "://" + parts.host
+    if parts.port > 0 and parts.port != _default_port(parts.scheme):
+        u = u + ":" + str(parts.port)
+    u = u + parts.path
+    if parts.query != "":
+        u = u + "?" + parts.query
+    return u

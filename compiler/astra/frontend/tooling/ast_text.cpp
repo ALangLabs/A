@@ -86,17 +86,19 @@ std::string typeText(const TypeExpr* type) {
   return "?";
 }
 
-std::string paramText(const ParamDecl& param) {
-  std::string text = param.name;
+std::string paramText(const ParamDecl& param, const ExprTextFn& expr) {
+  std::string text = param.variadic ? "*" : "";
+  text += param.name;
   if (param.type) text += ": " + typeText(param.type.get());
+  if (param.defaultValue && expr) text += " = " + expr(*param.defaultValue);
   return text;
 }
 
-std::string paramsText(const std::vector<ParamDecl>& params) {
+std::string paramsText(const std::vector<ParamDecl>& params, const ExprTextFn& expr) {
   std::string text = "(";
   for (std::size_t i = 0; i < params.size(); ++i) {
     if (i) text += ", ";
-    text += paramText(params[i]);
+    text += paramText(params[i], expr);
   }
   text += ")";
   return text;
@@ -106,7 +108,7 @@ std::string typeParamsText(const std::vector<std::string>& typeParams) {
   return typeParamsTextImpl(typeParams);
 }
 
-std::string signatureText(const FnDecl& decl) {
+std::string signatureText(const FnDecl& decl, const ExprTextFn& expr) {
   std::string text = "fn " + decl.name + typeParamsText(decl.typeParams);
   text += "(";
   bool first = true;
@@ -119,7 +121,7 @@ std::string signatureText(const FnDecl& decl) {
   for (const ParamDecl& param : decl.params) {
     if (!first) text += ", ";
     first = false;
-    text += paramText(param);
+    text += paramText(param, expr);
   }
   text += ")";
   if (decl.returnType) text += " -> " + typeText(decl.returnType.get());

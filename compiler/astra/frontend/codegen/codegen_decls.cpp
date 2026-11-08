@@ -674,6 +674,15 @@ void AsmEmitter::emitMain() {
       nameRanges_.clear();
       emitBody(mod.program->statements, true);
       }
+      // `fn main()` entry point: invoked once after all module top-levels,
+      // entry module only. Never runs for imports or under `a test`.
+      for (FnInfo* f : fnList_) {
+        if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
+          std::vector<int> ps(f->paramNames.size(), -1);
+          emitDirectCall(f->cname.c_str(), ps);
+          break;
+        }
+      }
       curModuleId_ = savedModule;
       emitFramePop();
       emit("    xor %eax, %eax\n    leave\n    ret\n");

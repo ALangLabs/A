@@ -1,5 +1,11 @@
 #include "a_runtime_internal.h"
 
+static int net_tls_probe(void);
+static ssize_t net_ssl_read(void *ssl, void *buf, int len);
+static ssize_t net_ssl_write(void *ssl, const void *buf, int len);
+static void net_ssl_shutdown(void *ssl);
+static void net_ssl_free(void *ssl);
+
 /* ------------------------------------------------------------------ */
 /* net module: resolve + TLS probe                                     */
 /* ------------------------------------------------------------------ */
@@ -42,6 +48,300 @@ aval bi_net_resolve(uint64_t n, aval *argv) {
 
 aval bi_net_tls_available(uint64_t n, aval *argv) {
     want_args("net.tls_available", n, 0, 0);
-    return A_FALSE;
+    return net_tls_probe() ? A_TRUE : A_FALSE;
+}
+
+/* ------------------------------------------------------------------ */
+/* sockets: handle table + TCP/TLS builtins                            */
+/* ------------------------------------------------------------------ */
+
+#define NET_MAX_SOCKS 64
+
+/* net.recv_status values stored per handle after each net.recv call. */
+enum { NET_RX_OK = 0, NET_RX_EOF = 1, NET_RX_ERR = 2, NET_RX_TIMEOUT = 3 };
+
+typedef struct {
+    int fd;
+    void *ssl;      /* SSL* when TLS, else NULL */
+    int used;
+    int recv_status; /* NET_RX_* from the last net.recv on this handle */
+} NetSock;
+
+static NetSock g_socks[NET_MAX_SOCKS];
+
+static int net_sock_new(int fd) {
+    for (int i = 0; i < NET_MAX_SOCKS; i++) {
+        if (!g_socks[i].used) {
+            g_socks[i].used = 1;
+            g_socks[i].fd = fd;
+            g_socks[i].ssl = NULL;
+            g_socks[i].recv_status = NET_RX_OK;
+            return i + 1;   /* handles are 1-based; 0 = invalid */
+        }
+    }
+    close(fd);
+    return 0;
+}
+
+static NetSock *net_sock_get(aval hv, const char *what) {
+    int64_t h = expect_int64(hv, what);
+    if (h < 1 || h > NET_MAX_SOCKS || !g_socks[h - 1].used)
+        panicf("%s: bad socket handle %lld", what, (long long)h);
+    return &g_socks[h - 1];
+}
+
+static void net_host_port(aval hv, aval pv, char *host, size_t hsz,
+                          char *port, size_t psz) {
+    uint64_t hl, pl;
+    const char *h = str_data(hv, &hl);
+    const char *p = str_data(pv, &pl);
+    if (hl >= hsz || pl >= psz) panicf("net: host/port too long");
+    memcpy(host, h, hl); host[hl] = '\0';
+    memcpy(port, p, pl); port[pl] = '\0';
+}
+
+/* Connect to the first reachable address; returns fd or -1. */
+static int net_tcp_connect_fd(const char *host, const char *port) {
+    struct addrinfo hints, *res = NULL, *ai;
+    memset(&hints, 0, sizeof hints);
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return -1;
+    int fd = -1;
+    for (ai = res; ai; ai = ai->ai_next) {
+        int s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+        if (s < 0) continue;
+        if (connect(s, ai->ai_addr, ai->ai_addrlen) == 0) { fd = s; break; }
+        close(s);
+    }
+    freeaddrinfo(res);
+    return fd;
+}
+
+aval bi_net_tcp_connect(uint64_t n, aval *argv) {
+    want_args("net.tcp_connect", n, 2, 2);
+    char host[256], port[16];
+    net_host_port(argv[0], argv[1], host, sizeof host, port, sizeof port);
+    int fd = net_tcp_connect_fd(host, port);
+    if (fd < 0) return mkint_full(-1);
+    int h = net_sock_new(fd);
+    if (!h) { close(fd); return mkint_full(-1); }
+    return mkint_full(h);
+}
+
+aval bi_net_send(uint64_t n, aval *argv) {
+    want_args("net.send", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.send");
+    uint64_t len;
+    const char *data = str_data(argv[1], &len);
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w;
+        if (s->ssl) {
+            w = net_ssl_write(s->ssl, data + off, (int)(len - off));
+        } else {
+            w = send(s->fd, data + off, len - off, MSG_NOSIGNAL);
+        }
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    return mkint_full((int64_t)off);
+}
+
+aval bi_net_recv(uint64_t n, aval *argv) {
+    want_args("net.recv", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.recv");
+    int64_t maxb = expect_int64(argv[1], "net.recv maxBytes");
+    if (maxb <= 0) maxb = 1;
+    if (maxb > (1 << 20)) maxb = 1 << 20;
+    char *buf = (char *)xmalloc((size_t)maxb);
+    ssize_t r;
+    if (s->ssl) {
+        r = net_ssl_read(s->ssl, buf, (int)maxb);
+    } else {
+        r = recv(s->fd, buf, (size_t)maxb, 0);
+    }
+    if (r > 0) {
+        s->recv_status = NET_RX_OK;
+    } else if (r == 0) {
+        s->recv_status = NET_RX_EOF;
+    } else {
+        s->recv_status = (errno == EAGAIN || errno == EWOULDBLOCK)
+                             ? NET_RX_TIMEOUT : NET_RX_ERR;
+    }
+    if (r <= 0) { free(buf); return a_str_new("", 0); }
+    aval out = a_str_new(buf, (uint64_t)r);
+    free(buf);
+    return out;
+}
+
+aval bi_net_recv_status(uint64_t n, aval *argv) {
+    want_args("net.recv_status", n, 1, 1);
+    int64_t h = expect_int64(argv[0], "net.recv_status");
+    if (h < 1 || h > NET_MAX_SOCKS || !g_socks[h - 1].used)
+        return mkint_full(-1);
+    return mkint_full(g_socks[h - 1].recv_status);
+}
+
+aval bi_net_close(uint64_t n, aval *argv) {
+    want_args("net.close", n, 1, 1);
+    int64_t h = expect_int64(argv[0], "net.close");
+    if (h >= 1 && h <= NET_MAX_SOCKS && g_socks[h - 1].used) {
+        NetSock *s = &g_socks[h - 1];
+        if (s->ssl) { net_ssl_shutdown(s->ssl); net_ssl_free(s->ssl); s->ssl = NULL; }
+        if (s->fd >= 0) close(s->fd);
+        s->fd = -1;
+        s->used = 0;
+    }
+    return A_NONE;
+}
+
+aval bi_net_set_timeout(uint64_t n, aval *argv) {
+    want_args("net.set_timeout", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.set_timeout");
+    int64_t ms = expect_int64(argv[1], "net.set_timeout millis");
+    if (ms < 0) ms = 0;
+    struct timeval tv;
+    tv.tv_sec = (time_t)(ms / 1000);
+    tv.tv_usec = (suseconds_t)((ms % 1000) * 1000);
+    setsockopt(s->fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    setsockopt(s->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    return A_NONE;
+}
+
+aval bi_net_local_port(uint64_t n, aval *argv) {
+    want_args("net.local_port", n, 1, 1);
+    NetSock *s = net_sock_get(argv[0], "net.local_port");
+    struct sockaddr_storage ss;
+    socklen_t sl = sizeof ss;
+    if (getsockname(s->fd, (struct sockaddr *)&ss, &sl) != 0) return mkint_full(-1);
+    if (ss.ss_family == AF_INET)
+        return mkint_full(ntohs(((struct sockaddr_in *)&ss)->sin_port));
+    if (ss.ss_family == AF_INET6)
+        return mkint_full(ntohs(((struct sockaddr_in6 *)&ss)->sin6_port));
+    return mkint_full(-1);
+}
+
+/* TLS via dlopen'd OpenSSL — no link-time dependency. */
+typedef struct ssl_ctx_st NET_SSL_CTX;
+typedef struct ssl_st NET_SSL;
+typedef struct ssl_method_st NET_SSL_METHOD;
+static NET_SSL_METHOD *(*p_net_TLS_client_method)(void);
+static NET_SSL_CTX *(*p_net_SSL_CTX_new)(const NET_SSL_METHOD *);
+static NET_SSL *(*p_net_SSL_new)(NET_SSL_CTX *);
+static int (*p_net_SSL_set_fd)(NET_SSL *, int);
+static int (*p_net_SSL_connect)(NET_SSL *);
+static int (*p_net_SSL_read)(NET_SSL *, void *, int);
+static int (*p_net_SSL_write)(NET_SSL *, const void *, int);
+static int (*p_net_SSL_shutdown)(NET_SSL *);
+static void (*p_net_SSL_free)(NET_SSL *);
+static void (*p_net_SSL_CTX_free)(NET_SSL_CTX *);
+/* Optional: SNI, peer hostname check, verify result. NULL when the loaded
+   OpenSSL is too old to export them. */
+typedef int (*net_ssl_verify_cb)(int, void *);
+static int (*p_net_SSL_CTX_set_verify)(NET_SSL_CTX *, int, net_ssl_verify_cb);
+static int (*p_net_SSL_CTX_set_default_verify_paths)(NET_SSL_CTX *);
+static int (*p_net_SSL_set_tlsext_host_name)(NET_SSL *, const char *);
+static int (*p_net_SSL_set1_host)(NET_SSL *, const char *);
+static long (*p_net_SSL_get_verify_result)(NET_SSL *);
+static NET_SSL_CTX *g_net_ssl_ctx = NULL;
+static int g_net_ssl_tried = 0;
+
+#define NET_SSL_VERIFY_PEER 0x01
+
+static int net_ssl_sym(void *h, const char *name, void **slot) {
+    void *p = dlsym(h, name);
+    if (!p) return 0;
+    *slot = p;
+    return 1;
+}
+
+static int net_tls_probe(void) {
+    if (g_net_ssl_tried) return g_net_ssl_ctx != NULL;
+    g_net_ssl_tried = 1;
+    const char *names[] = {"libssl.so.3", "libssl.so", "libssl.so.1.1", NULL};
+    void *h = NULL;
+    for (int i = 0; names[i]; i++) {
+        h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) break;
+    }
+    if (!h) return 0;
+    if (!net_ssl_sym(h, "TLS_client_method", (void **)&p_net_TLS_client_method) &&
+        !net_ssl_sym(h, "SSLv23_client_method", (void **)&p_net_TLS_client_method))
+        return 0;
+    if (!net_ssl_sym(h, "SSL_CTX_new", (void **)&p_net_SSL_CTX_new) ||
+        !net_ssl_sym(h, "SSL_new", (void **)&p_net_SSL_new) ||
+        !net_ssl_sym(h, "SSL_set_fd", (void **)&p_net_SSL_set_fd) ||
+        !net_ssl_sym(h, "SSL_connect", (void **)&p_net_SSL_connect) ||
+        !net_ssl_sym(h, "SSL_read", (void **)&p_net_SSL_read) ||
+        !net_ssl_sym(h, "SSL_write", (void **)&p_net_SSL_write) ||
+        !net_ssl_sym(h, "SSL_shutdown", (void **)&p_net_SSL_shutdown) ||
+        !net_ssl_sym(h, "SSL_free", (void **)&p_net_SSL_free) ||
+        !net_ssl_sym(h, "SSL_CTX_free", (void **)&p_net_SSL_CTX_free))
+        return 0;
+    /* Optional symbols: absence just downgrades TLS features. */
+    net_ssl_sym(h, "SSL_CTX_set_verify", (void **)&p_net_SSL_CTX_set_verify);
+    net_ssl_sym(h, "SSL_CTX_set_default_verify_paths",
+                (void **)&p_net_SSL_CTX_set_default_verify_paths);
+    net_ssl_sym(h, "SSL_set_tlsext_host_name",
+                (void **)&p_net_SSL_set_tlsext_host_name);
+    net_ssl_sym(h, "SSL_set1_host", (void **)&p_net_SSL_set1_host);
+    net_ssl_sym(h, "SSL_get_verify_result",
+                (void **)&p_net_SSL_get_verify_result);
+    g_net_ssl_ctx = p_net_SSL_CTX_new(p_net_TLS_client_method());
+    if (!g_net_ssl_ctx) return 0;
+    /* The ctx does not disable verification, so enable peer-cert checking:
+       default CA paths + SSL_VERIFY_PEER. Without this SSL_set1_host and
+       SSL_get_verify_result would be no-ops. */
+    if (p_net_SSL_CTX_set_default_verify_paths)
+        p_net_SSL_CTX_set_default_verify_paths(g_net_ssl_ctx);
+    if (p_net_SSL_CTX_set_verify)
+        p_net_SSL_CTX_set_verify(g_net_ssl_ctx, NET_SSL_VERIFY_PEER, NULL);
+    return 1;
+}
+
+static ssize_t net_ssl_read(void *ssl, void *buf, int len) {
+    return p_net_SSL_read((NET_SSL *)ssl, buf, len);
+}
+static ssize_t net_ssl_write(void *ssl, const void *buf, int len) {
+    return p_net_SSL_write((NET_SSL *)ssl, buf, len);
+}
+static void net_ssl_shutdown(void *ssl) {
+    p_net_SSL_shutdown((NET_SSL *)ssl);
+}
+static void net_ssl_free(void *ssl) {
+    p_net_SSL_free((NET_SSL *)ssl);
+}
+
+aval bi_net_tls_connect(uint64_t n, aval *argv) {
+    want_args("net.tls_connect", n, 2, 2);
+    char host[256], port[16];
+    net_host_port(argv[0], argv[1], host, sizeof host, port, sizeof port);
+    if (!net_tls_probe()) return mkint_full(-1);
+    int fd = net_tcp_connect_fd(host, port);
+    if (fd < 0) return mkint_full(-1);
+    NET_SSL *ssl = p_net_SSL_new(g_net_ssl_ctx);
+    if (ssl) {
+        /* SNI + expected peer hostname for cert verification. */
+        if (p_net_SSL_set_tlsext_host_name)
+            p_net_SSL_set_tlsext_host_name(ssl, host);
+        if (p_net_SSL_set1_host)
+            p_net_SSL_set1_host(ssl, host);
+    }
+    if (!ssl || p_net_SSL_set_fd(ssl, fd) != 1 || p_net_SSL_connect(ssl) != 1 ||
+        (p_net_SSL_get_verify_result &&
+         p_net_SSL_get_verify_result(ssl) != 0)) {
+        if (ssl) p_net_SSL_free(ssl);
+        close(fd);
+        return mkint_full(-1);
+    }
+    int h = net_sock_new(fd);
+    if (!h) {
+        p_net_SSL_free(ssl);
+        close(fd);
+        return mkint_full(-1);
+    }
+    g_socks[h - 1].ssl = ssl;
+    return mkint_full(h);
 }
 

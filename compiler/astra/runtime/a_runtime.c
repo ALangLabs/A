@@ -107,7 +107,14 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "file_size", bi_file_size },
     { "linalg_dot", bi_linalg_dot },
     { "linalg_matvec", bi_linalg_matvec },
-    { "linalg_matvec_t", bi_linalg_matvec_t }
+    { "linalg_matvec_t", bi_linalg_matvec_t },
+    { "net_tcp_connect", bi_net_tcp_connect }, { "net_send", bi_net_send },
+    { "net_recv", bi_net_recv }, { "net_close", bi_net_close },
+    { "net_set_timeout", bi_net_set_timeout },
+    { "net_local_port", bi_net_local_port },
+    { "net_tls_connect", bi_net_tls_connect },
+    { "net_recv_status", bi_net_recv_status },
+    { "read_bytes", bi_read_bytes }, { "write_bytes", bi_write_bytes }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

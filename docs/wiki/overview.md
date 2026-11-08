@@ -13,11 +13,11 @@ fn main():
     print("Hello, {name}!")   # string interpolation with {expr}
     for i in 0..5:
         print(i)
-
-main()
 ```
 
-Save as `hello.a` and run `./build/a run hello.a`.
+`fn main()` is called automatically after the file's top-level statements —
+no explicit `main()` call needed. Save as `hello.a` and run
+`./build/a run hello.a`.
 
 ## Headline features
 

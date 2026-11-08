@@ -241,6 +241,11 @@ int builtinRuntimeId(const std::string& name) {
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
       {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
+      {"net_tcp_connect", 196}, {"net_send", 197}, {"net_recv", 198},
+      {"net_close", 199}, {"net_set_timeout", 200}, {"net_local_port", 201},
+      {"net_tls_connect", 202},
+      {"net_recv_status", 203},
+      {"read_bytes", 204}, {"write_bytes", 205},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -4038,23 +4043,130 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     I8086Target t;
     NativeEmitter e(graph, sema, t, testMode);
     if (!e.run(out, error)) return false;
-    // Bare-metal boot stub: real mode needs segments zeroed and a stack
-    // before main runs. Exit via isa-debug-exit (port 0xf4) for qemu.
+    // Bare-metal boot: BIOS loads sector 0 at 0x7C00. .boot contains an
+    // int 13h CHS loader (AH=08h geometry + AH=02h reads) that pulls the
+    // rest of the image to 0x7E00+, then far-jumps to _entry at 0x10000
+    // (CS=0x1000, IP=0). .boot is padded to 0x8400 so .text starts on a
+    // 64KB boundary and stays inside one real-mode code segment. Stack:
+    // SS=0x9000, ESP=0xF000 (push/pop use SP, memory operands use ESP;
+    // both are <64K so they agree).
     out = std::string(
-        "    .section .text\n"
+        "    .section .boot,\"ax\"\n"
         "    .globl _start\n"
         "_start:\n"
+        "    cli\n"
+        "    movb %dl, 0x7db4\n"
+        "    xorl %eax, %eax\n"
+        "    movl %eax, %ds\n"
+        "    movl %eax, %es\n"
+        "    movb 0x7db4, %dl\n"
+        "    movb $0x08, %ah\n"
+        "    int $0x13\n"
+        "    jc __boot_fail\n"
+        "    movb %dh, 0x7db8\n"
+        "    movb %cl, %al\n"
+        "    andb $0x3f, %al\n"
+        "    movb %al, 0x7db6\n"
+        "    movb $0, 0x7db9\n"
+        "    movw $1, 0x7da4\n"
+        "    movw $0, 0x7da6\n"
+        "    movw $0, 0x7da8\n"
+        "    movl $0x7e00, 0x7dac\n"
+        "    movl 0x7df8, %eax\n"
+        "    decl %eax\n"
+        "    movl %eax, 0x7da0\n"
+        "__boot_load:\n"
+        "    movl 0x7da0, %eax\n"
+        "    testl %eax, %eax\n"
+        "    jz __boot_go\n"
+        "    movb 0x7da4, %cl\n"
+        "    movb 0x7da6, %dh\n"
+        "    movb 0x7da8, %ch\n"
+        "    movl 0x7dac, %eax\n"
+        "    shrl $4, %eax\n"
+        "    movw %ax, %es\n"
+        "    xorl %ebx, %ebx\n"
+        "    movb 0x7db4, %dl\n"
+        "    movb $0x01, %al\n"
+        "    movb $0x02, %ah\n"
+        "    int $0x13\n"
+        "    jc __boot_fail\n"
+        "    movl 0x7da0, %eax\n"
+        "    decl %eax\n"
+        "    movl %eax, 0x7da0\n"
+        "    movl 0x7dac, %eax\n"
+        "    addl $512, %eax\n"
+        "    movl %eax, 0x7dac\n"
+        "    movb 0x7da4, %al\n"
+        "    incb %al\n"
+        "    movb %al, 0x7da4\n"
+        "    movb 0x7da4, %al\n"
+        "    cmpb 0x7db6, %al\n"
+        "    jbe __boot_load\n"
+        "    movw $1, 0x7da4\n"
+        "    movb 0x7da6, %al\n"
+        "    incb %al\n"
+        "    movb %al, 0x7da6\n"
+        "    movb 0x7da6, %al\n"
+        "    cmpb 0x7db8, %al\n"
+        "    jb __boot_load\n"
+        "    movw $0, 0x7da6\n"
+        "    movb 0x7da8, %al\n"
+        "    incb %al\n"
+        "    movb %al, 0x7da8\n"
+        "    jmp __boot_load\n"
+        "__boot_go:\n"
+        "    ljmp $0x1000, $0x0000\n"
+        "__boot_fail:\n"
+        "    movb $'!', %al\n"
+        "    movw $0x3f8, %dx\n"
+        "    outb %al, %dx\n"
+        "    movw $0xf4, %dx\n"
+        "    movb $1, %al\n"
+        "    outb %al, %dx\n"
+        "    hlt\n"
+        "    .org 0x1a0\n"
+        "boot_rem:\n"
+        "    .long 0\n"
+        "boot_sec:\n"
+        "    .word 0\n"
+        "boot_head:\n"
+        "    .word 0\n"
+        "boot_cyl:\n"
+        "    .word 0\n"
+        "boot_buf:\n"
+        "    .long 0\n"
+        "    .org 0x1b4\n"
+        "boot_drive:\n"
+        "    .byte 0\n"
+        "    .byte 0\n"
+        "boot_spt:\n"
+        "    .byte 0\n"
+        "    .byte 0\n"
+        "boot_heads:\n"
+        "    .word 0\n"
+        "    .org 0x8400\n"
+        "    .section .text,\"ax\"\n"
+        "    .globl _entry\n"
+        "_entry:\n"
         "    cli\n"
         "    xorl %eax, %eax\n"
         "    movl %eax, %ds\n"
         "    movl %eax, %es\n"
-        "    movl %eax, %ss\n"
-        "    movl $0x90000, %esp\n"
+        "    movw $0x9000, %ax\n"
+        "    movw %ax, %ss\n"
+        "    movl $0xf000, %esp\n"
+        "    movl $boot_argv, %eax\n"
+        "    pushl %eax\n"
         "    call main\n"
         "    movw $0xf4, %dx\n"
         "    movb $42, %al\n"
         "    outb %al, %dx\n"
-        "    hlt\n") + out;
+        "    hlt\n"
+        "    .section .rodata\n"
+        "    .globl boot_argv\n"
+        "boot_argv:\n"
+        "    .long 2, 0xFFFF0000, 2, 0xFFFF0000\n") + out;
     gcAsmFunctions(out);
     return true;
   }

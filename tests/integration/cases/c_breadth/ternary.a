@@ -6,4 +6,3 @@ fn main():
     b = 0
     print(a != 0 ? a : b)
     print(a > 100 ? b : a + 10)
-main()

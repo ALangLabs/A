@@ -934,9 +934,12 @@ again:
 #ifdef ASTRA_TARGET_I8086
     /* Real mode: 16-bit operand/address size is the default. Our dialect
        uses 32-bit registers/operands and 32-bit flat addressing, so emit
-       0x66 (operand32) and 0x67 (addr32) prefixes. Skip for far
-       ljmp/lcall (0x9a/0xea) whose seg:off encoding is fixed. */
-    if (pa->opcode != 0x9a && pa->opcode != 0xea) {
+       0x66 (operand32) and 0x67 (addr32) prefixes. Far ljmp/lcall (0x9a/
+       0xea) have no memory operand but need 0x66 for the 32-bit offset in
+       the ptr16:32 encoding this assembler emits. */
+    if (pa->opcode == 0x9a || pa->opcode == 0xea) {
+        g(0x66);
+    } else {
         int hasmem = 0;
         for(i = 0; i < nb_ops; i++) {
             if (op_type[i] & (OP_EA | OP_ADDR | OP_INDIR)) {

@@ -2,4 +2,3 @@ fn main():
     flag = true
     x = flag ? 1 : "no"
     print(x)
-main()
