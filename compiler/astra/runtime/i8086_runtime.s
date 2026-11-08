@@ -290,20 +290,141 @@ a_mod_slow:
     xorl %edx, %edx
     ret
 
-# a_truthy_raw_slow(aval a) -> aval
+# a_truthy_raw_slow(aval a) -> plain u64 0 or 1 (NOT an aval!)
+# Callers test the raw result with jz/jnz, matching the C runtime which
+# returns (aval)(truthy(v) ? 1 : 0). Returning A_TRUE/A_FALSE avals here
+# makes every condition permanently true (both are nonzero avals).
     .globl a_truthy_raw_slow
 a_truthy_raw_slow:
     pushl %ebp
     movl %esp, %ebp
+    movl 8(%ebp), %eax          # lo
+    movl 12(%ebp), %edx         # hi
+    movl %edx, %ecx
+    andl $0xFFFF0000, %ecx
+    cmpl $0xFFFF0000, %ecx
+    jne .Lt_untagged            # untagged (double bits): nonzero -> true
+    testl $1, %eax
+    jnz .Lt_int                 # tagged int
+    # even tagged payload: A_NONE=2, A_FALSE=4, A_TRUE=6, else heap ptr
+    cmpl $2, %eax
+    je .Lt_zero
+    cmpl $4, %eax
+    je .Lt_zero
+    cmpl $6, %eax
+    je .Lt_one
+    testl $0xF, %eax
+    jz .Lt_obj                  # 16-aligned -> heap object
+    jmp .Lt_zero
+.Lt_int:
+    # int i == 0 iff aval == 0xFFFF000000000001 (payload = (i<<1)|1)
+    cmpl $1, %eax
+    jne .Lt_one
+    cmpl $0xFFFF0000, %edx
+    je .Lt_zero
+    jmp .Lt_one
+.Lt_obj:                       # eax = obj ptr; T_STR: {type@0,len@4}
+    movl %eax, %esi
+    movl (%esi), %ecx
+    cmpl $1, %ecx               # T_STR only for now
+    jne .Lt_one
+    movl 4(%esi), %ecx
+    testl %ecx, %ecx
+    jnz .Lt_one
+    jmp .Lt_zero
+.Lt_untagged:
+    orl %edx, %eax
+    jnz .Lt_one
+    jmp .Lt_zero
+.Lt_one:
+    movl $1, %eax
+    xorl %edx, %edx
+    popl %ebp
+    ret
+.Lt_zero:
+    xorl %eax, %eax
+    xorl %edx, %edx
+    popl %ebp
+    ret
+
+# a_not(aval v) -> aval A_TRUE/A_FALSE  (logical not)
+    .globl a_not
+a_not:
+    pushl %ebp
+    movl %esp, %ebp
+    # cdecl aval arg: push hi word first so lo lands at callee's 8(%ebp)
+    movl 12(%ebp), %eax
+    pushl %eax
     movl 8(%ebp), %eax
-    orl 12(%ebp), %eax
-    jz .Lt_false
-    movl $0x00000006, %eax
+    pushl %eax
+    call a_truthy_raw_slow
+    addl $8, %esp              # eax = 0/1
+    testl %eax, %eax
+    jnz .Lnot_f
+    movl $0x00000006, %eax      # A_TRUE
+    movl $0xFFFF0000, %edx
+    jmp .Lnot_d
+.Lnot_f:
+    movl $0x00000004, %eax      # A_FALSE
+    movl $0xFFFF0000, %edx
+.Lnot_d:
+    popl %ebp
+    ret
+
+# a_neg_slow(aval v) -> aval : unary minus on a tagged int.
+# -i == ~i + 1 on the unboxed signed 64-bit value, then rebox.
+# |i| = 2^46 (min int) overflows the 47-bit payload and wraps — the C
+# runtime would promote to bigint; acceptable gap for the i8086 subset.
+    .globl a_neg_slow
+a_neg_slow:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 12(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lneg_none
+    movl 8(%ebp), %eax
+    testl $1, %eax
+    jz .Lneg_none
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox               # esi=i_lo edi=i_hi
+    notl %esi
+    notl %edi
+    addl $1, %esi
+    adcl $0, %edi
+    call .Lrebox
+    popl %ebp
+    ret
+.Lneg_none:
+    movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     popl %ebp
     ret
-.Lt_false:
-    movl $0x00000004, %eax
+
+# a_bnot_slow(aval v) -> aval : bitwise ~ on a tagged int.
+# ~i stays inside the 47-bit signed range (involution), so no overflow.
+    .globl a_bnot_slow
+a_bnot_slow:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 12(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lbnot_none
+    movl 8(%ebp), %eax
+    testl $1, %eax
+    jz .Lbnot_none
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox               # esi=i_lo edi=i_hi
+    notl %esi
+    notl %edi
+    call .Lrebox
+    popl %ebp
+    ret
+.Lbnot_none:
+    movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     popl %ebp
     ret
@@ -826,11 +947,6 @@ a_getattr:
     ret
     .globl a_list_new
 a_list_new:
-    movl $0x00000002, %eax
-    movl $0xFFFF0000, %edx
-    ret
-    .globl a_not
-a_not:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     ret
