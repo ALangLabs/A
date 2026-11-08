@@ -26,17 +26,47 @@ language server; the VS Code extension wraps both.
 - `--no-color` — plain diagnostics.
 - `--target <arch>` (`a build` only) — cross-compile target: `x86_64`
   (default; native assembly emitter), `i386`, `arm` (ARMv7 hard-float),
-  `aarch64`/`arm64`, `riscv64`. An optional `-linux`/`-windows`/`-macos`
-  suffix is accepted but must match the host OS — Astra drivers are built
-  per-OS. Non-x86-64 targets go through the portable C emitter and the
-  matching `astra-<arch>` driver; linking needs a target sysroot via
+  `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal). An optional
+  `-linux`/`-windows`/`-macos` suffix is accepted but must match the host OS
+  — Astra drivers are built per-OS. Every non-x86-64 target tries its native
+  assembly emitter first and falls back to the portable C emitter, then calls
+  the matching `astra-<arch>` driver; linking needs a target sysroot via
   `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
   anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
   paths that must be rewritten relative to the sysroot lib dir).
   `a run`/`a test`/`a repl` always execute natively and reject other targets.
 
+### `i8086` bare-metal target
+
+`--target i8086` (aliases `i86`, `8086`, `8088`) emits a flat real-mode
+boot image instead of an executable — no libc, no sysroot, no `a run`/
+`a test`. Details:
+
+- The output is a BIOS boot sector at 0x7C00 with an `int 13h` CHS loader
+  (AH=08h drive geometry + AH=02h reads) that pulls the remaining sectors
+  (image padded to 512-byte sectors, 0x55AA signature, sector count at
+  file offset 0x1F8) to 0x7E00+, then far-jumps to `_entry` at CS=0x1000.
+- The emitted code uses 386+ operand-size prefixes in real mode. Real-mode
+  CS:IP is 16-bit, so `.text` must fit a single 64 KiB segment at
+  0x10000; the emitter dead-strips unreachable functions to stay under it.
+- Runtime is the hand-written subset in
+  `compiler/astra/runtime/i8086_runtime.s`: tagged-int arithmetic and
+  comparisons plus decimal `print` of ints. `print` writes to COM1
+  (0x3F8); other builtins are stubs returning `none` (non-int `print`
+  args show `?`).
+- Program exit writes 42 to port 0xF4 and halts. There is no automated
+  harness yet; run manually, e.g.
+  `qemu-system-i386 -drive format=raw,file=img -nographic -device isa-debug-exit,iobase=0xf4`
+  (`-nographic` routes COM1 to stdio; isa-debug-exit turns the port write
+  into a QEMU exit code).
+- The `astra-i8086` driver is built on Linux hosts only. The astra i8086
+  backend is assembler-only, so if the native emitter declines a program
+  the portable-C fallback cannot rescue it — the build fails at the astra
+  step.
+
 Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
-`A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_DEBUG_SRC`, `A_JOBS`.
+`A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm`/`c` to
+force an emitter), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`.
 
 ## Editor support
 

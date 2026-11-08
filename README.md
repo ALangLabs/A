@@ -21,12 +21,14 @@ compiles A straight to native machine code.
 
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
   and links a real executable through the bundled **Astra** backend (a TinyCC
-  fork). `a run` does the same and executes it. x86-64 uses a dedicated
-  assembly emitter; other architectures go through a portable C emitter that
+  fork). `a run` does the same and executes it. x86-64 SysV (Linux, macOS)
+  uses a dedicated x86-64 assembly emitter; every other target tries its own
+  native assembly emitter first and falls back to a portable C emitter that
   Astra compiles per target.
 - **Multi-target builds** — `a build --target <arch>` cross-compiles for
-  i386, AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS, given a
-  matching target sysroot (see *Cross-compilation* below).
+  i386, ARM (ARMv7), AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS,
+  given a matching target sysroot (see *Cross-compilation* below), plus the
+  bare-metal 16-bit `i8086` target.
 - **Static type checking with inference** — Hindley-Milner-style unification,
   generics, traits, algebraic enums, optional/result types, and flow-sensitive
   narrowing (`if x != None`).
@@ -125,7 +127,7 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 ```mermaid
 flowchart LR
     src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · codegen"]
-    fe --> s["x86-64 asm / portable C"]
+    fe --> s["x86-64 / per-arch asm · portable C"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
     astra --> bin["native executable"]
@@ -134,7 +136,9 @@ flowchart LR
 
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
-  analysis, typed SSA IR + optimizer, and the `AsmEmitter` assembly backend.
+  analysis, typed SSA IR + optimizer, and the native code emitters
+  (`emitAsm` for x86-64, per-arch `emitNative`, `emitC` as the portable
+  fallback).
 - **`compiler/astra/backend/`** — **Astra**, a TinyCC fork: the `astra` driver,
   the `libastra` library API, per-target code generators (x86-64, ARM, AArch64,
   RISC-V, i386, C67x), ELF/Mach-O/COFF writers, and support libraries.
@@ -155,10 +159,11 @@ operating systems):
 | Target | Backend | Status |
 |---|---|---|
 | `x86_64` (default) | x86-64 asm emitter → `astra` | native, fully tested |
-| `i386` | portable C emitter → `astra-i386` | verified (runs natively on x86-64) |
-| `arm` (ARMv7 hard-float) | portable C emitter → `astra-arm` | verified under qemu-armhf |
-| `aarch64` / `arm64` | portable C emitter → `astra-arm64` | needs AArch64 sysroot |
-| `riscv64` | portable C emitter → `astra-riscv64` | needs RISC-V64 sysroot |
+| `i386` | native i386 asm emitter (C fallback) → `astra-i386` | verified (runs natively on x86-64) |
+| `arm` (ARMv7 hard-float) | native ARM asm emitter (C fallback) → `astra-arm` | verified under qemu-armhf |
+| `aarch64` / `arm64` | native AArch64 asm emitter (C fallback) → `astra-arm64` | needs AArch64 sysroot |
+| `riscv64` | native RISC-V64 asm emitter (C fallback) → `astra-riscv64` | needs RISC-V64 sysroot |
+| `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc, no sysroot, no `a run`/`a test` |
 
 `a run`, `a test` and `a repl` always execute natively and reject non-host
 targets. Linking a cross binary requires the target C library: install the
@@ -168,14 +173,36 @@ drivers and staged lib dirs are produced by the build (`build/astra/astra-<arch>
 `build/astralib-<arch>/`); `A_ASTRA_<ARCH>` overrides the driver lookup.
 
 Not supported: RISC-V32 (no astra backend; the runtime value model is
-64-bit) and 16-bit (no libc/runtime environment exists for it). Windows
-has a first-pass `_WIN32` port of the driver pipeline (`CreateProcess`,
-`GetTempPath`, `GetModuleFileName` in `pipeline.cpp`) but is untested —
-it still needs a Windows astra driver build, PE link verification, and a
-Win32 test-mode harness in the C emitter (`a test` emits POSIX
-`fork`/`waitpid` today). Debian `*-cross` sysroots ship `libc.so`/
-`libm.so` linker scripts with absolute paths astra cannot resolve — rewrite
-the `GROUP` entries relative to the sysroot lib dir when setting one up.
+64-bit). 16-bit is `i8086` only — a bare-metal real-mode target (the
+emitted code uses 386+ operand-size prefixes despite the name) with no
+libc and no sysroot, built by the per-arch `astra-i8086` assembler/linker
+(asm-only; there is no i8086 C backend). `a build --target i8086 -o img`
+produces a flat boot image (`-oformat=binary`, entry at 0x7C00): sector 0
+contains an `int 13h` CHS loader (AH=08h drive geometry + AH=02h reads) that
+pulls the remaining 512-byte sectors to 0x7E00+, records the sector count at
+file offset 0x1F8, and stamps the 0x55AA signature; it then far-jumps to
+`_entry` at CS=0x1000. `print` writes to COM1 (0x3F8), program exit writes
+42 to port 0xF4 and halts. The hand-written runtime
+(`compiler/astra/runtime/i8086_runtime.s`) is a subset: tagged-int
+arithmetic/comparisons and decimal `print` of ints; other builtins are
+stubs returning `none` (non-int `print` args show `?`). Real-mode CS:IP is
+16-bit, so `.text` must fit in a single 64 KiB code segment at 0x10000 —
+the emitter dead-strips unreachable functions to stay under it. The astra
+i8086 driver is built on Linux hosts only, `a run`/`a test`/`a repl`
+reject it (nothing to execute natively), and there is no automated harness
+yet — run the image manually, e.g.
+`qemu-system-i386 -drive format=raw,file=img -nographic -device isa-debug-exit,iobase=0xf4`
+(`-nographic` routes COM1 to stdio; the isa-debug-exit device turns the
+port-0xF4 exit write into a QEMU exit code). Windows has a first-pass
+`_WIN32` port of the driver pipeline
+(`CreateProcess`, `GetTempPath`, `GetModuleFileName` in `pipeline.cpp`)
+but is untested — it still needs a Windows astra driver build, PE link
+verification, and a Win32 test-mode harness in the C emitter (`a test`
+emits POSIX `fork`/`waitpid` today); Windows x86-64 uses the portable C
+emitter because the asm emitter is SysV ABI only. Debian `*-cross`
+sysroots ship `libc.so`/`libm.so` linker scripts with absolute paths
+astra cannot resolve — rewrite the `GROUP` entries relative to the sysroot
+lib dir when setting one up.
 
 `tests/integration/cross_suite.sh <arch> <sysroot-env> <sysroot> [runner]`
 cross-compiles every runnable integration case for a target and diffs
