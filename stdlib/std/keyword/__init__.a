@@ -16,14 +16,13 @@
 #   * No `__all__`.
 
 # -- A keywords ----------------------------------------------------------------
-# Exact set produced by the lexer keyword table (includes the capitalized
-# `Class`/`Metaclass` alias forms and the `true`/`false`/`None` literals,
-# which the A lexer treats as keyword tokens).
+# Exact set produced by the lexer keyword table (includes the
+# `true`/`false`/`None` literals, which the A lexer treats as keyword tokens).
 
 kwlist = [
     "fn", "if", "elif", "else", "while", "for", "in", "loop",
-    "break", "continue", "return", "defer", "class", "Class",
-    "metaclass", "Metaclass", "pass", "self", "true", "false",
+    "break", "continue", "return", "defer", "class", "metaclass",
+    "pass", "self", "true", "false",
     "and", "or", "not", "import", "from", "as", "match", "None",
     "enum", "do", "type", "trait", "where", "comptime", "impl",
 ]

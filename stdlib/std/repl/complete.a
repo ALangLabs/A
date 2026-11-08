@@ -72,7 +72,7 @@ fn note_source(src):
 
 keywords = ["fn", "if", "elif", "else", "while", "for", "in", "loop",
             "break", "continue", "return", "defer", "class",
-            "Class", "metaclass", "Metaclass", "pass", "self", "true",
+            "metaclass", "pass", "self", "true",
             "false", "and", "or", "not", "import", "from", "as", "match",
             "None", "Some", "Ok", "Err", "enum", "do", "type", "trait",
             "where", "comptime", "impl", "try", "except", "finally", "raise",

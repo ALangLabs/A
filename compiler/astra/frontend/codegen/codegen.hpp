@@ -7,6 +7,7 @@
 // `astra` driver to produce a native executable.
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace a {
 struct ModuleGraph;
@@ -19,6 +20,15 @@ std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
                                               int moduleId,
                                               const std::string& name);
 
+// One per-module assembly unit produced by emitAsmPerUnit. `moduleId` is the
+// ModuleGraph module id; .text` payload is complete .bss+.rodata+.text for that unit
+// (assemble with `astra -c`). The entry unit additionally defines `main` and
+// the fnon setup table; every unit defines `__a_modinit_<mtag>` for its
+// top-level statements (entry unit includes its own).
+struct AsmUnit {
+  int moduleId = -1;
+  std::string text;
+};
 // Emits x86-64 assembly (AT&T syntax) for astra to assemble/compile and link
 // into machine code — the host fast path (A -> asm -> machine code).
 // In test mode, `main` discovers and runs top-level `fn test_*()` functions
@@ -29,6 +39,17 @@ std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
              std::string& error, bool testMode = false,
              const std::string* testFilter = nullptr);
+
+// Emits one assembly unit per module (per-module object cache, Phase 2).
+// When `only` is non-null and non-empty, only those module ids are emitted
+// (cache-miss units); otherwise every module in graph order (entry last
+// when not in order) is emitted. Symbols are stable (Phase 1), so cached
+// units link against freshly emitted ones.
+bool emitAsmPerUnit(const ModuleGraph& graph, const SemaResult& sema,
+                    std::vector<AsmUnit>& out, std::string& error,
+                    bool testMode = false,
+                    const std::string* testFilter = nullptr,
+                    const std::vector<int>* only = nullptr);
 
 // Emits target-native assembly (A -> .s -> astra -> machine code) for the
 // given arch ("arm64"/"aarch64", "riscv64", "i386", "arm", "i8086", and

@@ -6,13 +6,14 @@ scanners) and `examples/`/`tests/`.
 ## Lexical structure
 
 - **Comments**: `#` line comments; `##` doc comments attach to declarations.
+- **Docstrings**: `"""..."""` raw string statement at the top of a body.
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`; keywords are lowercase except
-  `Class`, `Metaclass`, `None`, `Some`/`Ok`/`Err` (capitalized builtins).
+  `None`, `Some`/`Ok`/`Err` (capitalized builtins).
 - **Indentation**: significant — blocks are introduced by `:` then an indented
   suite; `Indent`/`Dedent` are real tokens. Brackets `()[]{}` suppress
   newlines inside expressions.
 - **Keywords**: `fn if elif else while for in loop break continue return defer
-  class Class metaclass Metaclass pass self true false and or not import from
+  class metaclass pass self true false and or not import from
   as match None enum do type trait where comptime impl`.
   There is **no** `let`, `var`, or `struct` keyword — bindings are plain
   assignments (`x = 1`, `x: i64 = 1`) and types use `class`.

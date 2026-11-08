@@ -141,7 +141,7 @@
       "patterns": [
         {
           "name": "meta.class.a",
-          "begin": "\\b(class|Class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+          "begin": "\\b(class)\\s+([A-Za-z_][A-Za-z0-9_]*)",
           "end": "^(?=\\S)",
           "beginCaptures": {
             "1": { "name": "storage.modifier.a" },
@@ -383,7 +383,7 @@
         },
         {
           "name": "storage.modifier.a",
-          "match": "\\b(?:class|Class|metaclass|Metaclass|enum|trait|impl|type|comptime)\\b"
+          "match": "\\b(?:class|metaclass|enum|trait|impl|type|comptime)\\b"
         },
         {
           "name": "keyword.control.import.a",
