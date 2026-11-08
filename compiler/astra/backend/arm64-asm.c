@@ -1717,10 +1717,45 @@ static void asm_move_wide(ASTRAState *s1, int token)
     }
 }
 
+/* Handle adrp/adr: adrp xd, expr / adr xd, expr — PC-relative symbol
+   address materialization (page / byte offset). */
+static void asm_adr(ASTRAState *s1, int token)
+{
+    Operand op1, op2;
+    Sym *sym;
+
+    parse_operand(s1, &op1);
+    if (tok == ',') next();
+    parse_expr_operand(s1, &op2);
+
+    if (!(op1.type & OP_REG) || !(op1.reg_type & REG_X)) {
+        astra_error("adr/adrp requires a 64-bit register destination");
+        return;
+    }
+    if (!(op2.type & OP_IM)) {
+        astra_error("adr/adrp requires an expression operand");
+        return;
+    }
+    sym = op2.e.sym;
+    if (!sym) {
+        astra_error("adr/adrp requires a symbol");
+        return;
+    }
+    o((token == TOK_ASM_adrp ? ARM64_ADRP : ARM64_ADR) | op1.reg);
+    greloca(cur_text_section, sym, ind - 4,
+            token == TOK_ASM_adrp ? R_AARCH64_ADR_PREL_PG_HI21
+                                  : R_AARCH64_ADR_PREL_LO21,
+            (int32_t)op2.e.v);
+}
+
 /* Main assembler opcode dispatcher */
 ST_FUNC void asm_opcode(ASTRAState *s1, int opcode)
 {
     switch (opcode) {
+        case TOK_ASM_adrp:
+        case TOK_ASM_adr:
+            asm_adr(s1, opcode);
+            break;
         case TOK_ASM_add:
         case TOK_ASM_adds:
         case TOK_ASM_sub:
