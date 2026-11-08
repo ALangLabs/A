@@ -3,7 +3,7 @@
     "lineComment": "#",
     "blockComment": []
   },
-  "completionTriggerCharacters": [".", "\"", "(", ",", ":", "<"],
+  "completionTriggerCharacters": [".", "\"", "(", ",", ":", "<", ">", "?"],
   "brackets": [
     ["{", "}"],
     ["[", "]"],
@@ -13,17 +13,14 @@
     { "open": "{", "close": "}", "notIn": ["string", "comment"] },
     { "open": "[", "close": "]", "notIn": ["string", "comment"] },
     { "open": "(", "close": ")", "notIn": ["string", "comment"] },
-    { "open": "<", "close": ">", "notIn": ["string", "comment", "number"] },
     { "open": "\"\"\"", "close": "\"\"\"", "notIn": ["string"] },
     { "open": "\"", "close": "\"", "notIn": ["string"] },
-    { "open": "'", "close": "'", "notIn": ["string", "comment"] },
-    { "open": "`", "close": "`", "notIn": ["string", "comment"] }
+    { "open": "'", "close": "'", "notIn": ["string", "comment"] }
   ],
   "autoclosingPairs": [
     { "open": "{", "close": "}" },
     { "open": "[", "close": "]" },
     { "open": "(", "close": ")" },
-    { "open": "<", "close": ">" },
     { "open": "\"\"\"", "close": "\"\"\"" },
     { "open": "\"", "close": "\"" },
     { "open": "'", "close": "'" }
@@ -32,14 +29,13 @@
     ["{", "}"],
     ["[", "]"],
     ["(", ")"],
-    ["<", ">"],
     ["\"\"\"", "\"\"\""],
     ["\"", "\""],
     ["'", "'"]
   ],
   "folding": {
     "markers": {
-      "start": "^\\s*(?:fn|class|enum|trait|impl|type|if|elif|else|while|do|for|loop|match|async)\\b.*:\\s*$",
+      "start": "^\\s*(?:fn|class|enum|trait|impl|type|if|elif|else|while|do|for|loop|match)\\b.*:\\s*$",
       "end": "^\\s*$"
     }
   },
@@ -47,9 +43,8 @@
     "increaseIndentPattern": "^\\s*.*:\\s*(?:#.*)?$",
     "increaseIndentPattern2": "^\\s*(?:fn|class|enum|trait|impl|type)\\s+[^\\n]*:\\s*$",
     "decreaseIndentPattern": "^\\s*(?:elif\\b|else\\b|while\\b.*|do\\b)$",
-    "decreaseIndentPattern2": "^\\s*(?:except\\b|finally\\b)$",
     "indentNextLinePattern": "\\s+:\\s*(?:#.*)?$",
-    "outdentNextLinePattern": "^\\s*(?:elif\\b|else\\b|while\\b.*|do\\b|except\\b|finally\\b)$"
+    "outdentNextLinePattern": "^\\s*(?:elif\\b|else\\b|while\\b.*|do\\b)$"
   },
   "onEnterRules": [
     {
