@@ -657,6 +657,28 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       ABinding* vb = lookup(st.var);
       if (vb) vb->rawInt = true;
     }
+    // Include the loop variable in the same register residency set so raw
+    // reads (e.g. f64(i)) come straight from its XMM register instead of
+    // a spill slot per iteration.
+    if (promoteNames_.count(st.var) &&
+        (loopXmm_.empty() || (int)loopXmmAdded_.size() > xmmMark)) {
+      for (int x = 3; x <= 15; ++x) {
+        ABinding* vb = lookup(st.var);
+        if (!vb) break;
+        auto xr = loopXmm_.find(vb->slot);
+        if (xr != loopXmm_.end()) break;
+        bool used = false;
+        for (const auto& kv : loopXmm_)
+          if (kv.second == x) used = true;
+        if (!used) {
+          loopXmm_[vb->slot] = x;
+          loopXmmAdded_.push_back(vb->slot);
+          emit("    movq " + slotRef(vb->slot) + ", %xmm" +
+               std::to_string(x) + "\n");
+          break;
+        }
+      }
+    }
     loopBreak_.push_back(endL);
     loopCont_.push_back(contL);
     loopDeferDepth_.push_back((int)deferStack_.size());
