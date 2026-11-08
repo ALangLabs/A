@@ -7,8 +7,10 @@ system as user code (verified against `stdlib/std/` layout).
 
 - `import std:prelude` — helpers incl. `Ok`, `Err`, `is_ok`, `unwrap`,
   `unwrap_or`, `err_value`, `prelude_version()`.
-- `import std:<pkg>` or `import "std/<pkg>/__init__.a"` style paths reach
-  packages under `stdlib/std/`.
+- `import std:<pkg>` first checks the native modules (`math`, `io`, `fs`,
+  `net`, `env`, … — see [builtins](builtins.md)); names with no native
+  module resolve to a package under `stdlib/std/` (so `std:net` and
+  `std:env` are the native modules, not A files).
 - `stdlib/std/std.a` re-exports the common subset (`Int`, `Float`, `Bool`,
   `String`, `len_of`, `map_list`, `sqrt`, `Equatable`, arena helpers, …).
 
@@ -22,9 +24,9 @@ system as user code (verified against `stdlib/std/` layout).
 | `simd` | `vec_new`, `dot_lists`, `add_lists`, `scale_list`, `hadamard` |
 | `traits` | `Equatable`, `Hashable`, `Comparable`, `eq`, `is_copyable` |
 | `memory` | `arena_new`, `arena_pool`, `alloc`, `used`, `total` |
-| `http` | Synchronous HTTP/1.1 client: `get`, `post`, `put`, `patch`, `delete`, `head`, `request`, `http_connection`, `https_connection`, `urlsplit`, `urlunsplit`, `Response` (`.status`, `.headers`, `.body`, `.text()`, `.json()`, `.raise_for_status()`, `.is_ok`). Follows redirects; handles Content-Length, chunked, and close-delimited bodies. Import members directly (`from std:http import get`) — module-attribute access on the package also works. Optional arguments are positional (A has no keyword arguments); HEAD/204/304 responses carry no body. |
+| `http` | Synchronous HTTP/1.1 client, pure A over `std:net` (there are no `http_*` native builtins): `get`, `post`, `put`, `patch`, `delete`, `head`, `request`, `http_connection`, `https_connection`, `urlsplit`, `urlunsplit`, `Response` (`.status`, `.headers`, `.body`, `.text()`, `.json()`, `.raise_for_status()`, `.is_ok`). Follows redirects; handles Content-Length, chunked, and close-delimited bodies. Import members directly (`from std:http import get`) — module-attribute access on the package also works. Optional arguments are positional (A has no keyword arguments); HEAD/204/304 responses carry no body. |
 | `bytes`, `binary` | Byte-array (`[i64]` 0-255) utilities: `utf8_encode`/`utf8_decode`, `s2b`/`b2s`, `chr`/`ord`, varint codec — pair with `fs.read_bytes`/`write_bytes` for binary IO |
-| `iter`, `functools`, `operator`, `pprint`, `textwrap`, `shlex`, `keyword`, `statistics`, `fractions`, `heapq`, `copy`, `comptime`, `format` (csv/table), `getopt`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `enum`, `prelude` |
+| `iter`, `functools`, `operator`, `pprint`, `textwrap`, `shlex`, `keyword`, `statistics`, `fractions`, `heapq`, `copy`, `comptime`, `format` (csv/table), `getopt`, `json`, `fs`, `time`, `log`, `metrics`, `trace`, `net`, `string`, `bytes`, `binary`, `collections`, `core`, `test`/`testing`, `gpu`, `repl`, `enum`, `debug`, `prelude` |
 
 Many packages are thin A wrappers over the native modules in
 [builtins](builtins.md); others are pure A.

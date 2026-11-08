@@ -165,9 +165,11 @@ operating systems):
 | `riscv64` | native RISC-V64 asm emitter (C fallback) → `astra-riscv64` | needs RISC-V64 sysroot |
 | `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc/sysroot; `a run` via qemu-system-i386, `a test` unsupported |
 
-`a run`, `a test` and `a repl` always execute natively and reject non-host
-targets. Linking a cross binary requires the target C library: install the
-matching cross toolchain (e.g. `gcc-aarch64-linux-gnu`, `libc6-dev-i386`)
+`a run`, `a test` and `a repl` execute natively and reject non-host
+targets — the one exception is `a run --target i8086` on Linux, which runs
+the boot image under QEMU (see below). Linking a cross binary requires the
+target C library: install the matching cross toolchain
+(e.g. `gcc-aarch64-linux-gnu`, `libc6-dev-i386`)
 or point `A_SYSROOT` / `A_SYSROOT_<ARCH>` at a sysroot root. Per-arch Astra
 drivers and staged lib dirs are produced by the build (`build/astra/astra-<arch>`,
 `build/astralib-<arch>/`); `A_ASTRA_<ARCH>` overrides the driver lookup.

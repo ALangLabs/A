@@ -24,18 +24,21 @@ language server; the VS Code extension wraps both.
 - `-j <n>`, `--jobs <n>`, `--parallel` — parallel module checking.
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N`, `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
-- `--target <arch>` (`a build` only) — cross-compile target: `x86_64`
-  (default; native assembly emitter), `i386`, `arm` (ARMv7 hard-float),
-  `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal). An optional
-  `-linux`/`-windows`/`-macos` suffix is accepted but must match the host OS
-  — Astra drivers are built per-OS. Every non-x86-64 target tries its native
-  assembly emitter first and falls back to the portable C emitter, then calls
-  the matching `astra-<arch>` driver; linking needs a target sysroot via
+- `--target <arch>` — cross-compile target: `x86_64`
+  (default; x86-64 assembly emitter on Linux/macOS SysV), `i386`, `arm`
+  (ARMv7 hard-float), `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal).
+  An optional `-linux`/`-windows`/`-macos` suffix is accepted but must match
+  the host OS — Astra drivers are built per-OS. x86-64 uses the dedicated
+  `emitAsm` emitter; every other target tries its native per-arch emitter
+  (`emitNative` in `codegen_native.cpp`) first and falls back to the
+  portable C emitter (`emitC`), then calls the matching `astra-<arch>`
+  driver; linking needs a target sysroot via
   `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
   anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
   paths that must be rewritten relative to the sysroot lib dir).
-  `a run` executes natively (i8086 via qemu-system-i386); `a test`/`a repl`
-  reject non-host targets.
+  `A_CODEGEN=asm`/`c` forces the emitter choice. `a run` executes natively
+  (i8086 via qemu-system-i386 on Linux); `a test`/`a repl` reject non-host
+  targets.
 
 ### `i8086` bare-metal target
 
