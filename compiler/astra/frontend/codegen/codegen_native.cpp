@@ -41,6 +41,7 @@ struct NatTarget {
   virtual ~NatTarget() = default;
   virtual int frameReserve() const { return 0; }  // extra bytes inside frame (e.g. ra)
   virtual std::string extraRodata() const { return ""; }
+  virtual int ptrSize() const { return 8; }  // C pointer width (a_test_main arrays)
   virtual void prologue(std::string& o, int frameBytes) const = 0;
   virtual void epilogue(std::string& o, int frameBytes) const = 0;
   virtual std::string slotRef(int i) const = 0;   // e.g. "[sp, #8]"
@@ -1728,6 +1729,28 @@ class NativeEmitter {
       zeroReg(acc());
       return;
     }
+    if (t_.ptrSize() != 8) {
+      // 32-bit: names[]/fns[] are packed C pointer arrays — emit them as
+      // .long/.word entries in .data (aval slots are 8 bytes, wrong stride).
+      std::vector<std::string> nameLbls;
+      for (std::size_t i = 0; i < tests.size(); ++i) {
+        std::string lbl = "__na_tn_" + std::to_string(i);
+        nameLbls.push_back(lbl);
+        rodata_ << "    .section .rodata\n" << lbl << ":\n    .byte ";
+        for (unsigned char c : tests[i]->name) rodata_ << (int)c << ",";
+        rodata_ << "0\n";
+      }
+      std::string namesLbl = "__na_tnames", fnsLbl = "__na_tfns";
+      rodata_ << "    .section .data\n    .align 4\n" << namesLbl << ":\n";
+      for (auto& l : nameLbls) rodata_ << "    .long " << l << "\n";
+      rodata_ << fnsLbl << ":\n";
+      for (auto* f : tests) rodata_ << "    .long " << f->cname << "\n";
+      movImm(tests.size(), A(0));
+      leaSym(namesLbl, A(1));
+      leaSym(fnsLbl, A(2));
+      callSym("a_test_main");
+      return;
+    }
     // Build names[] and fns[] pointer arrays in consecutive slots.
     int namesBase = allocSlot();
     for (std::size_t i = 1; i < tests.size(); ++i) allocSlot();
@@ -3305,6 +3328,7 @@ struct Riscv64Target : NatTarget {
 struct I386Target : NatTarget {
   static constexpr int kReserve = 232;
   static constexpr int kOut = 0, kAcc = 128, kTmp = 136, kArg = 168;
+  int ptrSize() const override { return 4; }
   mutable std::string lastA, lastB;
   mutable int jcN_ = 0;
   mutable std::set<int> usedArgs_;
@@ -3549,6 +3573,7 @@ struct I386Target : NatTarget {
 struct Arm32Target : NatTarget {
   static constexpr int kReserve = 232;
   static constexpr int kOut = 0, kTmp = 136, kArg = 168;
+  int ptrSize() const override { return 4; }
   mutable std::string lastA, lastB;
   mutable int jcN_ = 0;
   mutable std::set<int> usedArgs_;
@@ -3866,8 +3891,8 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
   }
   if (arch == "i386" || arch == "x86") {
     if (testMode) {
-      // names[]/fns[] are raw C pointer arrays (ptr-sized elements); the
-      // slot-based emitter only works where ptr == 8 bytes.
+      // .long pointer arrays assemble but i386-link doesn't relocate
+      // data-section symbol entries yet — keep test mode on emitC.
       error = "native backend: i386 test mode unsupported";
       return false;
     }
