@@ -1,0 +1,46 @@
+# std.collections selftest — run: ./build/a test stdlib/std/collections/selftest.a
+from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_deque_insert():
+    d = deque_of([1, 2, 3])
+    d.insert(1, 9)
+    assert_eq(d.to_list(), [1, 9, 2, 3])
+    d.insert(0, 7)
+    assert_eq(d.to_list(), [7, 1, 9, 2, 3])
+    d.insert(-1, 8)
+    assert_eq(d.to_list(), [7, 1, 9, 2, 8, 3])
+    d.insert(6, 0)
+    assert_eq(len(d.to_list()), 7)
+    assert_eq(d.to_list()[6], 0)
+    # bounded: insert at left drops from the right
+    b = deque_bounded([1, 2, 3], 3)
+    b.insert(0, 7)
+    assert_eq(b.to_list(), [7, 1, 2])
+    # bounded: insert at right drops from the left
+    b2 = deque_bounded([1, 2, 3], 3)
+    b2.insert(3, 9)
+    assert_eq(b2.to_list(), [2, 3, 9])
+
+fn test_ordereddict_setdefault():
+    od = OrderedDict({})
+    assert_eq(od.setdefault("a", 1), 1)
+    assert_eq(od.setdefault("a", 99), 1)
+    assert_eq(od.get("a"), 1)
+    assert_eq(od.setdefault("b", 2), 2)
+    assert_eq(od.size(), 2)
+    # order preserved: a was inserted before b
+    ks = od.keys()
+    assert_eq(ks[0], "a")
+    assert_eq(ks[1], "b")
+
+fn test_counter_smoke():
+    c = Counter({})
+    c.update([1, 2, 2, 3, 3, 3])
+    top = c.most_common(1)
+    (k, cnt) = top[0]
+    assert_eq(k, 3)
+    assert_eq(cnt, 3)
+    assert_eq(c.total(), 6)

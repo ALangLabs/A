@@ -1,0 +1,34 @@
+# std.operator selftest — run: ./build/a test stdlib/std/operator/selftest.a
+import std:operator
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn _add3(a, b, c):
+    return a + b + c
+
+fn test_call():
+    assert_eq(operator.call(_add3, [1, 2, 3]), 6)
+    assert_eq(operator.call(_add3, [10, 20, 30]), 60)
+
+fn test_inplace_aliases():
+    assert_eq(operator.iadd(1, 2), 3)
+    assert_eq(operator.isub(5, 2), 3)
+    assert_eq(operator.imul(3, 4), 12)
+    assert_eq(operator.itruediv(7, 2), 3.5)
+    assert_eq(operator.ifloordiv(7, 2), 3)
+    assert_eq(operator.imod(7, 3), 1)
+    assert_eq(operator.ipow(2, 3), 8)
+    assert_eq(operator.ilshift(1, 3), 8)
+    assert_eq(operator.irshift(8, 2), 2)
+    assert_eq(operator.iand(6, 3), 2)
+    assert_eq(operator.ior(4, 1), 5)
+    assert_eq(operator.ixor(5, 3), 6)
+
+fn test_existing_ops():
+    assert_eq(operator.add(1, 2), 3)
+    assert_eq(operator.concat([1], [2]), [1, 2])
+    assert_eq(operator.countOf([1, 1, 2], 1), 2)
+    assert_eq(operator.indexOf([5, 6, 7], 6), 1)
+    assert_eq(operator.truth(0), false)
+    assert_eq(operator.is_none(None), true)

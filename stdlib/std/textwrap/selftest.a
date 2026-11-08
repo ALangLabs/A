@@ -1,0 +1,21 @@
+# std.textwrap selftest — run: ./build/a test stdlib/std/textwrap/selftest.a
+import std:textwrap
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_wrap_fill():
+    ws = textwrap.wrap("the quick brown fox", 10)
+    assert_eq(len(ws), 2)
+    assert_eq(textwrap.fill("the quick brown fox", 10), "the quick\nbrown fox")
+    assert_eq(textwrap.dedent("  a\n  b"), "a\nb")
+    assert_eq(textwrap.indent("a\nb", "> "), "> a\n> b")
+    assert_eq(textwrap.shorten("hello world", 8, "..."), "hello...")
+
+fn test_indented():
+    f = textwrap.fill_indented("one two three four five", 12, "", "  ")
+    assert_eq(f, "one two\n  three four\n  five")
+    ls = textwrap.wrap_indented("aa bb cc", 8, "> ", "  ")
+    assert_eq(len(ls), 2)
+    assert_eq(ls[0], "> aa bb")
+    assert_eq(ls[1], "  cc")

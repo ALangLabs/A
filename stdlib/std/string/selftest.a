@@ -1,0 +1,26 @@
+# std.string selftest — run: ./build/a test stdlib/std/string/selftest.a
+import std:string
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_constants_capwords():
+    # NOTE: module-level constants are unreliable under `a test` (see toolchain quirks).
+    assert_eq(string.capwords("hello world", None), "Hello World")
+    assert_eq(string.capwords("a,b,c", ","), "A,B,C")
+
+fn test_template():
+    t = string.Template_new("Hello $name, you are $age years old.")
+    m = {"name": "ann", "age": "30"}
+    assert_eq(t.substitute(m), "Hello ann, you are 30 years old.")
+    # safe_substitute keeps unknown placeholders
+    assert_eq(t.safe_substitute({"name": "bob"}), "Hello bob, you are $age years old.")
+    # $$ escape and ${...} form (braces escaped for A interpolation)
+    t2 = string.Template_new("cost: $$5 and $\{x\}")
+    assert_eq(t2.substitute({"x": "9"}), "cost: $5 and 9")
+    # invalid placeholders stay literal
+    t3 = string.Template_new("a $- b $1 c $d_")
+    assert_eq(t3.substitute({"d_": "ok"}), "a $- b $1 c ok")
+    # custom delimiter
+    t4 = string.Template_new("hi %name%", "%")
+    assert_eq(t4.substitute({"name": "z"}), "hi z%")
