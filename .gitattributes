@@ -1,3 +1,8 @@
 # A source files use the .a extension, which GitHub Linguist does not know;
-# without this it falls back to content heuristics and reports them as C.
+# without an override it falls back to content heuristics and reports them
+# as C. Linguist only resolves linguist-language to languages in its
+# languages.yml (custom names are not supported), so "A" is not a valid
+# value. Until A is added to Linguist upstream, mark .a files with an
+# unknown language name: they are then excluded from the language stats
+# instead of being misreported. Remove this line once Linguist ships "A".
 *.a linguist-language=A
