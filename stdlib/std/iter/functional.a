@@ -484,3 +484,30 @@ fn zip_longest_all(lists, fill = None):
         out.append(p)
         r = r + 1
     return out
+
+"""
+chain_from_iterable(lists) -> flattened array: concat of every element
+of every sub-array (Python itertools.chain.from_iterable). Elements are
+shared, not copied.
+"""
+fn chain_from_iterable(lists):
+    out = []
+    for sub in lists:
+        for x in sub:
+            out.append(x)
+    return out
+
+"""
+accumulate_init(xs, f, init) -> running totals seeded by `init`:
+[init, f(init,x0), f(f(init,x0),x1), ...] — the Python
+itertools.accumulate(iterable, function, initial=init) analogue. Empty
+xs -> [init].
+"""
+fn accumulate_init(xs, f, init):
+    out = []
+    acc = init
+    out.append(acc)
+    for x in xs:
+        acc = f(acc, x)
+        out.append(acc)
+    return out

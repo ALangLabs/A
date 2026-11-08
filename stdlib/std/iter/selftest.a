@@ -175,3 +175,15 @@ fn test_zip_all():
     assert_eq(zl[2][1], 0)
     assert_eq(zl[2][2], 9)
     assert_eq(iter.zip_longest_all([], []), [])
+
+fn test_chain_from_iterable_and_accumulate_init():
+    lists = []
+    lists.append([1, 2])
+    lists.append([3])
+    lists.append([])
+    lists.append([4, 5])
+    assert_eq(iter.chain_from_iterable(lists), [1, 2, 3, 4, 5])
+    assert_eq(iter.chain_from_iterable([]), [])
+    # accumulate_init seeds with init (Python initial= analogue)
+    assert_eq(iter.accumulate_init([1, 2, 3], _add, 10), [10, 11, 13, 16])
+    assert_eq(iter.accumulate_init([], _add, 7), [7])

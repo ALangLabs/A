@@ -144,3 +144,31 @@ fn test_strptime():
     assert(strptime("2024-01-01x", "%Y-%m-%d") == None)
     assert(strptime("hello", "%Y-%m-%d") == None)
     assert(strptime("2023-02-29", "%Y-%m-%d") == None)
+
+fn test_timedelta():
+    td = datetime.timedelta_new(1, 2, 3, 4, 5)
+    # 1d 2h 3m 4s 5ms = 93784005 ms
+    assert_eq(td.total_ms(), 93784005)
+    assert_eq(td.days(), 1)
+    assert_eq(td.seconds(), 2 * 3600 + 3 * 60 + 4)
+    assert_eq(td.milliseconds(), 5)
+    assert_eq(td.total_seconds(), 93784.005)
+    # negative durations normalize like Python (floor days)
+    neg = datetime.timedelta_new(0, 0, 0, -1)
+    assert_eq(neg.total_ms(), -1000)
+    assert_eq(neg.days(), -1)
+    assert_eq(neg.seconds(), 86399)
+    assert_eq(neg.abs_val().text(), "0:00:01.000")
+    assert_eq(neg.neg().text(), "0:00:01.000")
+    assert_eq(datetime.timedelta_new(2).text(), "2 days, 0:00:00.000")
+    assert_eq(datetime.timedelta_new(0, 0, 0, 0, 7).text(), "0:00:00.007")
+    # add_to / diff_dt round-trip
+    dt = datetime.from_timestamp(0)
+    td2 = datetime.timedelta_new(0, 1, 30)
+    dt2 = td2.add_to(dt)
+    assert_eq(dt2.isoformat(), "1970-01-01T01:30:00.000")
+    back = datetime.diff_dt(dt2, dt)
+    assert_eq(back.total_ms(), 5400000)
+    assert_eq(datetime.add_timedelta(dt, back).isoformat(), dt2.isoformat())
+    # from_ms raw ctor
+    assert_eq(datetime.timedelta_from_ms(1500).total_seconds(), 1.5)

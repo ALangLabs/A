@@ -348,6 +348,113 @@ fn days_in_month(year, month):
     core.panic("days_in_month: month out of range")
     return 0
 
+# -- timedelta ------------------------------------------------------------------
+#
+# Python datetime.timedelta stores days/seconds/microseconds normalized.
+# This port stores total MILLISECONDS in `ms` (the runtime clock precision)
+# and exposes normalized components via methods. Deviations:
+#   * constructor argument order is (days, hours, minutes, seconds,
+#     milliseconds) — Python's order puts microseconds/milliseconds before
+#     minutes/hours/weeks, which is unusable positionally in A.
+#   * precision is milliseconds; there is no microseconds component.
+#   * `timedelta_from_ms(ms)` is the raw constructor; `timedelta_new`
+#     takes the component form above.
+
+"""
+TimeDelta: a duration stored as total milliseconds (`ms` field).
+"""
+class TimeDelta:
+    ms: i64
+
+    """total_ms(self) -> total duration in milliseconds."""
+    fn total_ms(self):
+        return self.ms
+
+    """total_seconds(self) -> total duration in seconds (float)."""
+    fn total_seconds(self):
+        return self.ms / 1000.0
+
+    """days(self) -> whole days component (floor; may be negative)."""
+    fn days(self):
+        return _fdiv(self.ms, 86400000)
+
+    """seconds(self) -> seconds component within the day (0..86399)."""
+    fn seconds(self):
+        d = self.days()
+        rem = self.ms - d * 86400000
+        return rem / 1000
+
+    """milliseconds(self) -> ms component within the second (0..999)."""
+    fn milliseconds(self):
+        d = self.days()
+        rem = self.ms - d * 86400000
+        return rem % 1000
+
+    """neg(self) -> new TimeDelta with the sign flipped."""
+    fn neg(self):
+        return TimeDelta(-self.ms)
+
+    """abs_val(self) -> new TimeDelta with a non-negative duration."""
+    fn abs_val(self):
+        if self.ms < 0:
+            return TimeDelta(-self.ms)
+        return TimeDelta(self.ms)
+
+    """add_to(self, dt) -> DateTime shifted by this duration."""
+    fn add_to(self, dt):
+        return _dt_from_ms(timestamp(dt) + self.ms)
+
+    """text(self) -> 'D days, H:MM:SS.mmm' (sign on the whole duration).
+    NOTE: str(td) prints the struct repr — A does not dispatch __str__
+    for class instances; use .text() (same caveat as DateTime)."""
+    fn text(self):
+        neg = false
+        v = self.ms
+        if v < 0:
+            neg = true
+            v = -v
+        d = v / 86400000
+        rem = v - d * 86400000
+        h = rem / 3600000
+        rem = rem - h * 3600000
+        mi = rem / 60000
+        rem = rem - mi * 60000
+        s = rem / 1000
+        msec = rem - s * 1000
+        # Python str(timedelta) does not zero-pad the hours field
+        time_part = str(h) + ":" + _pad2(mi) + ":" + _pad2(s) + "." + _pad3(msec)
+        out = time_part
+        if d != 0:
+            if d == 1:
+                out = "1 day, " + time_part
+            else:
+                out = str(d) + " days, " + time_part
+        if neg:
+            return "-" + out
+        return out
+
+"""
+timedelta_new(days = 0, hours = 0, minutes = 0, seconds = 0,
+milliseconds = 0) -> TimeDelta. NOTE: argument order differs from
+Python (which interleaves microseconds/milliseconds before
+minutes/hours/weeks) — see the module header.
+"""
+fn timedelta_new(days = 0, hours = 0, minutes = 0, seconds = 0, milliseconds = 0):
+    return TimeDelta(days * 86400000 + hours * 3600000 + minutes * 60000 +
+                     seconds * 1000 + milliseconds)
+
+"""timedelta_from_ms(ms) -> TimeDelta of `ms` milliseconds."""
+fn timedelta_from_ms(ms):
+    return TimeDelta(ms)
+
+"""diff_dt(a, b) -> TimeDelta of (a - b) — Python `a - b`."""
+fn diff_dt(a, b):
+    return TimeDelta(timestamp(a) - timestamp(b))
+
+"""add_timedelta(dt, td) -> DateTime shifted by td (Python `dt + td`)."""
+fn add_timedelta(dt, td):
+    return _dt_from_ms(timestamp(dt) + td.ms)
+
 # -- strptime -----------------------------------------------------------------
 
 """

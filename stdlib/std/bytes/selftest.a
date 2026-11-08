@@ -1,5 +1,6 @@
 # std.bytes selftest — codepoint helpers and the native UTF-8 conversions.
 # Run: ./build/a test stdlib/std/bytes/selftest.a
+import std:core
 from "bytes.a" import utf8_decode, utf8_encode, b2s, s2b, s2b_fast, chr, ord
 
 fn assert_eq(a, b):
@@ -63,6 +64,61 @@ fn test_b2s_after_decode():
     src[0] = 74
     assert_eq(s, "hi")
 
+fn test_bytes_value_basics():
+    # Bytes is a first-class buffer: len/index/store/iteration/slice/equality
+    b: Bytes = Bytes("hey")
+    assert_eq(len(b), 3)
+    assert_eq(b[0], 104)
+    assert_eq(type(b), "Bytes")
+    b[0] = 72
+    assert_eq(core.bytes_to_str(b)!, "Hey")
+    assert_eq(b[0..2], Bytes("He"))
+    assert_eq(list(b), [72, 101, 121])
+    total = 0
+    for c in b:
+        total = total + c
+    assert_eq(total, 72 + 101 + 121)
+    assert_eq(Bytes([1, 2, 3]) == Bytes([1, 2, 3]), true)
+    assert_eq(Bytes([1, 2, 3]) == Bytes([1, 2]), false)
+    # Bytes + Bytes concatenates
+    assert_eq(len(Bytes("ab") + Bytes("cd")), 4)
+
+fn test_bytes_binary_roundtrip():
+    # Payloads that are not UTF-8 stay exact: no decode, no replacement chars.
+    raw: Bytes = Bytes(3)
+    raw[0] = 255
+    raw[1] = 0
+    raw[2] = 128
+    assert_eq(len(raw), 3)
+    assert_eq(core.bytes_to_str(raw) == None, true)
+    assert_eq(repr(raw).contains("xff"), true)
+    assert_eq(repr(raw).contains("x00"), true)
+    # append accepts Bytes, String, [i64] and a single byte
+    acc: Bytes = Bytes(0)
+    core.bytes_append(acc, raw)
+    core.bytes_append(acc, "ab")
+    core.bytes_append(acc, [67])
+    core.bytes_append(acc, 68)
+    assert_eq(len(acc), 7)
+    assert_eq(acc[3], 97)  # "ab" starts right after the three raw bytes
+    assert_eq(acc[4], 98)
+    assert_eq(acc[6], 68)
+    # a copy is independent of the source
+    copy: Bytes = Bytes(raw)
+    raw[0] = 1
+    assert_eq(copy[0], 255)
+
+fn test_bytes_large_buffer():
+    # 1 MiB: one allocation, index stores are O(1), decode is one native pass
+    big: Bytes = Bytes(1048576)
+    i = 0
+    while i < 1048576:
+        big[i] = 97
+        i = i + 1
+    assert_eq(len(big), 1048576)
+    assert_eq(len(core.bytes_to_str(big)!), 1048576)
+    assert_eq(len(utf8_decode(big)!), 1048576)
+
 fn main():
     test_utf8_encode_ascii_and_multibyte()
     test_utf8_decode_roundtrip()
@@ -71,4 +127,7 @@ fn main():
     test_b2s_and_s2b()
     test_ord_chr()
     test_b2s_after_decode()
+    test_bytes_value_basics()
+    test_bytes_binary_roundtrip()
+    test_bytes_large_buffer()
     print("stdio.bytes selftest: all tests passed")

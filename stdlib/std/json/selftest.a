@@ -52,6 +52,17 @@ fn test_dumps_separators():
     m = {"a": 1, "b": 2}
     assert_eq(dumps(m, -1, false, ["|", "="]), "\{\"a\"=1|\"b\"=2\}")
 
+fn test_dumps_ensure_ascii():
+    # default (Python parity): non-ASCII escaped as \uXXXX
+    assert_eq(dumps("h\u{e9}llo"), "\"h\\u00e9llo\"")
+    assert_eq(dumps("\u{65e5}\u{672c}"), "\"\\u65e5\\u672c\"")
+    # ensure_ascii = false: raw UTF-8 passthrough
+    assert_eq(dumps("h\u{e9}llo", -1, false, None, false), "\"héllo\"")
+    # astral char -> UTF-16 surrogate pair (U+1F600 -> D83D DE00)
+    assert_eq(dumps("\u{1f600}"), "\"\\ud83d\\ude00\"")
+    # ASCII unaffected either way
+    assert_eq(dumps("abc", -1, false, None, false), "\"abc\"")
+
 fn test_loads_roundtrip():
     text = "\{\"a\": [1, 2, \{\"b\": null\}], \"c\": \"x\\ny\"\}"
     v = loads(text)
@@ -80,5 +91,6 @@ test_dumps_containers()
 test_dumps_sort_keys()
 test_dumps_indent()
 test_dumps_separators()
+test_dumps_ensure_ascii()
 test_loads_roundtrip()
 print("json selftest ok")

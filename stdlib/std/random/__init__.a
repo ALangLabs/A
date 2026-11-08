@@ -207,6 +207,41 @@ class Random:
             i = i + 1
         return out
 
+    """
+    choices_weighted(self, seq, weights, k) -> array of k choices where
+    each element's probability is proportional to its weight
+    (Python random.choices(population, weights=..., k=...); a separate
+    name because A has no keyword arguments). `weights` must have the
+    same length as `seq`; panics on mismatch, empty weights, or a
+    non-positive total weight.
+    """
+    fn choices_weighted(self, seq, weights, k):
+        if len(seq) == 0:
+            core.panic("choices_weighted: empty sequence")
+        if len(weights) != len(seq):
+            core.panic("choices_weighted: weights must match population length")
+        total = 0.0
+        for x in weights:
+            total = total + (x + 0.0)
+        if total <= 0.0:
+            core.panic("choices_weighted: total weight must be positive")
+        # cumulative weights for linear-scan selection
+        cum = []
+        acc = 0.0
+        for x in weights:
+            acc = acc + (x + 0.0)
+            cum.append(acc)
+        out = []
+        i = 0
+        while i < k:
+            u = self.random() * total
+            j = 0
+            while j < len(cum) - 1 and cum[j] < u:
+                j = j + 1
+            out.append(seq[j])
+            i = i + 1
+        return out
+
     """sample(self, population, k) -> new array of k unique elements."""
     fn sample(self, population, k):
         n = len(population)
@@ -304,6 +339,68 @@ class Random:
             u = self.random()
         return -math.log(1.0 - u) / (lambd + 0.0)
 
+    """
+    gammavariate(self, alpha, beta) -> float; Gamma distribution with
+    shape alpha and scale beta (Python random.gammavariate). Uses the
+    Marsaglia-Tsang method for alpha >= 1 and the standard alpha<1
+    boost (Gamma(a) = Gamma(a+1) * U^(1/a)).
+    """
+    fn gammavariate(self, alpha, beta):
+        if alpha <= 0.0 or beta <= 0.0:
+            core.panic("gammavariate: alpha and beta must be positive")
+        if alpha < 1.0:
+            return self.gammavariate(alpha + 1.0, beta) * math.pow(self.random(), 1.0 / (alpha + 0.0))
+        d = (alpha + 0.0) - 0.3333333333333333
+        c = 1.0 / math.sqrt(9.0 * d)
+        while true:
+            x = self.gauss(0.0, 1.0)
+            v = 1.0 + c * x
+            if v <= 0.0:
+                continue
+            v = v * v * v
+            u = self.random()
+            if u <= 0.0:
+                continue
+            if math.log(u) < 0.5 * x * x + d - d * v + d * math.log(v):
+                return d * v * (beta + 0.0)
+        return 0.0  # unreachable; satisfies the return checker
+
+    """
+    betavariate(self, alpha, beta) -> float in [0, 1]; Beta
+    distribution (Python random.betavariate; ratio of two gammas).
+    """
+    fn betavariate(self, alpha, beta):
+        if alpha <= 0.0 or beta <= 0.0:
+            core.panic("betavariate: alpha and beta must be positive")
+        y = self.gammavariate(alpha, 1.0)
+        z = self.gammavariate(beta, 1.0)
+        s = y + z
+        if s == 0.0:
+            return 0.0
+        return y / s
+
+    """lognormvariate(self, mu, sigma) -> float; log-normal distribution."""
+    fn lognormvariate(self, mu, sigma):
+        return math.exp(self.gauss(mu, sigma))
+
+    """
+    paretovariate(self, alpha) -> float; Pareto distribution with
+    shape alpha (Python random.paretovariate).
+    """
+    fn paretovariate(self, alpha):
+        if alpha <= 0.0:
+            core.panic("paretovariate: alpha must be positive")
+        return math.pow(1.0 - self.random(), -1.0 / (alpha + 0.0)) - 1.0
+
+    """
+    weibullvariate(self, alpha, beta) -> float; Weibull distribution
+    (Python random.weibullvariate).
+    """
+    fn weibullvariate(self, alpha, beta):
+        if alpha <= 0.0 or beta <= 0.0:
+            core.panic("weibullvariate: alpha and beta must be positive")
+        return (beta + 0.0) * math.pow(-math.log(1.0 - self.random()), 1.0 / (alpha + 0.0))
+
     """randbytes(self, n) -> [i64] of n bytes, each in 0..255."""
     fn randbytes(self, n):
         out = []
@@ -392,6 +489,13 @@ fn choices(seq, k):
     _store(r)
     return v
 
+"""choices_weighted(seq, weights, k) -> weighted choices (global stream)."""
+fn choices_weighted(seq, weights, k):
+    r = _load()
+    v = r.choices_weighted(seq, weights, k)
+    _store(r)
+    return v
+
 """sample(population, k) -> new array of k unique elements."""
 fn sample(population, k):
     r = _load()
@@ -459,5 +563,40 @@ fn normalvariate(mu, sigma):
 fn expovariate(lambd):
     r = _load()
     v = r.expovariate(lambd)
+    _store(r)
+    return v
+
+"""gammavariate(alpha, beta) -> Gamma-distributed float (global stream)."""
+fn gammavariate(alpha, beta):
+    r = _load()
+    v = r.gammavariate(alpha, beta)
+    _store(r)
+    return v
+
+"""betavariate(alpha, beta) -> Beta-distributed float in [0, 1] (global stream)."""
+fn betavariate(alpha, beta):
+    r = _load()
+    v = r.betavariate(alpha, beta)
+    _store(r)
+    return v
+
+"""lognormvariate(mu, sigma) -> log-normal float (global stream)."""
+fn lognormvariate(mu, sigma):
+    r = _load()
+    v = r.lognormvariate(mu, sigma)
+    _store(r)
+    return v
+
+"""paretovariate(alpha) -> Pareto-distributed float (global stream)."""
+fn paretovariate(alpha):
+    r = _load()
+    v = r.paretovariate(alpha)
+    _store(r)
+    return v
+
+"""weibullvariate(alpha, beta) -> Weibull-distributed float (global stream)."""
+fn weibullvariate(alpha, beta):
+    r = _load()
+    v = r.weibullvariate(alpha, beta)
     _store(r)
     return v

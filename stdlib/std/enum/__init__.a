@@ -190,6 +190,21 @@ class EnumSpec:
             return self._by_value[v]
         return None
 
+    """
+    unique(self) -> self; panics when two canonical members share a
+    value (Python enum.unique decorator analogue — call it on the spec
+    after construction: `Color = Color.unique()` or `Color.unique()`).
+    """
+    fn unique(self):
+        seen = {}
+        for m in self._members:
+            k = str(m.value)
+            if k in seen:
+                core.panic("duplicate value " + str(m.value) +
+                           " in enum '" + self._typename + "'")
+            seen[k] = true
+        return self
+
 """
 FlagSpec: what Flag()/IntFlag() return. Wraps an EnumSpec of canonical
 single-bit members plus a cache of composite pseudo-members.
@@ -303,6 +318,10 @@ class FlagSpec:
         cv = self._flag_int(container.value)
         fv = self._flag_int(flag.value)
         return (cv & fv) == fv
+
+    """unique(self) -> self; delegates to the wrapped EnumSpec.unique()."""
+    fn unique(self):
+        return self._spec.unique()
 
 fn _names_from_string(s):
     t = s.replace(",", " ")

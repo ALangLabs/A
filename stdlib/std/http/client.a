@@ -39,7 +39,7 @@ class Response:
     reason: String
     headers: {String: String}
     body: String
-    body_bytes: [i64]
+    body_bytes: Bytes
     url: String
     encoding: String
     is_ok: bool
@@ -200,35 +200,25 @@ _read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer.
 Bytes past n are kept in conn._buf: pipelined responses and the next keep-alive
 reply must not be thrown away.
 """
-fn _read_n(conn, n: i64):
+fn _read_n(conn, n: i64) -> Bytes:
     if n <= 0:
-        return []
-    if len(conn._buf) == 0:
-        # Fast path: one native call, packed [i64] storage. The A-level loop
-        # below costs ~35 ns per byte (list.extend + slice copies), which caps
-        # large bodies at ~17 MB/s; this path is transport bound (~90 MB/s).
-        body = net.recv_exact(conn.sock, n)
-        if len(body) == 0:
-            st = net.recv_status(conn.sock)
-            if st == 3:
-                conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
-            if st == 2:
-                conn._fail("socket error reading {conn.host}:{conn.port}")
-        return body
-    out = _b_slice(conn._buf, 0, n)
-    conn._buf = _b_slice(conn._buf, len(out), len(conn._buf))
-    while len(out) < n:
-        chunk = _recv_chunk(conn)
-        if len(chunk) == 0:
-            break
-        need = n - len(out)
-        if len(chunk) <= need:
-            out.extend(chunk)
-
-        else:
-            out.extend(_b_slice(chunk, 0, need))
-            conn._buf = _b_slice(chunk, need, len(chunk))
-    return out
+        return Bytes(0)
+    pre = conn._buf
+    if len(pre) >= n:
+        # The header read over-read the whole body (and maybe the next reply).
+        conn._buf = _b_slice(pre, n, len(pre))
+        return Bytes(_b_slice(pre, 0, n))
+    conn._buf = []
+    # net.recv_buf allocates the Bytes buffer and lets the kernel fill it:
+    # one allocation, one copy, no int64 expansion of the payload.
+    body = net.recv_buf(conn.sock, n, pre)
+    if len(body) == 0:
+        st = net.recv_status(conn.sock)
+        if st == 3:
+            conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+        if st == 2:
+            conn._fail("socket error reading {conn.host}:{conn.port}")
+    return body
 
 """_read_line(conn) -> [i64] up to and including CRLF ([] on EOF)."""
 fn _read_line(conn):
@@ -272,14 +262,15 @@ fn _read_headers(conn):
 """BodyParts: the payload either as text (flat String) or as raw bytes."""
 class BodyParts:
     text: String
-    bytes: [i64]
+    bytes: Bytes
 
-"""_read_chunked(conn) -> [i64] dechunked payload."""
-fn _read_chunked(conn) -> [i64]:
+"""_read_chunked(conn) -> Bytes dechunked payload."""
+fn _read_chunked(conn) -> Bytes:
     # RFC 7230: chunked beats content-length when both are present.
     # Dechunk as we read, so the payload is copied once instead of twice
     # (framing bytes are discarded rather than collected and stripped).
     chunks = []
+    body = Bytes(0)
     while true:
         size_line = _read_line(conn)
         if len(size_line) == 0:
@@ -292,27 +283,26 @@ fn _read_chunked(conn) -> [i64]:
                 if len(t) == 0 or b2s(t) == "\r\n":
                     break
             break
-        chunks.append(_read_n(conn, size))
+        part = _read_n(conn, size)
+        if len(chunks) == 0:
+            chunks.append(part)  # no copy for the usual single-chunk response
+
+        else:
+            if len(body) == 0:
+                body = chunks[0]
+            core.bytes_append(body, part)
         _read_line(conn)  # discard the CRLF that ends the chunk
     if len(chunks) == 0:
-        return []
-    if len(chunks) == 1:
-        return chunks[0]  # no copy for the usual single-chunk response
-    body = []
-    for c in chunks:
-        body.extend(c)
+        return Bytes(0)
+    if len(body) == 0:
+        return chunks[0]
     return body
 
-"""_read_to_close(conn) -> [i64] body delimited by the server closing."""
-fn _read_to_close(conn) -> [i64]:
-    body = conn._buf
+"""_read_to_close(conn) -> Bytes body delimited by the server closing."""
+fn _read_to_close(conn) -> Bytes:
+    pre = conn._buf
     conn._buf = []
-    while true:
-        chunk = _recv_chunk(conn)
-        if len(chunk) == 0:
-            break
-        body.extend(chunk)
-    return body
+    return net.recv_buf_all(conn.sock, pre)
 
 """_short_read(conn, got, want) -> fail; a body shorter than its framing says."""
 fn _short_read(conn, got: i64, want: i64):
@@ -338,7 +328,7 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
     if cl != None:
         n = int(cl)
         if n <= 0:
-            return BodyParts("", [])
+            return BodyParts("", Bytes(0))
         if want_bytes:
             return BodyParts("", _read_n(conn, n))
         pre = conn._buf
@@ -569,7 +559,7 @@ class HTTPConnection:
             if len(lines) == 0:
                 self._fail("interim response without a final status")
         hdrs = _headers_map(lines[1..])
-        parts = BodyParts("", [])
+        parts = BodyParts("", Bytes(0))
         if self._method != "HEAD" and status != 204 and status != 304 and status >= 200:
             parts = _read_body(self, hdrs, self._fetch_bytes)
         self.close()
@@ -699,7 +689,7 @@ fn request(method: String, url: String, body = None, headers = None, params = No
                 continue
         return resp
     # unreachable: while true always returns or continues
-    return Response(0, "", {}, "", [], "", "utf-8", false)
+    return Response(0, "", {}, "", Bytes(0), "", "utf-8", false)
 
 """get(url[, headers[, params[, timeout[, allow_redirects[, verify]]]]]) -> Response"""
 fn get(url: String, headers = None, params = None, timeout = 0, allow_redirects = true, verify = true):

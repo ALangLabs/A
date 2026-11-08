@@ -9,11 +9,14 @@
 #   * On invalid input (empty data, insufficient points), functions
 #     `panic` with a message (A has no StatisticsError exceptions).
 #   * `fmean` ignores weights (not supported in this subset).
-#   * `median_grouped` and weighted `fmean` are not implemented.
+#   * NormalDist.inv_cdf uses bisection on cdf rather than Acklam's
+#     rational approximation; NormalDist.samples takes an explicit
+#     std:random Random stream instead of a `seed=` keyword.
 
 import std:math
 import std:core
 import std:json
+from "std/math/functions.a" import erf, erfc
 
 fn _check_nonempty(data, name):
     if len(data) < 1:
@@ -290,3 +293,169 @@ fn linear_regression(data1, data2):
     slope = sxy / float(n - 1) / vx
     intercept = my - slope * mx
     return [slope, intercept]
+
+fn median_grouped(data, interval = 1.0):
+    """Estimates the median for numeric data binned around the midpoints
+    of consecutive, fixed-width intervals (Python statistics.median_grouped).
+
+    Each value is the midpoint of a bin of width `interval`; the median is
+    linearly interpolated inside the median bin. The caller is responsible
+    for values being separated by exact multiples of `interval` (not checked).
+    """
+    xs = _sorted_copy(data)
+    n = len(xs)
+    if n == 0:
+        core.panic("median_grouped: no median for empty data")
+    # midpoint value of the median bin
+    x = _to_float(xs[n / 2])
+    # bisect_left: i = count of values < x ; bisect_right: j = count <= x
+    i = 0
+    while i < n and _to_float(xs[i]) < x:
+        i = i + 1
+    j = i
+    while j < n and _to_float(xs[j]) == x:
+        j = j + 1
+    iv = _to_float(interval)
+    lower = x - iv / 2.0
+    cf = float(i)
+    f = float(j - i)
+    return lower + iv * (float(n) / 2.0 - cf) / f
+
+# -- NormalDist ----------------------------------------------------------------
+#
+# Python statistics.NormalDist(mu=0.0, sigma=1.0): normal distribution with
+# pdf/cdf/inv_cdf/quantiles/samples. Deviations:
+#   * stored as public fields `mu`/`sigma` (constructed via
+#     NormalDist_new / from_samples rather than a keyword ctor).
+#   * inv_cdf uses bisection on cdf (~1e-12 accuracy after 100 iterations)
+#     instead of CPython's Acklam rational approximation.
+#   * samples(n, rng) takes an explicit std:random Random stream (Python's
+#     `seed=` keyword cannot be expressed; pass None to use the global
+#     std:random stream).
+#   * pdf()/cdf() panic when sigma == 0 (Python raises StatisticsError).
+
+# NOTE: _SQRT2/_TAU literals are inlined inside the methods below —
+# module-level variables read as 0.0 inside `a test` test functions
+# (toolchain quirk).
+
+"""
+_nd_inv_cdf(nd, prob) -> module-level inverse-CDF bisection shared by
+NormalDist.inv_cdf and quantiles (see the note on inv_cdf).
+"""
+fn _nd_inv_cdf(nd, prob):
+    pf = prob + 0.0
+    if pf <= 0.0 or pf >= 1.0:
+        core.panic("NormalDist.inv_cdf: p must be in (0.0, 1.0)")
+    if nd.sigma == 0.0:
+        return nd.mu
+    lo = nd.mu - 40.0 * nd.sigma
+    hi = nd.mu + 40.0 * nd.sigma
+    i = 0
+    while i < 100:
+        mid = (lo + hi) / 2.0
+        if nd.cdf(mid) < pf:
+            lo = mid
+        else:
+            hi = mid
+        i = i + 1
+    return (lo + hi) / 2.0
+
+"""
+_nd_quantiles(nd, n) -> module-level quantiles loop; int->float
+coercion of the loop counters miscompiles inside the NormalDist class
+method under `a run`/`a test`, so it lives here instead.
+"""
+fn _nd_quantiles(nd, ncnt):
+    if ncnt < 2:
+        core.panic("NormalDist.quantiles: n must be >= 2")
+    out = []
+    ii = 1
+    while ii < ncnt:
+        prob = float(ii) / float(ncnt)
+        out.append(_nd_inv_cdf(nd, prob))
+        ii = ii + 1
+    return out
+
+"""
+NormalDist: normal distribution N(mu, sigma). Fields mu/sigma are
+public (read-only by convention).
+"""
+class NormalDist:
+    mu
+    sigma
+
+    """pdf(self, x) -> probability density at x."""
+    fn pdf(self, x):
+        variance = self.sigma * self.sigma
+        if variance == 0.0:
+            core.panic("NormalDist.pdf: sigma is zero")
+        diff = (x + 0.0) - self.mu
+        return math.exp(diff * diff / (-2.0 * variance)) / math.sqrt(6.283185307179586 * variance)
+
+    """cdf(self, x) -> P(X <= x)."""
+    fn cdf(self, x):
+        if self.sigma == 0.0:
+            core.panic("NormalDist.cdf: sigma is zero")
+        return 0.5 * erfc((self.mu - (x + 0.0)) / (self.sigma * 1.4142135623730951))
+
+    """
+    inv_cdf(self, prob) -> x such that P(X <= x) = prob, for
+    0 < prob < 1 (Python statistics.NormalDist.inv_cdf; bisection).
+    NOTE: delegates to the module-level _nd_inv_cdf — a self->self
+    method call inside quantiles miscompiles under `a run`/`a test`.
+    """
+    fn inv_cdf(self, prob):
+        return _nd_inv_cdf(self, prob)
+
+    """
+    quantiles(self, n = 4) -> (n - 1) cut points separating the
+    distribution into n equal-probability intervals (Python parity;
+    n = 4 gives quartiles).
+    """
+    fn quantiles(self, n = 4):
+        return _nd_quantiles(self, n)
+
+    """
+    sample(self, rng) -> one sample; rng is a std:random Random (or any
+    object with .random()).
+    """
+    fn sample(self, rng):
+        return self.inv_cdf(rng.random())
+
+    """
+    samples(self, n, rng) -> array of n samples from rng
+    (Python NormalDist.samples; rng replaces the `seed=` keyword).
+    """
+    fn samples(self, n, rng):
+        out = []
+        i = 0
+        while i < n:
+            out.append(self.sample(rng))
+            i = i + 1
+        return out
+
+    """
+    zscore(self, x) -> standard score (x - mu) / sigma
+    (Python NormalDist.zscore).
+    """
+    fn zscore(self, x):
+        if self.sigma == 0.0:
+            core.panic("NormalDist.zscore: sigma is zero")
+        return ((x + 0.0) - self.mu) / self.sigma
+
+"""
+NormalDist_new(mu = 0.0, sigma = 1.0) -> NormalDist. Panics when
+sigma < 0 (Python raises StatisticsError).
+"""
+fn NormalDist_new(mu = 0.0, sigma = 1.0):
+    sm = sigma + 0.0
+    if sm < 0.0:
+        core.panic("NormalDist: sigma must be non-negative")
+    return NormalDist(mu + 0.0, sm)
+
+"""
+NormalDist_from_samples(data) -> NormalDist fitted to sample mean and
+sample standard deviation (Python NormalDist.from_samples).
+"""
+fn NormalDist_from_samples(data):
+    return NormalDist_new(mean(data), stdev(data))

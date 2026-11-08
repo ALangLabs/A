@@ -4,7 +4,7 @@
 # NOTE: `import std:math` resolves to the NATIVE math module, so this
 # selftest imports the A-file wrappers relatively (quoted path), the
 # same reachability the package files themselves use.
-from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round_val, trunc, random, random_int, clamp
+from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round_val, trunc, random, random_int, clamp, factorial, comb, perm, gcd, lcm, isqrt, prod, hypot, dist, fmod, degrees, radians, expm1, log1p, log_base, cbrt, fsum, erf, erfc, lgamma, gamma
 from "constants.a" import PI, E
 
 fn assert_eq(a, b):
@@ -54,9 +54,67 @@ fn test_random():
     i = random_int(3, 7)
     assert(i >= 3 and i <= 7)
 
+fn test_int_functions():
+    assert_eq(factorial(0), 1)
+    assert_eq(factorial(5), 120)
+    assert_eq(factorial(20), 2432902008176640000)
+    assert_eq(comb(5, 2), 10)
+    assert_eq(comb(10, 3), 120)
+    assert_eq(comb(7, 0), 1)
+    assert_eq(comb(7, 7), 1)
+    assert_eq(perm(5, 2), 20)
+    assert_eq(perm(5, 0), 1)
+    assert_eq(perm(5, 5), 120)
+    assert_eq(gcd(12, 18), 6)
+    assert_eq(gcd(-12, 18), 6)
+    assert_eq(gcd(7, 13), 1)
+    assert_eq(gcd(0, 5), 5)
+    assert_eq(lcm(4, 6), 12)
+    assert_eq(lcm(0, 6), 0)
+    assert_eq(isqrt(15), 3)
+    assert_eq(isqrt(16), 4)
+    assert_eq(isqrt(0), 0)
+    assert_eq(isqrt(1000000), 1000)
+    assert_eq(prod([1, 2, 3, 4]), 24)
+    assert_eq(prod([]), 1)
+
+fn test_float_functions():
+    assert_close(hypot(3.0, 4.0), 5.0)
+    assert_close(hypot(0.0, 0.0), 0.0)
+    assert_close(dist([0.0, 0.0], [3.0, 4.0]), 5.0)
+    assert_close(fmod(5.5, 2.0), 1.5)
+    assert_close(fmod(-5.5, 2.0), -1.5)
+    assert_close(degrees(PI), 180.0)
+    assert_close(radians(180.0), PI)
+    assert_close(expm1(0.001), 0.0010005001667084)
+    assert_close(expm1(1.0), E - 1.0)
+    assert_close(log1p(0.001), 0.0009995003330835)
+    assert_close(log1p(1.0), 0.6931472)
+    assert_close(log_base(8.0, 2.0), 3.0)
+    assert_close(log_base(100.0, 10.0), 2.0)
+    assert_close(cbrt(27.0), 3.0)
+    assert_close(cbrt(-8.0), -2.0)
+    assert_close(fsum([0.1, 0.2, 0.3]), 0.6)
+    assert_close(fsum([]), 0.0)
+
+fn test_erf_gamma():
+    assert_close(erf(0.0), 0.0)
+    assert_close(erf(1.0), 0.8427008)
+    assert_close(erf(-1.0), -0.8427008)
+    assert_close(erfc(0.0), 1.0)
+    assert_close(erfc(1.0), 0.1572992)
+    assert_close(gamma(5.0), 24.0)
+    assert_close(gamma(0.5), 1.7724539)
+    assert_close(gamma(1.5), 0.8862269)
+    assert_close(lgamma(5.0), 3.1780538)
+    assert_close(lgamma(0.5), 0.5723649)
+
 fn main():
     test_basics()
     test_trig_and_logs()
     test_clamp()
     test_random()
+    test_int_functions()
+    test_float_functions()
+    test_erf_gamma()
     print("std.math selftest: all tests passed")

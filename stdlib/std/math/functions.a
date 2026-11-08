@@ -1,4 +1,5 @@
 import std:math
+import std:core
 
 fn sqrt(x):
     return math.sqrt(x)
@@ -72,3 +73,323 @@ fn clamp(x, lo, hi):
     if x > hi:
         return hi
     return x
+
+# -- integer functions (Python math parity; i64 arithmetic) -------------------
+# NOTE: factorial overflows silently past 20! (i64 limit ~9.2e18); comb/perm
+# have the same bound. Python math.factorial is unbounded — documented
+# deviation.
+
+"""
+factorial(n) -> n! as i64. Panics on n < 0 (Python raises ValueError).
+"""
+fn factorial(n):
+    if n < 0:
+        core.panic("factorial: n must be >= 0")
+    r = 1
+    i = 2
+    while i <= n:
+        r = r * i
+        i = i + 1
+    return r
+
+"""
+comb(n, k) -> binomial coefficient C(n, k) as i64 (Python math.comb).
+Panics when k < 0, n < 0, or k > n (Python raises ValueError).
+"""
+fn comb(n, k):
+    if n < 0 or k < 0:
+        core.panic("comb: n and k must be >= 0")
+    if k > n:
+        core.panic("comb: k must be <= n")
+    if k > n - k:
+        k = n - k
+    r = 1
+    i = 1
+    while i <= k:
+        # exact at every step: r * (n - k + i) is divisible by i
+        r = r * (n - k + i) / i
+        i = i + 1
+    return r
+
+"""
+perm(n, k) -> number of k-permutations of n items as i64
+(Python math.perm). Panics when k < 0, n < 0, or k > n.
+"""
+fn perm(n, k):
+    if n < 0 or k < 0:
+        core.panic("perm: n and k must be >= 0")
+    if k > n:
+        core.panic("perm: k must be <= n")
+    r = 1
+    i = 0
+    while i < k:
+        r = r * (n - i)
+        i = i + 1
+    return r
+
+"""
+_iabs64(a) -> |a| for i64 (MIN_VALUE edge wraps; irrelevant in practice).
+"""
+fn _iabs64(a):
+    if a < 0:
+        return -a
+    return a
+
+"""
+gcd(a, b) -> greatest common divisor of integers a, b as i64
+(Python math.gcd; accepts any number of ints — here two args).
+"""
+fn gcd(a, b):
+    x = _iabs64(a)
+    y = _iabs64(b)
+    while y != 0:
+        t = x % y
+        x = y
+        y = t
+    return x
+
+"""
+lcm(a, b) -> least common multiple of integers a, b as i64
+(Python math.lcm). Returns 0 when either operand is 0.
+"""
+fn lcm(a, b):
+    if a == 0 or b == 0:
+        return 0
+    g = gcd(a, b)
+    return (_iabs64(a) / g) * _iabs64(b)
+
+"""
+isqrt(n) -> integer square root: largest i64 r with r*r <= n
+(Python math.isqrt). Panics on n < 0.
+"""
+fn isqrt(n):
+    if n < 0:
+        core.panic("isqrt: n must be >= 0")
+    if n == 0:
+        return 0
+    r = floor(math.sqrt(float(n))) + 1.0
+    ri = int(r)
+    while ri * ri > n:
+        ri = ri - 1
+    while (ri + 1) * (ri + 1) <= n:
+        ri = ri + 1
+    return ri
+
+"""
+prod(xs) -> product of all elements of a numeric array
+(Python math.prod). Empty array returns 1 (Python parity).
+"""
+fn prod(xs):
+    r = 1
+    for x in xs:
+        r = r * x
+    return r
+
+# -- float functions -----------------------------------------------------------
+
+"""
+hypot(x, y) -> sqrt(x*x + y*y), overflow-safe
+(Python math.hypot with two args).
+"""
+fn hypot(x, y):
+    ax = math.abs(x)
+    ay = math.abs(y)
+    m = math.max(ax, ay)
+    if m == 0.0:
+        return 0.0
+    rx = ax / m
+    ry = ay / m
+    return m * math.sqrt(rx * rx + ry * ry)
+
+"""
+dist(p, q) -> Euclidean distance between two equal-length numeric
+arrays (Python math.dist). Panics on length mismatch.
+"""
+fn dist(p, q):
+    if len(p) != len(q):
+        core.panic("dist: points must have the same dimension")
+    ss = 0.0
+    i = 0
+    while i < len(p):
+        d = (p[i] + 0.0) - (q[i] + 0.0)
+        ss = ss + d * d
+        i = i + 1
+    return math.sqrt(ss)
+
+"""
+fmod(x, y) -> float remainder with the sign of x, like C fmod
+(Python math.fmod). Panics on y == 0.
+"""
+fn fmod(x, y):
+    if y == 0.0:
+        core.panic("fmod: zero divisor")
+    return (x + 0.0) - math.trunc((x + 0.0) / (y + 0.0)) * (y + 0.0)
+
+"""
+degrees(x) -> angle in radians converted to degrees (Python math.degrees).
+"""
+fn degrees(x):
+    return (x + 0.0) * 57.29577951308232
+
+"""
+radians(x) -> angle in degrees converted to radians (Python math.radians).
+"""
+fn radians(x):
+    return (x + 0.0) * 0.017453292519943295
+
+"""
+expm1(x) -> e^x - 1, accurate for small |x| (Python math.expm1).
+"""
+fn expm1(x):
+    ax = math.abs(x + 0.0)
+    if ax < 0.001:
+        # series: x + x^2/2! + x^3/3! (error < 4e-14 for |x| < 1e-3)
+        x2 = (x + 0.0) * (x + 0.0)
+        return (x + 0.0) + x2 / 2.0 + x2 * (x + 0.0) / 6.0
+    return math.exp(x + 0.0) - 1.0
+
+"""
+log1p(x) -> log(1 + x), accurate for small |x| (Python math.log1p).
+Panics on x <= -1.
+"""
+fn log1p(x):
+    xf = x + 0.0
+    if xf <= -1.0:
+        core.panic("log1p: argument must be > -1")
+    ax = math.abs(xf)
+    if ax < 0.001:
+        # series: x - x^2/2 + x^3/3 - x^4/4 (error < 3e-13 for |x| < 1e-3)
+        x2 = xf * xf
+        return xf - x2 / 2.0 + x2 * xf / 3.0 - x2 * x2 / 4.0
+    return math.log(1.0 + xf)
+
+"""
+log_base(x, base) -> logarithm of x to the given base (Python
+math.log(x, base)). Panics on x <= 0 or base <= 0.
+"""
+fn log_base(x, base):
+    if x <= 0.0 or base <= 0.0:
+        core.panic("log: domain error")
+    return math.log(x + 0.0) / math.log(base + 0.0)
+
+"""
+cbrt(x) -> real cube root of x (Python math.cbrt; preserves sign).
+"""
+fn cbrt(x):
+    xf = x + 0.0
+    ax = math.abs(xf)
+    r = math.pow(ax, 0.3333333333333333)
+    if xf < 0.0:
+        return -r
+    return r
+
+"""
+fsum(xs) -> accurately rounded sum via Neumaier (compensated) summation
+(Python math.fsum; the compensated algorithm bounds the error).
+"""
+fn fsum(xs):
+    s = 0.0
+    c = 0.0
+    for x in xs:
+        xf = x + 0.0
+        t = s + xf
+        if math.abs(s) >= math.abs(xf):
+            c = c + (s - t) + xf
+        else:
+            c = c + (xf - t) + s
+        s = t
+    return s + c
+
+"""
+_erf_pos(x) -> erf(x) for x >= 0 via Abramowitz & Stegun 7.1.26
+(|error| < 1.5e-7).
+"""
+fn _erf_pos(x):
+    t = 1.0 / (1.0 + 0.3275911 * x)
+    # Horner form of a1*t + a2*t^2 + ... + a5*t^5 (a5 innermost)
+    poly = 1.061405429
+    poly = poly * t - 1.453152027
+    poly = poly * t + 1.421413741
+    poly = poly * t - 0.284496736
+    poly = poly * t + 0.254829592
+    return 1.0 - poly * t * math.exp(-x * x)
+
+"""
+erf(x) -> error function (Python math.erf; A&S approximation,
+|error| < 1.5e-7 — less precise than CPython's erf).
+"""
+fn erf(x):
+    xf = x + 0.0
+    if xf < 0.0:
+        return -_erf_pos(-xf)
+    return _erf_pos(xf)
+
+"""
+erfc(x) -> complementary error function 1 - erf(x) (Python math.erfc).
+"""
+fn erfc(x):
+    xf = x + 0.0
+    if xf < 0.0:
+        return 1.0 + _erf_pos(-xf)
+    return 1.0 - _erf_pos(xf)
+
+"""
+_lgamma_pos(x) -> log|Gamma(x)| for x > 0 via the Lanczos approximation
+(g = 5, n = 6 coefficients; Numerical Recipes gammln).
+"""
+fn _lgamma_pos(x):
+    cof0 = 76.18009172947146
+    cof1 = -86.50532032941677
+    cof2 = 24.01409824083091
+    cof3 = -1.231739572450155
+    cof4 = 0.1208650973866179e-2
+    cof5 = -0.5395239384953e-5
+    y = x
+    tmp = x + 5.5
+    tmp = tmp - (x + 0.5) * math.log(tmp)
+    ser = 1.000000000190015
+    y = y + 1.0
+    ser = ser + cof0 / y
+    y = y + 1.0
+    ser = ser + cof1 / y
+    y = y + 1.0
+    ser = ser + cof2 / y
+    y = y + 1.0
+    ser = ser + cof3 / y
+    y = y + 1.0
+    ser = ser + cof4 / y
+    y = y + 1.0
+    ser = ser + cof5 / y
+    return -tmp + math.log(2.5066282746310005 * ser / x)
+
+"""
+lgamma(x) -> log|Gamma(x)| (Python math.lgamma). Panics at
+non-positive integers (poles).
+"""
+fn lgamma(x):
+    xf = x + 0.0
+    xi = int(xf)
+    if xf == float(xi) and xf <= 0.0:
+        core.panic("lgamma: pole at non-positive integer")
+    if xf < 0.5:
+        s = math.sin(3.141592653589793 * xf)
+        if s == 0.0:
+            core.panic("lgamma: pole")
+        return math.log(3.141592653589793 / math.abs(s)) - _lgamma_pos(1.0 - xf)
+    return _lgamma_pos(xf)
+
+"""
+gamma(x) -> Gamma function (Python math.gamma). Panics at
+non-positive integers.
+"""
+fn gamma(x):
+    xf = x + 0.0
+    xi = int(xf)
+    if xf == float(xi) and xf <= 0.0:
+        core.panic("gamma: pole at non-positive integer")
+    if xf < 0.5:
+        s = math.sin(3.141592653589793 * xf)
+        if s == 0.0:
+            core.panic("gamma: pole")
+        return 3.141592653589793 / (s * math.exp(_lgamma_pos(1.0 - xf)))
+    return math.exp(_lgamma_pos(xf))

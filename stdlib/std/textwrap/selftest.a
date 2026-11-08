@@ -4,6 +4,9 @@ import std:textwrap
 fn assert_eq(a, b):
     assert(a == b)
 
+fn assert_true(c):
+    assert(c)
+
 fn test_wrap_fill():
     ws = textwrap.wrap("the quick brown fox", 10)
     assert_eq(len(ws), 2)
@@ -19,3 +22,37 @@ fn test_indented():
     assert_eq(len(ls), 2)
     assert_eq(ls[0], "> aa bb")
     assert_eq(ls[1], "  cc")
+
+fn test_textwrapper():
+    tw = textwrap.TextWrapper_new(10)
+    ws = tw.wrap("the quick brown fox jumps")
+    assert_eq(len(ws), 3)
+    assert_eq(tw.fill("the quick brown fox"), "the quick\nbrown fox")
+    # indents honoured, width includes them
+    tw2 = textwrap.TextWrapper_new(12, "", "  ")
+    f2 = tw2.fill("one two three four five")
+    assert_eq(f2, "one two\n  three four\n  five")
+    # break_long_words = false keeps long words whole
+    tw3 = textwrap.TextWrapper_new(5)
+    tw3.break_long_words = false
+    ws3 = tw3.wrap("supercalifragilistic ok")
+    assert_eq(ws3[0], "supercalifragilistic")
+    # break_on_hyphens allows breaking after '-'
+    tw4 = textwrap.TextWrapper_new(8)
+    tw4.break_long_words = false
+    ws4 = tw4.wrap("well-known fact")
+    joined = ""
+    i = 0
+    while i < len(ws4):
+        if i > 0:
+            joined = joined + "|"
+        joined = joined + str(ws4[i])
+        i = i + 1
+    assert_true(joined.contains("well-"))
+    # expand_tabs
+    tw5 = textwrap.TextWrapper_new(70)
+    assert_eq(tw5._prepare("a\tb"), "a       b")
+    # fix_sentence_endings doubles space after sentence end
+    tw6 = textwrap.TextWrapper_new(70)
+    tw6.fix_sentence_endings = true
+    assert_eq(tw6._prepare("Hi. there"), "Hi.  there")

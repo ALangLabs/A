@@ -1,11 +1,12 @@
 # std.statistics selftest — run: ./build/a test stdlib/std/statistics/selftest.a
 import std:statistics
+import std:random
 
 fn assert_eq(a, b):
     assert(a == b)
 
-fn assert_close(a, b):
-    assert(abs(a - b) < 1e-9)
+fn assert_close(a, b, tol = 1e-9):
+    assert(abs(a - b) < tol)
 
 fn test_multimode():
     m = statistics.multimode([1, 2, 2, 3, 3, 3])
@@ -46,12 +47,55 @@ fn test_linear_regression():
     assert_close(lr2[0], 2.0)
     assert_close(lr2[1], 1.0)
 
+fn test_median_grouped():
+    # CPython doc example shape: midpoints 25,35,45,55,65 with counts
+    # approximated by repeated values, interval 10 -> ~37.5 region.
+    # Simple check: [25,25,35,35,35,35,45] interval 10 -> median group 35
+    mg = statistics.median_grouped([25, 25, 35, 35, 35, 35, 45], 10)
+    # n=7, x=xs[3]=35, i=2 (<35), j=6 (<=35), L=30, f=4
+    # 30 + 10*(3.5-2)/4 = 33.75
+    assert_close(mg, 33.75)
+    # single distinct value -> stays at its midpoint
+    assert_close(statistics.median_grouped([5, 5, 5], 1), 5.0)
+
+fn test_normal_dist():
+    nd = statistics.NormalDist_new(0.0, 1.0)
+    assert_close(nd.cdf(0.0), 0.5)
+    assert_close(nd.cdf(1.0), 0.8413447, 1e-5)
+    assert_close(nd.pdf(0.0), 0.3989423, 1e-5)
+    # inv_cdf round-trips
+    assert_close(nd.cdf(nd.inv_cdf(0.975)), 0.975, 1e-9)
+    assert_close(nd.inv_cdf(0.5), 0.0, 1e-9)
+    # shifted/scaled
+    nd2 = statistics.NormalDist_new(10.0, 2.0)
+    assert_close(nd2.cdf(10.0), 0.5)
+    assert_close(nd2.inv_cdf(0.5), 10.0, 1e-9)
+    qs = nd.quantiles(4)
+    assert_eq(len(qs), 3)
+    assert_close(nd.cdf(qs[1]), 0.5, 1e-9)
+    assert_close(nd.zscore(1.0), 1.0)
+    assert_close(nd2.zscore(12.0), 1.0)
+    # samples are finite and roughly centered
+    rng = random.Random_new(42)
+    smp = nd.samples(200, rng)
+    assert_eq(len(smp), 200)
+    total = 0.0
+    for v in smp:
+        total = total + v
+    mean_est = total / 200.0
+    assert(abs(mean_est) < 0.3)
+    # from_samples on symmetric data
+    nd3 = statistics.NormalDist_from_samples([1.0, 2.0, 3.0])
+    assert_close(nd3.mu, 2.0)
+
 fn main():
     test_multimode()
     test_quantiles()
     test_covariance_correlation()
     test_linear_regression()
     test_median_absolute_deviation()
+    test_median_grouped()
+    test_normal_dist()
     print("statistics selftest OK")
 
 fn test_median_absolute_deviation():

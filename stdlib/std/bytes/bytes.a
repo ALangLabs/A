@@ -19,7 +19,7 @@ import std:core
 """_varint_encode(v, out) -> appends the LEB128 varint bytes of v >= 0."""
 fn _varint_encode(v: i64, out: [i64]):
     while v >= 128:
-        out.append((v % 128) + 128)
+        out.append(v % 128 + 128)
         v = v / 128
     out.append(v)
 
@@ -43,7 +43,7 @@ fn _varint_decode(bytes: [i64], pos: i64):
     while p < len(bytes):
         byte = bytes[p]
         p = p + 1
-        value = value + (byte % 128) * mult
+        value = value + byte % 128 * mult
         if byte < 128:
             return _Varint(value, p)
         mult = mult * 128
@@ -89,6 +89,7 @@ fn ord(c) -> i64?:
     elif b0 >= 240 and b0 < 248:
         need = 4
         cp = b0 - 240
+
     else:
         return None
     # ord() is defined for exactly one code point
@@ -127,12 +128,13 @@ fn utf8_encode(s: String):
             out.append(128 + cp % 64)
         elif cp < 65536:
             out.append(224 + cp / 4096)
-            out.append(128 + (cp / 64) % 64)
+            out.append(128 + cp / 64 % 64)
             out.append(128 + cp % 64)
+
         else:
             out.append(240 + cp / 262144)
-            out.append(128 + (cp / 4096) % 64)
-            out.append(128 + (cp / 64) % 64)
+            out.append(128 + cp / 4096 % 64)
+            out.append(128 + cp / 64 % 64)
             out.append(128 + cp % 64)
     return out
 
@@ -140,7 +142,7 @@ fn utf8_encode(s: String):
 utf8_decode(bytes) -> String? decoding UTF-8; None on malformed input
 (bad continuation bytes, overlong forms, surrogates, > U+10FFFF).
 """
-fn utf8_decode(bytes: [i64]) -> String?:
+fn utf8_decode(bytes) -> String?:
     # native single pass: the per-byte chr() loop below costs ~1s per MiB, and
     # HTTP bodies go through here. Kept as the fallback shape for reference
     # where the native runtime is unavailable.
@@ -168,7 +170,7 @@ fn _utf8_decode_slow(bytes: [i64]) -> String?:
             if i + 2 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192:
                 return None
             cp = (b0 - 224) * 4096 + (bytes[i + 1] - 128) * 64 + (bytes[i + 2] - 128)
-            if cp < 2048 or (cp >= 55296 and cp <= 57343):
+            if cp < 2048 or cp >= 55296 and cp <= 57343:
                 return None
             parts.append(chr(cp) ?? "")
             i = i + 3
@@ -180,6 +182,7 @@ fn _utf8_decode_slow(bytes: [i64]) -> String?:
                 return None
             parts.append(chr(cp) ?? "")
             i = i + 4
+
         else:
             return None
     return join(parts, "")
@@ -189,7 +192,7 @@ b2s(bytes) -> String interpreting each byte value as a Latin-1 code point
 (byte 0xE9 becomes 'é'). This is the "bytes are Latin-1 text" model used
 by quopri-style codecs; for real UTF-8 text use utf8_decode.
 """
-fn b2s(bytes: [i64]):
+fn b2s(bytes):
     parts = []
     for b in bytes:
         parts.append(chr(b) ?? "")

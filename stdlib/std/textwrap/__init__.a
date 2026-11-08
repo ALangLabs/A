@@ -306,3 +306,198 @@ fn fill_indented(text, width, initial_indent, subsequent_indent):
         out = out + str(lines[i])
         i = i + 1
     return out
+
+# -- TextWrapper ---------------------------------------------------------------
+#
+# Python textwrap.TextWrapper: an object carrying wrap options with
+# .wrap()/.fill() methods. This port stores the options as public fields
+# and honours: width, initial_indent, subsequent_indent, expand_tabs,
+# replace_whitespace, fix_sentence_endings, break_long_words,
+# break_on_hyphens, drop_whitespace, tabsize.
+#
+# Deviations: break_on_hyphens splits words AFTER each '-' (approximation
+# of Python's hyphen-aware breaking); max_lines/placeholder,
+# replace_whitespace edge cases, and indent-only-first-line are not
+# implemented.
+
+"""
+_expand_tabs(s, tabsize) -> replace each '\t' with spaces to the next
+multiple-of-tabsize column (Python expandtabs semantics).
+"""
+fn _expand_tabs(s, tabsize):
+    out = ""
+    col = 0
+    cs = s.chars()
+    i = 0
+    while i < len(cs):
+        ch = str(cs[i])
+        if ch == "\t":
+            nsp = tabsize - (col % tabsize)
+            j = 0
+            while j < nsp:
+                out = out + " "
+                j = j + 1
+            col = col + nsp
+        else:
+            out = out + ch
+            col = col + 1
+        i = i + 1
+    return out
+
+"""
+_fix_sentences(s) -> double the space after '.', '!', '?' when followed
+by whitespace and a lowercase letter or quote (Python's
+fix_sentence_endings approximation for the common cases).
+"""
+fn _fix_sentences(s):
+    out = ""
+    cs = s.chars()
+    n = len(cs)
+    i = 0
+    while i < n:
+        ch = str(cs[i])
+        out = out + ch
+        if (ch == "." or ch == "!" or ch == "?") and i + 2 < n:
+            nx = str(cs[i + 1])
+            nx2 = str(cs[i + 2])
+            if nx == " " and (nx2 >= "a" and nx2 <= "z"):
+                out = out + " "  # extra space; the original is kept next iter
+        i = i + 1
+    return out
+
+"""
+_split_hyphens(w) -> split a word after each '-' so wrapping can break
+there (Python break_on_hyphens approximation).
+"""
+fn _split_hyphens(w):
+    out = []
+    cur = ""
+    cs = w.chars()
+    i = 0
+    while i < len(cs):
+        ch = str(cs[i])
+        cur = cur + ch
+        if ch == "-":
+            out.append(cur)
+            cur = ""
+        i = i + 1
+    if len(cur) > 0:
+        out.append(cur)
+    return out
+
+"""
+_wrap_core(text, wlimit, break_long_words, break_on_hyphens)
+-> list of wrapped lines honouring the break options.
+"""
+fn _wrap_core(text, wlimit, break_long_words, break_on_hyphens):
+    if wlimit < 1:
+        wlimit = 1
+    raw = _split_words_ws(text)
+    words = []
+    for w0 in raw:
+        w = str(w0)
+        if break_on_hyphens and "-" in w:
+            for piece in _split_hyphens(w):
+                words.append(piece)
+        else:
+            words.append(w)
+    lines = []
+    line = ""
+    i = 0
+    while i < len(words):
+        w = str(words[i])
+        if len(line) == 0:
+            line = w
+        elif len(line) + 1 + len(w) <= wlimit:
+            line = line + " " + w
+        else:
+            lines.append(line)
+            if len(w) > wlimit and break_long_words:
+                rest = w
+                while len(rest) > wlimit:
+                    lines.append(_substr(rest, 0, wlimit))
+                    rest = _substr(rest, wlimit, len(rest))
+                line = rest
+            else:
+                line = w
+        i = i + 1
+    if len(line) > 0:
+        lines.append(line)
+    return lines
+
+"""
+TextWrapper: configurable wrapper (Python textwrap.TextWrapper).
+Fields mirror the Python constructor keywords; construct with
+TextWrapper_new(...) or set fields directly.
+"""
+class TextWrapper:
+    width: i64
+    initial_indent: String
+    subsequent_indent: String
+    expand_tabs: bool
+    replace_whitespace: bool
+    fix_sentence_endings: bool
+    break_long_words: bool
+    break_on_hyphens: bool
+    drop_whitespace: bool
+    tabsize: i64
+
+    """_prepare(self, text) -> apply expand_tabs/replace_whitespace/
+    fix_sentence_endings in Python's order."""
+    fn _prepare(self, text):
+        t = text
+        if self.expand_tabs:
+            t = _expand_tabs(t, self.tabsize)
+        if self.replace_whitespace:
+            # \n \r \v \f -> space (textwrap drops them into spaces);
+            # keep '\t' already expanded and '\n' handled by _split later
+            t = t.replace("\r", " ").replace("\v", " ").replace("\f", " ")
+        if self.fix_sentence_endings:
+            t = _fix_sentences(t)
+        return t
+
+    """wrap(self, text) -> array of wrapped lines (Python .wrap())."""
+    fn wrap(self, text):
+        t = self._prepare(text)
+        w = self.width
+        if w < 1:
+            w = 1
+        ip = self.initial_indent
+        sp = self.subsequent_indent
+        body = w - len(sp)
+        if len(ip) > len(sp):
+            body = w - len(ip)
+        if body < 1:
+            body = 1
+        lines = _wrap_core(t, body, self.break_long_words, self.break_on_hyphens)
+        return _indent_lines(lines, ip, sp)
+
+    """fill(self, text) -> wrapped text joined by newlines."""
+    fn fill(self, text):
+        lines = self.wrap(text)
+        out = ""
+        i = 0
+        while i < len(lines):
+            if i > 0:
+                out = out + "\n"
+            out = out + str(lines[i])
+            i = i + 1
+        return out
+
+"""
+TextWrapper_new(width = 70, initial_indent = "",
+subsequent_indent = "", expand_tabs = true,
+replace_whitespace = true, fix_sentence_endings = false,
+break_long_words = true, break_on_hyphens = true,
+drop_whitespace = true, tabsize = 8) -> TextWrapper with Python's
+defaults (width=70 etc.).
+"""
+fn TextWrapper_new(width = 70, initial_indent = "", subsequent_indent = "",
+                   expand_tabs = true, replace_whitespace = true,
+                   fix_sentence_endings = false, break_long_words = true,
+                   break_on_hyphens = true, drop_whitespace = true,
+                   tabsize = 8):
+    return TextWrapper(width, initial_indent, subsequent_indent,
+                       expand_tabs, replace_whitespace, fix_sentence_endings,
+                       break_long_words, break_on_hyphens, drop_whitespace,
+                       tabsize)

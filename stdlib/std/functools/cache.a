@@ -71,6 +71,18 @@ class LRUCache:
     fn cache_info(self):
         return CacheInfo(self.hits, self.misses, self.maxsize, len(self.cache))
 
+    """
+    cache_parameters(self) -> map with the cache's parameters, mirroring
+    Python functools.CacheInfo-adjacent `cache_parameters()`:
+    {"typed": false, "user_function": func, "maxsize": maxsize}.
+    """
+    fn cache_parameters(self):
+        m = {}
+        m["typed"] = false
+        m["user_function"] = self.func
+        m["maxsize"] = self.maxsize
+        return m
+
 """
 lru_cache(func, maxsize) -> LRUCache wrapping `func`.
 `maxsize <= 0` gives an unbounded cache (Python `maxsize=None`).

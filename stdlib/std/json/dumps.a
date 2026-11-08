@@ -20,7 +20,8 @@
 #     strict JSON).
 #   * tuples/sets serialize as arrays; dict keys that are not strings
 #     are converted with str() (Python converts int keys too).
-#   * ensure_ascii is not supported: non-ASCII passes through as UTF-8.
+#   * ensure_ascii (default true, Python parity) escapes non-ASCII as
+#     \uXXXX (surrogate pairs above U+FFFF); pass false for raw UTF-8.
 #
 # `loads(text)` -> parsed value; panics on invalid JSON (Python raises
 # JSONDecodeError — A has no exceptions).
@@ -59,11 +60,13 @@ fn _jhex(n):
     return out
 
 """
-_jescape(s) -> JSON-quoted string: escapes '"', '\\', \n, \r, \t and
-other characters below U+0020 as \uXXXX (detected via `ch < " "`, the
-same single-char ordering used by std.string).
+_jescape(s, ensure_ascii) -> JSON-quoted string: escapes '"', '\\', \n,
+\r, \t and other characters below U+0020 as \uXXXX (detected via
+`ch < " "`, the same single-char ordering used by std.string). When
+ensure_ascii is true, characters above U+007F are escaped as \uXXXX
+(surrogate pairs above U+FFFF), matching Python json.dumps.
 """
-fn _jescape(s):
+fn _jescape(s, ensure_ascii):
     out = "\""
     cs = s.chars()
     i = 0
@@ -83,6 +86,20 @@ fn _jescape(s):
             # control character: emit \u00XX (all are < 0x20 -> 2 hex
             # digits suffice; _jhex pads to 4 like Python's \uXXXX)
             out = out + "\\u00" + _jhex(_ord8(ch))
+        elif ensure_ascii:
+            # non-ASCII (code point > 127): \uXXXX, or a UTF-16
+            # surrogate pair above U+FFFF — matching Python json.dumps
+            cp = _ord8(ch)
+            if cp > 127:
+                if cp > 65535:
+                    v = cp - 65536
+                    hi = 55296 + v / 1024
+                    lo = 56320 + v % 1024
+                    out = out + "\\u" + _jhex(hi) + "\\u" + _jhex(lo)
+                else:
+                    out = out + "\\u" + _jhex(cp)
+            else:
+                out = out + ch
         else:
             out = out + ch
         i = i + 1
@@ -125,12 +142,12 @@ fn _pad(n):
     return out
 
 """
-_dump(value, indent, sort_keys, item_sep, key_sep, depth) -> JSON text.
+_dump(value, indent, sort_keys, item_sep, key_sep, depth, ensure_ascii) -> JSON text.
 indent < 0 -> single line; indent >= 0 -> newline + (depth+1)*indent
 spaces before each element and depth*indent before the closing
 bracket (Python's indent semantics).
 """
-fn _dump(value, indent, sort_keys, item_sep, key_sep, depth):
+fn _dump(value, indent, sort_keys, item_sep, key_sep, depth, ensure_ascii):
     kind = json.kind(value)
     if kind == "null":
         return "null"
@@ -143,8 +160,8 @@ fn _dump(value, indent, sort_keys, item_sep, key_sep, depth):
     if kind == "string":
         s = json.as_str(value)
         if s == None:
-            return _jescape(str(value))
-        return _jescape(s!)
+            return _jescape(str(value), ensure_ascii)
+        return _jescape(s!, ensure_ascii)
     if kind == "array":
         arr = json.as_array(value)
         if arr == None:
@@ -156,13 +173,13 @@ fn _dump(value, indent, sort_keys, item_sep, key_sep, depth):
         if indent < 0:
             parts = []
             for x in xs:
-                parts.append(_dump(x, indent, sort_keys, item_sep, key_sep, depth))
+                parts.append(_dump(x, indent, sort_keys, item_sep, key_sep, depth, ensure_ascii))
             return "[" + item_sep.join(parts) + "]"
         pad_child = _pad(indent * (depth + 1))
         pad_self = _pad(indent * depth)
         parts = []
         for x in xs:
-            parts.append("\n" + pad_child + _dump(x, indent, sort_keys, item_sep, key_sep, depth + 1))
+            parts.append("\n" + pad_child + _dump(x, indent, sort_keys, item_sep, key_sep, depth + 1, ensure_ascii))
         return "[" + item_sep.join(parts) + "\n" + pad_self + "]"
     if kind == "object":
         mm = json.as_map(value)
@@ -188,25 +205,27 @@ fn _dump(value, indent, sort_keys, item_sep, key_sep, depth):
             for k in ks:
                 # sorted branch: ks holds the key strings themselves
                 kk = _key_text(k)
-                parts.append(_jescape(kk) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth))
+                parts.append(_jescape(kk, ensure_ascii) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth, ensure_ascii))
             return "\{" + item_sep.join(parts) + "\}"
         pad_child = _pad(indent * (depth + 1))
         pad_self = _pad(indent * depth)
         parts = []
         for k in ks:
             kk = _key_text(k)
-            parts.append("\n" + pad_child + _jescape(kk) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth + 1))
+            parts.append("\n" + pad_child + _jescape(kk, ensure_ascii) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth + 1, ensure_ascii))
         return "\{" + item_sep.join(parts) + "\n" + pad_self + "\}"
     core.panic("json.dumps: value of kind '" + kind + "' is not serializable")
     return ""
 
 """
-dumps(value, indent = -1, sort_keys = false, separators = None) -> JSON
-string (Python json.dumps). `separators` is an optional [item_sep,
-key_sep] pair overriding the defaults (", "/": " compact,
-","/": " when indent >= 0).
+dumps(value, indent = -1, sort_keys = false, separators = None,
+ensure_ascii = true) -> JSON string (Python json.dumps).
+`separators` is an optional [item_sep, key_sep] pair overriding the
+defaults (", "/": " compact, ","/": " when indent >= 0).
+`ensure_ascii` escapes non-ASCII as \uXXXX (default, Python parity);
+pass false to emit raw UTF-8.
 """
-fn dumps(value, indent = -1, sort_keys = false, separators = None):
+fn dumps(value, indent = -1, sort_keys = false, separators = None, ensure_ascii = true):
     item_sep = ", "
     key_sep = ": "
     if indent >= 0:
@@ -217,7 +236,7 @@ fn dumps(value, indent = -1, sort_keys = false, separators = None):
         if len(a) >= 2:
             item_sep = str(a[0])
             key_sep = str(a[1])
-    return _dump(value, indent, sort_keys, item_sep, key_sep, 0)
+    return _dump(value, indent, sort_keys, item_sep, key_sep, 0, ensure_ascii)
 
 """
 loads(text) -> parsed JSON value (Python json.loads). Panics on invalid
