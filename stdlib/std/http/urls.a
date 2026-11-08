@@ -2,6 +2,8 @@
 #
 # urlsplit(url) -> UrlParts {scheme, host, port, path, query}
 # Defaults: http -> 80, https -> 443. Returns None on unparseable input.
+# quote/urlencode percent-encode query components (RFC 3986).
+from std:bytes import ord
 
 class UrlParts:
     scheme: String
@@ -86,3 +88,38 @@ fn urlunsplit(parts: UrlParts):
     if parts.query != "":
         u = u + "?" + parts.query
     return u
+
+"""_unreserved(c) -> bool: RFC 3986 characters a query may keep unescaped."""
+fn _unreserved(c: i64):
+    if c >= 48 and c <= 57:
+        return true
+    if c >= 65 and c <= 90:
+        return true
+    if c >= 97 and c <= 122:
+        return true
+    return c == 45 or c == 46 or c == 95 or c == 126
+
+"""
+quote(s) -> String percent-encoding every byte outside the RFC 3986
+unreserved set (urllib.parse.quote with no safe characters). UTF-8 input
+is encoded bytewise.
+"""
+fn quote(s: String):
+    hex = "0123456789ABCDEF"
+    out = ""
+    for ch in s.chars():
+        b = ord(ch)!
+        if _unreserved(b):
+            out = out + ch
+        else:
+            out = out + "%" + hex[b / 16] + hex[b % 16]
+    return out
+
+"""urlencode(params) -> String "k=v&k2=v2" with keys and values quoted."""
+fn urlencode(params: {String: String}):
+    out = ""
+    for k in params.keys():
+        if out != "":
+            out = out + "&"
+        out = out + quote(k) + "=" + quote(params[k])
+    return out

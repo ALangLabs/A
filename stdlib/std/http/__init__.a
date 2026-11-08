@@ -4,4 +4,4 @@
 #   resp = get("https://example.com/")
 #   resp.status, resp.headers, resp.body, resp.text(), resp.json()
 from "client.a" import Response, HTTPConnection, http_connection, https_connection, request, get, post, delete, put, patch, head
-from "urls.a" import UrlParts, urlsplit, urlunsplit
+from "urls.a" import UrlParts, urlsplit, urlunsplit, quote, urlencode
