@@ -1,0 +1,284 @@
+# std.path — POSIX path manipulation (Python `os.path` / `posixpath` subset).
+#
+# Pure-A port of the pure-Python parts of CPython's `posixpath.py`.
+# All paths are `/`-separated strings; there is no Windows drive/UNC
+# handling (documented deviation — A targets POSIX hosts).
+#
+#   import std:path
+#   path.join(["a", "b", "c.a"])   # "a/b/c.a"
+#   path.split("/x/y/z.txt")       # ["/x/y", "z.txt"]  (array, not tuple)
+#   path.splitext("a/b.tar.gz")   # ["a/b.tar", ".gz"]
+#   path.normpath("a//b/../c")    # "a/c"
+#   path.abspath("../x")          # cwd-joined + normalized
+#   path.relpath("/a/b/c", "/a")  # "b/c"
+#   path.expanduser("~/x")        # $HOME/x (unchanged when HOME unset)
+#
+# Deviations from Python:
+#   * split/splitext return 2-element arrays [first, second] (A has no
+#     tuple indexing); unpack with `p = path.split(x); p[0]`, `p[1]`.
+#   * join takes an ARRAY of components: path.join(parts). There is no
+#     variadic form.
+#   * splitdrive always returns ["", path] (no drive letters on POSIX).
+#   * expanduser only handles a leading "~" or "~/" via $HOME; "~user"
+#     forms are returned unchanged (no passwd database access).
+#   * No bytes-path variants; everything is String.
+#   * `join` collides with the builtin `join(a, b)` under module-attribute
+#     access (`path.join(parts)` resolves to the builtin). Import members
+#     directly — `from std:path import join` — which works correctly.
+import std:core
+import std:env
+
+sep = "/"
+curdir = "."
+pardir = ".."
+extsep = "."
+pathsep = ":"
+devnull = "/dev/null"
+altsep = ""
+
+"""_is_sep(c) -> true for the path separator character."""
+fn _is_sep(c):
+    return c == "/"
+
+"""
+join(parts) -> str joining an array of path components.
+An absolute component resets the accumulated path (Python semantics);
+empty components still contribute their separator position.
+"""
+fn join(parts):
+    if len(parts) == 0:
+        return ""
+    path = str(parts[0])
+    i = 1
+    while i < len(parts):
+        b = str(parts[i])
+        if b == "":
+            # Python keeps the separator: "a" + "/" + "" -> "a/"
+            if not path.endswith("/"):
+                path = path + "/"
+            i = i + 1
+            continue
+        if path == "":
+            path = b
+        elif b.startswith("/"):
+            path = b
+        elif path.endswith("/"):
+            path = path + b
+        else:
+            path = path + "/" + b
+        i = i + 1
+    return path
+
+"""split(path) -> [dir, file]: head/tail split at the last separator."""
+fn split(path):
+    p = str(path)
+    i = p.rfind("/")
+    if i < 0:
+        return ["", p]
+    if i == 0:
+        return ["/", p[1..]]
+    return [p[0..i], p[i + 1..]]
+
+"""dirname(path) -> directory portion ("" when there is none)."""
+fn dirname(path):
+    return split(path)[0]
+
+"""basename(path) -> final component."""
+fn basename(path):
+    return split(path)[1]
+
+"""splitext(path) -> [root, ext]: split at the last dot in the final component."""
+fn splitext(path):
+    p = str(path)
+    d = dirname(p)
+    b = basename(p)
+    i = b.rfind(".")
+    if i <= 0:
+        # No dot, or a leading dot (hidden file like ".bashrc") -> no ext.
+        return [p, ""]
+    root = b[0..i]
+    ext = b[i..]
+    if d == "":
+        return [root, ext]
+    if d == "/":
+        return ["/" + root, ext]
+    return [d + "/" + root, ext]
+
+"""splitdrive(path) -> ["", path] (POSIX has no drive component)."""
+fn splitdrive(path):
+    return ["", str(path)]
+
+"""isabs(path) -> true for '/'-prefixed paths."""
+fn isabs(path):
+    return str(path).startswith("/")
+
+"""
+normpath(path) -> canonical path: collapses repeated separators,
+removes "." components, resolves ".." lexically (never pops below the
+root for absolute paths, never pops a leading "..").
+"""
+fn normpath(path):
+    p = str(path)
+    if p == "":
+        return "."
+    absolute = p.startswith("/")
+    comps = p.split("/")
+    out = []
+    i = 0
+    while i < len(comps):
+        c = comps[i]
+        if c == "" or c == ".":
+            i = i + 1
+            continue
+        if c == "..":
+            n = len(out)
+            if n > 0 and out[n - 1] != "..":
+                out.pop()
+            elif not absolute:
+                out.append("..")
+        else:
+            out.append(c)
+        i = i + 1
+    result = out.join("/")
+    if absolute:
+        result = "/" + result
+    if result == "":
+        if absolute:
+            return "/"
+        return "."
+    return result
+
+"""abspath(path) -> absolute normalized path (joins current_dir when relative)."""
+fn abspath(path):
+    p = str(path)
+    if not isabs(p):
+        p = current_dir() + "/" + p
+    return normpath(p)
+
+"""
+expanduser(path) -> path with a leading "~" replaced by $HOME.
+Returns the input unchanged when HOME is unset/empty or the path does
+not start with "~"; "~user" forms are left unchanged.
+"""
+fn expanduser(path):
+    p = str(path)
+    if not p.startswith("~"):
+        return p
+    home = env.get("HOME")
+    if home == "":
+        return p
+    if len(p) == 1:
+        return home
+    if str(p[1]) == "/":
+        return home + p[1..]
+    return p
+
+"""
+relpath(path, start = ".") -> path relative to `start`.
+Both sides are normalized; the result uses ".." components as needed.
+"""
+fn relpath(path, start = "."):
+    p = normpath(path)
+    s = normpath(start)
+    if not isabs(p):
+        p = abspath(p)
+    if not isabs(s):
+        s = abspath(s)
+    pc = p.split("/")
+    sc = s.split("/")
+    # Drop leading "" from the absolute-path split.
+    pi = 0
+    while pi < len(pc) and pc[pi] == "":
+        pi = pi + 1
+    si = 0
+    while si < len(sc) and sc[si] == "":
+        si = si + 1
+    pn = len(pc) - pi
+    sn = len(sc) - si
+    common = 0
+    while common < pn and common < sn and pc[pi + common] == sc[si + common]:
+        common = common + 1
+    ups = sn - common
+    downs = pn - common
+    if ups == 0 and downs == 0:
+        return "."
+    parts = []
+    i = 0
+    while i < ups:
+        parts.append("..")
+        i = i + 1
+    i = 0
+    while i < downs:
+        parts.append(pc[pi + common + i])
+        i = i + 1
+    return parts.join("/")
+
+"""commonprefix(paths) -> longest common leading STRING prefix (str-based)."""
+fn commonprefix(paths):
+    if len(paths) == 0:
+        return ""
+    p = str(paths[0])
+    i = 1
+    while i < len(paths):
+        q = str(paths[i])
+        n = len(p)
+        if len(q) < n:
+            n = len(q)
+        j = 0
+        while j < n and p[j] == q[j]:
+            j = j + 1
+        p = p[0..j]
+        i = i + 1
+    return p
+
+"""commonpath(paths) -> longest common DIRECTORY prefix; panics on mixed abs/rel."""
+fn commonpath(paths):
+    if len(paths) == 0:
+        core.panic("commonpath: empty path list")
+    absolutes = []
+    i = 0
+    while i < len(paths):
+        absolutes.append(isabs(paths[i]))
+        i = i + 1
+    first_abs = absolutes[0]
+    i = 1
+    while i < len(absolutes):
+        if absolutes[i] != first_abs:
+            core.panic("commonpath: can't mix absolute and relative paths")
+        i = i + 1
+    split_paths = []
+    i = 0
+    while i < len(paths):
+        split_paths.append(normpath(paths[i]).split("/"))
+        i = i + 1
+    common = split_paths[0]
+    clen = len(common)
+    i = 1
+    while i < len(split_paths):
+        sp = split_paths[i]
+        j = 0
+        while j < clen and j < len(sp) and common[j] == sp[j]:
+            j = j + 1
+        clen = j
+        i = i + 1
+    # For absolute paths the leading "" component (from splitting on '/')
+    # already reproduces the leading separator when joined.
+    parts = []
+    i = 0
+    while i < clen:
+        parts.append(common[i])
+        i = i + 1
+    result = parts.join("/")
+    if result == "":
+        if first_abs:
+            return "/"
+        return "."
+    return result
+
+"""exists(path) -> file_exists builtin (regular files only; see std:os.exists)."""
+fn exists(path):
+    return file_exists(path)
+
+"""getsize(path) -> file_size builtin (-1 when missing or not a file)."""
+fn getsize(path):
+    return file_size(path)

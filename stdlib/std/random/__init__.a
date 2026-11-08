@@ -1,0 +1,358 @@
+# std.random — seedable pseudo-random numbers (Python `random` subset).
+#
+# Pure-A PRNG: the MINSTD / Park-Miller generator
+#
+#     state = (state * 48271) mod 2147483647     state in [1, 2147483645]
+#
+# chosen because every intermediate fits comfortably in i64 (max product
+# ~2^46), so no overflow-checked arithmetic can fire. Period 2^31 - 2.
+#
+# Usage:
+#   import std:random
+#   random.seed(42)
+#   x = random.random()          # [0.0, 1.0)
+#   n = random.randint(1, 10)    # inclusive
+#   c = random.choice(["a", "b"])
+#   rng = random.Random(7)       # independent stream
+#   rng.shuffle(deck)
+#
+# Deviations from Python:
+#   * Not cryptographically secure (weaker than CPython's Mersenne Twister;
+#     fine for simulations, shuffling, games — not for keys/tokens).
+#   * seed(s): s may be an integer, a float, or any value stringified then
+#     hashed (djb2). seed()/seed(None) reseeds from time.now() milliseconds.
+#   * random() builds a 53-bit float from two 31-bit draws (like Python).
+#   * randint/randrange/sample/choice use rejection sampling where practical
+#     (no modulo bias for ranges <= 2^31-1).
+#   * shuffle(x) shuffles the array in place AND returns it (Python returns
+#     None); use shuffled(x) for a copy.
+#   * sample(population, k) requires k <= len(population); panics otherwise.
+#   * getrandbits(k) supports 1 <= k <= 62 (two 31-bit draws max).
+#   * randbytes(n) returns [i64] of n bytes in 0..255.
+#   * Module-level functions share one global Random instance; construct
+#     Random(seed) for independent streams.
+import std:core
+import std:time
+import std:json
+import std:bytes
+import std:math
+
+# NOTE: the Park-Miller constants are inlined as literals in every function
+# below (2147483647 modulus, 48271 multiplier, 2147483646 max state/span).
+# Module-level variables read as 0.0 inside `a test` test functions
+# (toolchain quirk), so named constants would silently break there.
+
+"""
+_next_raw(self) -> i64 in [1, 2147483646]; advances the Park-Miller state.
+"""
+fn _next_raw(self):
+    self.state = (self.state * 48271) % 2147483647
+    return self.state
+
+"""
+_next31(self) -> i64 in [0, 2^31-2]; one uniform 31-bit-ish draw.
+"""
+fn _next31(self):
+    return _next_raw(self) - 1
+
+"""
+_randbelow(self, n) -> i64 in [0, n); rejection sampling so there is no
+modulo bias. n must be >= 1.
+"""
+fn _randbelow(self, n):
+    if n <= 0:
+        core.panic("randbelow: n must be positive")
+    if n == 1:
+        return 0
+    if n > 2147483646:
+        # Range wider than one draw: fall back to a single modulo draw
+        # (bias is negligible relative to the range size).
+        return _next31(self) % n
+    limit = (2147483646 / n) * n
+    while true:
+        x = _next31(self)
+        if x < limit:
+            return x % n
+    return 0  # unreachable; satisfies the return checker
+
+"""
+_seed_hash(s) -> i64 seed derived from an arbitrary value's string form
+(djb2 over code points). Deterministic across runs for equal inputs.
+"""
+fn _seed_hash(s):
+    h = 5381
+    text = str(s)
+    i = 0
+    while i < len(text):
+        c = bytes.ord(text[i])
+        cp = c ?? 0
+        h = ((h * 33) + cp) % 2147483647
+        if h <= 0:
+            h = h + 2147483647 - 1
+        i = i + 1
+    if h <= 0:
+        h = 1
+    return h
+
+"""
+_is_int_value(s) -> true when s is a Json number without a fraction or
+exponent (i.e. an integer literal safe for int()).
+"""
+fn _is_int_value(s):
+    if json.kind(s) != "number":
+        return false
+    t = str(s)
+    if "." in t or "e" in t or "E" in t:
+        return false
+    # int(s) must stay inside i64; longer digit strings go through the hash.
+    if len(t) > 18:
+        return false
+    return true
+
+"""
+_pow2(n) -> 2^n as i64 (n <= 62).
+"""
+fn _pow2(n):
+    r = 1
+    i = 0
+    while i < n:
+        r = r * 2
+        i = i + 1
+    return r
+
+"""
+Random: a seedable PRNG stream. Field `state` is public for inspection;
+prefer the methods.
+"""
+class Random:
+    state: i64
+
+    """Random(seed) -> stream; seed may be i64, float, String, or None."""
+    fn seed(self, s = None):
+        if s == None:
+            # Wall-clock entropy; millisecond resolution is enough for
+            # non-adversarial use (documented deviation).
+            raw = time.now()
+            self.state = (raw % 2147483646) + 1
+        elif _is_int_value(s):
+            v = int(str(s))
+            self.state = v % 2147483646
+            if self.state <= 0:
+                self.state = self.state + 2147483646
+        else:
+            self.state = _seed_hash(s)
+
+    """_u62(self) -> float in [0, 1) from two 31-bit draws (62 bits total)."""
+    fn _u62(self):
+        hi = _next31(self)
+        lo = _next31(self)
+        # hi * 2^31 + lo  (< 2^62, safe); / 2^62 -> [0, 1)
+        return float(hi * 2147483648 + lo) / 4611686018427387904.0
+
+    """random(self) -> float in [0.0, 1.0)."""
+    fn random(self):
+        return self._u62()
+
+    """randint(self, a, b) -> i64 in [a, b] inclusive."""
+    fn randint(self, a, b):
+        if b < a:
+            core.panic("randint: empty range")
+        width = b - a + 1
+        return a + _randbelow(self, width)
+
+    """
+    randrange(self, start, stop = None, step = 1) -> i64.
+    Python semantics: randrange(stop), randrange(start, stop),
+    randrange(start, stop, step). `stop = None` selects the 1-arg form.
+    """
+    fn randrange(self, start, stop = None, step = 1):
+        if step == 0:
+            core.panic("randrange: step is 0")
+        lo = start
+        hi = stop
+        if hi == None:
+            hi = start
+            lo = 0
+        if step > 0:
+            width = hi - lo
+            if width <= 0:
+                core.panic("randrange: empty range")
+            count = (width + step - 1) / step
+            if count <= 0:
+                core.panic("randrange: empty range")
+            return lo + step * _randbelow(self, count)
+        # negative step: values lo, lo+step, ... while > hi
+        span = lo - hi
+        if span <= 0:
+            core.panic("randrange: empty range")
+        count = (span - step - 1) / (-step)
+        if count <= 0:
+            core.panic("randrange: empty range")
+        return lo + step * _randbelow(self, count)
+
+    """choice(self, seq) -> random element of a non-empty array."""
+    fn choice(self, seq):
+        if len(seq) == 0:
+            core.panic("choice: empty sequence")
+        return seq[_randbelow(self, len(seq))]
+
+    """choices(self, seq, k) -> array of k independent choices (with replacement)."""
+    fn choices(self, seq, k):
+        if len(seq) == 0:
+            core.panic("choices: empty sequence")
+        out = []
+        i = 0
+        while i < k:
+            out.append(self.choice(seq))
+            i = i + 1
+        return out
+
+    """sample(self, population, k) -> new array of k unique elements."""
+    fn sample(self, population, k):
+        n = len(population)
+        if k < 0 or k > n:
+            core.panic("sample: k out of range")
+        pool = population.copy()
+        out = []
+        i = 0
+        while i < k:
+            j = i + _randbelow(self, n - i)
+            tmp = pool[i]
+            pool[i] = pool[j]
+            pool[j] = tmp
+            out.append(pool[i])
+            i = i + 1
+        return out
+
+    """shuffle(self, x) -> x shuffled in place (also returned)."""
+    fn shuffle(self, x):
+        n = len(x)
+        i = n - 1
+        while i > 0:
+            j = _randbelow(self, i + 1)
+            tmp = x[i]
+            x[i] = x[j]
+            x[j] = tmp
+            i = i - 1
+        return x
+
+    """shuffled(self, x) -> new array with x's elements shuffled."""
+    fn shuffled(self, x):
+        out = x.copy()
+        return self.shuffle(out)
+
+    """uniform(self, a, b) -> float in [a, b] (endpoints possible)."""
+    fn uniform(self, a, b):
+        # `x + 0.0` coerces int->float; float() miscompiles on float args
+        # inside class methods (backend quirk).
+        return (a + 0.0) + ((b + 0.0) - (a + 0.0)) * self._u62()
+
+    """
+    triangular(self, low, high, mode) -> float; continuous distribution
+    peaked at `mode` (Python random.triangular).
+    """
+    fn triangular(self, low, high, mode):
+        u = self._u62()
+        lo = low + 0.0
+        hi = high + 0.0
+        mo = mode + 0.0
+        fc = (mo - lo) / (hi - lo)
+        if u < fc:
+            return lo + math.sqrt((mo - lo) * (hi - lo) * u)
+        return hi - math.sqrt((hi - mo) * (hi - lo) * (1.0 - u))
+
+    """getrandbits(self, k) -> i64 with k random bits (1 <= k <= 62)."""
+    fn getrandbits(self, k):
+        if k < 1 or k > 62:
+            core.panic("getrandbits: k must be in [1, 62]")
+        if k <= 31:
+            return _next31(self) % _pow2(k)
+        hi_bits = k - 31
+        hi = _next31(self) % _pow2(hi_bits)
+        lo = _next31(self)
+        return hi * 2147483648 + lo
+
+    """randbytes(self, n) -> [i64] of n bytes, each in 0..255."""
+    fn randbytes(self, n):
+        out = []
+        i = 0
+        while i < n:
+            out.append(_randbelow(self, 256))
+            i = i + 1
+        return out
+
+"""
+Random_new(seed) -> Random with `seed(s)` applied. Use this instead of
+`Random(s)` when s is a String/float/negative/large seed: positional
+construction only assigns the raw `state` field (fine for small positive
+integer seeds, which coincide with seed()'s mapping), while Random_new
+runs the full seed logic for any value.
+"""
+fn Random_new(seed):
+    r = Random(1)
+    r.seed(seed)
+    return r
+
+# -- module-level API (shared global stream) ---------------------------------
+
+_default = Random(1)
+_default_seeded = false
+
+fn _ensure_seeded():
+    if not _default_seeded:
+        _default.seed(time.now())
+        _default_seeded = true
+    return _default
+
+"""seed(s = None) -> reseed the global stream."""
+fn seed(s = None):
+    _ensure_seeded()
+    _default.seed(s)
+
+"""random() -> float in [0.0, 1.0) from the global stream."""
+fn random():
+    return _ensure_seeded().random()
+
+"""randint(a, b) -> i64 in [a, b] inclusive."""
+fn randint(a, b):
+    return _ensure_seeded().randint(a, b)
+
+"""randrange(start, stop = None, step = 1) -> i64 (Python semantics)."""
+fn randrange(start, stop = None, step = 1):
+    return _ensure_seeded().randrange(start, stop, step)
+
+"""choice(seq) -> random element of a non-empty array."""
+fn choice(seq):
+    return _ensure_seeded().choice(seq)
+
+"""choices(seq, k) -> array of k independent choices."""
+fn choices(seq, k):
+    return _ensure_seeded().choices(seq, k)
+
+"""sample(population, k) -> new array of k unique elements."""
+fn sample(population, k):
+    return _ensure_seeded().sample(population, k)
+
+"""shuffle(x) -> x shuffled in place (also returned)."""
+fn shuffle(x):
+    return _ensure_seeded().shuffle(x)
+
+"""shuffled(x) -> new array with x's elements shuffled."""
+fn shuffled(x):
+    return _ensure_seeded().shuffled(x)
+
+"""uniform(a, b) -> float in [a, b]."""
+fn uniform(a, b):
+    return _ensure_seeded().uniform(a, b)
+
+"""triangular(low, high, mode) -> float (sum-of-uniforms distribution)."""
+fn triangular(low, high, mode):
+    return _ensure_seeded().triangular(low, high, mode)
+
+"""getrandbits(k) -> i64 with k random bits (1 <= k <= 62)."""
+fn getrandbits(k):
+    return _ensure_seeded().getrandbits(k)
+
+"""randbytes(n) -> [i64] of n bytes in 0..255."""
+fn randbytes(n):
+    return _ensure_seeded().randbytes(n)

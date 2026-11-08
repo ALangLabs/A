@@ -1,0 +1,56 @@
+# std.os selftest — OS helper wrappers (filesystem-touching parts use a
+# temp dir under the current directory and clean up after themselves).
+# Run: ./build/a test stdlib/std/os/selftest.a
+import std:os
+from std:path import join
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+# NOTE: module-level constants (os.sep, os.name, ...) read as 0.0 inside
+# `a test` test functions (toolchain quirk), so they are not asserted here;
+# they work normally under `a run`/`a build`.
+fn test_getcwd():
+    c = os.getcwd()
+    assert_true(c.startswith("/"))
+
+fn test_getenv():
+    # getenv returns "" for unset variables; defaults fill in.
+    assert_eq(os.getenv("__A_DEFINITELY_UNSET__"), "")
+    assert_eq(os.getenv_default("__A_DEFINITELY_UNSET__", "dflt"), "dflt")
+    assert_eq(os.environ_get("__A_DEFINITELY_UNSET__"), "")
+    # PATH is effectively always set on POSIX.
+    assert_true(os.getenv("PATH") != "")
+
+fn test_filesystem_roundtrip():
+    base = "_os_selftest_tmp"
+    f = join([base, "sub", "file.txt"])
+    os.makedirs(join([base, "sub"]))
+    write_file(f, "hello")
+    assert_true(file_exists(f))
+    assert_eq(os.getsize(f), 5)
+    assert_true(os.isfile(f))
+    names = os.listdir(base)
+    assert_eq(len(names), 1)
+    assert_eq(names[0], "sub")
+    assert_true(os.isdir(base))
+    # rename is a global builtin (os.rename intentionally not wrapped).
+    g = join([base, "renamed.txt"])
+    rename(f, g)
+    assert_true(file_exists(g))
+    os.remove(g)
+    assert_true(not file_exists(g))
+    os.rmdir(base)
+    # os.isdir probes via list_dir and PANICS on missing paths (no stat
+    # builtin), so verify removal through the parent listing instead.
+    top = os.listdir(".")
+    found = false
+    i = 0
+    while i < len(top):
+        if top[i] == base:
+            found = true
+        i = i + 1
+    assert_true(not found)

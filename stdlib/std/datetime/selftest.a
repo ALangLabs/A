@@ -1,0 +1,108 @@
+# std.datetime selftest — civil calendar conversions and formatting.
+# Run: ./build/a test stdlib/std/datetime/selftest.a
+import std:datetime
+from std:datetime import DateTime, from_timestamp, timestamp, date, now, add_seconds, diff_ms, weekday, isoweekday, days_in_month, is_leap_year
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn test_epoch_and_roundtrip():
+    dt = from_timestamp(0)
+    assert_eq(dt.year, 1970)
+    assert_eq(dt.month, 1)
+    assert_eq(dt.day, 1)
+    assert_eq(dt.hour, 0)
+    assert_eq(dt.minute, 0)
+    assert_eq(dt.second, 0)
+    assert_eq(dt.millisecond, 0)
+    assert_eq(timestamp(dt), 0)
+    # A known instant: 2000-01-01T00:00:00Z = 946684800000 ms.
+    y2k = from_timestamp(946684800000)
+    assert_eq(y2k.year, 2000)
+    assert_eq(y2k.month, 1)
+    assert_eq(y2k.day, 1)
+    assert_eq(timestamp(y2k), 946684800000)
+
+fn test_milliseconds():
+    dt = from_timestamp(1500)
+    assert_eq(dt.second, 1)
+    assert_eq(dt.millisecond, 500)
+    # Negative timestamps floor correctly (1969-12-31T23:59:59.999).
+    neg = from_timestamp(-1)
+    assert_eq(neg.year, 1969)
+    assert_eq(neg.month, 12)
+    assert_eq(neg.day, 31)
+    assert_eq(neg.hour, 23)
+    assert_eq(neg.minute, 59)
+    assert_eq(neg.second, 59)
+    assert_eq(neg.millisecond, 999)
+
+fn test_isoformat():
+    dt = DateTime(2024, 2, 29, 3, 4, 5, 678)
+    assert_eq(dt.isoformat(), "2024-02-29T03:04:05.678")
+    assert_eq(from_timestamp(0).isoformat(), "1970-01-01T00:00:00.000")
+
+fn test_strftime():
+    dt = DateTime(2024, 3, 1, 13, 5, 9, 123)
+    assert_eq(dt.strftime("%Y-%m-%d"), "2024-03-01")
+    assert_eq(dt.strftime("%H:%M:%S"), "13:05:09")
+    assert_eq(dt.strftime("%p"), "PM")
+    assert_eq(dt.strftime("%A"), "Friday")
+    assert_eq(dt.strftime("%a"), "Fri")
+    assert_eq(dt.strftime("%B"), "March")
+    assert_eq(dt.strftime("%b"), "Mar")
+    assert_eq(dt.strftime("%%"), "%")
+    assert_eq(dt.strftime("%j"), "061")
+    assert_eq(dt.strftime("%f"), "123000")
+    assert_eq(dt.strftime("%z %Z"), "+0000 UTC")
+    # 1970-01-01 was a Thursday.
+    assert_eq(from_timestamp(0).strftime("%A %w %u"), "Thursday 4 4")
+
+fn test_weekday():
+    # 2024-03-01 is a Friday.
+    dt = DateTime(2024, 3, 1, 0, 0, 0, 0)
+    assert_eq(weekday(dt), 4)
+    assert_eq(isoweekday(dt), 5)
+    assert_eq(from_timestamp(0).weekday(), 3)
+
+fn test_date_time_parts():
+    dt = DateTime(2024, 6, 15, 10, 20, 30, 40)
+    dp = dt.date_parts()
+    assert_eq(dp[0], 2024)
+    assert_eq(dp[1], 6)
+    assert_eq(dp[2], 15)
+    tp = dt.time_parts()
+    assert_eq(tp[0], 10)
+    assert_eq(tp[1], 20)
+    assert_eq(tp[2], 30)
+    assert_eq(tp[3], 40)
+
+fn test_arithmetic():
+    dt = DateTime(2024, 1, 1, 0, 0, 0, 0)
+    later = add_seconds(dt, 3661)
+    assert_eq(later.hour, 1)
+    assert_eq(later.minute, 1)
+    assert_eq(later.second, 1)
+    assert_eq(diff_ms(later, dt), 3661000)
+    shifted = datetime.add_ms(dt, 1500)
+    assert_eq(shifted.second, 1)
+    assert_eq(shifted.millisecond, 500)
+
+fn test_calendar_helpers():
+    assert_true(is_leap_year(2024))
+    assert_true(not is_leap_year(2023))
+    assert_true(is_leap_year(2000))
+    assert_true(not is_leap_year(1900))
+    assert_eq(days_in_month(2024, 2), 29)
+    assert_eq(days_in_month(2023, 2), 28)
+    assert_eq(days_in_month(2024, 4), 30)
+    assert_eq(days_in_month(2024, 12), 31)
+    # date() constructor is midnight UTC.
+    d = date(1999, 12, 31)
+    assert_eq(d.isoformat(), "1999-12-31T00:00:00.000")
+    # now() returns a sane current DateTime.
+    n = now()
+    assert_true(n.year >= 2024)
