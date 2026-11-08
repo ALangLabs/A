@@ -58,7 +58,6 @@ aval bi_join(uint64_t n, aval *argv) {
     Buf b;
     buf_init(&b);
     AObj *src = obj_of(argv[0]);
-    int sk = kind_of(argv[0]);
     if (src && (src->type == T_LIST || src->type == T_TUPLE ||
                 src->type == T_SET) &&
         arr_join_scalar_safe((const AArr *)src)) {

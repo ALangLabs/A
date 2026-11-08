@@ -84,8 +84,6 @@ aval a_some_new(aval value) {
     return mkobj(&r->h);
 }
 
-static int result_is_option(aval v) { return ((AResult *)obj_of(v))->is_option != 0; }
-
 int is_result(aval v) {
     AObj *o = obj_of(v);
     return o && o->type == T_RESULT;

@@ -74,7 +74,7 @@ static void qsort_int(int64_t *a, uint64_t n) {
         uint64_t lt = 0, i = 0, gt = n;
         while (i < gt) {
             if (a[i] < pivot) { int64_t t = a[lt]; a[lt++] = a[i]; a[i++] = t; }
-            else if (a[i] > pivot) { int64_t t = a[gt - 1]; a[gt - 1] = a[i]; gt--; }
+            else if (a[i] > pivot) { int64_t t = a[gt - 1]; a[gt - 1] = a[i]; a[i] = t; gt--; }
             else i++;
         }
         /* recurse into the smaller side, iterate on the larger one */
