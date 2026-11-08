@@ -144,8 +144,9 @@ file(COPY "${ASTRA_SRC}/include/" DESTINATION "${ASTRA_STAGE}/include")
 # staged files whose source disappeared are removed at configure time.
 file(GLOB ASTRA_RUNTIME_SOURCES CONFIGURE_DEPENDS
      "${ASTRA_ROOT}/runtime/*.c" "${ASTRA_ROOT}/runtime/*.h"
+     "${ASTRA_ROOT}/runtime/*.s"
      "${ASTRA_ROOT}/backend/python/*.c")
-file(GLOB ASTRA_RUNTIME_STAGED "${ASTRA_STAGE}/*.c" "${ASTRA_STAGE}/*.h")
+file(GLOB ASTRA_RUNTIME_STAGED "${ASTRA_STAGE}/*.c" "${ASTRA_STAGE}/*.h" "${ASTRA_STAGE}/*.s")
 foreach(staged IN LISTS ASTRA_RUNTIME_STAGED)
     get_filename_component(staged_name "${staged}" NAME)
     if(NOT EXISTS "${ASTRA_ROOT}/runtime/${staged_name}" AND

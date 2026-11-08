@@ -124,6 +124,7 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
       else if (tok == "arm" || tok == "armv4" || tok == "armv5" || tok == "armv6" || tok == "armv7" || tok == "armv7l" || tok == "armv7a" || tok == "arm-linux-gnueabi" || tok == "arm-linux-gnueabihf") arch = "arm";
       else if (tok == "riscv64" || tok == "riscv64gc") arch = "riscv64";
       else if (tok == "riscv32") arch = "riscv32";
+      else if (tok == "i8086" || tok == "8086" || tok == "i86" || tok == "8088") arch = "i8086";
     }
     if (tok == "linux" || tok == "linux-gnu" || tok == "gnu" || tok == "elf") { if (osTok.empty()) osTok = "linux"; }
     else if (tok == "windows" || tok == "win32" || tok == "mingw" || tok == "mingw32" || tok == "mingw64" || tok == "msvc" || tok == "cygwin" || tok == "pe") { if (osTok.empty()) osTok = "windows"; }
@@ -132,7 +133,7 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
     // vendor/env tokens (pc, gnu, gnueabi, gnueabihf, musl, none, apple-darwin handled above) ignored
   }
   if (arch.empty()) {
-    err << "error: unknown target '" << spec << "' (expected x86_64, i386, aarch64/arm64, arm, or riscv64)\n";
+    err << "error: unknown target '" << spec << "' (expected x86_64, i386, aarch64/arm64, arm, riscv64, or i8086)\n";
     return false;
   }
   if (!osTok.empty() && osTok != t.os) {
@@ -560,6 +561,41 @@ int astraBuild(const std::string& arch, const std::string& srcPath, const std::s
     err << "error: cannot locate A runtime (a_runtime.c) for target '" << arch
         << "'; set A_RUNTIME_C or build with cmake\n";
     return 1;
+  }
+  // i8086 is a bare-metal real-mode target: no libc/sysroot, the runtime
+  // is a hand-written assembly subset, and the output is a flat boot
+  // image (not an ELF executable).
+  if (arch == "i8086") {
+    std::string rtS = runtimeDir + "/i8086_runtime.s";
+    if (!std::filesystem::exists(rtS)) rtS = runtimeDir + "/../i8086_runtime.s";
+    std::vector<std::string> args = {srcPath, rtS,
+        "-nostdlib", "-static",
+        "-Wl,-e,_start", "-Wl,-Ttext=0x7C00", "-Wl,-oformat=binary",
+        "-o", outPath};
+    int rc = runAstra(arch, args);
+    if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
+    // Pad to one boot sector and stamp the 0xAA55 signature. Images
+    // larger than 512 bytes need a multi-sector loader (not yet
+    // implemented) — warn so the limitation is visible.
+    std::error_code ec;
+    auto sz = std::filesystem::file_size(outPath, ec);
+    if (!ec) {
+      if (sz > 512) {
+        err << "warning: i8086 image is " << sz << " bytes (>512); only the "
+               "first sector will be loaded by the BIOS boot path\n";
+      }
+      std::fstream f(outPath, std::ios::in | std::ios::out | std::ios::binary);
+      if (f) {
+        if (sz < 512) {
+          std::string pad(512 - (size_t)sz, '\x90');
+          f.seekp(0, std::ios::end); f.write(pad.data(), (std::streamsize)pad.size());
+        }
+        f.seekp(510);
+        char sig[2] = {(char)0x55, (char)0xAA};
+        f.write(sig, 2);
+      }
+    }
+    return 0;
   }
   std::vector<std::string> rtSrcs;
   if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) {

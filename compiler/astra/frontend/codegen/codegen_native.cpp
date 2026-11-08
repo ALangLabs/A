@@ -17,6 +17,7 @@
 #include <cstring>
 #include <memory>
 #include <set>
+#include <regex>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -42,6 +43,9 @@ struct NatTarget {
   virtual int frameReserve() const { return 0; }  // extra bytes inside frame (e.g. ra)
   virtual std::string extraRodata() const { return ""; }
   virtual int ptrSize() const { return 8; }  // C pointer width (a_test_main arrays)
+  // Bare-metal targets (i8086): no libc, tiny address space — skip
+  // function-name/struct registration metadata and GC dead functions.
+  virtual bool bareMetal() const { return false; }
   virtual void prologue(std::string& o, int frameBytes) const = 0;
   virtual void epilogue(std::string& o, int frameBytes) const = 0;
   virtual std::string slotRef(int i) const = 0;   // e.g. "[sp, #8]"
@@ -1594,6 +1598,10 @@ class NativeEmitter {
     allocSlot();  // slot 0 scratch
     callSym("a_runtime_init");
     // fn/struct/enum globals = a_fnon_new(entry_addr, A_NONE, name)
+    // Bare-metal targets skip this: it references every function symbol
+    // (defeating dead-code elimination) and fn-name metadata is unused
+    // without a libc/runtime introspection layer.
+    if (!t_.bareMetal()) {
     for (StructInfo* st : structList_) {
       std::string lbl = "__na_sn_" + st->name;
       leaSym(st->ctorCname, A(0));
@@ -1616,6 +1624,7 @@ class NativeEmitter {
       rodata_ << "    .section .rodata\n" << lbl << ":\n    .byte ";
       for (unsigned char c : f->name) rodata_ << (int)c << ",";
       rodata_ << "0\n";
+    }
     }
     {
       std::vector<std::string> _ekeys;
@@ -1652,6 +1661,26 @@ class NativeEmitter {
           emitStmt(s.get());
         }
         curFnName_.clear();
+      }
+      // `fn main()` entry point: invoked once after all module top-levels,
+      // entry module only. Never runs for imports or under `a test`.
+      if (FnInfo* mf = findModuleFn(graph_.entry, "main")) {
+        std::vector<int> argSlots;
+        for (std::size_t i = 0; i < mf->paramNames.size(); ++i) {
+          int s = allocSlot();
+          movImm(kTag, acc());
+          storeAcc(s);
+          argSlots.push_back(s);
+        }
+        if (mf->variadic && !argSlots.empty()) {
+          int lst = allocSlot();
+          movImm(0, A(0));
+          zeroReg(A(1));
+          callSym("a_list_new");
+          storeAcc(lst);
+          argSlots.back() = lst;
+        }
+        emitOrderedCall(mf->cname, argSlots);
       }
       // program exit: drop RAII bindings in every remaining scope
       // (global scope holds module-level `x = ...` bindings).
@@ -3874,7 +3903,102 @@ struct Arm32Target : NatTarget {
 // i8086 real mode: identical instruction dialect to i386 — the backend
 // assembler emits 0x66/0x67 prefixes automatically. Only the entry stub
 // differs (no crt: _start sets up segments/stack and calls main).
-struct I8086Target : I386Target {};
+struct I8086Target : I386Target {
+  bool bareMetal() const override { return true; }
+};
+
+// Dead-function elimination for bare-metal targets: real-mode CS:IP is
+// 16-bit so .text must stay under 64KB, and the boot sector only loads
+// 512 bytes. The emitter produces every function in the module graph;
+// this pass keeps only functions transitively referenced (call/lea/data)
+// from non-function code plus `main`/`_start`.
+//
+// Assembly layout contract (from NativeEmitter): global symbols appear
+// as column-0 `name:` labels; each function's `.section`/`.globl`
+// directives immediately precede its label; local labels are indented.
+void gcAsmFunctions(std::string& src) {
+  std::vector<std::string> lines;
+  {
+    std::istringstream in(src);
+    std::string l;
+    while (std::getline(in, l)) lines.push_back(l);
+  }
+  // Any __na_* global symbol block (fn/method/lambda/ctor code, field and
+  // name-string rodata, global slots) is droppable when unreferenced.
+  // `main`/`_start`/runtime `a_*` symbols are not __na_ and always stay.
+  const std::regex fnLabel(R"(^__na_[A-Za-z0-9_]+:$)");
+  const std::regex anyLabel(R"(^([A-Za-z_][A-Za-z0-9_]*):$)");
+  // Block = [header start, next header start). Header start walks back
+  // over indented .section/.globl directive lines.
+  struct Block { std::size_t begin, end; std::string name; bool isFn; };
+  std::vector<Block> blocks;
+  std::vector<std::size_t> labelIdx;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    std::smatch m;
+    if (std::regex_match(lines[i], m, anyLabel)) labelIdx.push_back(i);
+  }
+  for (std::size_t k = 0; k < labelIdx.size(); ++k) {
+    std::size_t li = labelIdx[k];
+    std::smatch m;
+    std::regex_match(lines[li], m, anyLabel);
+    std::string name = m[1].str();
+    std::size_t h = li;
+    while (h > 0 &&
+           (lines[h - 1].find(".section") != std::string::npos ||
+            lines[h - 1].find(".globl") != std::string::npos) &&
+           !lines[h - 1].empty() && lines[h - 1][0] == ' ')
+      --h;
+    std::size_t e = (k + 1 < labelIdx.size()) ? labelIdx[k + 1] : lines.size();
+    // extend end backwards over the next block's header directives
+    while (e > li + 1 &&
+           (lines[e - 1].find(".section") != std::string::npos ||
+            lines[e - 1].find(".globl") != std::string::npos) &&
+           !lines[e - 1].empty() && lines[e - 1][0] == ' ')
+      --e;
+    blocks.push_back({h, e, name, std::regex_match(name, fnLabel)});
+  }
+  if (blocks.empty()) return;
+  // kept[i] for fn blocks; non-fn blocks are always kept.
+  std::vector<char> kept(blocks.size(), 1);
+  for (std::size_t i = 0; i < blocks.size(); ++i)
+    if (!blocks[i].isFn) kept[i] = 1;
+  // Fixpoint: scan kept blocks for references to fn symbols.
+  const std::regex fnRef(R"(\b(__na_[A-Za-z0-9_]+)\b)");
+  std::unordered_map<std::string, std::size_t> byName;
+  for (std::size_t i = 0; i < blocks.size(); ++i)
+    if (blocks[i].isFn) byName[blocks[i].name] = i;
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (std::size_t i = 0; i < blocks.size(); ++i) {
+      if (!kept[i]) continue;
+      for (std::size_t j = blocks[i].begin; j < blocks[i].end; ++j) {
+        const std::string& l = lines[j];
+        if (l.find("__na_") == std::string::npos) continue;
+        std::sregex_iterator it(l.begin(), l.end(), fnRef), end;
+        for (; it != end; ++it) {
+          auto f = byName.find((*it)[1].str());
+          if (f != byName.end() && !kept[f->second]) {
+            kept[f->second] = 1;
+            changed = true;
+          }
+        }
+      }
+    }
+  }
+  // Rebuild: keep all lines except dropped fn blocks. Lines before the
+  // first block and non-block gaps are always kept.
+  std::vector<char> dropLine(lines.size(), 0);
+  for (std::size_t i = 0; i < blocks.size(); ++i)
+    if (blocks[i].isFn && !kept[i])
+      for (std::size_t j = blocks[i].begin; j < blocks[i].end; ++j)
+        dropLine[j] = 1;
+  std::string out;
+  out.reserve(src.size());
+  for (std::size_t i = 0; i < lines.size(); ++i)
+    if (!dropLine[i]) { out += lines[i]; out += '\n'; }
+  src.swap(out);
+}
 
 }  // namespace
 
@@ -3931,6 +4055,7 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
         "    movb $42, %al\n"
         "    outb %al, %dx\n"
         "    hlt\n") + out;
+    gcAsmFunctions(out);
     return true;
   }
   error = "native backend: arch '" + arch + "' not implemented";

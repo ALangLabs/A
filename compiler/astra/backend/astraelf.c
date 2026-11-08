@@ -2307,7 +2307,15 @@ static int sort_sections(ASTRAState *s1, int *sec_order, struct dyn_inf *d)
             if (s1->plt && s == s1->plt->reloc)
                 k = 0x21;
         } else if (s->sh_flags & SHF_EXECINSTR) {
+#ifdef ASTRA_TARGET_I8086
+            /* real mode: .text must be the lowest section so the boot
+               sector image starts with _start and IP stays in range.
+               k+0x100 must land below rodata's 0x150 but avoid the
+               0x140 RELRO-write trap. */
+            k = 0x30;
+#else
             k = 0x60;
+#endif
         /* RELRO sections --> */
         } else if (s->sh_flags & SHF_TLS) {
             if (s->sh_addralign > tls_align)
