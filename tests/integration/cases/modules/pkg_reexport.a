@@ -1,0 +1,7 @@
+import "lib/pkg/__init__.a" as pkg
+
+print(pkg.greet("a"))
+print(pkg.Answer)
+print(pkg.double(21))
+f = pkg.double
+print(f(3))

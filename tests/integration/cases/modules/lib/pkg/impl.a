@@ -1,0 +1,7 @@
+fn greet(name):
+    return "hi " + name
+
+Answer = 42
+
+fn double(x):
+    return x * 2
