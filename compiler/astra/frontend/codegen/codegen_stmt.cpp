@@ -677,6 +677,98 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       emit("    mov " + slotRef(curS) + ", %r10\n");
       curGprSlot_ = curS;
     }
+    // Fused sqrt(f64(x)) detection (shared by the scalar + unrolled loops).
+    const Expr* val = as.value.get();
+    bool fused = false;
+    const Expr* inner = nullptr;
+    if (val && val->kind == ExprKind::Call) {
+      const CallExpr& vc = static_cast<const CallExpr&>(*val);
+      if (vc.builtinId == BuiltinId::Sqrt && vc.args.size() == 1) {
+        const Expr* arg = vc.args[0].value.get();
+        if (arg && arg->kind == ExprKind::Call) {
+          const CallExpr& fc = static_cast<const CallExpr&>(*arg);
+          if (fc.builtinId == BuiltinId::F64 && fc.args.size() == 1 &&
+              exprIsInt(fc.args[0].value.get()) &&
+              rawSafeExpr(fc.args[0].value.get())) {
+            fused = true;
+            inner = fc.args[0].value.get();
+          }
+        }
+      }
+    }
+    bool canElide = false;
+    if (fused) {
+      if (stepConst == 1) {
+        ARange lr = exprRangeFlat(loE);
+        canElide = lr.known && lr.lo >= 0;
+      } else if (stepConst == -1) {
+        ARange hr = exprRangeFlat(hiE);
+        canElide = hr.known && hr.lo >= 0;
+      }
+    }
+    // One fused element: acc += sqrt(f64(counter+off)) in %xmm0 with no
+    // temp slot. Fresh labels per expansion (unrolled loop replicates it).
+    auto emitFusedElt = [&](int off) {
+      std::string domL = newLabel("sqd"), nanL2 = newLabel("fanil"),
+                  doneL2 = newLabel("fadone");
+      rawInvAll();  // direct mov traffic below bypasses the reg cache
+      // Loop-var operand: value is r10+off (alias puts the binding on the
+      // counter slot; looked up by name since the unrolled loop expands
+      // before bindLocal). Offsets use lea, never a memory read. Only
+      // when the counter actually lives in %r10 (gprCtr); otherwise the
+      // memory path below is authoritative.
+      bool loopVarRead = false;
+      if (inner->kind == ExprKind::Ident &&
+          static_cast<const IdentExpr*>(inner)->name == st.var && gprCtr) {
+        // off == 0: convert %r10 DIRECTLY (cvtsi2sd reg operand) so the
+        // cvt has no dependency on a preceding mov.
+        if (off == 0) loopVarRead = true;
+        else emit("    lea " + std::to_string(off) + "(%r10), %rax\n");
+      } else if (off > 0) {
+        // Unroll only accepts loop-var operands (checked by the caller).
+        return;
+      } else if (inner->kind == ExprKind::Ident) {
+        ABinding* ib = lookup(static_cast<const IdentExpr*>(inner)->name);
+        auto xr2 = ib ? loopXmm_.find(ib->slot) : loopXmm_.end();
+        if (xr2 != loopXmm_.end()) {
+          emit(std::string("    movq %xmm") + std::to_string(xr2->second) +
+               ", %rax\n");
+        } else if (ib && ib->slot == curGprSlot_) {
+          emit("    mov %r10, %rax\n");
+        } else if (ib && ib->rawInt) {
+          loadSlot(ib->slot);
+        } else {
+          int s = allocSlot();
+          emitRawExpr(inner, s);
+          loadSlot(s);
+        }
+      } else {
+        int s = allocSlot();
+        emitRawExpr(inner, s);
+        loadSlot(s);
+      }
+      if (loopVarRead) {
+        emit("    cvtsi2sd %r10, %xmm0\n");
+      } else {
+        emit("    cvtsi2sd %rax, %xmm0\n");
+      }
+      if (canElide) {
+        emit("    sqrtsd %xmm0, %xmm0\n");
+      } else {
+        emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
+             domL + "\n    sqrtsd %xmm0, %xmm0\n");
+      }
+      emit(std::string("    addsd %xmm0, ") + xr + "\n");
+      emit("    ucomisd " + xr + ", " + xr + "\n");
+      emit("    jp " + nanL2 + "\n");
+      emit("    jmp " + doneL2 + "\n");
+      emitLabel(nanL2);
+      movImm(kCanonNaN);
+      emit(std::string("    movq %rax, ") + xr + "\n");
+      emitLabel(domL);
+      emitPanicStr("math domain error");
+      emitLabel(doneL2);
+    };
     emitLabel(loopL);
     // continue while (step>0 ? cur<end : cur>end). Constant steps skip
     // the sign dispatch entirely at the cost of one compare.
@@ -756,78 +848,9 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loopBreak_.push_back(endL);
     loopCont_.push_back(contL);
     loopDeferDepth_.push_back((int)deferStack_.size());
-    // Body: fused sqrt(f64(x)) keeps the value in %xmm0 end-to-end (no
-    // temp slot, no spill/reload stall); otherwise eval to rs and add.
-    const Expr* val = as.value.get();
-    bool fused = false;
-    const Expr* inner = nullptr;
-    if (val && val->kind == ExprKind::Call) {
-      const CallExpr& vc = static_cast<const CallExpr&>(*val);
-      if (vc.builtinId == BuiltinId::Sqrt && vc.args.size() == 1) {
-        const Expr* arg = vc.args[0].value.get();
-        if (arg && arg->kind == ExprKind::Call) {
-          const CallExpr& fc = static_cast<const CallExpr&>(*arg);
-          if (fc.builtinId == BuiltinId::F64 && fc.args.size() == 1 &&
-              exprIsInt(fc.args[0].value.get()) &&
-              rawSafeExpr(fc.args[0].value.get())) {
-            fused = true;
-            inner = fc.args[0].value.get();
-          }
-        }
-      }
-    }
+    // Body.
     if (fused) {
-      std::string domL = newLabel("sqd");
-      // Domain-check elision: sqrt(i) panics only for i < 0. With a
-      // proven non-negative iteration range (ascending from a lo >= 0,
-      // or descending to a hi >= 0) the panic is unreachable, so the
-      // xorpd/ucomisd check (which serializes cvt -> cmp -> sqrt) goes.
-      bool canElide = false;
-      if (stepConst == 1) {
-        ARange lr = exprRangeFlat(loE);
-        canElide = lr.known && lr.lo >= 0;
-      } else if (stepConst == -1) {
-        ARange hr = exprRangeFlat(hiE);
-        canElide = hr.known && hr.lo >= 0;
-      }
-      rawInvAll();  // direct mov traffic below bypasses the reg cache
-      if (inner->kind == ExprKind::Ident) {
-        ABinding* ib = lookup(static_cast<const IdentExpr*>(inner)->name);
-        auto xr2 = ib ? loopXmm_.find(ib->slot) : loopXmm_.end();
-        if (xr2 != loopXmm_.end()) {
-          emit(std::string("    movq %xmm") + std::to_string(xr2->second) +
-               ", %rax\n");
-        } else if (ib && ib->slot == curGprSlot_) {
-          emit("    mov %r10, %rax\n");
-        } else if (ib && ib->rawInt) {
-          loadSlot(ib->slot);
-        } else {
-          int s = allocSlot();
-          emitRawExpr(inner, s);
-          loadSlot(s);
-        }
-      } else {
-        int s = allocSlot();
-        emitRawExpr(inner, s);
-        loadSlot(s);
-      }
-      emit("    cvtsi2sd %rax, %xmm0\n");
-      if (canElide) {
-        emit("    sqrtsd %xmm0, %xmm0\n");
-      } else {
-        emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
-             domL + "\n    sqrtsd %xmm0, %xmm0\n");
-      }
-      emit(std::string("    addsd %xmm0, ") + xr + "\n");
-      emit("    ucomisd " + xr + ", " + xr + "\n");
-      emit("    jp " + nanL + "\n");
-      emit("    jmp " + doneL + "\n");
-      emitLabel(nanL);
-      movImm(kCanonNaN);
-      emit(std::string("    movq %rax, ") + xr + "\n");
-      emitLabel(domL);
-      emitPanicStr("math domain error");
-      emitLabel(doneL);
+      emitFusedElt(0);
     } else {
       int rs = evalSlot(as.value.get());
       rawInvAll();  // direct movsd traffic below bypasses the reg cache
