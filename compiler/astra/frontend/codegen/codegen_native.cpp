@@ -280,6 +280,8 @@ struct StructInfo {
   const StructDecl* decl = nullptr;
   std::string ctorCname;
   std::string globalVar;
+  std::string nameLabel;  // unique __na_sn_* rodata label (names may repeat
+                          // across modules, e.g. prelude vs std/prelude)
   std::vector<std::string> fieldNames;
   std::unordered_map<std::string, FnInfo*> methods;
   int moduleId = -1;
@@ -1168,7 +1170,8 @@ class NativeEmitter {
           info->name = st->name;
           info->moduleId = mod.id;
           info->ctorCname = "__na_ctor" + std::to_string(stId);
-          info->globalVar = "__na_gs" + std::to_string(stId++);
+          info->globalVar = "__na_gs" + std::to_string(stId);
+          info->nameLabel = "__na_sn_" + std::to_string(stId++);
           for (const FieldDecl& f : st->fields) info->fieldNames.push_back(f.name);
           structs_[st->name] = info;
           structList_.push_back(info);
@@ -1699,7 +1702,7 @@ class NativeEmitter {
     // without a libc/runtime introspection layer.
     if (!t_.bareMetal()) {
     for (StructInfo* st : structList_) {
-      std::string lbl = "__na_sn_" + st->name;
+      std::string lbl = st->nameLabel;
       leaSym(st->ctorCname, A(0));
       movImm(kTag | 0x2ULL, A(1));
       leaSym(lbl, A(2));
