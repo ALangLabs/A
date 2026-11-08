@@ -538,6 +538,25 @@ inline void mixRuntimeSources(std::uint64_t& h, const std::string& runtimeC) {
   for (const std::string& f : files) h = mixFileStat(h, f);
 }
 
+// The compiler binary itself is part of every cache key: rebuilding `a`
+// changes codegen, and the version string does not move on every commit. A
+// stale hit here silently ran an executable produced by an older compiler
+// (which is exactly how a codegen regression hides during development).
+inline std::string selfExePath() {
+#ifdef _WIN32
+  char buf[MAX_PATH];
+  DWORD n = GetModuleFileNameA(nullptr, buf, MAX_PATH);
+  if (n == 0 || n >= MAX_PATH) return std::string();
+  return std::string(buf, n);
+#else
+  char buf[4096];
+  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
+  if (n <= 0) return std::string();
+  buf[n] = '\0';
+  return std::string(buf);
+#endif
+}
+
 struct Plan {
   bool active = false;
   std::string file;  // final cache file path
@@ -585,6 +604,10 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
   h = mixBytes(h, rcflags ? rcflags : "");
   h = mixFileStat(h, astraBin);
+  {
+    const std::string self = selfExePath();
+    if (!self.empty()) h = mixFileStat(h, self);
+  }
   // Library dir that astra links against, when staged.
   for (const std::string& cand : {runtimeDir + "/libastra1.a",
                                   runtimeDir + "/lib/libastra1.a"}) {
@@ -634,6 +657,10 @@ inline std::string precheckKey(const std::string& path,
   std::uint64_t h = 1469598103934665603ULL;
   h = mixBytes(h, "pre1");
   h = mixBytes(h, kVersion);
+  {
+    const std::string self = selfExePath();
+    if (!self.empty()) h = mixFileStat(h, self);
+  }
   h = mixBytes(h, td.arch);
   h = mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
