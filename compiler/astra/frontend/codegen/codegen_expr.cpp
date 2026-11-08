@@ -787,19 +787,22 @@ void AsmEmitter::emitField(const Expr* e) {
             }
           }
           if (chain.size() == 1) {
-            auto it = topLevelGlobals_.find(std::to_string(mb->moduleId) + ":" + chain[0]);
+            // Follow `from "x.a" import name` re-exports in package
+            // __init__ modules to the module that declares the member.
+            auto rm = a::resolveModuleMember(graph_, mb->moduleId, chain[0]);
+            auto it = topLevelGlobals_.find(std::to_string(rm.first) + ":" + rm.second);
             if (it != topLevelGlobals_.end()) {
               emit("    mov " + it->second + "(%rip), %rax");
               return;
             }
             for (FnInfo* fi : fnList_) {
-              if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == chain[0]) {
+              if (!fi->isMethod && fi->moduleId == rm.first && fi->name == rm.second) {
                 emit("    mov " + fi->globalVar + "(%rip), %rax");
                 return;
               }
             }
             for (StructInfo* st : structList_) {
-              if (st->moduleId == mb->moduleId && st->name == chain[0]) {
+              if (st->moduleId == rm.first && st->name == rm.second) {
                 emit("    mov " + st->globalVar + "(%rip), %rax");
                 return;
               }
@@ -810,13 +813,27 @@ void AsmEmitter::emitField(const Expr* e) {
           return;
         }
         if (mb && mb->kind == BKind::Module && mb->moduleId < 0) {
-          // Native module constant: math.PI, math.E, ...
+          // Native module member as a value: math.PI, math.sqrt.
           if (chain.size() == 1) {
             if (const std::string* cn = nativeConstant(mb->aux, chain[0])) {
               double v = *cn == "PI"   ? 3.14159265358979323846
                         : *cn == "E"    ? 2.71828182845904523536
                                         : 0.0;
               movImm(dblBits(v));
+              return;
+            }
+            if (const std::string* fn = nativeFunction(mb->aux, chain[0])) {
+              int bid = builtinRuntimeId(*fn);
+              if (bid >= 0) {
+                movImm((uint64_t)bid, "%rdi");
+                emit("    call a_builtin\n");
+                return;
+              }
+            }
+            int bid = builtinRuntimeId(chain[0]);
+            if (bid >= 0) {
+              movImm((uint64_t)bid, "%rdi");
+              emit("    call a_builtin\n");
               return;
             }
           }

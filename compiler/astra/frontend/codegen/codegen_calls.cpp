@@ -1058,8 +1058,11 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
                  mb->aux + "." + f.field);
             return;
           }
+          // Function/struct in that module, following `from "x.a" import
+          // name` re-exports in package __init__ modules.
+          auto rm = a::resolveModuleMember(graph_, mb->moduleId, f.field);
           for (FnInfo* fi : fnList_) {
-            if (!fi->isMethod && fi->moduleId == mb->moduleId && fi->name == f.field) {
+            if (!fi->isMethod && fi->moduleId == rm.first && fi->name == rm.second) {
               if (tryEmitInlineCall(fi, call)) return;
               std::vector<int> ps(fi->paramNames.size(), -1);
               placeArgs(call, fi->paramNames, ps, 0,
@@ -1069,12 +1072,31 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
             }
           }
           for (StructInfo* st : structList_) {
-            if (st->moduleId == mb->moduleId && st->name == f.field) {
+            if (st->moduleId == rm.first && st->name == rm.second) {
               std::vector<int> ps(st->fieldNames.size(), -1);
               placeArgs(call, st->fieldNames, ps);
               emitDirectCall(st->ctorCname.c_str(), ps);
               return;
             }
+          }
+          // Module-level let holding a callable: mod.handler(...).
+          auto git = topLevelGlobals_.find(std::to_string(rm.first) + ":" + rm.second);
+          if (git != topLevelGlobals_.end()) {
+            std::vector<const Expr*> args = positionalArgs(call);
+            std::vector<int> slots;
+            for (const Expr* a : args) slots.push_back(evalSlot(a));
+            Argv av = allocArgv((int)slots.size());
+            for (std::size_t i = 0; i < slots.size(); ++i)
+              argvStore(av, (int)i, slots[i]);
+            emit("    mov " + git->second + "(%rip), %rdi\n");
+            movImm(slots.size(), "%rsi");
+            if (slots.empty()) {
+              emit("    xor %edx, %edx");
+            } else {
+              leaSlot(argvPtr(av), "%rdx");
+            }
+            emit("    call a_call\n");
+            return;
           }
           fail("unknown module member '" + f.field + "'");
           return;

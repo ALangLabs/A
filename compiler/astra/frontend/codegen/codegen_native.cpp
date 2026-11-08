@@ -26,6 +26,7 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "codegen/codegen_internal.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
@@ -259,44 +260,6 @@ int builtinRuntimeId(const std::string& name) {
   return it == kMap.end() ? -1 : it->second;
 }
 
-int builtinIdForBuiltin(BuiltinId id) {
-  switch (id) {
-    case BuiltinId::Print: return 0;
-    case BuiltinId::Eprint: return 1;
-    case BuiltinId::Len: return 2;
-    case BuiltinId::Str: return 3;
-    case BuiltinId::Sqrt: return 12;
-    case BuiltinId::F64: return 5;
-    case BuiltinId::I64: return 4;
-    case BuiltinId::Abs: return 7;
-    case BuiltinId::Round: return 23;
-    case BuiltinId::Floor: return 21;
-    case BuiltinId::Ceil: return 22;
-    case BuiltinId::Pow: return 11;
-    case BuiltinId::Join: return 56;
-    case BuiltinId::Map: return 32;
-    case BuiltinId::Filter: return 33;
-    case BuiltinId::Sum: return 10;
-    case BuiltinId::Any: return 34;
-    case BuiltinId::All: return 35;
-    case BuiltinId::Some: return 36;
-    case BuiltinId::Ok: return 37;
-    case BuiltinId::Err: return 38;
-    case BuiltinId::Panic: return 39;
-    case BuiltinId::Assert: return 40;
-    case BuiltinId::AssertEq: return 41;
-    default: return -1;
-  }
-}
-
-std::string stemOf(const std::string& path) {
-  auto slash = path.find_last_of("/\\");
-  std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
-  auto dot = base.find_last_of('.');
-  if (dot != std::string::npos) base.resize(dot);
-  return base;
-}
-
 struct FnInfo {
   const FnDecl* decl = nullptr;
   std::string cname;
@@ -329,7 +292,7 @@ struct EnumVariantInfo {
 };
 
 enum class BKind { Local, Global, Param, FnValue, Builtin, StructCtor,
-                   EnumValue, Module, Capture, NativeConst };
+                   EnumValue, Module, Capture, NativeConst, PyModule, PyFunc };
 
 struct ABinding {
   BKind kind = BKind::Local;
@@ -341,7 +304,9 @@ struct ABinding {
   EnumVariantInfo* en = nullptr;
   int moduleId = -1;
   int envIdx = -1;   // BKind::Capture: index into closure env
-  std::string aux;   // BKind::Module: native module name (moduleId < 0)
+  std::string aux;   // BKind::Module: native module name (moduleId < 0);
+                     // BKind::PyModule/PyFunc: python module path
+  std::string pyMember;  // BKind::PyFunc: python member name
   FnInfo* dropFn = nullptr;  // RAII: struct `drop` method for this binding
 };
 
@@ -793,6 +758,51 @@ class NativeEmitter {
     callSym("a_call");
   }
 
+  // py_call(module, member, nkw, pos..., (kname, kval)*nkw): argv[0..1] are
+  // the module/member strings, argv[2] the kwargs count, then positional
+  // args, then name/value pairs. The runtime resolves libpython. Mirrors
+  // emitAsm's emitPyCall / emitC's emitPyCall.
+  void emitPyCall(const std::string& module, const std::string& member,
+                  const CallExpr& call) {
+    int ms = strLitSlot(module);
+    int fs = strLitSlot(member);
+    std::vector<int> posSlots;
+    std::vector<std::pair<std::string, int>> kwSlots;
+    for (const CallArg& a : call.args) {
+      int s = evalToSlot(a.value.get());
+      if (a.name.empty()) {
+        posSlots.push_back(s);
+      } else {
+        kwSlots.push_back({a.name, s});
+      }
+    }
+    int nkw = (int)kwSlots.size();
+    Argv av = allocArgv((int)posSlots.size() + 2 * nkw + 3);
+    argvStore(av, 0, ms);
+    argvStore(av, 1, fs);
+    int ks = allocSlot();
+    movImm(mkintA(nkw), acc());
+    storeAcc(ks);
+    argvStore(av, 2, ks);
+    for (std::size_t i = 0; i < posSlots.size(); ++i)
+      argvStore(av, (int)i + 3, posSlots[i]);
+    for (std::size_t i = 0; i < kwSlots.size(); ++i) {
+      int kns = strLitSlot(kwSlots[i].first);
+      argvStore(av, (int)(3 + posSlots.size() + 2 * i), kns);
+      argvStore(av, (int)(3 + posSlots.size() + 2 * i + 1), kwSlots[i].second);
+    }
+    int bid = builtinRuntimeId("py_call");
+    if (bid < 0) {
+      fail("native: py_call builtin unavailable");
+      return;
+    }
+    movImm((uint64_t)bid, A(0));
+    movImm(av.n, A(1));
+    if (av.n == 0) zeroReg(A(2));
+    else leaSlot(av.base, A(2));
+    callSym("a_bi_call");
+  }
+
   // Direct call to a known A function: f(aval *argv), argv[0]=env.
   void emitDirectCall(FnInfo* f, const std::vector<const Expr*>& args) {
     int n = (int)args.size() + 1;  // argv[0] = env placeholder
@@ -963,6 +973,57 @@ class NativeEmitter {
         sym = st->globalVar; return true;
       }
     return false;
+  }
+
+  // Follow `from "x.a" import name` re-exports (package __init__ modules) to
+  // the module that actually declares `name`. Returns {moduleId, name};
+  // unchanged when there is no re-export. Mirrors emitC's
+  // resolveModuleMember; native/python re-exports are not followed.
+  std::pair<int, std::string> resolveModuleMember(int moduleId,
+                                                  const std::string& name) {
+    std::string cur = name;
+    for (int depth = 0; moduleId >= 0 && depth < 16; ++depth) {
+      if (moduleId >= (int)graph_.modules.size()) break;
+      const Module& mod = graph_.at(moduleId);
+      if (!mod.program) break;
+      bool declared = false;
+      for (const StmtPtr& s : mod.program->statements) {
+        if ((s->kind == StmtKind::FnDecl &&
+             static_cast<const FnDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::StructDecl &&
+             static_cast<const StructDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::EnumDecl &&
+             static_cast<const EnumDecl*>(s.get())->name == cur) ||
+            (s->kind == StmtKind::Let &&
+             static_cast<const LetStmt*>(s.get())->name == cur)) {
+          declared = true;
+          break;
+        }
+      }
+      if (declared) break;
+      int nextId = -1;
+      std::string nextName;
+      for (const StmtPtr& s : mod.program->statements) {
+        if (s->kind != StmtKind::FromImport) continue;
+        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
+          continue;
+        for (const auto& item : im->items) {
+          // `import x as y` re-exports under the alias; recurse on the
+          // source name in the source module.
+          if (item.name == cur || (!item.alias.empty() && item.alias == cur)) {
+            nextId = im->moduleId;
+            nextName = item.name;
+            break;
+          }
+        }
+        if (nextId >= 0) break;
+      }
+      if (nextId < 0) break;
+      moduleId = nextId;
+      cur = nextName;
+    }
+    return {moduleId, cur};
   }
 
   // ---- defer ----------------------------------------------------------------
@@ -1249,7 +1310,7 @@ class NativeEmitter {
     for (const char* nm : {"math", "io", "fs", "strings", "collections", "core",
                            "time", "json", "binary", "testing", "log", "metrics",
                            "trace", "net", "http", "terminal", "env", "repl",
-                           "kernels", "unsafe", "arena", "std"}) {
+                           "kernels", "unsafe", "arena", "std", "py", "kernel_ops"}) {
       ABinding b;
       b.kind = BKind::Module;
       b.moduleId = -1;
@@ -1270,15 +1331,24 @@ class NativeEmitter {
   }
 
   // Register a module's import aliases (import x / from x import y,
-  // including native `std:` modules) into the current scope. Mirrors
-  // emitC's bindModuleImportStmts; python: imports are skipped — uses of
-  // them fail later and the pipeline falls back to emitC.
+  // including native `std:` modules and `python:` modules) into the
+  // current scope. Mirrors emitC's bindModuleImportStmts.
   void bindModuleImports(const Module& mod) {
     if (!mod.program) return;
     for (const StmtPtr& s : mod.program->statements) {
       if (s->kind == StmtKind::Import) {
         const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
-        if (im->pythonModuleImport) continue;
+        if (im->pythonModuleImport) {
+          // import python:<mod> [as x]: dynamic module, calls go through
+          // the runtime py_call builtin.
+          std::string alias = !im->alias.empty() ? im->alias
+                               : stemOf(im->pythonModule);
+          ABinding b;
+          b.kind = BKind::PyModule;
+          b.aux = im->pythonModule;
+          scopes_.back()[alias] = b;
+          continue;
+        }
         std::string alias = !im->alias.empty() ? im->alias
                              : !im->bareName.empty() ? im->bareName
                              : stemOf(im->path);
@@ -1291,7 +1361,17 @@ class NativeEmitter {
         }
       } else if (s->kind == StmtKind::FromImport) {
         const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
-        if (im->pythonModuleImport) continue;
+        if (im->pythonModuleImport) {
+          // from python:<mod> import name [as x]: dynamic member call.
+          for (const auto& item : im->items) {
+            ABinding b;
+            b.kind = BKind::PyFunc;
+            b.aux = im->pythonModule;
+            b.pyMember = item.name;
+            scopes_.back()[item.alias.empty() ? item.name : item.alias] = b;
+          }
+          continue;
+        }
         for (const auto& item : im->items) {
           std::string alias = item.alias.empty() ? item.name : item.alias;
           if (im->nativeModule) {
@@ -1917,8 +1997,9 @@ class NativeEmitter {
                 static_cast<const IdentExpr*>(fx.object.get())->name;
             ABinding* mb = lookup(mid);
             if (mb && mb->kind == BKind::Module && mb->moduleId >= 0) {
+              auto rm = resolveModuleMember(mb->moduleId, fx.field);
               std::string gsym;
-              if (moduleGlobalSym(mb->moduleId, fx.field, gsym)) {
+              if (moduleGlobalSym(rm.first, rm.second, gsym)) {
                 loadSlot(valS, A(0));
                 storeSym(gsym, A(0));
                 return;
@@ -2607,7 +2688,8 @@ class NativeEmitter {
             callSym("a_builtin");
             return;
           }
-          if (b->kind == BKind::Module) {
+          if (b->kind == BKind::Module || b->kind == BKind::PyModule ||
+              b->kind == BKind::PyFunc) {
             fail("native: module '" + x.name + "' is not a value");
             return;
           }
@@ -2908,6 +2990,10 @@ class NativeEmitter {
           const std::string& nm =
               static_cast<const IdentExpr*>(x.callee.get())->name;
           ABinding* b = lookup(nm);
+          if (b && b->kind == BKind::PyFunc) {
+            emitPyCall(b->aux, b->pyMember, x);
+            return;
+          }
           if (b && b->kind == BKind::FnValue && b->fn) {
             emitFnCallOrdered(b->fn, x);
             return;
@@ -2947,17 +3033,43 @@ class NativeEmitter {
             const std::string& mid =
                 static_cast<const IdentExpr*>(fx.object.get())->name;
             ABinding* mb = lookup(mid);
+            if (mb && mb->kind == BKind::PyModule) {
+              emitPyCall(mb->aux, fx.field, x);
+              return;
+            }
             if (mb && mb->kind == BKind::Module) {
               if (mb->moduleId >= 0) {
                 // A module member: mod.fn / mod.Struct / mod.CONST
                 int bid = builtinRuntimeId(fx.field);
                 if (bid >= 0) { emitBiCall(bid, args); return; }
-                if (FnInfo* mf = findModuleFn(mb->moduleId, fx.field)) {
+                // Follow __init__ re-exports to the declaring module.
+                auto rm = resolveModuleMember(mb->moduleId, fx.field);
+                if (FnInfo* mf = findModuleFn(rm.first, rm.second)) {
                   emitFnCallOrdered(mf, x);
                   return;
                 }
-                if (StructInfo* mst = findModuleStruct(mb->moduleId, fx.field)) {
+                if (StructInfo* mst = findModuleStruct(rm.first, rm.second)) {
                   emitStructCall(mst, x);
+                  return;
+                }
+                // Module-level let holding a callable: mod.handler(...).
+                std::string gsym;
+                if (moduleGlobalSym(rm.first, rm.second, gsym)) {
+                  int fs = allocSlot();
+                  loadSym(gsym, acc());
+                  storeAcc(fs);
+                  Argv av = allocArgv((int)args.size());
+                  for (std::size_t i = 0; i < args.size(); ++i) {
+                    int s = allocSlot();
+                    emitExpr(args[i]);
+                    storeAcc(s);
+                    argvStore(av, (int)i, s);
+                  }
+                  loadSlot(fs, A(0));
+                  movImm(args.size(), A(1));
+                  if (args.empty()) zeroReg(A(2));
+                  else leaSlot(av.base, A(2));
+                  callSym("a_call");
                   return;
                 }
                 fail("native: unknown module member '" + mid + "." + fx.field + "'");
@@ -3100,18 +3212,20 @@ class NativeEmitter {
                   }
                 }
                 // Top-level let / fn / struct in that module: c.LIMIT
+                // (following `from x import y` re-exports in __init__ files).
                 if (chain.size() == 1) {
-                  if (FnInfo* mf = findModuleFn(mb->moduleId, chain[0])) {
+                  auto rm = resolveModuleMember(mb->moduleId, chain[0]);
+                  if (FnInfo* mf = findModuleFn(rm.first, rm.second)) {
                     loadSym(mf->globalVar, acc());
                     return;
                   }
                   if (StructInfo* mst =
-                          findModuleStruct(mb->moduleId, chain[0])) {
+                          findModuleStruct(rm.first, rm.second)) {
                     loadSym(mst->globalVar, acc());
                     return;
                   }
                   std::string gsym;
-                  if (moduleGlobalSym(mb->moduleId, chain[0], gsym)) {
+                  if (moduleGlobalSym(rm.first, rm.second, gsym)) {
                     loadSym(gsym, acc());
                     return;
                   }

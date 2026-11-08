@@ -51,6 +51,59 @@ bool AsmEmitter::run(std::string& out, std::string& error) {
 
 namespace a {
 
+// Follow `from "x.a" import name` re-exports (package __init__ modules) to
+// the module that actually declares `name`. Returns {moduleId, name};
+// unchanged when there is no re-export. Native/python re-exports are not
+// followed (shortcut: module values have no runtime representation).
+// Shared by emitC (Emitter::resolveModuleMember) and emitAsm.
+std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
+                                              int moduleId,
+                                              const std::string& name) {
+  std::string cur = name;
+  for (int depth = 0; moduleId >= 0 && depth < 16; ++depth) {
+    if (moduleId >= (int)graph.modules.size()) break;
+    const Module& mod = graph.at(moduleId);
+    if (!mod.program) break;
+    bool declared = false;
+    for (const StmtPtr& s : mod.program->statements) {
+      if ((s->kind == StmtKind::FnDecl &&
+           static_cast<const FnDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::StructDecl &&
+           static_cast<const StructDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::EnumDecl &&
+           static_cast<const EnumDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::Let &&
+           static_cast<const LetStmt*>(s.get())->name == cur)) {
+        declared = true;
+        break;
+      }
+    }
+    if (declared) break;
+    int nextId = -1;
+    std::string nextName;
+    for (const StmtPtr& s : mod.program->statements) {
+      if (s->kind != StmtKind::FromImport) continue;
+      const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+      if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
+        continue;
+      for (const auto& item : im->items) {
+        // `import x as y` re-exports under the alias; recurse on the
+        // source name in the source module.
+        if (item.name == cur || (!item.alias.empty() && item.alias == cur)) {
+          nextId = im->moduleId;
+          nextName = item.name;
+          break;
+        }
+      }
+      if (nextId >= 0) break;
+    }
+    if (nextId < 0) break;
+    moduleId = nextId;
+    cur = nextName;
+  }
+  return {moduleId, cur};
+}
+
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
              std::string& error, bool testMode) {
   detail::AsmEmitter emitter(graph, sema, testMode);

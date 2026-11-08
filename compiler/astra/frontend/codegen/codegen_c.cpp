@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "codegen/codegen_internal.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
@@ -112,36 +113,6 @@ int builtinRuntimeId(const std::string& name) {
   return it == kMap.end() ? -1 : it->second;
 }
 
-int builtinIdForBuiltin(BuiltinId id) {
-  switch (id) {
-    case BuiltinId::Print: return 0;
-    case BuiltinId::Eprint: return 1;
-    case BuiltinId::Len: return 2;
-    case BuiltinId::Str: return 3;
-    case BuiltinId::Sqrt: return 12;
-    case BuiltinId::F64: return 5;
-    case BuiltinId::I64: return 4;
-    case BuiltinId::Abs: return 7;
-    case BuiltinId::Round: return 23;
-    case BuiltinId::Floor: return 21;
-    case BuiltinId::Ceil: return 22;
-    case BuiltinId::Pow: return 11;
-    case BuiltinId::Join: return 56;
-    case BuiltinId::Map: return 32;
-    case BuiltinId::Filter: return 33;
-    case BuiltinId::Sum: return 10;
-    case BuiltinId::Any: return 34;
-    case BuiltinId::All: return 35;
-    case BuiltinId::Some: return 36;
-    case BuiltinId::Ok: return 37;
-    case BuiltinId::Err: return 38;
-    case BuiltinId::Panic: return 39;
-    case BuiltinId::Assert: return 40;
-    case BuiltinId::AssertEq: return 41;
-    default: return -1;
-  }
-}
-
 std::string cEscape(const std::string& s) {
   std::string out;
   for (unsigned char c : s) {
@@ -182,22 +153,6 @@ std::string utf8Encode(char32_t cp) {
     out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
   }
   return out;
-}
-
-std::string floatText(double v) {
-  char buf[64];
-  std::snprintf(buf, sizeof buf, "%.17g", v);
-  std::string s = buf;
-  if (s.find_first_of(".eEnN") == std::string::npos) s += ".0";
-  return s;
-}
-
-std::string stemOf(const std::string& path) {
-  auto slash = path.find_last_of("/\\");
-  std::string base = slash == std::string::npos ? path : path.substr(slash + 1);
-  auto dot = base.find_last_of('.');
-  if (dot != std::string::npos) base.resize(dot);
-  return base;
 }
 
 struct FnInfo {
@@ -663,51 +618,10 @@ class Emitter {
   // the module that actually declares `name`. Returns {moduleId, name};
   // unchanged when there is no re-export. Native/python re-exports are not
   // followed (shortcut: module values have no runtime representation).
+  // Implementation shared with the emitAsm backend (codegen_internal.hpp).
   std::pair<int, std::string> resolveModuleMember(int moduleId,
                                                   const std::string& name) {
-    std::string cur = name;
-    for (int depth = 0; moduleId >= 0 && depth < 16; ++depth) {
-      if (moduleId >= (int)graph_.modules.size()) break;
-      const Module& mod = graph_.at(moduleId);
-      if (!mod.program) break;
-      bool declared = false;
-      for (const StmtPtr& s : mod.program->statements) {
-        if ((s->kind == StmtKind::FnDecl &&
-             static_cast<const FnDecl*>(s.get())->name == cur) ||
-            (s->kind == StmtKind::StructDecl &&
-             static_cast<const StructDecl*>(s.get())->name == cur) ||
-            (s->kind == StmtKind::EnumDecl &&
-             static_cast<const EnumDecl*>(s.get())->name == cur) ||
-            (s->kind == StmtKind::Let &&
-             static_cast<const LetStmt*>(s.get())->name == cur)) {
-          declared = true;
-          break;
-        }
-      }
-      if (declared) break;
-      int nextId = -1;
-      std::string nextName;
-      for (const StmtPtr& s : mod.program->statements) {
-        if (s->kind != StmtKind::FromImport) continue;
-        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
-        if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
-          continue;
-        for (const auto& item : im->items) {
-          // `import x as y` re-exports under the alias; recurse on the
-          // source name in the source module.
-          if (item.name == cur || (!item.alias.empty() && item.alias == cur)) {
-            nextId = im->moduleId;
-            nextName = item.name;
-            break;
-          }
-        }
-        if (nextId >= 0) break;
-      }
-      if (nextId < 0) break;
-      moduleId = nextId;
-      cur = nextName;
-    }
-    return {moduleId, cur};
+    return a::resolveModuleMember(graph_, moduleId, name);
   }
 
   // ---- function / main emission ------------------------------------------

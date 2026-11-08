@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ast/ast.hpp"
+#include "codegen/codegen.hpp"
 #include "codegen/codegen_internal.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"

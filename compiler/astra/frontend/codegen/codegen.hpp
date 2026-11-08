@@ -6,10 +6,18 @@
 // Astra backend). The pipeline hands the staged .s and runtime source to the
 // `astra` driver to produce a native executable.
 #include <string>
+#include <utility>
 
 namespace a {
 struct ModuleGraph;
 struct SemaResult;
+
+// Follows `from "x.a" import name` re-exports (package __init__ modules) to
+// the module that actually declares `name`; returns {moduleId, name},
+// unchanged when there is no re-export. Shared by emitC and emitAsm.
+std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
+                                              int moduleId,
+                                              const std::string& name);
 
 // Emits x86-64 assembly (AT&T syntax) for astra to assemble/compile and link
 // into machine code — the host fast path (A -> asm -> machine code).
