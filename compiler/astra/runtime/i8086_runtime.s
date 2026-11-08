@@ -7483,7 +7483,8 @@ a_method:
     addl %ecx, %eax             # &items[j]
     movl %eax, %esi
     movl %ebp, %edi
-    subl $24, %edi              # &key aval (-24)
+    subl $24, %edi
+    addl $0x90000, %edi          # flat ptr: SS=0x9000, stack args need +0x90000
     call .Laval_gt
     testl %eax, %eax
     jz .Lsrt_place
@@ -7514,12 +7515,24 @@ a_method:
     jmp .Lmt_none_pop
 
 # .Laval_gt: esi=A aval ptr, edi=B aval ptr -> eax=1 if A>B else 0.
-# Handles small ints and T_STR; anything else -> 0.
+# Handles tagged ints (signed i64 compare: hi signed, lo unsigned),
+# untagged doubles (IEEE-754 bits mapped to a sortable u64 key), and
+# T_STR objects (bytewise); anything else/mixed -> 0.
 .Laval_gt:
     pushl %ebp
     movl %esp, %ebp
     pushl %esi                  # [ebp-4] A
     pushl %edi                  # [ebp-8] B
+    # tagged avals have hi&0xFFFF0000 == 0xFFFF0000; anything else is an
+    # untagged double bit-pattern.
+    movl 4(%esi), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lagt_dbl_a
+    movl 4(%edi), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lagt_no                 # A tagged, B untagged -> unordered
     movl (%esi), %eax
     testl $1, %eax
     jz .Lagt_str
@@ -7538,13 +7551,20 @@ a_method:
     movl 4(%ecx), %edi
     call .Lunbox                # esi:edi = B i64
     movl -16(%ebp), %ecx        # A hi
-    cmpl %ecx, %edi             # B hi - A hi
-    ja .Lagt_yes
-    jb .Lagt_no
+    cmpl %ecx, %edi             # B hi - A hi (signed)
+    jg .Lagt_no                 # B_hi >s A_hi -> B > A
+    jl .Lagt_yes                # B_hi <s A_hi -> A > B
     movl -12(%ebp), %ecx        # A lo
-    cmpl %ecx, %esi             # B lo - A lo
-    ja .Lagt_yes
+    cmpl %ecx, %esi             # B lo - A lo (unsigned; hi equal)
+    jb .Lagt_yes                # B_lo < A_lo -> A > B
     jmp .Lagt_no
+.Lagt_dbl_a:
+    # A untagged: both must be untagged doubles, else unordered
+    movl 4(%edi), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    je .Lagt_no
+    jmp .Lagt_dbl
 .Lagt_str:
     movl -4(%ebp), %esi
     movl (%esi), %ebx           # A obj
@@ -7592,6 +7612,49 @@ a_method:
     cmpl -20(%ebp), %eax
     ja .Lagt_yes                # equal prefix, A longer -> A > B
     jmp .Lagt_no
+# untagged doubles: map IEEE-754 bits to a sortable u64 key
+# (sign set -> ~bits, else bits|0x8000000000000000) then unsigned compare.
+# A,B are raw bit patterns in the avals; NaN orders arbitrarily but total.
+.Lagt_dbl:
+    movl -4(%ebp), %esi         # A aval ptr
+    movl (%esi), %ebx           # A lo
+    movl 4(%esi), %edx          # A hi
+    testl $0x80000000, %edx
+    jz .Lagt_dpa
+    notl %ebx
+    notl %edx
+    jmp .Lagt_dka
+.Lagt_dpa:
+    orl $0x80000000, %edx
+.Lagt_dka:
+    pushl %edx                  # [ebp-12] A key hi
+    pushl %ebx                  # [ebp-16] A key lo
+    movl -8(%ebp), %esi         # B aval ptr
+    movl (%esi), %ebx           # B lo
+    movl 4(%esi), %edx          # B hi
+    testl $0x80000000, %edx
+    jz .Lagt_dpb
+    notl %ebx
+    notl %edx
+    jmp .Lagt_dkb
+.Lagt_dpb:
+    orl $0x80000000, %edx
+.Lagt_dkb:
+    # edx:ebx = B key (hi:lo); compare against saved A key (unsigned u64)
+    cmpl -12(%ebp), %edx        # B_hi - A_hi
+    ja .Lagt_dno                # B > A -> not greater
+    jb .Lagt_dyes               # B < A -> A > B
+    movl -16(%ebp), %eax        # A key lo
+    cmpl %eax, %ebx             # B_lo - A_lo
+    ja .Lagt_dno
+    jb .Lagt_dyes
+    jmp .Lagt_dno               # equal -> not greater
+.Lagt_dyes:
+    addl $8, %esp
+    jmp .Lagt_yes
+.Lagt_dno:
+    addl $8, %esp
+    jmp .Lagt_no
 .Lagt_yes:
     movl $1, %eax
     jmp .Lagt_out
@@ -7619,14 +7682,80 @@ a_method:
 
 
     .globl a_setattr
+# a_setattr(obj@8 aval, name@16 cstr4, v@24 aval) -> aval
+# Subset of the C runtime: T_DICT stores name->v and returns v; anything
+# else yields A_NONE (C would panic; structs/modules lower elsewhere).
 a_setattr:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lsat_none
+    cmpl $4, (%esi)             # T_DICT only
+    jne .Lsat_none
+    pushl %esi                  # [ebp-4] dict
+    # strlen(name)
+    movl 16(%ebp), %edi
+.Lsat_len:
+    cmpb $0, (%edi)
+    je .Lsat_len_done
+    incl %edi
+    jmp .Lsat_len
+.Lsat_len_done:
+    movl 16(%ebp), %edx
+    subl %edx, %edi             # edi = len
+    # a_str_new(name, len): push len_hi, len_lo, ptr
+    pushl $0
+    pushl %edi
+    movl 16(%ebp), %eax
+    pushl %eax
+    call a_str_new
+    addl $12, %esp              # eax:edx = key aval
+    # a_dict_set(d,k,v): push v.hi,v.lo,k.hi,k.lo,d.hi,d.lo (cdecl order)
+    movl 28(%ebp), %ecx         # v hi
+    pushl %ecx
+    movl 24(%ebp), %ecx         # v lo
+    pushl %ecx
+    pushl %edx                  # k hi
+    pushl %eax                  # k lo
+    movl $0xFFFF0000, %ecx
+    pushl %ecx                  # d hi
+    movl -4(%ebp), %ecx         # dict obj = d lo
+    pushl %ecx
+    call a_dict_set
+    addl $24, %esp
+    # return v
+    movl 24(%ebp), %eax
+    movl 28(%ebp), %edx
+    jmp .Lsat_out
+.Lsat_none:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
+.Lsat_out:
+    movl %ebp, %esp
+    popl %ebp
     ret
     .globl a_range_contains
+# a_range_contains(r@8 aval, v@16 aval) -> A_TRUE/A_FALSE aval
+# Range membership: same s32 subset as a_contains' .Lct_range path
+# (identical arg layout, so we tail into it with our own ebp frame).
 a_range_contains:
-    movl $0x00000002, %eax
+    pushl %ebp
+    movl %esp, %ebp
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lrc_false
+    cmpl $6, (%esi)             # T_RANGE
+    jne .Lrc_false
+    jmp .Lct_range
+.Lrc_false:
+    movl $4, %eax               # A_FALSE
     movl $0xFFFF0000, %edx
+    popl %ebp
     ret
     .globl a_test_main
 a_test_main:

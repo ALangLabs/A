@@ -268,6 +268,14 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       }
       return value;
     }
+    if (method == "setdefault") {
+      if (!arity(1, 2, "1 or 2 arguments (key[, default])")) return typeError();
+      keyArg(0);
+      if (call.args.size() == 2) {
+        checkArgAgainst(*call.args[1].value, value, "in the default argument to 'setdefault'");
+      }
+      return value;
+    }
     if (method == "contains") {
       if (!arity(1, 1, "1 argument (key)")) return typeError();
       keyArg(0);
@@ -526,6 +534,58 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     sink_.error(field.fieldSpan,
                 "String has no method named '" + method + "'.",
                 availableMethodsHelp("string", stringMethods()));
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    return typeError();
+  }
+
+  if (object->kind == TypeKind::Tuple) {
+    // Tuples share the runtime's read-only sequence methods (T_TUPLE takes
+    // the same a_method seq path as lists); mutators are list-only.
+    if (rejectNamed()) return typeError();
+    auto arity = [&](std::size_t low, std::size_t high, const std::string& usage) -> bool {
+      if (call.args.size() < low || call.args.size() > high) {
+        sink_.error(call.span, "Method '" + method + "' expects " + usage + ", found " +
+                                   std::to_string(call.args.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        return false;
+      }
+      return true;
+    };
+    // Heterogeneous tuples have no single element type; element args are
+    // inferred but not unified (runtime equality is by value).
+    TypePtr elem = object->params.empty() ? typeError() : object->params[0];
+    auto elemArg = [&](std::size_t index) { inferExpr(*call.args[index].value); };
+
+    if (method == "contains") {
+      if (!arity(1, 1, "1 argument (value)")) return typeError();
+      elemArg(0);
+      return typeBool();
+    }
+    if (method == "count" || method == "index") {
+      if (!arity(1, 1, "1 argument (value)")) return typeError();
+      elemArg(0);
+      return typeInt(64, true);
+    }
+    if (method == "first" || method == "last") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeOptional(elem);
+    }
+    if (method == "join") {
+      if (!arity(1, 1, "1 argument (separator)")) return typeError();
+      TypePtr argType = inferExpr(*call.args[0].value);
+      if (!unify(argType, typeString())) {
+        reportMismatch(argType, typeString(), call.args[0].value->span,
+                       "in separator argument to 'join'");
+      }
+      return typeString();
+    }
+    if (method == "copy") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return object;
+    }
+    sink_.error(field.fieldSpan,
+                "Tuple has no method named '" + method + "'.",
+                availableMethodsHelp("tuple", tupleMethods()));
     for (auto& arg : call.args) inferExpr(*arg.value);
     return typeError();
   }

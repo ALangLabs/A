@@ -42,6 +42,7 @@ inline const std::vector<MethodSig>& mapMethods() {
   static const std::vector<MethodSig> methods = {
       {"get", "get(k[, default])", "Value for key k; the default or None when absent."},
       {"pop", "pop(k[, default])", "Removes the key and returns its value or the default."},
+      {"setdefault", "setdefault(k[, default])", "Value for key k, inserting the default when absent."},
       {"contains", "contains(k)", "True when the map holds the key."},
       {"keys", "keys()", "The keys as an array."},
       {"values", "values()", "The values as an array."},
@@ -66,6 +67,19 @@ inline const std::vector<MethodSig>& setMethods() {
       {"issuperset", "issuperset(s)", "True when the other set is contained here."},
       {"copy", "copy()", "Returns a shallow copy of the set."},
       {"clear", "clear()", "Removes every element."},
+  };
+  return methods;
+}
+
+inline const std::vector<MethodSig>& tupleMethods() {
+  static const std::vector<MethodSig> methods = {
+      {"contains", "contains(v)", "True when the tuple holds v."},
+      {"count", "count(v)", "Number of occurrences of v."},
+      {"index", "index(v)", "First index of v; -1 when absent."},
+      {"first", "first()", "The first element as an optional."},
+      {"last", "last()", "The last element as an optional."},
+      {"join", "join(sep)", "Concatenates the elements with a separator."},
+      {"copy", "copy()", "Returns a shallow copy of the tuple."},
   };
   return methods;
 }
