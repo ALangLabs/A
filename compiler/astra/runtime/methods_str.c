@@ -88,7 +88,14 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             if (n >= 2) st = expect_int64(argv[1], "start");
             int64_t en = (int64_t)s->h.len;
             if (n >= 3) {
-                en = expect_int64(argv[2], "end");
+                /* end is a code-point index like Python; normalize
+                   negatives and clamp, then map to a byte offset. */
+                int64_t total_cp = (int64_t)u8_count(s->data, s->h.len);
+                int64_t en_cp = expect_int64(argv[2], "end");
+                if (en_cp < 0) en_cp += total_cp;
+                if (en_cp < 0) en_cp = 0;
+                if (en_cp > total_cp) en_cp = total_cp;
+                en = (int64_t)cp_to_byte(s->data, s->h.len, en_cp);
                 /* approximate by clamping search to prefix */
                 if (en < (int64_t)s->h.len) {
                     aval tmp = a_str_new(s->data, (uint64_t)en);
@@ -109,6 +116,9 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             want_args(name, n, 1, 3);
             int64_t st = n >= 2 ? expect_int64(argv[1], "start") : 0;
             int64_t en = n >= 3 ? expect_int64(argv[2], "end") : (int64_t)s->h.len;
+            if (en < 0) en += (int64_t)s->h.len;
+            if (en < 0) en = 0;
+            if (en > (int64_t)s->h.len) en = (int64_t)s->h.len;
             aval hay = obj;
             if (en < (int64_t)s->h.len) hay = a_str_new(s->data, (uint64_t)en);
             uint64_t hn, nn;

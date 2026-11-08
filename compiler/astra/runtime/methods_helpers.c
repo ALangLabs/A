@@ -46,27 +46,58 @@ AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
     uint64_t n = s->h.len;
     AVec out = { NULL, 0, 0 };
     if (a_is_none(sep)) {
-        if (maxsplit == 0) {
-            avec_push(&out, a_str_new(s->data, n));
-            return out;
-        }
-        /* whitespace split; for rsplit with a limit merge leading words */
+        /* whitespace split; words recorded as (start,end) byte spans so
+           rsplit can rebuild the unstripped remainder verbatim. */
+        AVec spans = { NULL, 0, 0 };
         uint64_t i = 0;
-        int64_t splits = 0;
         while (i < n) {
             while (i < n && is_space_byte((unsigned char)s->data[i])) ++i;
             if (i >= n) break;
             uint64_t st = i;
             while (i < n && !is_space_byte((unsigned char)s->data[i])) ++i;
-            avec_push(&out, a_str_new(s->data + st, i - st));
-            if (maxsplit >= 0 && ++splits >= maxsplit && i < n) {
-                /* keep remainder as one token */
-                while (i < n && is_space_byte((unsigned char)s->data[i])) ++i;
-                if (i < n) avec_push(&out, a_str_new(s->data + i, n - i));
+            avec_push(&spans, mkint_full((int64_t)st));
+            avec_push(&spans, mkint_full((int64_t)i));
+        }
+        uint64_t nw = spans.len / 2;
+        if (maxsplit == 0) {
+            /* No splits: one item = the string with leading whitespace
+               stripped (trailing/internal whitespace preserved). */
+            uint64_t lead = 0;
+            while (lead < n && is_space_byte((unsigned char)s->data[lead])) ++lead;
+            if (lead < n) avec_push(&out, a_str_new(s->data + lead, n - lead));
+            free(spans.p);
+            return out;
+        }
+        if (rsplit && maxsplit >= 0 && nw > (uint64_t)maxsplit) {
+            /* The last maxsplit separators split off as individual words;
+               everything before them stays as one raw remainder (leading
+               whitespace kept, separator runs consumed). */
+            uint64_t m = (uint64_t)maxsplit;
+            uint64_t first = nw - m;
+            int64_t rend = int_val_full(spans.p[2 * (first - 1) + 1]);
+            avec_push(&out, a_str_new(s->data, (uint64_t)rend));
+            for (uint64_t k = first; k < nw; ++k) {
+                int64_t ws = int_val_full(spans.p[2 * k]);
+                int64_t we = int_val_full(spans.p[2 * k + 1]);
+                avec_push(&out, a_str_new(s->data + ws, (uint64_t)(we - ws)));
+            }
+            free(spans.p);
+            return out;
+        }
+        if (maxsplit < 0) maxsplit = INT64_MAX;
+        /* forward split (rsplit with no effective limit is identical) */
+        for (uint64_t k = 0; k < nw; ++k) {
+            int64_t ws = int_val_full(spans.p[2 * k]);
+            int64_t we = int_val_full(spans.p[2 * k + 1]);
+            if ((int64_t)k >= maxsplit) {
+                /* keep remainder as one token (raw text incl. internal
+                   and trailing whitespace) */
+                avec_push(&out, a_str_new(s->data + ws, n - (uint64_t)ws));
                 break;
             }
+            avec_push(&out, a_str_new(s->data + ws, (uint64_t)(we - ws)));
         }
-        (void)rsplit;
+        free(spans.p);
         return out;
     }
     uint64_t sn;
