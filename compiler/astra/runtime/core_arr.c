@@ -44,7 +44,7 @@ void arr_ensure_aval(AArr *a) {
     free(a->iitems);
     a->iitems = NULL;
     a->items = items;
-    a->flags &= ~ARR_F_PACKED;
+    a->flags &= ~(ARR_F_PACKED | ARR_F_F64);
 }
 
 /* aval -> packed. Caller must have verified every element is an int
@@ -57,7 +57,7 @@ static void arr_to_packed(AArr *a) {
     free(a->items);
     a->items = NULL;
     a->iitems = iitems;
-    a->flags |= ARR_F_PACKED;
+    a->flags = (a->flags & ~ARR_F_F64) | ARR_F_PACKED;
 }
 
 /* Pack an aval T_LIST whose elements are all integers. No-op for
@@ -89,6 +89,7 @@ void arr_push(AArr *a, aval v) {
         arr_ensure_aval(a);
     }
     arr_reserve(a, (uint64_t)a->h.len + 1);
+    if ((a->flags & ARR_F_F64) && !a_is_double(v)) a->flags &= ~ARR_F_F64;
     a->items[a->h.len++] = v;
 }
 

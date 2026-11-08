@@ -85,6 +85,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"fn_signature", 190}, {"fn_doc", 191},
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
+      {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

@@ -278,6 +278,71 @@ int runAstra(const std::string& arch, const std::vector<std::string>& args){
   return runChild(findAstra(arch),args);
 }
 
+std::vector<std::string> splitArgs(const std::string& s) {
+  std::vector<std::string> out;
+  std::istringstream in(s);
+  std::string tok;
+  while (in >> tok) out.push_back(tok);
+  return out;
+}
+
+bool runtimeCcDisabled(const char* v) {
+  if (!v || !*v) return false;
+  std::string s = lowerStr(v);
+  return s == "0" || s == "off" || s == "no" || s == "none" || s == "astra";
+}
+
+// Host-target builds can use the system C compiler for the runtime archive.
+// Astra's C frontend is a tiny-compiler fork and emits unoptimized frame code;
+// GCC/Clang produce substantially better code for the numeric runtime kernels.
+// Cross targets still use astra because they need the target libc/sysroot.
+bool buildRuntimeArchiveCC(const std::string& arch, const std::string& runtimeDir,
+                           const std::vector<std::string>& rtSrcs,
+                           const std::string& rtArchive) {
+  if (arch != hostArch() || hostOs() == "windows" || rtSrcs.empty()) return false;
+  if (runtimeCcDisabled(std::getenv("A_RUNTIME_CC"))) return false;
+  const char* ccEnv = std::getenv("A_RUNTIME_CC");
+  std::string cc = (ccEnv && *ccEnv) ? ccEnv : "cc";
+  if (runChild(cc, {"--version"}) != 0) return false;
+
+  std::vector<std::string> cflags;
+  const char* flagEnv = std::getenv("A_RUNTIME_CFLAGS");
+  if (flagEnv && *flagEnv) {
+    cflags = splitArgs(flagEnv);
+  } else {
+    cflags = {"-O3", "-std=gnu11", "-w", "-fno-semantic-interposition"};
+    if (arch == "x86_64" || arch == "i386") {
+      cflags.push_back("-march=native");
+      cflags.push_back("-mtune=native");
+    }
+  }
+
+  const std::string objDir = runtimeDir + "/rt_obj_cc";
+  std::error_code ec;
+  std::filesystem::create_directories(objDir, ec);
+  if (ec) return false;
+
+  std::vector<std::string> objs;
+  objs.reserve(rtSrcs.size());
+  for (const std::string& src : rtSrcs) {
+    std::string obj = objDir + "/" +
+        std::filesystem::path(src).stem().string() + ".o";
+    std::vector<std::string> args = cflags;
+    args.push_back("-I" + runtimeDir);
+    args.push_back("-c");
+    args.push_back(src);
+    args.push_back("-o");
+    args.push_back(obj);
+    if (runChild(cc, args) != 0) return false;
+    objs.push_back(obj);
+  }
+
+  std::vector<std::string> aa = {"rcs", rtArchive};
+  aa.insert(aa.end(), objs.begin(), objs.end());
+  if (runChild("ar", aa) == 0) return true;
+  return runChild("llvm-ar", aa) == 0;
+}
+
 #ifdef _WIN32
 // CreateProcess a built binary directly; inherits stdin/stdout/stderr.
 // Returns the exit code, 127 on failure.
@@ -566,7 +631,8 @@ int astraBuild(const std::string& arch, const std::string& srcPath, const std::s
   // subsequent builds link the archive instead of recompiling ~40 C files
   // per program. The archive is keyed by arch via runtimeDir (astralib-<arch>).
   const std::string rtArchive = runtimeDir + "/libaruntime.a";
-  if (optimizationLevel == 2 && !hasFile(rtArchive)) {
+  if (optimizationLevel == 2 && !hasFile(rtArchive) &&
+      !buildRuntimeArchiveCC(arch, runtimeDir, rtSrcs, rtArchive)) {
     std::error_code ec;
     const std::string objDir = runtimeDir + "/rt_obj";
     std::filesystem::create_directories(objDir, ec);

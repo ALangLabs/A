@@ -1,54 +1,102 @@
-/* linalg.c — dense numeric kernels over packed list storage.
+/* linalg.c — dense numeric kernels over list storage.
  *
- * For a T_LIST whose elements are all doubles, AArr.items is an aval[]
- * whose 64-bit words ARE the IEEE-754 double bits (NaN-boxing stores
- * doubles inline). These builtins reinterpret items as double* and run
- * the whole reduction in C — no per-element aval dispatch, bounds checks,
- * or boxing. This is the fast path for matmul/attention-style code.
+ * Float list elements are aval words whose payload is the IEEE-754 double
+ * bits. Once an aval-mode list has been verified all-double we mark it
+ * ARR_F_F64 and hot kernels can read AArr.items as double* directly.
+ * Packed integer lists (AArr.iitems) and mixed numeric lists still work
+ * through arr_num(), so the fast path never changes semantics.
  */
 #include "a_runtime_internal.h"
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* aval bits for a non-NaN double equal the IEEE-754 representation, so a
- * plain pointer cast is exact on x86-64/aarch64 (little-endian IEEE). */
-static const double *as_f64(aval v, AArr **out) {
+static AArr *as_arr(aval v, const char *what) {
     AObj *o = obj_of(v);
-    if (!o || o->type != T_LIST) return NULL;
-    AArr *a = (AArr *)o;
-    *out = a;
+    if (!o || o->type != T_LIST) panicf("%s must be a list", what);
+    return (AArr *)o;
+}
+
+static AArr *as_arr_opt(aval v, const char *what) {
+    if (a_is_none(v)) return NULL;
+    return as_arr(v, what);
+}
+
+static inline double aval_num(aval v) {
+    if (a_is_double(v)) {
+        union { uint64_t u; double d; } c;
+        c.u = v;
+        return c.d;
+    }
+    if (is_int_val(v)) return (double)int_val_full(v);
+    panicf("linalg expects numeric arrays");
+    return 0.0;
+}
+
+static inline double arr_num(const AArr *a, uint64_t i) {
+    if (arr_packed(a)) return (double)a->iitems[i];
+    return aval_num(a->items[i]);
+}
+
+/* Verified all-double aval storage -> raw double view. Scans once, then
+   caches ARR_F_F64 on the array; mutating writes clear the flag. */
+static const double *f64_ptr(AArr *a) {
+    if (arr_packed(a) || !a->items) return NULL;
+    if (!(a->flags & ARR_F_F64)) {
+        for (uint64_t i = 0; i < a->h.len; i++)
+            if (!a_is_double(a->items[i])) return NULL;
+        a->flags |= ARR_F_F64;
+    }
     return (const double *)(const void *)a->items;
 }
 
-static aval *f64_list(uint64_t n, const double *src) {
-    aval *items = (aval *)malloc((size_t)n * sizeof(aval));
-    if (!items) panicf("out of memory");
-    for (uint64_t i = 0; i < n; i++) items[i] = mkdouble(src[i]);
-    aval r = a_list_new(n, items);
-    free(items);
-    return r;
+static double *to_f64(const AArr *a, uint64_t n, const char *what) {
+    if ((uint64_t)a->h.len < n) panicf("%s too short", what);
+    double *out = (double *)malloc((size_t)n * sizeof(double));
+    if (!out) panicf("out of memory");
+    for (uint64_t i = 0; i < n; i++) out[i] = arr_num(a, i);
+    return out;
+}
+
+static aval f64_list(uint64_t n, const double *src) {
+    AArr *a = (AArr *)xmalloc(sizeof(AArr));
+    a->h.type = T_LIST;
+    a->h.len = (uint32_t)n;
+    a->h.cap = n;
+    a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
+    a->iitems = NULL;
+    a->flags = ARR_F_F64;
+    for (uint64_t i = 0; i < n; i++) a->items[i] = mkdouble(src[i]);
+    return mkobj(a);
 }
 
 /* dot(a, b) -> float : sum_i a[i]*b[i] over min(len) */
 aval bi_linalg_dot(uint64_t n, aval *argv) {
     (void)n;
-    AArr *aa = NULL, *bb = NULL;
-    const double *a = as_f64(argv[0], &aa);
-    const double *b = as_f64(argv[1], &bb);
-    if (!a || !b) panicf("linalg.dot expects two lists of numbers");
+    AArr *aa = as_arr(argv[0], "dot() first argument");
+    AArr *bb = as_arr(argv[1], "dot() second argument");
     uint64_t na = aa->h.len, nb = bb->h.len;
     uint64_t m = na < nb ? na : nb;
-    const double *ar = a, *br = b;
+    const double *ad = f64_ptr(aa), *bd = f64_ptr(bb);
     double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
     uint64_t i = 0;
-    for (; i + 4 <= m; i += 4) {
-        acc0 += ar[i] * br[i];
-        acc1 += ar[i + 1] * br[i + 1];
-        acc2 += ar[i + 2] * br[i + 2];
-        acc3 += ar[i + 3] * br[i + 3];
+    if (ad && bd) {
+        for (; i + 4 <= m; i += 4) {
+            acc0 += ad[i] * bd[i];
+            acc1 += ad[i + 1] * bd[i + 1];
+            acc2 += ad[i + 2] * bd[i + 2];
+            acc3 += ad[i + 3] * bd[i + 3];
+        }
+        for (; i < m; i++) acc0 += ad[i] * bd[i];
+    } else {
+        for (; i + 4 <= m; i += 4) {
+            acc0 += arr_num(aa, i) * arr_num(bb, i);
+            acc1 += arr_num(aa, i + 1) * arr_num(bb, i + 1);
+            acc2 += arr_num(aa, i + 2) * arr_num(bb, i + 2);
+            acc3 += arr_num(aa, i + 3) * arr_num(bb, i + 3);
+        }
+        for (; i < m; i++) acc0 += arr_num(aa, i) * arr_num(bb, i);
     }
-    for (; i < m; i++) acc0 += ar[i] * br[i];
     return mkdouble((acc0 + acc1) + (acc2 + acc3));
 }
 
@@ -58,37 +106,41 @@ aval bi_linalg_dot(uint64_t n, aval *argv) {
  * Sequential w reads, `out` stays cache-hot. */
 aval bi_linalg_matvec(uint64_t n, aval *argv) {
     (void)n;
-    AArr *xa = NULL, *wa = NULL, *ba = NULL;
-    const double *x = as_f64(argv[0], &xa);
-    const double *w = as_f64(argv[1], &wa);
-    const double *bias = as_f64(argv[2], &ba);
-    if (!x || !w) panicf("linalg.matvec expects list args");
+    AArr *xa = as_arr(argv[0], "matvec() vector");
+    AArr *wa = as_arr(argv[1], "matvec() weights");
+    AArr *ba = as_arr_opt(argv[2], "matvec() bias");
     int64_t nin = a_int_full(argv[3]);
     int64_t nout = a_int_full(argv[4]);
-    if (nin <= 0 || nout <= 0) panicf("linalg.matvec: bad dims");
-    if ((int64_t)xa->h.len < nin) panicf("linalg.matvec: x too short");
-    if ((int64_t)wa->h.len < nin * nout) panicf("linalg.matvec: w too short");
+    if (nin <= 0 || nout <= 0) panicf("matvec: bad dims");
+    if ((int64_t)xa->h.len < nin) panicf("matvec: x too short");
+    if ((int64_t)wa->h.len < nin * nout) panicf("matvec: w too short");
+    int has_bias = ba && (int64_t)ba->h.len >= nout;
+    double *x = to_f64(xa, (uint64_t)nin, "matvec() vector");
+    double *bias = has_bias ? to_f64(ba, (uint64_t)nout, "matvec() bias") : NULL;
     double *out = (double *)malloc((size_t)nout * sizeof(double));
     if (!out) panicf("out of memory");
-    if (bias && (int64_t)ba->h.len >= nout) {
-        memcpy(out, bias, (size_t)nout * sizeof(double));
-    } else {
-        memset(out, 0, (size_t)nout * sizeof(double));
-    }
+    if (bias) memcpy(out, bias, (size_t)nout * sizeof(double));
+    else memset(out, 0, (size_t)nout * sizeof(double));
+    const double *wf = f64_ptr(wa);
+    int wp = wf ? 0 : arr_packed(wa);
     for (int64_t i = 0; i < nin; i++) {
         double xi = x[i];
-        const double *wr = w + (size_t)i * (size_t)nout;
-        int64_t j = 0;
-        for (; j + 4 <= nout; j += 4) {
-            out[j] += xi * wr[j];
-            out[j + 1] += xi * wr[j + 1];
-            out[j + 2] += xi * wr[j + 2];
-            out[j + 3] += xi * wr[j + 3];
+        uint64_t base = (uint64_t)i * (uint64_t)nout;
+        if (wf) {
+            const double *wr = wf + base;
+            for (int64_t j = 0; j < nout; j++) out[j] += xi * wr[j];
+        } else if (wp) {
+            const int64_t *wr = wa->iitems + base;
+            for (int64_t j = 0; j < nout; j++) out[j] += xi * (double)wr[j];
+        } else {
+            const aval *wr = wa->items + base;
+            for (int64_t j = 0; j < nout; j++) out[j] += xi * aval_num(wr[j]);
         }
-        for (; j < nout; j++) out[j] += xi * wr[j];
     }
     aval r = f64_list((uint64_t)nout, out);
     free(out);
+    free(x);
+    free(bias);
     return r;
 }
 
@@ -97,34 +149,57 @@ aval bi_linalg_matvec(uint64_t n, aval *argv) {
  *   out[i] = bias[i] + sum_j x[j] * w[i*nin + j] */
 aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
     (void)n;
-    AArr *xa = NULL, *wa = NULL, *ba = NULL;
-    const double *x = as_f64(argv[0], &xa);
-    const double *w = as_f64(argv[1], &wa);
-    const double *bias = as_f64(argv[2], &ba);
-    if (!x || !w) panicf("linalg.matvec_t expects list args");
+    AArr *xa = as_arr(argv[0], "matvec_t() vector");
+    AArr *wa = as_arr(argv[1], "matvec_t() weights");
+    AArr *ba = as_arr_opt(argv[2], "matvec_t() bias");
     int64_t nout = a_int_full(argv[3]);
     int64_t nin = a_int_full(argv[4]);
-    if (nin <= 0 || nout <= 0) panicf("linalg.matvec_t: bad dims");
-    if ((int64_t)xa->h.len < nin) panicf("linalg.matvec_t: x too short");
-    if ((int64_t)wa->h.len < nout * nin) panicf("linalg.matvec_t: w too short");
+    if (nin <= 0 || nout <= 0) panicf("matvec_t: bad dims");
+    if ((int64_t)xa->h.len < nin) panicf("matvec_t: x too short");
+    if ((int64_t)wa->h.len < nout * nin) panicf("matvec_t: w too short");
+    double *x = to_f64(xa, (uint64_t)nin, "matvec_t() vector");
     double *out = (double *)malloc((size_t)nout * sizeof(double));
     if (!out) panicf("out of memory");
-    const double *xr = x;
+    const double *wf = f64_ptr(wa);
+    int wp = wf ? 0 : arr_packed(wa);
+    int has_bias = ba && (int64_t)ba->h.len >= nout;
     for (int64_t i = 0; i < nout; i++) {
-        const double *wr = w + (size_t)i * (size_t)nin;
+        uint64_t base = (uint64_t)i * (uint64_t)nin;
         double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
         int64_t j = 0;
-        for (; j + 4 <= nin; j += 4) {
-            acc0 += wr[j] * xr[j];
-            acc1 += wr[j + 1] * xr[j + 1];
-            acc2 += wr[j + 2] * xr[j + 2];
-            acc3 += wr[j + 3] * xr[j + 3];
+        if (wf) {
+            const double *wr = wf + base;
+            for (; j + 4 <= nin; j += 4) {
+                acc0 += wr[j] * x[j];
+                acc1 += wr[j + 1] * x[j + 1];
+                acc2 += wr[j + 2] * x[j + 2];
+                acc3 += wr[j + 3] * x[j + 3];
+            }
+            for (; j < nin; j++) acc0 += wr[j] * x[j];
+        } else if (wp) {
+            const int64_t *wr = wa->iitems + base;
+            for (; j + 4 <= nin; j += 4) {
+                acc0 += (double)wr[j] * x[j];
+                acc1 += (double)wr[j + 1] * x[j + 1];
+                acc2 += (double)wr[j + 2] * x[j + 2];
+                acc3 += (double)wr[j + 3] * x[j + 3];
+            }
+            for (; j < nin; j++) acc0 += (double)wr[j] * x[j];
+        } else {
+            const aval *wr = wa->items + base;
+            for (; j + 4 <= nin; j += 4) {
+                acc0 += aval_num(wr[j]) * x[j];
+                acc1 += aval_num(wr[j + 1]) * x[j + 1];
+                acc2 += aval_num(wr[j + 2]) * x[j + 2];
+                acc3 += aval_num(wr[j + 3]) * x[j + 3];
+            }
+            for (; j < nin; j++) acc0 += aval_num(wr[j]) * x[j];
         }
-        for (; j < nin; j++) acc0 += wr[j] * xr[j];
-        out[i] = ((acc0 + acc1) + (acc2 + acc3)) +
-                 (bias && (int64_t)ba->h.len > i ? bias[i] : 0.0);
+        double bias = has_bias ? arr_num(ba, (uint64_t)i) : 0.0;
+        out[i] = ((acc0 + acc1) + (acc2 + acc3)) + bias;
     }
     aval r = f64_list((uint64_t)nout, out);
     free(out);
+    free(x);
     return r;
 }

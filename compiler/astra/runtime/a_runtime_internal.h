@@ -47,6 +47,7 @@ typedef struct AObj {
      aval-mode T_LIST, so arr_push_int skips its all-int promotion scan. */
 #define ARR_F_PACKED 1u
 #define ARR_F_NOMIX  2u
+#define ARR_F_F64    4u  /* aval items verified to be all unboxed doubles */
 
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,

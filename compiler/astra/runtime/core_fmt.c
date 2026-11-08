@@ -309,6 +309,7 @@ aval a_list_fill_str_range(aval list, int64_t lo, int64_t hi, int64_t step) {
     if (step == 0) panicf("range() step must be positive, found 0.");
     AArr *a = arr_of(list, "list");
     if (arr_packed(a)) arr_ensure_aval(a);
+    a->flags &= ~ARR_F_F64;
     uint64_t count = 0;
     if (step > 0) {
         if (lo < hi) {

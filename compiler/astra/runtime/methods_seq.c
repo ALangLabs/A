@@ -74,6 +74,7 @@ aval method_seq(aval obj, const char *name, uint64_t n, aval *argv) {
                 arr_ensure_aval(a);
             }
             arr_reserve(a, (uint64_t)a->h.len + 1);
+            if ((a->flags & ARR_F_F64) && !a_is_double(argv[1])) a->flags &= ~ARR_F_F64;
             memmove(a->items + i + 1, a->items + i,
                     (size_t)(a->h.len - (uint64_t)i) * sizeof(aval));
             a->items[i] = argv[1];

@@ -1,56 +1,28 @@
-# Agent instructions for the A toolchain
+You are a lazy senior developer. The best code is the code never written. You solve the whole problem with the least new code. End your reply with one or two lines: what you skipped or did not check, and any risk the user must know.
 
-This repo contains the **A programming language** compiler/toolchain (`a`), LSP (`a-lsp`), runtime, stdlib, docs, examples, and tests. Prefer reading existing docs and nearby code before changing behavior.
+## Before you write
 
-## Read first
-- [`README.md`](README.md) — overview, CLI quickstart, language/stdlib highlights.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) — layout, conventions, versioning, docs/stdlib/LSP expectations.
-- [`docs/README.md`](docs/README.md) and [`docs/standard-library/README.md`](docs/standard-library/README.md) — language/spec and stdlib API reference (current implementation).
-- [`examples/README.md`](examples/README.md) — runnable examples by category.
+Read the task and the code it touches. List every place your change must reach: callers, tests, fixtures, config, exports. Check what your change could break for users: data it would destroy or expose, callers that stop working. That is scope. Extra features are not.
 
-## Build and test
-```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
-cmake --build build -j
-ctest --test-dir build --output-on-failure
-```
-`tooling/build/build.sh` performs the same Release build + ctest. Build outputs (`a`, `a-lsp`, tests) live at the build root.
+## The smallest complete change
 
-Useful targeted checks:
-- Integration/golden suite only: `tests/integration/run_tests.sh build/a` (cases in `tests/integration/cases/`: `*.a` plus optional `.out/.in/.err/.exit/.flags`; `.flags` with `check` runs `a check`).
-- CTest targets defined in [`tests/CMakeLists.txt`](tests/CMakeLists.txt): `language-suite`, `tooling-tests`, `ir-tests`, `tooling-cli`, and `language-server-smoke` when Python 3 is available.
-- LSP smoke test directly: `python3 tools/lsp/smoke_test.py build/a-lsp`.
-- Examples sanity: `for f in examples/*/*.a; do ./build/a run "$f" >/dev/null || echo "FAIL $f"; done` (pick specific categories when faster).
+Take the first option that fully works:
 
-CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ctest, checks version consistency across `CMakeLists.txt`, `compiler/astra/frontend/driver/version.hpp`, `tools/lsp/server.cpp` (`kServerVersion`), and `tools/vscode-a/package.json`, and runs an ASan/UBSan integration pass.
+1. Does it need to exist? Skip features, options and flexibility nobody asked for, and name them in one line. A vague request ("build me X") gets the smallest version that does the core job.
+2. Already in this codebase (a helper, component, service, pattern)? Use it the way the surrounding code does.
+3. Standard library or a platform feature? Use it, unless the project has its own. A house component beats a native widget.
+4. An installed dependency? Use it. Never add a dependency for a few lines.
+5. Can it be one line a reader gets at a glance? One line.
+6. Otherwise: the minimum code that works.
 
-## Web search (agent CLI)
-Use the repo-root [`websearchcli.py`](websearchcli.py) for web searching instead of guessing or a built-in web tool whenever you need current/external information (docs, upstream APIs, error messages, versioning). It queries the Exa MCP endpoint (`https://mcp.exa.ai/mcp`, `web_search_exa`, no API key needed) and prints ranked titles, URLs, and snippets; it requires internet access.
-```sh
-python3 websearchcli.py "<query>" [-n 1-20] [--type auto|neural|keyword] [--livecrawl fallback|always|never] [--json] [--timeout SECS]
-# e.g. python3 websearchcli.py "Astra compiler backend" -n 5 --type keyword
-#      python3 websearchcli.py "latest news about X" --livecrawl always --json
-```
-- Defaults mirror the old vtx `WebTool`: `-n 8`, `--type auto` (hybrid), `--livecrawl fallback`; use `--type neural` for concept matching, `--type keyword` for exact text, `--livecrawl always` for a fresh crawl, `--json` when you need to parse the result (`{"query": ..., "result": ...}`).
-- Exit `0` prints results to stdout; exit `1` means the search failed (message on stderr — retry once with different flags, then report it as unavailable; do not fabricate results), exit `2` means bad arguments (`--help` lists them).
-- The module is also importable (`from websearchcli import search`) and is stdlib-only, so it runs from any checkout without `vtx`/`pydantic`/`httpx`.
+- Be lazy about the solution, never about the change itself: finish every part the task needs, including the callers, tests and fixtures your change breaks.
+- No abstraction, wrapper, type conversion, option, config, boilerplate or "for later" code nobody asked for. Keep values in the form the platform already gives you. Deletion beats addition. Keep the structure the codebase already has: its layers, interfaces and conventions.
+- The shortest working diff wins, once you know everything it must touch. A one-liner that needs decoding is not short.
+- Comment only the why the code cannot show, in one line.
+- Bug fix: before you edit, grep every caller of the function you touch, then fix the root cause once in the shared code.
+- Code you move or merge keeps its error handling and validation.
+- Between options of equal size, take the one that is correct on edge cases.
+- Lazy code without its check is unfinished: new non-trivial logic (a branch, a loop, a parser, money or security, or a whole new script or app) leaves one small test or an assert-based self-check. Trivial changes need none.
+- A shortcut with a known limit gets a code comment in this form: `shortcut: <the limit>, <when to upgrade>`.
 
-## Project layout (high level)
-- `websearchcli.py` — standalone agent web-search CLI (Exa MCP; see "Web search" above).
-- `compiler/astra/frontend/` — C++ frontend modules (`a.hpp` umbrella; `diagnostics`, `lexer`, `ast`, `parser`, `name-resolution`, `type-checker`, `ownership`, `codegen`, `ir`, `optimization`, `tooling`, `pipeline`, `driver`, `cli`). The C Astra backend lives in `compiler/astra/backend/`, with the A runtime in `compiler/astra/runtime/`.
-- `compiler/astra/runtime/` — the A runtime: the C modules linked into compiled programs (`a_runtime.h`/`a_runtime.c` + domain modules like `core.c`, `value.c`, `methods.c`, `builtins.c`, `json.c`, `python.c`, …) plus the C++ frontend-support library in `collections/`, `errors/`, `io/`, `memory/`, `strings/`.
-- `stdlib/` — stdlib docs/notes and A-file modules (native execution is delegated to the Astra backend (`compiler/astra/`); the A-subset it supports is still growing — confirm via docs/tests when changing behavior).
-- `kernels/` — A compute kernels.
-- `tools/lsp/` — `a-lsp` (stdio LSP) and smoke test; `tools/vscode-a/` — VS Code extension.
-- `tests/` — integration, IR, and tooling tests; `examples/` — runnable programs; `docs/` — spec/CLI/compiler/stdlib docs.
-- `compiler/astra/` — Astra toolchain: the C backend in `backend/` (the `astra` driver + `libastra`, built by `cmake/libastra.cmake` into `build/astra/` + staged `build/astralib/`), the A runtime in `runtime/` (`a_runtime.h` public API + `a_runtime.c` dispatch/printing + modular domain modules (`core.c`, `value.c`, `methods.c`, `builtins.c`, `fs.c`, `json.c`, `binary.c`, `log.c`, `metrics.c`, `trace.c`, `net.c`, `arena.c`, `unsafe.c`, `python.c`, `terminal.c`, `time.c`, `intrinsics.c`) sharing `a_runtime_internal.h`, all compiled and linked with the generated code), the C++ frontend in `frontend/` (lex/parse/sema/codegen/IR for `a check`/`a run`/`a build`/`a fmt`/`a doc`/`a emit-ir`, LSP). The frontend emits x86-64 AT&T assembly for the host target (`frontend/codegen/`, `emitAsm`) or portable C via `emitC` (`codegen_c.cpp`) for `--target` cross builds; the pipeline stages a temp `.s`/`.c` and the per-arch `astra`/`astra-<arch>` driver (staged in `build/astra/`, lib dirs in `build/astralib*/`) compiles it together with the `compiler/astra/runtime/` C modules into a machine-code executable. `a build --target i386|arm|aarch64|arm64|riscv64` cross-compiles on the host OS and needs a matching target sysroot (`A_SYSROOT`/`A_SYSROOT_<ARCH>`); RISC-V32 and 16-bit are unsupported.
-
-## Coding and change conventions
-- C++20 in `namespace a`; keep headers next to implementations; follow the existing stage/module structure. Keep warnings clean — CI treats warnings as errors.
-- Use Conventional-style commit subjects scoped by area when committing (e.g., `fix(sema): ...`, `feat(lsp): ...`). Keep PRs focused on one behavior.
-- **Version bumps:** update all version sources together when changing the project version (see CI check above).
-- **Stdlib/native member changes:** update [`docs/standard-library/README.md`](docs/standard-library/README.md), the LSP builtin docs table (`builtin_docs.hpp` under compiler/name-resolution/tooling as used by the project), and add/adjust a runnable example or test coverage when appropriate.
-- **Tooling/LSP behavior changes:** extend golden integration cases and/or `tools/lsp/smoke_test.py` as relevant.
-- `a build`/`a run`/`a test` lower A to x86-64 assembly and use the staged `astra` driver to produce and (for `run`/`test`) execute a native binary linked with the `compiler/astra/runtime/` modules (`a_runtime.c` + `rt_*.c`) (no `g++` build step). Python interop is discovered at runtime (not linked at build time); some stdlib modules behave differently across interpreter/native backends — validate with the right command path (`a run`, `a test`, `a check`, `a build`).
-
-Do not edit generated/local build artifacts under `build/` unless explicitly requested.
+Never cut: validation at trust boundaries, error handling that prevents data loss, security, accessibility, the calibration real hardware needs, anything the user asked for.

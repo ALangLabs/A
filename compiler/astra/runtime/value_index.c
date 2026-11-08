@@ -155,6 +155,7 @@ aval a_setitem(aval obj, aval idx, aval val) {
                 a->flags |= ARR_F_NOMIX;
                 arr_ensure_aval(a);
             }
+            if ((a->flags & ARR_F_F64) && !a_is_double(val)) a->flags &= ~ARR_F_F64;
             a->items[i] = val;
             return val;
         }
@@ -218,14 +219,20 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
         while (k < hi) {
             int64_t i = normalize_index(k, len);
             if (pok) root->iitems[(size_t)(base + i)] = pv;
-            else root->items[(size_t)(base + i)] = val;
+            else {
+                if ((root->flags & ARR_F_F64) && !a_is_double(val)) root->flags &= ~ARR_F_F64;
+                root->items[(size_t)(base + i)] = val;
+            }
             k = (int64_t)((uint64_t)k + (uint64_t)step);
         }
     } else {
         while (k > hi) {
             int64_t i = normalize_index(k, len);
             if (pok) root->iitems[(size_t)(base + i)] = pv;
-            else root->items[(size_t)(base + i)] = val;
+            else {
+                if ((root->flags & ARR_F_F64) && !a_is_double(val)) root->flags &= ~ARR_F_F64;
+                root->items[(size_t)(base + i)] = val;
+            }
             k = (int64_t)((uint64_t)k + (uint64_t)step);
         }
     }

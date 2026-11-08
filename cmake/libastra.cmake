@@ -249,32 +249,61 @@ add_custom_command(OUTPUT "${astra_libdir}/runmain.o"
 # Prebuild the A runtime modules once into libaruntime.a so `a run`/`a build`
 # link an archive instead of recompiling every runtime .c per program. Only
 # the ELF path is archived; other targets keep the compile-sources fallback.
+# The host archive prefers the system C compiler: Astra's C frontend is a
+# tiny-compiler fork and emits unoptimized frame code for runtime kernels.
+option(A_RUNTIME_SYSTEM_CC "Build the host A runtime archive with the system C compiler" ON)
 set(ASTRA_RUNTIME_ARCHIVE "")
 if(NOT WIN32 AND NOT APPLE)
-    set(ASTRA_RT_FLAGS -O2 -I${ASTRA_STAGE}
-               -I/usr/include -I/usr/include/x86_64-linux-gnu
-               -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/local/include)
     set(ASTRA_RT_OBJS "")
+    if(A_RUNTIME_SYSTEM_CC)
+        set(ASTRA_RT_CC_FLAGS -O3 -std=gnu11 -w -fno-semantic-interposition
+            -I${ASTRA_STAGE})
+        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686")
+            list(APPEND ASTRA_RT_CC_FLAGS -march=native -mtune=native)
+        endif()
+    else()
+        set(ASTRA_RT_FLAGS -O2 -I${ASTRA_STAGE}
+                   -I/usr/include -I/usr/include/x86_64-linux-gnu
+                   -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/local/include)
+    endif()
     foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
         get_filename_component(rt_c_name "${rt_c}" NAME)
-        set(rt_obj "${ASTRA_BUILD}/obj/rt_${rt_c_name}.o")
-        add_custom_command(OUTPUT "${rt_obj}"
-            COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${ASTRA_RT_FLAGS}
-                    -c "${rt_c}" -o "${rt_obj}"
-            # libastra1.a must exist first: without -B the driver finds its
-            # staged include/lib dir by probing for it next to the binary.
-            DEPENDS astra_driver "${astra_libdir}/libastra1.a" "${rt_c}"
-            COMMENT "astra runtime ${rt_c_name}"
-            VERBATIM)
+        if(A_RUNTIME_SYSTEM_CC)
+            set(rt_obj "${ASTRA_BUILD}/obj/cc_rt_${rt_c_name}.o")
+            add_custom_command(OUTPUT "${rt_obj}"
+                COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS}
+                        -c "${rt_c}" -o "${rt_obj}"
+                DEPENDS "${rt_c}"
+                COMMENT "system runtime ${rt_c_name}"
+                VERBATIM)
+        else()
+            set(rt_obj "${ASTRA_BUILD}/obj/rt_${rt_c_name}.o")
+            add_custom_command(OUTPUT "${rt_obj}"
+                COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${ASTRA_RT_FLAGS}
+                        -c "${rt_c}" -o "${rt_obj}"
+                # libastra1.a must exist first: without -B the driver finds its
+                # staged include/lib dir by probing for it next to the binary.
+                DEPENDS astra_driver "${astra_libdir}/libastra1.a" "${rt_c}"
+                COMMENT "astra runtime ${rt_c_name}"
+                VERBATIM)
+        endif()
         list(APPEND ASTRA_RT_OBJS "${rt_obj}")
     endforeach()
     set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
-    add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
-        COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
-                "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
-        DEPENDS ${ASTRA_RT_OBJS}
-        COMMENT "astra -ar libaruntime.a"
-        VERBATIM)
+    if(A_RUNTIME_SYSTEM_CC)
+        add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
+            COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
+            DEPENDS ${ASTRA_RT_OBJS}
+            COMMENT "system C runtime libaruntime.a"
+            VERBATIM)
+    else()
+        add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
+            COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
+                    "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
+            DEPENDS ${ASTRA_RT_OBJS}
+            COMMENT "astra -ar libaruntime.a"
+            VERBATIM)
+    endif()
 endif()
 
 set(ASTRA_RUNTIME_DEPS "${astra_libdir}/libastra1.a" "${astra_libdir}/runmain.o"
