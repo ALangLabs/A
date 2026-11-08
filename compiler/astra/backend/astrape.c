@@ -2128,25 +2128,6 @@ static void pe_add_runtime(ASTRAState *s1, struct pe_info *pe)
             ++start_symbol;
     }
 
-#ifdef CONFIG_ASTRA_BACKTRACE
-    if (s1->do_backtrace) {
-#ifdef CONFIG_ASTRA_BCHECK
-        if (s1->do_bounds_check && s1->output_type != ASTRA_OUTPUT_DLL) {
-	    if (s1->output_type == ASTRA_OUTPUT_MEMORY)
-                astra_add_support(s1, "bcheck_run.o");
-	    else
-                astra_add_support(s1, "bcheck.o");
-	}
-#endif
-        if (s1->output_type == ASTRA_OUTPUT_EXE)
-            astra_add_support(s1, "bt-exe.o");
-        if (s1->output_type == ASTRA_OUTPUT_DLL)
-            astra_add_support(s1, "bt-dll.o");
-        if (s1->output_type != ASTRA_OUTPUT_DLL)
-            astra_add_support(s1, "bt-log.o");
-        astra_add_btstub(s1);
-    }
-#endif
 
     /* grab the startup code from libastra1.a */
 #ifdef ASTRA_IS_NATIVE
@@ -2258,9 +2239,6 @@ ST_FUNC int pe_output_file(ASTRAState *s1, const char *filename)
     pe.s1 = s1;
     s1->filetype = 0;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    astra_add_bcheck(s1);
-#endif
     astra_add_pragma_libs(s1);
     pe_add_runtime(s1, &pe);
     resolve_common_syms(s1);

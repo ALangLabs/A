@@ -179,11 +179,6 @@ static int float_abi;
 static int func_sub_sp_offset, last_itod_magic;
 static int leaffunc;
 
-#if defined(CONFIG_ASTRA_BCHECK)
-static addr_t func_bound_offset;
-static unsigned long func_bound_ind;
-ST_DATA int func_bound_add_epilog;
-#endif
 
 #if defined(ASTRA_ARM_EABI) && defined(ASTRA_ARM_VFP)
 static CType float_type, double_type, func_float_type, func_double_type;
@@ -833,9 +828,6 @@ static void gcall_or_jmp(int is_jmp)
      }
   } else {
     /* otherwise, indirect call */
-#ifdef CONFIG_ASTRA_BCHECK
-    vtop->r &= ~VT_MUSTBOUND;
-#endif
     r = gv(RC_INT);
     if(!is_jmp)
       o(0xE1A0E00F);       // mov lr,pc
@@ -843,72 +835,6 @@ static void gcall_or_jmp(int is_jmp)
   }
 }
 
-#if defined(CONFIG_ASTRA_BCHECK)
-
-static void gen_bounds_call(int v)
-{
-    Sym *sym = external_helper_sym(v);
-
-    greloc(cur_text_section, sym, ind, R_ARM_PC24);
-    o(0xebfffffe);
-}
-
-static void gen_bounds_prolog(void)
-{
-    /* leave some room for bound checking code */
-    func_bound_offset = lbounds_section->data_offset;
-    func_bound_ind = ind;
-    func_bound_add_epilog = 0;
-    o(0xe1a00000);  /* ld r0,lbounds_section->data_offset */
-    o(0xe1a00000);
-    o(0xe1a00000);
-    o(0xe1a00000);
-    o(0xe1a00000);  /* call __bound_local_new */
-}
-
-static void gen_bounds_epilog(void)
-{
-    addr_t saved_ind;
-    addr_t *bounds_ptr;
-    Sym *sym_data;
-    int offset_modified = func_bound_offset != lbounds_section->data_offset;
-
-    if (!offset_modified && !func_bound_add_epilog)
-        return;
-
-    /* add end of table info */
-    bounds_ptr = section_ptr_add(lbounds_section, sizeof(addr_t));
-    *bounds_ptr = 0;
-
-    sym_data = get_sym_ref(&char_pointer_type, lbounds_section,
-                           func_bound_offset, PTR_SIZE);
-
-    /* generate bound local allocation */
-    if (offset_modified) {
-        saved_ind = ind;
-        ind = func_bound_ind;
-        o(0xe59f0000);  /* ldr r0, [pc] */
-        o(0xea000000);  /* b $+4 */
-        greloc(cur_text_section, sym_data, ind, R_ARM_REL32);
-        o(-12);  /* lbounds_section->data_offset */
-	o(0xe080000f);  /* add r0,r0,pc */
-        gen_bounds_call(TOK___bound_local_new);
-        ind = saved_ind;
-    }
-
-    /* generate bound check local freeing */
-    o(0xe92d0003);  /* push {r0,r1} */
-    o(0xed2d0b04);  /* vpush {d0,d1} */
-    o(0xe59f0000);  /* ldr r0, [pc] */
-    o(0xea000000);  /* b $+4 */
-    greloc(cur_text_section, sym_data, ind, R_ARM_REL32);
-    o(-12);  /* lbounds_section->data_offset */
-    o(0xe080000f);  /* add r0,r0,pc */
-    gen_bounds_call(TOK___bound_local_delete);
-    o(0xecbd0b04); /* vpop {d0,d1} */
-    o(0xe8bd0003); /* pop {r0,r1} */
-}
-#endif
 
 /* Return whether a structure is an homogeneous float aggregate or not.
    The answer is true if all the elements of the structure are of the same
@@ -1342,10 +1268,6 @@ void gfunc_call(int nb_args)
   int variadic;
 #endif
 
-#ifdef CONFIG_ASTRA_BCHECK
-  if (astra_state->do_bounds_check)
-    gbound_args(nb_args);
-#endif
 
   save_regs(nb_args + 1);
 
@@ -1495,10 +1417,6 @@ from_stack:
   last_itod_magic=0;
   leaffunc = 1;
   loc = 0;
-#ifdef CONFIG_ASTRA_BCHECK
-  if (astra_state->do_bounds_check)
-    gen_bounds_prolog();
-#endif
 }
 
 /* generate function epilog */
@@ -1507,10 +1425,6 @@ void gfunc_epilog(void)
   uint32_t x;
   int diff;
 
-#ifdef CONFIG_ASTRA_BCHECK
-  if (astra_state->do_bounds_check)
-    gen_bounds_epilog();
-#endif
   /* Copy float return value to core register if base standard is used and
      float computation is made with VFP */
 #if defined(ASTRA_ARM_EABI) && defined(ASTRA_ARM_VFP)
@@ -1731,13 +1645,6 @@ void gen_opi(int op)
 	}
       }
       fr=intr(gv(RC_INT));
-#ifdef CONFIG_ASTRA_BCHECK
-      if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-        vswap();
-        c=intr(gv(RC_INT));
-        vswap();
-      }
-#endif
       if ((opc & 0xfff00000) == 0xe1500000) // cmp rx,ry
 	o(opc|(c<<16)|fr);
       else {
@@ -1760,13 +1667,6 @@ done:
 	o(opc|r|(c<<7)|(fr<<12));
       } else {
         fr=intr(gv(RC_INT));
-#ifdef CONFIG_ASTRA_BCHECK
-        if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-          vswap();
-          r=intr(gv(RC_INT));
-          vswap();
-        }
-#endif
 	c=intr(vtop[-1].r=get_reg_ex(RC_INT,two2mask(vtop->r,vtop[-1].r)));
 	o(opc|r|(c<<12)|(fr<<8)|0x10);
       }
@@ -1878,14 +1778,6 @@ void gen_opf(int op)
     r2=gv(RC_FLOAT);
     x|=vfpr(r2)<<16;
     r|=regmask(r2);
-#ifdef CONFIG_ASTRA_BCHECK
-    if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-      vswap();
-      r=gv(RC_FLOAT);
-      vswap();
-      x=(x&~0xf)|vfpr(r);
-    }
-#endif
   }
   vtop->r=get_reg_ex(RC_FLOAT,r);
   if(!fneg)
@@ -1966,13 +1858,6 @@ void gen_opf(int op)
 	r2=c2&0xf;
       } else {
 	r2=fpr(gv(RC_FLOAT));
-#ifdef CONFIG_ASTRA_BCHECK
-        if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-          vswap();
-          r=fpr(gv(RC_FLOAT));
-          vswap();
-        }
-#endif
       }
       break;
     case '-':
@@ -1994,13 +1879,6 @@ void gen_opf(int op)
 	r=fpr(gv(RC_FLOAT));
 	vswap();
 	r2=fpr(gv(RC_FLOAT));
-#ifdef CONFIG_ASTRA_BCHECK
-        if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-          vswap();
-          r=fpr(gv(RC_FLOAT));
-          vswap();
-        }
-#endif
       }
       break;
     case '*':
@@ -2015,13 +1893,6 @@ void gen_opf(int op)
 	r2=c2;
       else {
 	r2=fpr(gv(RC_FLOAT));
-#ifdef CONFIG_ASTRA_BCHECK
-        if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-          vswap();
-          r=fpr(gv(RC_FLOAT));
-          vswap();
-        }
-#endif
       }
       x|=0x100000; // muf
       break;
@@ -2043,13 +1914,6 @@ void gen_opf(int op)
 	r=fpr(gv(RC_FLOAT));
 	vswap();
 	r2=fpr(gv(RC_FLOAT));
-#ifdef CONFIG_ASTRA_BCHECK
-        if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-          vswap();
-          r=fpr(gv(RC_FLOAT));
-          vswap();
-        }
-#endif
       }
       break;
     default:
@@ -2102,13 +1966,6 @@ void gen_opf(int op)
 	  r2=c2&0xf;
 	} else {
 	  r2=fpr(gv(RC_FLOAT));
-#ifdef CONFIG_ASTRA_BCHECK
-          if ((vtop[-1].r & VT_VALMASK) >= VT_CONST) {
-            vswap();
-            r=fpr(gv(RC_FLOAT));
-            vswap();
-          }
-#endif
 	}
         --vtop;
         vset_VT_CMP(op);
@@ -2334,15 +2191,7 @@ ST_FUNC void gen_vla_sp_restore(int addr) {
 /* Subtract from the stack pointer, and push the resulting value onto the stack */
 ST_FUNC void gen_vla_alloc(CType *type, int align) {
     int r;
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        vpushv(vtop);
-#endif
     r = intr(gv(RC_INT));
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        o(0xe2800001 | (r<<16)|(r<<12)); /* add r,r,#1 */
-#endif
     o(0xE04D0000|(r<<12)|r); /* sub r, sp, r */
 #ifdef ASTRA_ARM_EABI
     if (align < 8)
@@ -2355,18 +2204,6 @@ ST_FUNC void gen_vla_alloc(CType *type, int align) {
         astra_error("alignment is not a power of 2: %i", align);
     o(stuff_const(0xE3C0D000|(r<<16), align - 1)); /* bic sp, r, #align-1 */
     vpop();
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check) {
-        vpushi(0);
-        vtop->r = TREG_R0;
-        o(0xe1a0000d | (vtop->r << 12)); // mov r0,sp
-        vswap();
-        vpush_helper_func(TOK___bound_new_region);
-        vrott(3);
-        gfunc_call(2);
-        func_bound_add_epilog = 1;
-    }
-#endif
 }
 
 /* end of ARM code generator */

@@ -156,13 +156,12 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define ASTRA_TARGET_X86_64 *//* x86-64 code generator */
 /* #define ASTRA_TARGET_ARM    *//* ARMv4 code generator */
 /* #define ASTRA_TARGET_ARM64  *//* ARMv8 code generator */
-/* #define ASTRA_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define ASTRA_TARGET_RISCV64 *//* risc-v code generator */
 /* #define ASTRA_TARGET_I8086   *//* i8086 real-mode code generator (asm only) */
 
 /* default target is I386 */
 #if !defined(ASTRA_TARGET_I386) && !defined(ASTRA_TARGET_ARM) && \
-    !defined(ASTRA_TARGET_ARM64) && !defined(ASTRA_TARGET_C67) && \
+    !defined(ASTRA_TARGET_ARM64) && \
     !defined(ASTRA_TARGET_X86_64) && !defined(ASTRA_TARGET_RISCV64) && \
     !defined(ASTRA_TARGET_I8086)
 # if defined __x86_64__
@@ -201,18 +200,6 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # elif defined __riscv && defined __LP64__ && defined ASTRA_TARGET_RISCV64
 #  define ASTRA_IS_NATIVE
 # endif
-#endif
-
-#if defined CONFIG_ASTRA_BACKTRACE && CONFIG_ASTRA_BACKTRACE==0
-# undef CONFIG_ASTRA_BACKTRACE
-#else
-# define CONFIG_ASTRA_BACKTRACE 1 /* enable builtin stack backtraces */
-#endif
-
-#if defined CONFIG_ASTRA_BCHECK && CONFIG_ASTRA_BCHECK==0
-#  undef CONFIG_ASTRA_BCHECK
-#else
-#  define CONFIG_ASTRA_BCHECK 1 /* enable bound checking code */
 #endif
 
 #if defined CONFIG_NEW_MACHO && CONFIG_NEW_MACHO==0
@@ -380,11 +367,6 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "arm64-gen.c"
 # include "arm64-link.c"
 # include "arm64-asm.c"
-#elif defined ASTRA_TARGET_C67
-# define ASTRA_TARGET_COFF
-# include "coff.h"
-# include "c67-gen.c"
-# include "c67-link.c"
 #elif defined(ASTRA_TARGET_RISCV64)
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
@@ -786,11 +768,6 @@ struct ASTRAState {
     /* compile with debug symbol (and use them if error during execution) */
     unsigned char do_debug;
     unsigned char dwarf;
-    unsigned char do_backtrace;
-#ifdef CONFIG_ASTRA_BCHECK
-    /* compile with built-in memory and bounds checker */
-    unsigned char do_bounds_check;
-#endif
     unsigned char test_coverage;  /* generate test coverage code */
 
     /* use GNU C extensions */
@@ -903,11 +880,6 @@ struct ASTRAState {
     Section *text_section, *data_section, *rodata_section, *bss_section;
     Section *common_section;
     Section *cur_text_section; /* current section where function code is generated */
-#ifdef CONFIG_ASTRA_BCHECK
-    /* bound check related sections */
-    Section *bounds_section; /* contains global data bound description */
-    Section *lbounds_section; /* contains local data bound description */
-#endif
     /* symbol section */
     union { Section *symtab_section, *symtab; }; /* historical alias */
     /* temporary dynamic symbol sections (for dll loading) */
@@ -995,9 +967,6 @@ struct ASTRAState {
     void *bt_data;
 #endif
 
-#ifdef CONFIG_ASTRA_BACKTRACE
-    int rt_num_callers;
-#endif
 
     /* benchmark info */
     int total_idents;
@@ -1298,7 +1267,6 @@ ST_FUNC int astra_add_file_internal(ASTRAState *s1, const char *filename, int fl
 #define AFF_BINTYPE_REL 1
 #define AFF_BINTYPE_DYN 2
 #define AFF_BINTYPE_AR  3
-#define AFF_BINTYPE_C67 4
 
 /* return value of astra_add_file_internal(): 0, -1, or FILE_NOT_FOUND */
 #define FILE_NOT_FOUND -2
@@ -1309,12 +1277,6 @@ ST_FUNC int astra_add_crt(ASTRAState *s, const char *filename);
 #endif
 ST_FUNC int astra_add_dll(ASTRAState *s, const char *filename, int flags);
 ST_FUNC int astra_add_support(ASTRAState *s1, const char *filename);
-#ifdef CONFIG_ASTRA_BCHECK
-ST_FUNC void astra_add_bcheck(ASTRAState *s1);
-#endif
-#ifdef CONFIG_ASTRA_BACKTRACE
-ST_FUNC void astra_add_btstub(ASTRAState *s1);
-#endif
 ST_FUNC void astra_add_pragma_libs(ASTRAState *s1);
 PUB_FUNC int astra_add_library_err(ASTRAState *s, const char *f);
 PUB_FUNC void astra_print_stats(ASTRAState *s, unsigned total_time);
@@ -1522,15 +1484,8 @@ ST_FUNC void indir(void);
 ST_FUNC void unary(void);
 ST_FUNC void gexpr(void);
 ST_FUNC int expr_const(void);
-#if defined CONFIG_ASTRA_BCHECK || defined ASTRA_TARGET_C67
-ST_FUNC Sym *get_sym_ref(CType *type, Section *sec, unsigned long offset, unsigned long size);
-#endif
 #if defined ASTRA_TARGET_X86_64 && !defined ASTRA_TARGET_PE
 ST_FUNC int classify_x86_64_va_arg(CType *ty);
-#endif
-#ifdef CONFIG_ASTRA_BCHECK
-ST_FUNC void gbound_args(int nb_args);
-ST_DATA int func_bound_add_epilog;
 #endif
 ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref);
 
@@ -1538,10 +1493,9 @@ ST_FUNC Sym *gfunc_set_param(Sym *s, int c, int byref);
 
 #define ASTRA_OUTPUT_FORMAT_ELF    0 /* default output format: ELF */
 #define ASTRA_OUTPUT_FORMAT_BINARY 1 /* binary image output */
-#define ASTRA_OUTPUT_FORMAT_COFF   2 /* COFF */
 #define ASTRA_OUTPUT_DYN           ASTRA_OUTPUT_DLL
 
-#define ARMAG  "!<arch>\n"    /* For COFF and a.out archives */
+#define ARMAG  "!<arch>\n"    /* For a.out archives */
 
 typedef struct {
     unsigned int n_strx;         /* index into string table of name */
@@ -1651,9 +1605,7 @@ ST_FUNC void gen_cvt_ftoi(int t);
 ST_FUNC void gen_cvt_itof(int t);
 ST_FUNC void gen_cvt_ftof(int t);
 ST_FUNC void ggoto(void);
-#ifndef ASTRA_TARGET_C67
 ST_FUNC void o(unsigned int c);
-#endif
 ST_FUNC void gen_vla_sp_save(int addr);
 ST_FUNC void gen_vla_sp_restore(int addr);
 ST_FUNC void gen_vla_alloc(CType *type, int align);
@@ -1735,16 +1687,6 @@ ST_FUNC void gen_cvt_sxtw(void);
 ST_FUNC void gen_cvt_csti(int t);
 ST_FUNC void gen_increment_tcov (SValue *sv);
 ST_FUNC void gen_clear_cache(void);
-#endif
-
-/* ------------ c67-gen.c ------------ */
-#ifdef ASTRA_TARGET_C67
-#endif
-
-/* ------------ astracoff.c ------------ */
-#ifdef ASTRA_TARGET_COFF
-ST_FUNC int astra_output_coff(ASTRAState *s1, FILE *f);
-ST_FUNC int astra_load_coff(ASTRAState * s1, int fd);
 #endif
 
 /* ------------ astraasm.c ------------ */
@@ -1995,8 +1937,6 @@ static inline void post_sem(ASTRASem *p) {
 #define bss_section         ASTRA_STATE_VAR(bss_section)
 #define common_section      ASTRA_STATE_VAR(common_section)
 #define cur_text_section    ASTRA_STATE_VAR(cur_text_section)
-#define bounds_section      ASTRA_STATE_VAR(bounds_section)
-#define lbounds_section     ASTRA_STATE_VAR(lbounds_section)
 #define symtab_section      ASTRA_STATE_VAR(symtab_section)
 #define gnu_ext             ASTRA_STATE_VAR(gnu_ext)
 #define astra_error_noabort   ASTRA_SET_STATE(_astra_error_noabort)

@@ -82,11 +82,6 @@ ST_DATA const int reg_classes[NB_REGS] = {
   1 << TREG_SP
 };
 
-#if defined(CONFIG_ASTRA_BCHECK)
-static addr_t func_bound_offset;
-static unsigned long func_bound_ind;
-ST_DATA int func_bound_add_epilog;
-#endif
 
 static int ireg(int r)
 {
@@ -468,76 +463,6 @@ static void gcall_or_jmp(int docall)
     }
 }
 
-#if defined(CONFIG_ASTRA_BCHECK)
-
-static void gen_bounds_call(int v)
-{
-    Sym *sym = external_helper_sym(v);
-
-    greloca(cur_text_section, sym, ind, R_RISCV_CALL_PLT, 0);
-    o(0x17 | (1 << 7));   // auipc TR, 0 %call(func)
-    EI(0x67, 0, 1, 1, 0); // jalr  TR, r(TR)
-}
-
-static void gen_bounds_prolog(void)
-{
-    /* leave some room for bound checking code */
-    func_bound_offset = lbounds_section->data_offset;
-    func_bound_ind = ind;
-    func_bound_add_epilog = 0;
-    o(0x00000013);  /* ld a0,#lbound section pointer */
-    o(0x00000013);
-    o(0x00000013);  /* nop -> call __bound_local_new */
-    o(0x00000013);
-}
-
-static void gen_bounds_epilog(void)
-{
-    addr_t saved_ind;
-    addr_t *bounds_ptr;
-    Sym *sym_data;
-    Sym label = {0};
-
-    int offset_modified = func_bound_offset != lbounds_section->data_offset;
-
-    if (!offset_modified && !func_bound_add_epilog)
-        return;
-
-    /* add end of table info */
-    bounds_ptr = section_ptr_add(lbounds_section, sizeof(addr_t));
-    *bounds_ptr = 0;
-
-    sym_data = get_sym_ref(&char_pointer_type, lbounds_section,
-                           func_bound_offset, PTR_SIZE);
-
-    label.type.t = VT_VOID | VT_STATIC;
-    /* generate bound local allocation */
-    if (offset_modified) {
-        saved_ind = ind;
-        ind = func_bound_ind;
-        put_extern_sym(&label, cur_text_section, ind, 0);
-        greloca(cur_text_section, sym_data, ind, R_RISCV_GOT_HI20, 0);
-        o(0x17 | (10 << 7));    // auipc a0, 0 %pcrel_hi(sym)+addend
-        greloca(cur_text_section, &label, ind, R_RISCV_PCREL_LO12_I, 0);
-        EI(0x03, 3, 10, 10, 0); // ld a0, 0(a0)
-        gen_bounds_call(TOK___bound_local_new);
-        ind = saved_ind;
-        label.c = 0; /* force new local ELF symbol */
-    }
-
-    /* generate bound check local freeing */
-    o(0xe02a1101); /* addi sp,sp,-32  sd   a0,0(sp)   */
-    o(0xa82ae42e); /* sd   a1,8(sp)   fsd  fa0,16(sp) */
-    put_extern_sym(&label, cur_text_section, ind, 0);
-    greloca(cur_text_section, sym_data, ind, R_RISCV_GOT_HI20, 0);
-    o(0x17 | (10 << 7));    // auipc a0, 0 %pcrel_hi(sym)+addend
-    greloca(cur_text_section, &label, ind, R_RISCV_PCREL_LO12_I, 0);
-    EI(0x03, 3, 10, 10, 0); // ld a0, 0(a0)
-    gen_bounds_call(TOK___bound_local_delete);
-    o(0x65a26502); /* ld   a0,0(sp)   ld   a1,8(sp)   */
-    o(0x61052542); /* fld  fa0,16(sp) addi sp,sp,32   */
-}
-#endif
 
 static void reg_pass_rec(CType *type, int *rc, int *fieldofs, int ofs)
 {
@@ -593,11 +518,6 @@ ST_FUNC void gfunc_call(int nb_args)
     SValue *sv;
     Sym *sa;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    int bc_save = astra_state->do_bounds_check;
-    if (astra_state->do_bounds_check)
-        gbound_args(nb_args);
-#endif
 
     areg[0] = 0; /* int arg regs */
     areg[1] = 8; /* float arg regs */
@@ -751,14 +671,7 @@ ST_FUNC void gfunc_call(int nb_args)
                 gaddrof();
                 vtop->type = char_pointer_type;
                 vpushi(ii >> 20);
-#ifdef CONFIG_ASTRA_BCHECK
-		if ((origtype.t & VT_BTYPE) == VT_STRUCT)
-                    astra_state->do_bounds_check = 0;
-#endif
                 gen_op('+');
-#ifdef CONFIG_ASTRA_BCHECK
-		astra_state->do_bounds_check = bc_save;
-#endif
                 indir();
                 vtop->type = origtype;
                 loadt = vtop->type.t & VT_BTYPE;
@@ -876,10 +789,6 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
             ES(0x23, 3, 8, 10 + areg[0], -8 + num_va_regs * 8); // sd aX, loc(s0)
         }
     }
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_prolog();
-#endif
 }
 
 ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,
@@ -922,10 +831,6 @@ ST_FUNC void gfunc_epilog(void)
 {
     int v, saved_ind, d, large_ofs_ind;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_epilog();
-#endif
 
     loc = (loc - num_va_regs * 8);
     d = v = (-loc + 15) & -16;
@@ -1458,32 +1363,11 @@ ST_FUNC void gen_vla_sp_restore(int addr)
 ST_FUNC void gen_vla_alloc(CType *type, int align)
 {
     int rr;
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        vpushv(vtop);
-#endif
     rr = ireg(gv(RC_INT));
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        EI(0x13, 0, rr, rr, 15+1);   // addi RR, RR, 15+1
-    else
-#endif
     EI(0x13, 0, rr, rr, 15);   // addi RR, RR, 15
     EI(0x13, 7, rr, rr, -16);  // andi, RR, RR, -16
     ER(0x33, 0, 2, 2, rr, 0x20); // sub sp, sp, rr
     vpop();
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check) {
-        vpushi(0);
-        vtop->r = TREG_R(0);
-        o(0x00010513); /* mv a0,sp */
-        vswap();
-        vpush_helper_func(TOK___bound_new_region);
-        vrott(3);
-        gfunc_call(2);
-        func_bound_add_epilog = 1;
-    }
-#endif
 }
 
 ST_FUNC void gen_clear_cache(void)

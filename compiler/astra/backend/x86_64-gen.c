@@ -158,11 +158,6 @@ ST_DATA const int reg_classes[NB_REGS] = {
 static unsigned long func_sub_sp_offset;
 static int func_ret_sub;
 
-#if defined(CONFIG_ASTRA_BCHECK)
-static addr_t func_bound_offset;
-static unsigned long func_bound_ind;
-ST_DATA int func_bound_add_epilog;
-#endif
 
 #ifdef ASTRA_TARGET_PE
 static int func_scratch, func_alloca;
@@ -639,76 +634,6 @@ static void gcall_or_jmp(int is_jmp)
     }
 }
 
-#if defined(CONFIG_ASTRA_BCHECK)
-
-static void gen_bounds_call(int v)
-{
-    Sym *sym = external_helper_sym(v);
-    oad(0xe8, 0);
-    greloca(cur_text_section, sym, ind-4, R_X86_64_PLT32, -4);
-}
-
-#ifdef ASTRA_TARGET_PE
-# define TREG_FASTCALL_1 TREG_RCX
-#else
-# define TREG_FASTCALL_1 TREG_RDI
-#endif
-
-static void gen_bounds_prolog(void)
-{
-    /* leave some room for bound checking code */
-    func_bound_offset = lbounds_section->data_offset;
-    func_bound_ind = ind;
-    func_bound_add_epilog = 0;
-    o(0x0d8d48 + ((TREG_FASTCALL_1 == TREG_RDI) * 0x300000)); /*lbound section pointer */
-    gen_le32 (0);
-    oad(0xb8, 0); /* call to function */
-}
-
-static void gen_bounds_epilog(void)
-{
-    addr_t saved_ind;
-    addr_t *bounds_ptr;
-    Sym *sym_data;
-    int offset_modified = func_bound_offset != lbounds_section->data_offset;
-
-    if (!offset_modified && !func_bound_add_epilog)
-        return;
-
-    /* add end of table info */
-    bounds_ptr = section_ptr_add(lbounds_section, sizeof(addr_t));
-    *bounds_ptr = 0;
-
-    sym_data = get_sym_ref(&char_pointer_type, lbounds_section, 
-                           func_bound_offset, PTR_SIZE);
-
-    /* generate bound local allocation */
-    if (offset_modified) {
-        saved_ind = ind;
-        ind = func_bound_ind;
-        greloca(cur_text_section, sym_data, ind + 3, R_X86_64_PC32, -4);
-        ind = ind + 7;
-        gen_bounds_call(TOK___bound_local_new);
-        ind = saved_ind;
-    }
-
-    /* generate bound check local freeing */
-    o(0x5250); /* save returned value, if any */
-    o(0x20ec8348); /* sub $32,%rsp */
-    o(0x290f);     /* movaps %xmm0,0x10(%rsp) */
-    o(0x102444);
-    o(0x240c290f); /* movaps %xmm1,(%rsp) */
-    greloca(cur_text_section, sym_data, ind + 3, R_X86_64_PC32, -4);
-    o(0x0d8d48 + ((TREG_FASTCALL_1 == TREG_RDI) * 0x300000)); /* lea xxx(%rip), %rcx/rdi */
-    gen_le32 (0);
-    gen_bounds_call(TOK___bound_local_delete);
-    o(0x280f);     /* movaps 0x10(%rsp),%xmm0 */
-    o(0x102444);
-    o(0x240c280f); /* movaps (%rsp),%xmm1 */
-    o(0x20c48348); /* add $32,%rsp */
-    o(0x585a); /* restore returned value, if any */
-}
-#endif
 
 #ifdef ASTRA_TARGET_PE
 
@@ -788,10 +713,6 @@ void gfunc_call(int nb_args)
     int size, r, args_size, i, d, bt, struct_size;
     int arg;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gbound_args(nb_args);
-#endif
 
     save_regs(nb_args);
 
@@ -906,10 +827,6 @@ void gfunc_call(int nb_args)
     if ((vtop->r & VT_SYM) && vtop->sym->v == TOK_alloca) {
         /* need to add the "func_scratch" area after alloca */
         o(0x48); func_alloca = oad(0x05, func_alloca); /* add $NN, %rax */
-#ifdef CONFIG_ASTRA_BCHECK
-        if (astra_state->do_bounds_check)
-            gen_bounds_call(TOK___bound_alloca_nr); /* new region */
-#endif
     }
     vtop--;
 }
@@ -981,10 +898,6 @@ void gfunc_prolog(Sym *func_sym)
         }
         reg_param_index++;
     }
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_prolog();
-#endif
 }
 
 /* generate function epilog */
@@ -996,10 +909,6 @@ void gfunc_epilog(void)
     func_scratch = (func_scratch + 15) & -16;
     loc = (loc & -16) - func_scratch;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_epilog();
-#endif
 
     o(0xc9); /* leave */
     if (func_ret_sub == 0) {
@@ -1232,10 +1141,6 @@ void gfunc_call(int nb_args)
     int sse_reg, gen_reg;
     char *onstack = astra_malloc((nb_args + 1) * sizeof (char));
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gbound_args(nb_args);
-#endif
 
     save_regs(nb_args);
 
@@ -1572,10 +1477,6 @@ void gfunc_prolog(Sym *func_sym)
         gfunc_set_param(sym, param_addr, 0);
     }
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_prolog();
-#endif
 }
 
 /* generate function epilog */
@@ -1583,10 +1484,6 @@ void gfunc_epilog(void)
 {
     int v, saved_ind;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_epilog();
-#endif
     o(0xc9); /* leave */
     if (func_ret_sub == 0) {
         o(0xc3); /* ret */
@@ -2284,9 +2181,6 @@ ST_FUNC void gen_vla_result(int addr) {
 ST_FUNC void gen_vla_alloc(CType *type, int align) {
     int use_call = 0;
 
-#if defined(CONFIG_ASTRA_BCHECK)
-    use_call = astra_state->do_bounds_check;
-#endif
 #ifdef ASTRA_TARGET_PE	/* alloca does more than just adjust %rsp on Windows */
     use_call = 1;
 #endif

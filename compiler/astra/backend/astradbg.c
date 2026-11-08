@@ -440,13 +440,6 @@ ST_FUNC void astra_debug_new(ASTRAState *s1)
     if (!s1->dState)
         s1->dState = astra_mallocz(sizeof *s1->dState);
 
-#ifdef CONFIG_ASTRA_BACKTRACE
-    /* include stab info with standalone backtrace support */
-    if (s1->do_debug && s1->output_type == ASTRA_OUTPUT_MEMORY)
-        s1->do_backtrace = 1;
-    if (s1->do_backtrace)
-        shf = SHF_ALLOC; /* have debug data available at runtime */
-#endif
 
     if (s1->dwarf) {
 	int i;
@@ -2323,16 +2316,6 @@ ST_FUNC void astra_debug_funcstart(ASTRAState *s1, Sym *sym)
         astra_debug_line(s1);
         dwarf_info.func = sym;
         dwarf_info.line = file->line_num;
-	if (s1->do_backtrace) {
-	    int i, len;
-
-	    dwarf_line_op(s1, 0); // extended
-	    dwarf_uleb128_op(s1, strlen(funcname) + 2);
-	    dwarf_line_op(s1, DW_LNE_hi_user - 1);
-	    len = strlen(funcname) + 1;
-	    for (i = 0; i < len; i++)
-		dwarf_line_op(s1, funcname[i]);
-	}
     }
     else
     {

@@ -41,10 +41,6 @@
 #include "arm64-gen.c"
 #include "arm64-link.c"
 #include "arm64-asm.c"
-#elif defined(ASTRA_TARGET_C67)
-#include "c67-gen.c"
-#include "c67-link.c"
-#include "astracoff.c"
 #elif defined(ASTRA_TARGET_X86_64)
 #include "x86_64-gen.c"
 #include "x86_64-link.c"
@@ -1157,11 +1153,6 @@ static int astra_add_binary(ASTRAState *s1, int flags, const char *filename, int
         break;
 #endif
 
-#ifdef ASTRA_TARGET_COFF
-    case AFF_BINTYPE_C67:
-        ret = astra_load_coff(s1, fd);
-        break;
-#endif
     }
 
     close(fd);
@@ -1522,10 +1513,6 @@ static int astra_set_linker(ASTRAState *s, const char *optarg)
                 s->output_format = ASTRA_OUTPUT_FORMAT_ELF;
             else if (0==strcmp("binary", o.arg))
                 s->output_format = ASTRA_OUTPUT_FORMAT_BINARY;
-#if defined ASTRA_TARGET_COFF
-            else if (0==strcmp("coff", o.arg))
-                s->output_format = ASTRA_OUTPUT_FORMAT_COFF;
-#endif
             else
                 goto err;
         } else if (link_option(&o, "export-all-symbols|export-dynamic|E")) {
@@ -1681,12 +1668,6 @@ static const ASTRAOption astra_options[] = {
     { "B", ASTRA_OPTION_B, ASTRA_OPTION_HAS_ARG },
     { "l", ASTRA_OPTION_l, ASTRA_OPTION_HAS_ARG },
     { "bench", ASTRA_OPTION_bench, 0 },
-#ifdef CONFIG_ASTRA_BACKTRACE
-    { "bt", ASTRA_OPTION_bt, ASTRA_OPTION_HAS_ARG | ASTRA_OPTION_NOSEP },
-#endif
-#ifdef CONFIG_ASTRA_BCHECK
-    { "b", ASTRA_OPTION_b, 0 },
-#endif
     { "g", ASTRA_OPTION_g, ASTRA_OPTION_HAS_ARG | ASTRA_OPTION_NOSEP },
 #ifdef ASTRA_TARGET_MACHO
     { "compatibility_version", ASTRA_OPTION_compatibility_version, ASTRA_OPTION_HAS_ARG },
@@ -1833,8 +1814,6 @@ static const char dumpmachine_str[] =
     "i386-pc"
 #elif defined ASTRA_TARGET_X86_64
     "x86_64-pc"
-#elif defined ASTRA_TARGET_C67
-    "c67"
 #elif defined ASTRA_TARGET_ARM
     "arm"
 #elif defined ASTRA_TARGET_ARM64
@@ -1990,22 +1969,6 @@ PUB_FUNC int astra_parse_args(ASTRAState *s, int *pargc, char ***pargv)
         case ASTRA_OPTION_bench:
             s->do_bench = 1;
             break;
-#ifdef CONFIG_ASTRA_BACKTRACE
-        case ASTRA_OPTION_bt:
-            s->rt_num_callers = atoi(optarg); /* zero = default (6) */
-            goto enable_backtrace;
-        enable_backtrace:
-            s->do_backtrace = 1;
-            if (0 == s->do_debug)
-                s->do_debug = 1;
-	    s->dwarf = CONFIG_DWARF_VERSION;
-            break;
-#ifdef CONFIG_ASTRA_BCHECK
-        case ASTRA_OPTION_b:
-            s->do_bounds_check = 1;
-            goto enable_backtrace;
-#endif
-#endif
         case ASTRA_OPTION_g:
             s->do_debug = 2;
             s->dwarf = CONFIG_DWARF_VERSION;
@@ -2017,7 +1980,7 @@ PUB_FUNC int astra_parse_args(ASTRAState *s, int *pargc, char ***pargv)
             } else if (isnum(*optarg)) {
                 x = *optarg++ - '0';
                 /* -g0 = no info, -g1 = lines/functions only, -g2 = full info */
-                s->do_debug = x > 2 ? 2 : x == 0 && s->do_backtrace ? 1 : x;
+                s->do_debug = x > 2 ? 2 : x;
                 goto g_redo;
 #ifdef ASTRA_TARGET_PE
             } else if (0 == strcmp(".pdb", optarg)) {

@@ -17,20 +17,14 @@ XAR = $(XASTRA) -ar
 XFLAGS-unx = -B$(TOPSRC)
 XFLAGS-win = -B$(TOPSRC)/win32 -I$(TOPSRC)/include
 XFLAGS = $(XFLAGS$(XCFG))
-BFLAGS = -bt
 
 # in order to use gcc, type: make <target>-libastra1-usegcc=yes
 arm-libastra1-usegcc ?= no
-
-# This makes bounds checking 40%..60% faster.
-#x86_64-libastra1-usegcc=yes
-#i386-libastra1-usegcc=yes
 
 ifeq "$($(T)-libastra1-usegcc)" "yes"
  XCC = $(CC)
  XAR = $(AR)
  XFLAGS = $(CFLAGS) -fPIC -fno-omit-frame-pointer -Wno-unused-function -Wno-unused-variable
- BFLAGS = $(if $(CONFIG_dwarf),-gdwarf,-gstabs)
 endif
 
 XFLAGS += -I$(TOP)
@@ -45,18 +39,14 @@ WIN_O = crt1.o crt1w.o wincrt1.o wincrt1w.o dllcrt1.o dllmain.o winex.o
 LIN_O = dsohandle.o
 OSX_O =
 
-# backtrace/bcheck/run only for native compiler
+# run/coverage only for native compiler (backtrace/bounds-check removed:
+# CONFIG_ASTRA_BACKTRACE/BCHECK are hardcoded 0 in cmake/libastra.cmake)
 Nat = $(if $X,no,)
-Cbt = $(Nat)$(subst yes,,$(CONFIG_backtrace))
-Cbc = $(Cbt)$(subst yes,,$(CONFIG_bcheck))
 
 $(Nat)COMMON_O += runmain.o tcov.o
-$(Cbt)COMMON_O += bt-exe.o bt-log.o
-$(Cbt)WIN_O += bt-dll.o
-$(Cbc)COMMON_O += bcheck.o bcheck_run.o
 
 # not in libastra1.a
-EXTRA_O = runmain.o bt-exe.o bt-dll.o bt-log.o bcheck.o bcheck_run.o
+EXTRA_O = runmain.o
 
 OBJ-i386 = $(I386_O) pic86.o $(LIN_O)
 OBJ-x86_64 = $(X86_64_O) va_list.o $(LIN_O)
@@ -93,10 +83,6 @@ $(X)%.o : %.S $(ASTRA)
 
 $(TOP)/%.o : %.c $(ASTRA)
 	$S$(XCC) -c $< -o $@ $(XFLAGS)
-
-$(TOP)/bcheck.o : XFLAGS += $(BFLAGS)
-$(TOP)/bcheck_run.o : bcheck.c $(ASTRA)
-	$S$(XCC) -c bcheck.c -o $@ $(XFLAGS)  $(BFLAGS) -DBCHECK_RUN
 
 $(X)crt1w.o : crt1.c
 $(X)wincrt1w.o : wincrt1.c

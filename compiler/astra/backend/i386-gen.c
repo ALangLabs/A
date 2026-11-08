@@ -105,13 +105,6 @@ ST_DATA const int reg_classes[NB_REGS] = {
 
 static unsigned long func_sub_sp_offset;
 static int func_ret_sub;
-#ifdef CONFIG_ASTRA_BCHECK
-static addr_t func_bound_offset;
-static unsigned long func_bound_ind;
-ST_DATA int func_bound_add_epilog;
-static void gen_bounds_prolog(void);
-static void gen_bounds_epilog(void);
-#endif
 
 /* XXX: make it faster ? */
 ST_FUNC void g(int c)
@@ -542,10 +535,6 @@ ST_FUNC void gfunc_call(int nb_args)
     int size, align, r, args_size, i, func_call;
     Sym *func_sym;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gbound_args(nb_args);
-#endif
 
     save_regs(nb_args + 1);
 
@@ -731,10 +720,6 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
         func_ret_sub = 4;
 #endif
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_prolog();
-#endif
 }
 
 /* generate function epilog */
@@ -742,10 +727,6 @@ ST_FUNC void gfunc_epilog(void)
 {
     addr_t v, saved_ind;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_epilog();
-#endif
 
     /* align local size to word & save local variables */
     v = (-loc + 3) & -4;
@@ -1195,91 +1176,6 @@ ST_FUNC void ggoto(void)
 }
 
 /* bound check support functions */
-#ifdef CONFIG_ASTRA_BCHECK
-
-/* Need PIC for shared libraries */
-static void gen_bound_call(int v)
-{
-    Sym *sym;
-
-    sym = external_helper_sym(v);
-#if defined CONFIG_ASTRA_PIC
-    get_pc_thunk(TREG_EBX, 1);
-    oad(0xe8, -4);
-    greloc(cur_text_section, sym, ind - 4, R_386_PLT32);
-#else
-    oad(0xe8, -4);
-    greloc(cur_text_section, sym, ind - 4, R_386_PC32);
-#endif
-}
-
-static void gen_bounds_prolog(void)
-{
-    /* leave some room for bound checking code */
-    func_bound_offset = lbounds_section->data_offset;
-    func_bound_ind = ind;
-    func_bound_add_epilog = 0;
-#if defined CONFIG_ASTRA_PIC
-    oad(0xb8, 0); /* call to pc_thunk function */
-    oad(0x808d, 0); /* lea lbound section pointer */
-    oad(0xb8, 0); /* call to pc_thunk function */
-    oad(0xc381, 0); /* add _GLOBAL_OFFSET_TABLE_ */
-    oad(0xb8, 0); /* call to function */
-#else
-    oad(0xb8, 0); /* lbound section pointer */
-    oad(0xb8, 0); /* call to function */
-#endif
-}
-
-static void gen_bounds_epilog(void)
-{
-    addr_t saved_ind;
-    addr_t *bounds_ptr;
-    Sym *sym_data;
-    int offset_modified = func_bound_offset != lbounds_section->data_offset;
-
-    if (!offset_modified && !func_bound_add_epilog)
-        return;
-
-    /* add end of table info */
-    bounds_ptr = section_ptr_add(lbounds_section, sizeof(addr_t));
-    *bounds_ptr = 0;
-
-    sym_data = get_sym_ref(&char_pointer_type, lbounds_section,
-                           func_bound_offset, PTR_SIZE);
-
-    /* generate bound local allocation */
-    if (offset_modified) {
-        saved_ind = ind;
-        ind = func_bound_ind;
-#if defined CONFIG_ASTRA_PIC
-	get_pc_thunk(TREG_EAX, 0);
-	o(0x808d | TREG_EAX * 0x900); /* lea $xx(r), r */
-	greloc(cur_text_section, sym_data, ind, R_386_PC32);
-	gen_le32(2);
-#else
-        greloc(cur_text_section, sym_data, ind + 1, R_386_32);
-        ind = ind + 5;
-#endif
-        gen_bound_call(TOK___bound_local_new);
-        ind = saved_ind;
-    }
-
-    /* generate bound check local freeing */
-    o(0x5250); /* save returned value, if any */
-#if defined CONFIG_ASTRA_PIC
-    get_pc_thunk(TREG_EAX, 0);
-    o(0x808d | TREG_EAX * 0x900); /* lea $xx(r), r */
-    greloc(cur_text_section, sym_data, ind, R_386_PC32);
-    gen_le32(2);
-#else
-    greloc(cur_text_section, sym_data, ind + 1, R_386_32);
-    oad(0xb8, 0); /* mov %eax, xxx */
-#endif
-    gen_bound_call(TOK___bound_local_delete);
-    o(0x585a); /* restore returned value, if any */
-}
-#endif
 
 /* Save the stack pointer onto the stack */
 ST_FUNC void gen_vla_sp_save(int addr) {
@@ -1296,9 +1192,6 @@ ST_FUNC void gen_vla_sp_restore(int addr) {
 ST_FUNC void gen_vla_alloc(CType *type, int align) {
     int use_call = 0;
 
-#if defined(CONFIG_ASTRA_BCHECK)
-    use_call = astra_state->do_bounds_check;
-#endif
 #ifdef ASTRA_TARGET_PE    /* alloca does more than just adjust %rsp on Windows */
     use_call = 1;
 #endif

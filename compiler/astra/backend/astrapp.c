@@ -3598,14 +3598,6 @@ static void astra_predefs(ASTRAState *s1, CString *cs, int is_asm)
       putdef(cs, "__ASTRA_PP__");
     if (s1->output_type == ASTRA_OUTPUT_MEMORY)
       putdef(cs, "__ASTRA_RUN__");
-#ifdef CONFIG_ASTRA_BACKTRACE
-    if (s1->do_backtrace)
-      putdef(cs, "__ASTRA_BACKTRACE__");
-#endif
-#ifdef CONFIG_ASTRA_BCHECK
-    if (s1->do_bounds_check)
-      putdef(cs, "__ASTRA_BCHECK__");
-#endif
     if (s1->char_is_unsigned)
       putdef(cs, "__CHAR_UNSIGNED__");
     if (s1->optimize > 0)

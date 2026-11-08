@@ -95,14 +95,6 @@ ST_FUNC void astraelf_new(ASTRAState *s)
     astra_eh_frame_start(s);
 #endif
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (s->do_bounds_check) {
-        /* if bound checking, then add corresponding sections */
-        /* (make ro after relocation done with GNU_RELRO) */
-        bounds_section = new_section(s, ".bounds", SHT_PROGBITS, shf_RELRO);
-        lbounds_section = new_section(s, ".lbounds", SHT_PROGBITS, shf_RELRO);
-    }
-#endif
 
 #ifdef ASTRA_TARGET_PE
     /* to make sure that -lastra1 -Wl,-e,_start will grab the startup code
@@ -1593,14 +1585,6 @@ ST_FUNC void add_array (ASTRAState *s1, const char *sec, int c)
     section_ptr_add(s, PTR_SIZE);
 }
 
-#ifdef CONFIG_ASTRA_BCHECK
-ST_FUNC void astra_add_bcheck(ASTRAState *s1)
-{
-    if (0 == s1->do_bounds_check)
-        return;
-    section_ptr_add(bounds_section, sizeof(addr_t));
-}
-#endif
 
 /* set symbol to STB_LOCAL and resolve. The point is to not export it as
    a dynamic symbol to allow so's to have one each with a different value. */
@@ -1628,100 +1612,6 @@ static void astra_compile_string_no_debug(ASTRAState *s, const char *str)
     s->test_coverage = save_test_coverage;
 }
 
-#ifdef CONFIG_ASTRA_BACKTRACE
-static void put_ptr(ASTRAState *s1, Section *s, int offs)
-{
-    int c;
-    c = set_global_sym(s1, NULL, s, offs);
-    s = data_section;
-    put_elf_reloc (s1->symtab, s, s->data_offset, R_DATA_PTR, c);
-    section_ptr_add(s, PTR_SIZE);
-}
-
-ST_FUNC void astra_add_btstub(ASTRAState *s1)
-{
-    Section *s;
-    int n, o, *p;
-    CString cstr;
-    const char *__rt_info = &"___rt_info"[!s1->leading_underscore];
-
-    s = data_section;
-    /* Align to PTR_SIZE */
-    section_add(s, 0, PTR_SIZE);
-    o = s->data_offset;
-    /* create a struct rt_context (see astrarun.c) */
-    if (s1->dwarf) {
-        put_ptr(s1, dwarf_line_section, 0);
-        put_ptr(s1, dwarf_line_section, -1);
-	if (s1->dwarf >= 5)
-            put_ptr(s1, dwarf_line_str_section, 0);
-	else
-            put_ptr(s1, dwarf_str_section, 0);
-    }
-    else
-    {
-        put_ptr(s1, stab_section, 0);
-        put_ptr(s1, stab_section, -1);
-        put_ptr(s1, stab_section->link, 0);
-    }
-
-    /* skip esym_start/esym_end/elf_str (not loaded) */
-    section_ptr_add(s, 3 * PTR_SIZE);
-
-    if (s1->output_type == ASTRA_OUTPUT_MEMORY && 0 == s1->dwarf) {
-        put_ptr(s1, text_section, 0);
-    } else {
-        /* prog_base : local nameless symbol with offset 0 at SHN_ABS */
-        put_ptr(s1, NULL, 0);
-#if defined ASTRA_TARGET_MACHO
-        /* adjust for __PAGEZERO */
-        if (s1->dwarf == 0 && s1->output_type == ASTRA_OUTPUT_EXE)
-            write64le(data_section->data + data_section->data_offset - PTR_SIZE,
-	              (uint64_t)1 << 32);
-#endif
-    }
-    n = 3 * PTR_SIZE;
-#ifdef CONFIG_ASTRA_BCHECK
-    if (s1->do_bounds_check) {
-        put_ptr(s1, bounds_section, 0);
-        n -= PTR_SIZE;
-    }
-#endif
-    section_ptr_add(s, n);
-    p = section_ptr_add(s, 2 * sizeof (int));
-    p[0] = s1->rt_num_callers;
-    p[1] = s1->dwarf;
-    // if (s->data_offset - o != 10*PTR_SIZE + 2*sizeof (int)) exit(99);
-
-    if (s1->output_type == ASTRA_OUTPUT_MEMORY) {
-        set_global_sym(s1, __rt_info, s, o);
-        return;
-    }
-
-    cstr_new(&cstr);
-    cstr_printf(&cstr,
-        "extern void __bt_init(),__bt_exit(),__bt_init_dll();"
-        "static void *__rt_info[];"
-        "__attribute__((constructor)) static void __bt_init_rt(){");
-#ifdef ASTRA_TARGET_PE
-    if (s1->output_type == ASTRA_OUTPUT_DLL)
-#ifdef CONFIG_ASTRA_BCHECK
-        cstr_printf(&cstr, "__bt_init_dll(%d);", s1->do_bounds_check);
-#else
-        cstr_printf(&cstr, "__bt_init_dll(0);");
-#endif
-#endif
-    cstr_printf(&cstr, "__bt_init(__rt_info,%d);}",
-        s1->output_type != ASTRA_OUTPUT_DLL);
-    /* In case dlcose is called by application */
-    cstr_printf(&cstr,
-        "__attribute__((destructor)) static void __bt_exit_rt(){"
-        "__bt_exit(__rt_info);}");
-    astra_compile_string_no_debug(s1, cstr.data);
-    cstr_free(&cstr);
-    set_local_sym(s1, __rt_info, s, o);
-}
-#endif /* def CONFIG_ASTRA_BACKTRACE */
 
 static void astra_tcov_add_file(ASTRAState *s1, const char *filename)
 {
@@ -1828,37 +1718,12 @@ ST_FUNC void astra_add_runtime(ASTRAState *s1)
 {
     s1->filetype = 0;
 
-#ifdef CONFIG_ASTRA_BCHECK
-    astra_add_bcheck(s1);
-#endif
     astra_add_pragma_libs(s1);
 
     /* add libc */
     if (!s1->nostdlib) {
         int lpthread = s1->option_pthread;
 
-#ifdef CONFIG_ASTRA_BCHECK
-        if (s1->do_bounds_check && s1->output_type != ASTRA_OUTPUT_DLL) {
-	    if (s1->output_type == ASTRA_OUTPUT_MEMORY)
-                astra_add_support(s1, "bcheck_run.o");
-	    else
-                astra_add_support(s1, "bcheck.o");
-# if !(TARGETOS_OpenBSD || TARGETOS_NetBSD)
-            astra_add_library(s1, "dl");
-# endif
-            lpthread = 1;
-        }
-#endif
-#ifdef CONFIG_ASTRA_BACKTRACE
-        if (s1->do_backtrace) {
-            if (s1->output_type & ASTRA_OUTPUT_EXE)
-                astra_add_support(s1, "bt-exe.o");
-            if (s1->output_type != ASTRA_OUTPUT_DLL)
-                astra_add_support(s1, "bt-log.o");
-            astra_add_btstub(s1);
-            lpthread = 1;
-        }
-#endif
         if (lpthread)
             astra_add_library(s1, "pthread");
         astra_add_library(s1, "c");
@@ -2844,11 +2709,6 @@ static int astra_write_elf_file(ASTRAState *s1, const char *filename, int phnum,
         return astra_error_noabort("could not write '%s: %s'", filename, strerror(errno));
     if (s1->verbose)
         printf("<- %s\n", filename);
-#ifdef ASTRA_TARGET_COFF
-    if (s1->output_format == ASTRA_OUTPUT_FORMAT_COFF)
-        astra_output_coff(s1, f);
-    else
-#endif
     if (s1->output_format == ASTRA_OUTPUT_FORMAT_ELF)
         ret = astra_output_elf(s1, f, phnum, phdr);
     else
@@ -3289,10 +3149,6 @@ ST_FUNC int astra_object_type(int fd, ElfW(Ehdr) *h)
     } else if (size >= 8) {
         if (0 == memcmp(h, ARMAG, 8))
             return AFF_BINTYPE_AR;
-#ifdef ASTRA_TARGET_COFF
-        if (((struct filehdr*)h)->f_magic == COFF_C67_MAGIC)
-            return AFF_BINTYPE_C67;
-#endif
     }
     return 0;
 }

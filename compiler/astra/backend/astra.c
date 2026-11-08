@@ -73,12 +73,6 @@ static const char help[] =
 #ifdef ASTRA_TARGET_PE
     "  -g.pdb       create .pdb debug database\n"
 #endif
-#ifdef CONFIG_ASTRA_BCHECK
-    "  -b           compile with built-in memory and bounds checker (implies -g)\n"
-#endif
-#ifdef CONFIG_ASTRA_BACKTRACE
-    "  -bt[N]       link with backtrace (stack dump) support [show max N callers]\n"
-#endif
     "Misc. options:\n"
     "  -std=version define __STDC_VERSION__ according to version (c11/gnu11)\n"
     "  -x[c|a|b|n]  specify type of the next infile (C,ASM,BIN,NONE)\n"
@@ -186,8 +180,6 @@ static const char version[] =
         "i386"
 #elif defined ASTRA_TARGET_X86_64
         "x86_64"
-#elif defined ASTRA_TARGET_C67
-        "C67"
 #elif defined ASTRA_TARGET_ARM
         "ARM"
 # ifdef ASTRA_ARM_EABI

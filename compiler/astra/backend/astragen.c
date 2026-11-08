@@ -1590,152 +1590,11 @@ ST_FUNC void gaddrof(void)
         vtop->r = (vtop->r & ~VT_VALMASK) | VT_LOCAL | VT_LVAL;
 }
 
-#ifdef CONFIG_ASTRA_BCHECK
-/* generate a bounded pointer addition */
-static void gen_bounded_ptr_add(void)
-{
-    int save = (vtop[-1].r & VT_VALMASK) == VT_LOCAL;
-    if (save) {
-      vpushv(&vtop[-1]);
-      vrott(3);
-    }
-    vpush_helper_func(TOK___bound_ptr_add);
-    vrott(3);
-    gfunc_call(2);
-    vtop -= save;
-    vpushi(0);
-    /* returned pointer is in REG_IRET */
-    vtop->r = REG_IRET | VT_BOUNDED;
-    if (nocode_wanted)
-        return;
-    /* relocation offset of the bounding function call point */
-    vtop->c.i = (cur_text_section->reloc->data_offset - sizeof(ElfW_Rel));
-}
-
-/* patch pointer addition in vtop so that pointer dereferencing is
-   also tested */
-static void gen_bounded_ptr_deref(void)
-{
-    addr_t func;
-    int size, align;
-    ElfW_Rel *rel;
-    Sym *sym;
-
-    if (nocode_wanted)
-        return;
-
-    size = type_size(&vtop->type, &align);
-    switch(size) {
-    case  1: func = TOK___bound_ptr_indir1; break;
-    case  2: func = TOK___bound_ptr_indir2; break;
-    case  4: func = TOK___bound_ptr_indir4; break;
-    case  8: func = TOK___bound_ptr_indir8; break;
-    case 12: func = TOK___bound_ptr_indir12; break;
-    case 16: func = TOK___bound_ptr_indir16; break;
-    default:
-        /* may happen with struct member access */
-        return;
-    }
-    sym = external_helper_sym(func);
-    if (!sym->c)
-        put_extern_sym(sym, NULL, 0, 0);
-    /* patch relocation */
-    /* XXX: find a better solution ? */
-    rel = (ElfW_Rel *)(cur_text_section->reloc->data + vtop->c.i);
-    rel->r_info = ELFW(R_INFO)(sym->c, ELFW(R_TYPE)(rel->r_info));
-}
-
-/* generate lvalue bound code */
-static void gbound(void)
-{
-    CType type1;
-
-    vtop->r &= ~VT_MUSTBOUND;
-    /* if lvalue, then use checking code before dereferencing */
-    if (vtop->r & VT_LVAL) {
-        /* if not VT_BOUNDED value, then make one */
-        if (!(vtop->r & VT_BOUNDED)) {
-            /* must save type because we must set it to int to get pointer */
-            type1 = vtop->type;
-            vtop->type.t = VT_PTR;
-            gaddrof();
-            vpushi(0);
-            gen_bounded_ptr_add();
-            vtop->r |= VT_LVAL;
-            vtop->type = type1;
-        }
-        /* then check for dereferencing */
-        gen_bounded_ptr_deref();
-    }
-}
-
-/* we need to call __bound_ptr_add before we start to load function
-   args into registers */
-ST_FUNC void gbound_args(int nb_args)
-{
-    int i, v;
-    SValue *sv;
-
-    for (i = 1; i <= nb_args; ++i)
-        if (vtop[1 - i].r & VT_MUSTBOUND) {
-            vrotb(i);
-            gbound();
-            vrott(i);
-        }
-
-    sv = vtop - nb_args;
-    if (sv->r & VT_SYM) {
-        v = sv->sym->v;
-        if (v == TOK_setjmp
-          || v == TOK__setjmp
-#ifndef ASTRA_TARGET_PE
-          || v == TOK_sigsetjmp
-          || v == TOK___sigsetjmp
-#endif
-          ) {
-            vpush_helper_func(TOK___bound_setjmp);
-            vpushv(sv + 1);
-            gfunc_call(1);
-            func_bound_add_epilog = 1;
-        }
-        if (v == TOK_alloca)
-            func_bound_add_epilog = 1;
-#if TARGETOS_NetBSD
-        if (v == TOK_longjmp) /* undo rename to __longjmp14 */
-            sv->sym->asm_label = TOK___bound_longjmp;
-#endif
-    }
-}
-
-/* Add bounds for local symbols from S to E (via ->prev) */
-static void add_local_bounds(Sym *s, Sym *e)
-{
-    for (; s != e; s = s->prev) {
-        if (!s->v || (s->r & VT_VALMASK) != VT_LOCAL)
-          continue;
-        /* Add arrays/structs/unions because we always take address */
-        if ((s->type.t & VT_ARRAY)
-            || (s->type.t & VT_BTYPE) == VT_STRUCT
-            || s->a.addrtaken) {
-            /* add local bound info */
-            int align, size = type_size(&s->type, &align);
-            addr_t *bounds_ptr = section_ptr_add(lbounds_section,
-                                                 2 * sizeof(addr_t));
-            bounds_ptr[0] = s->c;
-            bounds_ptr[1] = size;
-        }
-    }
-}
-#endif
 
 /* add debug info for locals or function parameters, optionally
    register bounds */
 static void astra_debug_end_scope(Sym *b, int bounds)
 {
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check && bounds)
-        add_local_bounds(local_stack, b);
-#endif
     astra_add_debug_info (astra_state, local_stack, b);
 }
 
@@ -1897,10 +1756,6 @@ ST_FUNC int gv(int rc)
 	    init_putv(&p, &vtop->type, offset);
 	    vtop->r |= VT_LVAL;
         }
-#ifdef CONFIG_ASTRA_BCHECK
-        if (vtop->r & VT_MUSTBOUND) 
-            gbound();
-#endif
 
         bt = vtop->type.t & VT_BTYPE;
         if (bt == VT_VOID || bt == VT_STRUCT) /* should not happen */
@@ -1985,11 +1840,6 @@ ST_FUNC int gv(int rc)
             }
         }
         vtop->r = r;
-#ifdef ASTRA_TARGET_C67
-        /* uses register pairs for doubles */
-        if (bt == VT_DOUBLE)
-            vtop->r2 = r+1;
-#endif
     }
     return r;
 }
@@ -3107,18 +2957,6 @@ op_err:
             vpush_type_size(pointed_type(&vtop[-1].type), &align);
             vtop->type.t &= ~VT_UNSIGNED;
             gen_op('*');
-#ifdef CONFIG_ASTRA_BCHECK
-            if (astra_state->do_bounds_check && !CONST_WANTED) {
-                /* if bounded pointers, we generate a special code to
-                   test bounds */
-                if (op == '-') {
-                    vpushi(0);
-                    vswap();
-                    gen_op('-');
-                }
-                gen_bounded_ptr_add();
-            } else
-#endif
             {
                 gen_opic(op);
             }
@@ -3712,26 +3550,15 @@ ST_FUNC void vstore(void)
         size = type_size(&vtop->type, &align);
         /* destination, keep on stack() as result */
         vpushv(vtop - 1);
-#ifdef CONFIG_ASTRA_BCHECK
-        if (vtop->r & VT_MUSTBOUND)
-            gbound(); /* check would be wrong after gaddrof() */
-#endif
         vtop->type.t = VT_PTR;
         gaddrof();
         /* source */
         vswap();
-#ifdef CONFIG_ASTRA_BCHECK
-        if (vtop->r & VT_MUSTBOUND)
-            gbound();
-#endif
         vtop->type.t = VT_PTR;
         gaddrof();
 
 #ifdef ASTRA_TARGET_NATIVE_STRUCT_COPY
         if (1
-#ifdef CONFIG_ASTRA_BCHECK
-            && !astra_state->do_bounds_check
-#endif
             ) {
             gen_struct_copy(size);
         } else
@@ -3820,14 +3647,6 @@ ST_FUNC void vstore(void)
                 gen_cast(&vtop[-1].type);
             }
 
-#ifdef CONFIG_ASTRA_BCHECK
-            /* bound check case */
-            if (vtop[-1].r & VT_MUSTBOUND) {
-                vswap();
-                gbound();
-                vswap();
-            }
-#endif
             gv(RC_TYPE(dbt)); /* generate value */
 
             if (delayed_cast) {
@@ -5345,10 +5164,6 @@ ST_FUNC void indir(void)
         && (vtop->type.t & VT_BTYPE) != VT_FUNC) {
         vtop->r |= VT_LVAL;
         /* if bound checking, the referenced pointer must be checked */
-#ifdef CONFIG_ASTRA_BCHECK
-        if (astra_state->do_bounds_check)
-            vtop->r |= VT_MUSTBOUND;
-#endif
     }
 }
 
@@ -6203,11 +6018,6 @@ special_math_val:
             /* an array is never an lvalue */
             if (!(vtop->type.t & VT_ARRAY)) {
                 vtop->r |= VT_LVAL;
-#ifdef CONFIG_ASTRA_BCHECK
-                /* if bound checking, the referenced pointer must be checked */
-                if (astra_state->do_bounds_check)
-                    vtop->r |= VT_MUSTBOUND;
-#endif
             }
             next();
         } else if (tok == '[') {
@@ -6265,10 +6075,6 @@ special_math_val:
                     /* pass it as 'int' to avoid structure arg passing
                        problems */
                     vseti(VT_LOCAL, loc);
-#ifdef CONFIG_ASTRA_BCHECK
-                    if (astra_state->do_bounds_check)
-                        --loc;
-#endif
                     ret.c = vtop->c;
                     if (ret_nregs < 0)
                       vtop--;
@@ -8260,9 +8066,6 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
     Sym *flexible_array;
     Sym *sym = NULL;
     int saved_nocode_wanted = nocode_wanted;
-#ifdef CONFIG_ASTRA_BCHECK
-    int bcheck = astra_state->do_bounds_check && !NODATA_WANTED;
-#endif
     init_params p = {0};
 
     if (scope == VT_CONST) {
@@ -8365,21 +8168,9 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 
     if ((r & VT_VALMASK) == VT_LOCAL) {
         sec = NULL;
-#ifdef CONFIG_ASTRA_BCHECK
-        if (bcheck && v) {
-            /* add padding between stack variables for bound checking */
-            loc -= align;
-        }
-#endif
         loc = (loc - size) & -align;
         addr = loc;
         p.local_offset = addr + size;
-#ifdef CONFIG_ASTRA_BCHECK
-        if (bcheck && v) {
-            /* add padding between stack variables for bound checking */
-            loc -= align;
-        }
-#endif
         if (v) {
             /* local variable */
 #ifdef CONFIG_ASTRA_ASM
@@ -8436,10 +8227,6 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
             }
         }
 
-#ifdef CONFIG_ASTRA_BCHECK
-        if (bcheck)
-            size = size + 1; /* add padding */
-#endif
         if (sec) {
 	    addr = section_add(sec, size, align);
         } else {
@@ -8461,19 +8248,6 @@ static void decl_initializer_alloc(CType *type, AttributeDef *ad, int r,
 	    vtop->r |= r;
         }
 
-#ifdef CONFIG_ASTRA_BCHECK
-        /* handles bounds now because the symbol must be defined
-           before for the relocation */
-        if (bcheck) {
-            addr_t *bounds_ptr;
-
-            greloca(bounds_section, sym, bounds_section->data_offset, R_DATA_PTR, 0);
-            /* then add global bound info */
-            bounds_ptr = section_ptr_add(bounds_section, 2 * sizeof(addr_t));
-            bounds_ptr[0] = 0; /* relocated */
-            bounds_ptr[1] = size - 1;
-        }
-#endif
     }
 
     if (type->t & VT_VLA) {

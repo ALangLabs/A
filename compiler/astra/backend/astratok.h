@@ -284,15 +284,6 @@
 # endif
 #endif
 
-#if defined ASTRA_TARGET_C67
-     DEF(TOK__divi, "_divi")
-     DEF(TOK__divu, "_divu")
-     DEF(TOK__divf, "_divf")
-     DEF(TOK__divd, "_divd")
-     DEF(TOK__remi, "_remi")
-     DEF(TOK__remu, "_remu")
-#endif
-
 #if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_I8086
      DEF(TOK___fixsfdi, "__fixsfdi")
      DEF(TOK___fixdfdi, "__fixdfdi")
@@ -341,33 +332,6 @@
 #endif
 
 /* bound checking symbols */
-#ifdef CONFIG_ASTRA_BCHECK
-     DEF(TOK___bound_ptr_add, "__bound_ptr_add")
-     DEF(TOK___bound_ptr_indir1, "__bound_ptr_indir1")
-     DEF(TOK___bound_ptr_indir2, "__bound_ptr_indir2")
-     DEF(TOK___bound_ptr_indir4, "__bound_ptr_indir4")
-     DEF(TOK___bound_ptr_indir8, "__bound_ptr_indir8")
-     DEF(TOK___bound_ptr_indir12, "__bound_ptr_indir12")
-     DEF(TOK___bound_ptr_indir16, "__bound_ptr_indir16")
-     DEF(TOK___bound_main_arg, "__bound_main_arg")
-     DEF(TOK___bound_local_new, "__bound_local_new")
-     DEF(TOK___bound_local_delete, "__bound_local_delete")
-     DEF(TOK___bound_setjmp, "__bound_setjmp")
-     DEF(TOK___bound_longjmp, "__bound_longjmp")
-     DEF(TOK___bound_new_region, "__bound_new_region")
-# ifdef ASTRA_TARGET_PE
-#  ifdef ASTRA_TARGET_X86_64
-     DEF(TOK___bound_alloca_nr, "__bound_alloca_nr")
-#  endif
-# else
-     DEF(TOK_sigsetjmp, "sigsetjmp")
-     DEF(TOK___sigsetjmp, "__sigsetjmp")
-     DEF(TOK_siglongjmp, "siglongjmp")
-# endif
-     DEF(TOK_setjmp, "setjmp")
-     DEF(TOK__setjmp, "_setjmp")
-     DEF(TOK_longjmp, "longjmp")
-#endif
 
 
 /*********************************************************************/

@@ -91,11 +91,6 @@ ST_DATA const int reg_classes[NB_REGS] = {
   RC_FLOAT | RC_F(7)
 };
 
-#if defined(CONFIG_ASTRA_BCHECK)
-static addr_t func_bound_offset;
-static unsigned long func_bound_ind;
-ST_DATA int func_bound_add_epilog;
-#endif
 
 #define IS_FREG(x) ((x) >= TREG_F(0))
 
@@ -676,14 +671,11 @@ static void arm64_gen_bl_or_b(int b)
 	o(b ? ARM64_B : ARM64_BL); // b/bl .
     }
     else {
-#ifdef CONFIG_ASTRA_BCHECK
-        vtop->r &= ~VT_MUSTBOUND;
-#endif
         o((b ? ARM64_BR : ARM64_BLR) | intr(gv(RC_R30)) << 5); // br/blr
     }
 }
 
-#if defined CONFIG_ASTRA_BCHECK || defined ASTRA_TARGET_PE
+#if defined ASTRA_TARGET_PE
 static void gen_static_call(int v)
 {
     Sym *sym = external_helper_sym(v);
@@ -692,54 +684,6 @@ static void gen_static_call(int v)
 }
 #endif
 
-#if defined(CONFIG_ASTRA_BCHECK)
-static void gen_bounds_prolog(void)
-{
-    /* leave some room for bound checking code */
-    func_bound_offset = lbounds_section->data_offset;
-    func_bound_ind = ind;
-    func_bound_add_epilog = 0;
-    o(ARM64_NOP);  /* nop -> mov x0, lbound section pointer */
-    o(ARM64_NOP);
-    o(ARM64_NOP);
-    o(ARM64_NOP);  /* nop -> call __bound_local_new */
-}
-
-static void gen_bounds_epilog(void)
-{
-    addr_t saved_ind;
-    addr_t *bounds_ptr;
-    Sym *sym_data;
-    int offset_modified = func_bound_offset != lbounds_section->data_offset;
-
-    if (!offset_modified && !func_bound_add_epilog)
-        return;
-
-    /* add end of table info */
-    bounds_ptr = section_ptr_add(lbounds_section, sizeof(addr_t));
-    *bounds_ptr = 0;
-
-    sym_data = get_sym_ref(&char_pointer_type, lbounds_section,
-                           func_bound_offset, PTR_SIZE);
-
-    /* generate bound local allocation */
-    if (offset_modified) {
-        saved_ind = ind;
-        ind = func_bound_ind;
-        arm64_sym(0, sym_data, 0);
-        gen_static_call(TOK___bound_local_new);
-        ind = saved_ind;
-    }
-
-    /* generate bound check local freeing */
-    o(0xa9bf07e0); /* stp x0, x1, [sp, #-16]! */
-    o(0x3c9f0fe0); /* str q0, [sp, #-16]! */
-    arm64_sym(0, sym_data, 0);
-    gen_static_call(TOK___bound_local_delete);
-    o(0x3cc107e0); /* ldr q0, [sp], #16 */
-    o(0xa8c107e0); /* ldp x0, x1, [sp], #16 */
-}
-#endif
 
 static int arm64_hfa_aux(CType *type, int *fsize, int num)
 {
@@ -1058,10 +1002,6 @@ ST_FUNC void gfunc_call(int nb_args)
 
     save_regs(nb_args + 1);
 
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gbound_args(nb_args);
-#endif
 
     return_type = &vtop[-nb_args].type.ref->type;
     if ((return_type->t & VT_BTYPE) == VT_STRUCT)
@@ -1376,10 +1316,6 @@ ST_FUNC void gfunc_prolog(Sym *func_sym)
     for (i = 0; i < ARM64_FUNC_STACK_SETUP_SLOTS; ++i)
         o(ARM64_NOP); // nop
     loc = 0;
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_prolog();
-#endif
 }
 
 ST_FUNC void gen_va_start(void)
@@ -1605,10 +1541,6 @@ ST_FUNC void gfunc_return(CType *func_type)
 
 ST_FUNC void gfunc_epilog(void)
 {
-#ifdef CONFIG_ASTRA_BCHECK
-    if (astra_state->do_bounds_check)
-        gen_bounds_epilog();
-#endif
 
     if (loc) {
         // Insert instructions to subtract size of stack frame from SP.
@@ -2276,32 +2208,11 @@ ST_FUNC void gen_vla_sp_restore(int addr) {
 
 ST_FUNC void gen_vla_alloc(CType *type, int align) {
     uint32_t r;
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        vpushv(vtop);
-#endif
     r = intr(gv(RC_INT));
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check)
-        o(0x91004000 | r | r << 5); // add x(r),x(r),#15+1
-    else
-#endif
     o(0x91003c00 | r | r << 5); // add x(r),x(r),#15
     o(0x927cec00 | r | r << 5); // bic x(r),x(r),#15
     o(0xcb2063ff | r << 16); // sub sp,sp,x(r)
     vpop();
-#if defined(CONFIG_ASTRA_BCHECK)
-    if (astra_state->do_bounds_check) {
-        vpushi(0);
-        vtop->r = TREG_R(0);
-        o(0x910003e0 | vtop->r); // mov r0,sp
-        vswap();
-        vpush_helper_func(TOK___bound_new_region);
-        vrott(3);
-        gfunc_call(2);
-        func_bound_add_epilog = 1;
-    }
-#endif
 }
 
 /* end of A64 code generator */

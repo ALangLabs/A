@@ -12,7 +12,9 @@
 
 #define R_NUM       R_386_NUM
 
+#ifndef ELF_START_ADDR
 #define ELF_START_ADDR 0x08048000
+#endif
 #define ELF_PAGE_SIZE  0x1000
 
 #if defined CONFIG_ASTRA_PIC
