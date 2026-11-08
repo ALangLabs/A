@@ -9,7 +9,7 @@ compiles A straight to native machine code.
 [![CI](https://github.com/ALangLabs/A/actions/workflows/ci.yml/badge.svg)](https://github.com/ALangLabs/A/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-0.0.1-informational.svg)](#)
-[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS-lightgrey.svg)](#)
+[![Platform](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey.svg)](#)
 
 [Features](#-features) • [Quick start](#-quick-start) • [The language](#-the-language) • [Toolchain](#-toolchain) • [Architecture](#-architecture) • [Documentation](#-documentation) • [Development](#-development)
 
@@ -22,9 +22,10 @@ compiles A straight to native machine code.
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
   and links a real executable through the bundled **Astra** backend (a TinyCC
   fork). `a run` does the same and executes it. x86-64 SysV (Linux, macOS)
-  uses a dedicated x86-64 assembly emitter; every other target tries its own
-  native assembly emitter first and falls back to a portable C emitter that
-  Astra compiles per target.
+  uses a dedicated x86-64 assembly emitter; x86-64 Windows uses a Win64
+  MS-ABI native emitter; every other target tries its own native assembly
+  emitter first (a declined construct is a hard error — there is no C
+  fallback).
 - **Multi-target builds** — `a build --target <arch>` cross-compiles for
   i386, ARM (ARMv7), AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS,
   given a matching target sysroot (see *Cross-compilation* below), plus the
@@ -63,6 +64,11 @@ cmake --build build -j
 # Produce a native binary
 ./build/a build path/to/file.a -o myapp
 ```
+
+`cmake --build build -j` builds everything in `all`, including `a-lsp`
+(use `--target a` or `--target a-lsp` to build just one binary). Link-time
+optimization is **off by default** so dev builds stay fast; for release
+builds add `-DA_ENABLE_LTO=ON` to the configure step.
 
 Or use the helper script: `tooling/build/build.sh`.
 
@@ -137,8 +143,8 @@ flowchart LR
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
   analysis, typed SSA IR + optimizer, and the native code emitters
-  (`emitAsm` for x86-64, per-arch `emitNative`, `emitC` as the portable
-  fallback).
+  (`emitAsm` for x86-64 SysV, `emitNative` per-arch incl. the Win64 MS ABI
+  for `x86_64-windows`).
 - **`compiler/astra/backend/`** — **Astra**, a TinyCC fork: the `astra` driver,
   the `libastra` library API, per-target code generators (x86-64, ARM, AArch64,
   RISC-V, i386, C67x), ELF/Mach-O/COFF writers, and support libraries.
@@ -201,13 +207,18 @@ isa-debug-exit on port 0xF4); `a test`/`a repl` still reject it.
 image and diffs serial output against an expected `.out` file. To run an
 image manually:
 `qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
-Windows has a first-pass
-`_WIN32` port of the driver pipeline
-(`CreateProcess`, `GetTempPath`, `GetModuleFileName` in `pipeline.cpp`)
-but is untested — it still needs a Windows astra driver build, PE link
-verification, and a Win32 test-mode harness in the C emitter (`a test`
-emits POSIX `fork`/`waitpid` today); Windows x86-64 uses the portable C
-emitter because the asm emitter is SysV ABI only. Debian `*-cross`
+Windows is a supported host OS (x86-64 and arm64): the driver pipeline has
+`_WIN32` ports (`CreateProcess`, `GetTempPath`, `GetModuleFileName` in
+`pipeline.cpp`), the Win64 MS-ABI native emitter covers `x86_64`, and the
+Windows astra drivers (`x86_64`, `i386`, `arm64`) link PE32+ executables —
+`a run`/`a test`/`a build` work, with `a test` taking the serial path (no
+fork-based batching) and the runtime's parallel pool disabled. Runtime
+caveats on Windows: TCP sockets work via Winsock2, but TLS/zlib stay
+unavailable (no `dlopen`), `import python:<pkg>` interop is stubbed out,
+and POSIX-only pieces like `terminal` raw mode degrade gracefully. The
+`i8086` target remains Linux-hosts-only, and Windows builds only the
+`x86_64`/`i386`/`arm64` astra drivers — no `arm`, `riscv64`, or `i8086`.
+Debian `*-cross`
 sysroots ship `libc.so`/`libm.so` linker scripts with absolute paths
 astra cannot resolve — rewrite the `GROUP` entries relative to the sysroot
 lib dir when setting one up.
@@ -235,6 +246,9 @@ program output — verified 70/70 on i386 (native), arm, aarch64 and riscv64
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
 ctest --test-dir build --output-on-failure
+
+# Release/perf build: LTO is off by default (faster dev builds) — opt in with
+#   -DA_ENABLE_LTO=ON on the configure step.
 
 # Targeted checks
 tests/integration/run_tests.sh build/a          # golden suite only

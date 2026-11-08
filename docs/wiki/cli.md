@@ -1,7 +1,11 @@
 # CLI and tooling
 
 The `a` binary (`./build/a`) is the single entry point. `a-lsp` is the
-language server; the VS Code extension wraps both.
+language server; the VS Code extension wraps both. Both are built by the
+default `cmake --build build` (`all` target) — `--target a` builds only
+`a`, `--target a-lsp` only the server. CMake option `A_ENABLE_LTO=ON`
+enables link-time optimization for Release builds (off by default for
+faster dev builds).
 
 ## Commands
 
@@ -29,22 +33,38 @@ language server; the VS Code extension wraps both.
   matching nothing prints `no tests matched` and exits 0. The filter is part
   of the run-cache key, so different filters never share a cached binary.
 - `--target <arch>` — cross-compile target: `x86_64`
-  (default; x86-64 assembly emitter on Linux/macOS SysV), `i386`, `arm`
+  (default; x86-64 assembly emitter on Linux/macOS SysV, Win64 MS-ABI
+  native emitter on Windows), `i386`, `arm`
   (ARMv7 hard-float), `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal).
   An optional `-linux`/`-windows`/`-macos` suffix is accepted but must match
-  the host OS — Astra drivers are built per-OS. x86-64 uses the dedicated
-  `emitAsm` emitter; every other target uses its native per-arch emitter
-  (`emitNative` in `codegen_native.cpp`, including Win64/MS-ABI for
-  `x86_64-windows`), then calls the matching `astra-<arch>`
+  the host OS — Astra drivers are built per-OS. Host OSes: Linux, macOS,
+  and Windows (x86-64/arm64). The astra driver set differs per host:
+  Linux builds `x86_64 i386 arm arm64 riscv64 i8086`, macOS `x86_64 arm64`,
+  Windows `x86_64 i386 arm64`. x86-64 on Linux/macOS uses the dedicated
+  `emitAsm` emitter; every other target/OS uses the native per-arch
+  emitter (`emitNative` in `codegen_native.cpp`, including Win64/MS-ABI
+  for `x86_64-windows`), then calls the matching `astra-<arch>`
   driver; linking needs a target sysroot via
   `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
   anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
   paths that must be rewritten relative to the sysroot lib dir).
   There is no C emitter — every target compiles A → assembly → machine
-  code. `A_CODEGEN=asm` forces the assembly emitter (a decline is a hard
-  error); `A_CODEGEN=c` is rejected. `a run` executes natively
+  code, and an emitter decline is a hard error. `A_CODEGEN=asm` forces the
+  assembly emitter (a decline is a hard error); `A_CODEGEN=c` is rejected.
+  `a run` executes natively
   (i8086 via qemu-system-i386 on Linux); `a test`/`a repl` reject non-host
   targets.
+
+### Host platform notes
+
+- **Windows**: `a run`/`a build`/`a test` produce and run PE32+
+  executables; `a test` uses the serial path (no fork batching) and the
+  runtime thread pool is disabled. Winsock2 provides plain TCP, but TLS
+  and zlib stay unavailable (no `dlopen`), `import python:<pkg>` interop
+  is stubbed out, and POSIX-only facilities (e.g. `terminal` raw mode)
+  degrade. `i8086` is Linux-hosts-only.
+- **Linux / macOS**: full feature set, including `i8086` (Linux only),
+  Python interop, TLS/zlib, and the parallel runtime/test paths.
 
 ### `i8086` bare-metal target
 

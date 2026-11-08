@@ -1,6 +1,9 @@
 include_guard(GLOBAL)
 option(A_WARNINGS_AS_ERRORS "Treat compiler warnings as errors" OFF)
-option(A_ENABLE_LTO "Enable link-time optimization in Release builds" ON)
+# LTO roughly doubles link time on the `a`/`a-lsp` binaries, so it is off by
+# default for fast dev iteration. Enable it for release/perf builds:
+#   cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_ENABLE_LTO=ON
+option(A_ENABLE_LTO "Enable link-time optimization in Release builds" OFF)
 if(A_ENABLE_LTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
   include(CheckIPOSupported)
   check_ipo_supported(RESULT a_ipo_supported OUTPUT a_ipo_error)
