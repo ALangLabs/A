@@ -14,7 +14,7 @@ struct SemaResult;
 
 // Follows `from "x.a" import name` re-exports (package __init__ modules) to
 // the module that actually declares `name`; returns {moduleId, name},
-// unchanged when there is no re-export. Shared by emitC and emitAsm.
+// unchanged when there is no re-export. Shared by the asm emitters.
 std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
                                               int moduleId,
                                               const std::string& name);
@@ -27,22 +27,13 @@ std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
 bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
              std::string& error, bool testMode = false);
 
-// Emits portable C (calling the public runtime API in a_runtime.h) for astra
-// to compile for ANY target it supports (i386, x86-64, ARM, AArch64,
-// RISC-V64, PE, Mach-O). This is the cross-compilation / non-x86-64 path:
-// one emitter covers every backend target. In test mode, `main` discovers
-// and runs top-level `fn test_*()` functions. Returns false and fills
-// `error` on unsupported constructs.
-bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
-           std::string& error, bool testMode = false);
-
 // Emits target-native assembly (A -> .s -> astra -> machine code) for the
 // given arch ("arm64"/"aarch64", "riscv64", "i386", "arm", "i8086", and
 // "x86_64"+os=="windows" today; more targets plug into the same NatTarget
 // layer). No C intermediate: values are aval words in frame slots, all
 // semantics via a_*_slow runtime calls. Returns false and fills `error`
-// for unimplemented arches or uncovered constructs so the pipeline can
-// fall back to emitC.
+// for unimplemented arches or uncovered constructs — the pipeline treats
+// a decline as a hard error (there is no C fallback).
 //
 // x86_64+windows uses the Win64 MS ABI (rcx/rdx/r8/r9 args, 32-byte
 // shadow space, __chkstk probing for >4KiB frames). Gap: no SEH

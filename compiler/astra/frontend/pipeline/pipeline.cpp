@@ -48,16 +48,15 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
 // ---------------------------------------------------------------- Astra exec
 // `a run`/`a build`/`a test` are thin wrappers over the Astra toolchain
 // driver (compiler/astra/): the frontend emits target assembly (x86-64
-// SysV via emitAsm, other arches via emitNative) or portable C (emitC)
-// as a fallback, `astra` compiles/assembles that together with
-// the C A runtime (a_runtime.c) to machine code and links the executable.
+// SysV via emitAsm, other arches via emitNative), `astra` assembles that
+// together with the C A runtime (a_runtime.c) to machine code and links
+// the executable. There is no C-source intermediate: every target goes
+// A -> asm -> machine code.
 //
 // Cross-compilation: astra ships one driver binary per target architecture
 // (astra-<arch>, built by cmake/libastra.cmake). The frontend picks the
-// emitter by target: x86-64 SysV targets prefer the asm backend; every
-// other arch goes through emitNative (native per-arch assembly), with
-// emitC as the portable fallback for constructs the native backends do
-// not cover (e.g. python interop on non-x86-64 targets). i8086 is
+// emitter by target: x86-64 SysV targets use emitAsm; every other arch
+// goes through emitNative (native per-arch assembly). i8086 is
 // asm-only — astra rejects C input for it. Astra
 // binaries are bound to the host OS at build time, so the target OS must
 // match the host — only the architecture is selectable.
@@ -179,7 +178,7 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
   }
   // The asm emitter is x86-64 SysV only: valid for ELF (linux) and Mach-O
   // (macos) x86-64 targets. i386, ARM, RISC-V, i8086 and Windows x86-64
-  // (MS ABI) go through emitNative; emitC remains the fallback.
+  // (MS ABI) go through emitNative. A declined emission is a hard error.
   t.useAsm = (arch == "x86_64" && (t.os == "linux" || t.os == "macos"));
   return true;
 }
@@ -909,8 +908,8 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   }
   return p;
 }
-// Compiles emitted source (target assembly or portable C, plus the runtime
-// modules) with the astra driver for `arch` into outPath. The runtime is modular: every *.c
+// Compiles emitted target assembly plus the runtime modules with the
+// astra driver for `arch` into outPath. The runtime is modular: every *.c
 // next to the located a_runtime.c (dispatch/printing plus the domain .c
 // modules) is compiled and linked in, unless the prebuilt libaruntime.a
 // archive exists for the default opt level. -B points astra at the staged
@@ -1113,68 +1112,32 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
     }
   }
   std::string srcSource, srcError;
-  bool emitted = false;
-  std::string srcPath;
   const char* forced = std::getenv("A_CODEGEN");
-  bool preferC = forced && lowerStr(forced) == "c";
-  // A_CODEGEN=asm is strict: only the target's assembly emitter may run —
-  // emitAsm on x86-64 SysV, emitNative on every other arch — and a decline
-  // is a hard error carrying the emitter's reason (no emitC fallback).
-  // A_CODEGEN=c forces emitC; unset/unknown keeps the default
-  // asm -> native -> C cascade.
+  if (forced && lowerStr(forced) == "c") {
+    err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
+           "removed — every target compiles A -> assembly -> machine code\n";
+    return kCErr;
+  }
   bool strictAsm = forced && lowerStr(forced) == "asm";
-  if (strictAsm) {
-    bool asmOk = td->useAsm
-        ? emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)
-        : emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError, testMode);
-    if (!asmOk) {
-      if (td->arch == "i8086")
-        err << "error: code generation failed for i8086 (asm-only target): "
-            << srcError << "\n";
-      else
-        err << "error: A_CODEGEN=asm: assembly backend declined: "
-            << srcError << "\n";
-      return kCErr;
-    }
-    emitted = true;
-    srcPath = stageSrc(srcSource, ".s", err);
-  } else {
-    if (td->useAsm && !preferC) {
-      // Preferred path: x86-64 assembly (fast, no C intermediate).
-      if (emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)) {
-        emitted = true;
-        srcPath = stageSrc(srcSource, ".s", err);
-      } else if (std::getenv("A_DEBUG_NATIVE")) {
-        // Fall through to the native/C emitters for anything the asm
-        // backend does not cover.
-        err << "note: asm backend declined: " << srcError << "\n";
-      }
-    }
-    if (!emitted) {
-      // Native per-arch asm emitters (A -> .s -> machine code, no C step).
-      // emitNative covers a growing subset; emitC remains the fallback —
-      // except for i8086, which is asm-only bare-metal (astra rejects C
-      // input), so a native-emission failure is fatal there.
-      if (emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError, testMode)) {
-        emitted = true;
-        srcPath = stageSrc(srcSource, ".s", err);
-      } else if (std::getenv("A_DEBUG_NATIVE")) {
-        err << "note: native backend declined: " << srcError << "\n";
-      }
-    }
-    if (!emitted && td->arch == "i8086") {
+  // The target's assembly emitter is the only codegen path: emitAsm on
+  // x86-64 SysV (linux/macos), emitNative on every other arch (including
+  // Windows x86-64 via the Win64 MS ABI). A decline is a hard error
+  // carrying the emitter's reason — there is no C fallback.
+  bool asmOk = td->useAsm
+      ? emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)
+      : emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError, testMode);
+  if (!asmOk) {
+    if (td->arch == "i8086")
       err << "error: code generation failed for i8086 (asm-only target): "
           << srcError << "\n";
-      return kCErr;
-    }
-    if (!emitted) {
-      if (!emitC(*m.graph, *m.sema, srcSource, srcError, testMode)) {
-        err << "error: code generation failed: " << srcError << "\n";
-        return kCErr;
-      }
-      srcPath = stageSrc(srcSource, ".c", err);
-    }
+    else if (strictAsm)
+      err << "error: A_CODEGEN=asm: assembly backend declined: "
+          << srcError << "\n";
+    else
+      err << "error: code generation failed: " << srcError << "\n";
+    return kCErr;
   }
+  std::string srcPath = stageSrc(srcSource, ".s", err);
   if (srcPath.empty()) return kCErr;
   std::string tmpBin = tempPath("bin");
   std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
@@ -1229,8 +1192,8 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
   CompiledModule m; m.graph=std::make_unique<ModuleGraph>(std::move(graph)); m.sema=std::make_unique<SemaResult>(std::move(result)); m.ok=true; return m;
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
-  // Execution: the frontend emits target assembly or portable C, Astra
-  // compiles it with the runtime into a binary, and the binary runs
+  // Execution: the frontend emits target assembly, Astra
+  // assembles it with the runtime into a binary, and the binary runs
   // as a child process — host targets only.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
@@ -1286,62 +1249,35 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  // `a build`: emit target assembly (x86-64 SysV asm, per-arch native) or
-  // portable C, then astra links a native executable for the target arch.
+  // `a build`: emit target assembly (x86-64 SysV asm, per-arch native),
+  // then astra links a native executable for the target arch.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   std::string srcSource, srcError;
-  bool emitted = false;
-  std::string srcPath;
   const char* forced = std::getenv("A_CODEGEN");
-  bool preferC = forced && lowerStr(forced) == "c";
-  // A_CODEGEN=asm is strict (see compileAndRun): the target's assembly
-  // emitter must succeed or the build fails with its decline reason.
+  if (forced && lowerStr(forced) == "c") {
+    err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
+           "removed — every target compiles A -> assembly -> machine code\n";
+    return kCErr;
+  }
   bool strictAsm = forced && lowerStr(forced) == "asm";
-  if (strictAsm) {
-    bool asmOk = td.useAsm
-        ? emitAsm(*m.graph, *m.sema, srcSource, srcError)
-        : emitNative(*m.graph, *m.sema, td.arch, td.os, srcSource, srcError);
-    if (!asmOk) {
-      if (td.arch == "i8086")
-        err << "error: code generation failed for i8086 (asm-only target): "
-            << srcError << "\n";
-      else
-        err << "error: A_CODEGEN=asm: assembly backend declined: "
-            << srcError << "\n";
-      return kCErr;
-    }
-    srcPath = stageSrc(srcSource, ".s", err);
-  } else {
-    if (td.useAsm && !preferC) {
-      if (emitAsm(*m.graph, *m.sema, srcSource, srcError)) emitted = true;
-      else if (std::getenv("A_DEBUG_NATIVE"))
-        err << "note: asm backend declined: " << srcError << "\n";
-    }
-    if (!emitted) {
-      if (emitNative(*m.graph, *m.sema, td.arch, td.os, srcSource, srcError)) {
-        emitted = true;
-        srcPath = stageSrc(srcSource, ".s", err);
-      } else if (std::getenv("A_DEBUG_NATIVE")) {
-        err << "note: native backend declined: " << srcError << "\n";
-      }
-    } else {
-      srcPath = stageSrc(srcSource, ".s", err);
-    }
-    if (!emitted && td.arch == "i8086") {
-      // i8086 is asm-only bare-metal: astra rejects C input, so emitC can
-      // never produce a bootable image for it.
+  // The target's assembly emitter is the only codegen path (emitAsm on
+  // x86-64 SysV, emitNative elsewhere); a decline is a hard error.
+  bool asmOk = td.useAsm
+      ? emitAsm(*m.graph, *m.sema, srcSource, srcError)
+      : emitNative(*m.graph, *m.sema, td.arch, td.os, srcSource, srcError);
+  if (!asmOk) {
+    if (td.arch == "i8086")
       err << "error: code generation failed for i8086 (asm-only target): "
           << srcError << "\n";
-      return kCErr;
-    }
-    if (!emitted) {
-      if (!emitC(*m.graph, *m.sema, srcSource, srcError)) {
-        err << "error: code generation failed: " << srcError << "\n"; return kCErr;
-      }
-      srcPath = stageSrc(srcSource, ".c", err);
-    }
+    else if (strictAsm)
+      err << "error: A_CODEGEN=asm: assembly backend declined: "
+          << srcError << "\n";
+    else
+      err << "error: code generation failed: " << srcError << "\n";
+    return kCErr;
   }
+  std::string srcPath = stageSrc(srcSource, ".s", err);
   if (srcPath.empty()) return kCErr;
   int rc = astraBuild(td.arch, td.os, srcPath, outputPath, err, config.optimizationLevel);
   std::error_code ec; std::filesystem::remove(srcPath, ec);

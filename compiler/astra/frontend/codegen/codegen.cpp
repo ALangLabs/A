@@ -55,7 +55,7 @@ namespace a {
 // the module that actually declares `name`. Returns {moduleId, name};
 // unchanged when there is no re-export. Native/python re-exports are not
 // followed (shortcut: module values have no runtime representation).
-// Shared by emitC (Emitter::resolveModuleMember) and emitAsm.
+// Shared by emitAsm and emitNative.
 std::pair<int, std::string> resolveModuleMember(const ModuleGraph& graph,
                                               int moduleId,
                                               const std::string& name) {
