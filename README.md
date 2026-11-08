@@ -126,7 +126,7 @@ Highlights: `class` types with fields, methods, and inheritance, `enum` (plain a
 algebraic), `trait` + `impl` conformance, generics and `comptime` params,
 closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 `Result`, slices/views, `defer`, destructuring, string interpolation, and
-`#` comments with `##` doc comments.
+`#` comments and `"""..."""` docstrings.
 
 ## 🧰 Toolchain
 

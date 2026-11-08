@@ -24,14 +24,6 @@
     "comments": {
       "patterns": [
         {
-          "name": "comment.line.number-sign.documentation.a",
-          "match": "(##+)([^\\n]*)$",
-          "captures": {
-            "1": { "name": "punctuation.definition.comment.documentation.a" },
-            "2": { "name": "comment.content.documentation.a" }
-          }
-        },
-        {
           "name": "comment.line.number-sign.todo.a",
           "match": "#\\s*(TODO|FIXME|XXX|HACK|NOTE)\\b[^\\n]*$",
           "captures": {

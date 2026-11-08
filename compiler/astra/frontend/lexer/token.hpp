@@ -115,7 +115,6 @@ struct Comment {
   Span span;
   std::string text;      // includes the leading '#' characters
   bool trailing = false; // true when code precedes the comment on the same line
-  bool doc = false;      // true for '##' documentation comments
 };
 
 struct Token {

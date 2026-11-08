@@ -5,8 +5,9 @@ scanners) and `examples/`/`tests/`.
 
 ## Lexical structure
 
-- **Comments**: `#` line comments; `##` doc comments attach to declarations.
-- **Docstrings**: `"""..."""` raw string statement at the top of a body.
+- **Comments**: `#` line comments (including `##`, which is just a comment).
+- **Docstrings**: `"""..."""` raw string statements document declarations —
+  the first statement in a body, or directly above a declaration/module.
 - **Identifiers**: `[A-Za-z_][A-Za-z0-9_]*`; keywords are lowercase except
   `None`, `Some`/`Ok`/`Err` (capitalized builtins).
 - **Indentation**: significant — blocks are introduced by `:` then an indented

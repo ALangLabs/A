@@ -38,9 +38,10 @@ p = Point(3, 4)          # positional or named: Point(x=1, y=2)
 - Fields are bare names or `name: Type`; methods take `self`.
 - Inheritance: `class Dog(Animal):`; metaclass: `class C(metaclass=M):`
   (also `class C(Base, metaclass=M)`).
-- Docstrings: a `"""..."""` string-literal statement at the top of a body
-  (triple-quoted, raw — no escapes or interpolation). `##` comments are doc
-  comments attached to declarations, not docstrings.
+- Docstrings: a `"""..."""` string-literal statement documents a declaration —
+  the first statement inside a body, or directly above the declaration
+  (triple-quoted, raw — no escapes or interpolation). `#`/`##` are plain
+  comments, not documentation.
 
 ## Enums
 

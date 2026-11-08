@@ -16,7 +16,7 @@ from pathlib import Path
 
 SOURCE = '''import json
 
-## A two-dimensional point.
+"""A two-dimensional point."""
 class Point:
     x: i32
     y: i32
@@ -24,7 +24,7 @@ class Point:
     fn length_squared(self) -> i32:
         return self.x * self.x + self.y * self.y
 
-## Adds two numbers.
+"""Adds two numbers."""
 fn add(a: i32, b: i32) -> i32:
     return a + b
 
@@ -35,16 +35,18 @@ words = "abc"
 print("total = {total}")
 print(doc, words.strip())
 
-## Adds things.
-## Args:
-##   a: first number
-##   b: second number
-##   c: third number
-## Returns:
-##   The sum.
-## Example:
-## >>> add3(1, 2, 3)
-## 6
+"""
+Adds things.
+Args:
+  a: first number
+  b: second number
+  c: third number
+Returns:
+  The sum.
+Example:
+>>> add3(1, 2, 3)
+6
+"""
 fn add3(a: i32, b: i32, c: i32) -> i32:
     return a + b + c
 

@@ -372,61 +372,18 @@ std::string LanguageServer::extractDocstring(const std::string& source, int star
 std::string LanguageServer::docCommentText(const Compilation& compilation, const FileIndex& file,
                            const Span& span) const {
   if (!span.valid()) return {};
-  int moduleId = -1;
-  const std::string canonical = canonicalPath(file.path);
-  for (std::size_t i = 0; i < compilation.graph.modules.size(); ++i) {
-    if (canonicalPath(compilation.graph.modules[i].path) == canonical) {
-      moduleId = static_cast<int>(i);
-      break;
-    }
-  }
 
-  // 1. Check for leading `##` doc comments above the symbol.
-  const std::vector<a::Comment>* comments = compilation.commentsForModule(moduleId);
-  if (comments) {
-    std::vector<std::string> lines;
-    int expected = span.line - 1;
-    std::size_t start = comments->size();
-    for (std::size_t i = 0; i < comments->size(); ++i) {
-      if ((*comments)[i].span.line == expected) { start = i; break; }
-      if ((*comments)[i].span.line > expected) break;
-    }
-    if (start < comments->size()) {
-      for (std::size_t index = start + 1; index > 0; --index) {
-        const a::Comment& comment = (*comments)[index - 1];
-        if (!comment.doc || comment.trailing || comment.span.line != expected) break;
-        std::string line = comment.text;
-        while (!line.empty() && (line.back() == '\r' || line.back() == '\n')) line.pop_back();
-        if (line.rfind("##", 0) == 0) line.erase(0, 2);
-        if (!line.empty() && line.front() == ' ') line.erase(0, 1);
-        lines.push_back(std::move(line));
-        --expected;
-      }
-      if (!lines.empty()) {
-        std::string text;
-        for (auto it = lines.rbegin(); it != lines.rend(); ++it) {
-          if (!text.empty()) text += '\n';
-          text += *it;
-        }
-        return text;
-      }
-    }
-  }
-
-  // 2. Check for Python-style `"""docstring"""` or `'''docstring'''` right
-  // above or as the first statement in the function / class / struct body.
+  // Documentation comes from `"""docstring"""` statements: as the first
+  // statement in a function / class / struct body, or directly above the
+  // declaration.
   const std::string* source = compilation.textForPath(file.path);
-  if (source) {
-    // Check immediately inside body (e.g. line span.line + 1)
-    std::string ds = extractDocstring(*source, span.line + 1);
+  if (!source) return {};
+  std::string ds = extractDocstring(*source, span.line + 1);
+  if (!ds.empty()) return ds;
+  if (span.line > 1) {
+    ds = extractDocstringAbove(*source, span.line);
     if (!ds.empty()) return ds;
-    // Or immediately above declaration
-    if (span.line > 1) {
-      ds = extractDocstringAbove(*source, span.line);
-      if (!ds.empty()) return ds;
-    }
   }
-
   return {};
 }
 

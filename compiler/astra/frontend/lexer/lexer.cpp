@@ -196,7 +196,6 @@ void Lexer::skipComment() {
   Comment comment;
   comment.span = makeSpan(start, startLine, startCol);
   comment.text = text_.substr(start, pos_ - start);
-  comment.doc = comment.text.rfind("##", 0) == 0;
   if (!tokens_.empty()) {
     const Token& previous = tokens_.back();
     comment.trailing = previous.kind != Tok::Newline && previous.kind != Tok::Indent &&
