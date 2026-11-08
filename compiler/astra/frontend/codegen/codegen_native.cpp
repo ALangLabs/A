@@ -2448,8 +2448,8 @@ class NativeEmitter {
       }
       case ExprKind::Unary: {
         auto& x = static_cast<const UnaryExpr&>(*e);
-        if (x.op == "!" && x.postfix) {
-          // postfix unwrap
+        if (x.op == "!") {
+          // postfix unwrap ('!' is always unwrap; 'not' is logical not)
           emitExpr(x.operand.get());
           callSym("a_unwrap");
           return;
