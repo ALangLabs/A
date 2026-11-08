@@ -61,13 +61,24 @@ void panicf(const char *fmt, ...) {
 
 void *xmalloc(size_t n) {
     /* Heap objects are NaN-boxed pointers distinguished by a zero low
-     * nibble, so every object needs 16-byte alignment. 64-bit libcs
-     * guarantee that from malloc; 32-bit libcs (ARM, i386) only
-     * guarantee 8, so allocate aligned explicitly. */
+     * nibble, so every object needs 16-byte alignment. 32-bit libcs
+     * (ARM, i386, 32-bit Windows) only guarantee 8, so allocate aligned
+     * explicitly; on those targets a_runtime_internal.h maps malloc/
+     * realloc/free onto the _aligned_* CRT entry points so the pairing
+     * stays consistent. */
+#if defined(_WIN32)
+    /* Win64 CRT malloc returns 16-byte-aligned blocks; on 32-bit Windows
+       the malloc macro in a_runtime_internal.h already routes this call
+       to _aligned_malloc. */
+    void *p = malloc(n ? n : 1);
+    if (!p) panicf("out of memory");
+    return p;
+#else
     void *p = NULL;
     if (posix_memalign(&p, 16, n ? n : 1) != 0 || !p)
         panicf("out of memory");
     return p;
+#endif
 }
 
 void *xrealloc(void *p, size_t n) {
@@ -132,10 +143,35 @@ int64_t expect_int64(aval v, const char *what) {
 }
 
 /* Inline ints cover [-2^46, 2^46); wider values box as T_INT64. */
+/* Bump arena for int boxes. An aval is 47-bit inline; anything outside
+   +/-2^46 needs a heap box. Those boxes are never freed (the runtime has no
+   collector), so a chunked bump allocator is strictly cheaper than malloc per
+   value: it removes malloc's size-class logic and bookkeeping, which was the
+   entire cost of integer arithmetic that leaves the inline range (e.g. any
+   product above 7e13, as in a 32-bit LCG step). */
+#define INT_BOX_CHUNK (1u << 16)
+static char *g_intbox_cursor = NULL;
+static size_t g_intbox_left = 0;
+
+/* mkobj() requires 16-byte alignment (NaN-boxed pointers), so the bump step
+   is sizeof(AInt64) rounded up to 16. */
+#define INT_BOX_STEP (((sizeof(AInt64) + 15u) / 16u) * 16u)
+
+static AInt64 *intbox_alloc(void) {
+    if (g_intbox_left < INT_BOX_STEP) {
+        g_intbox_cursor = (char *)xmalloc(INT_BOX_CHUNK);
+        g_intbox_left = INT_BOX_CHUNK;
+    }
+    AInt64 *p = (AInt64 *)g_intbox_cursor;
+    g_intbox_cursor += INT_BOX_STEP;
+    g_intbox_left -= INT_BOX_STEP;
+    return p;
+}
+
 aval mkint_full(int64_t i) {
     const int64_t lim = INT64_C(1) << 46;
     if (i >= -lim && i < lim) return a_mkint(i);
-    AInt64 *p = (AInt64 *)xmalloc(sizeof(AInt64));
+    AInt64 *p = intbox_alloc();
     p->h.type = T_INT64;
     p->h.len = 0;
     p->h.cap = 0;
@@ -153,4 +189,63 @@ aval mkdouble(double d) {
 }
 
 aval bool_aval(int b) { return b ? A_TRUE : A_FALSE; }
+
+#if defined(_WIN32)
+/* ------------------------------------------------------------------ */
+/* Windows compat: snprintf shim + Win32 timing helpers               */
+/* ------------------------------------------------------------------ */
+
+/* msvcrt.dll has no snprintf export (it lives in libmingwex, which is not
+   shipped); wrap the exported vsnprintf. Note the legacy vsnprintf
+   returns -1 on truncation instead of the would-be length. */
+int snprintf(char *s, size_t n, const char *format, ...) {
+    va_list ap;
+    va_start(ap, format);
+    int r = vsnprintf(s, n, format, ap);
+    va_end(ap);
+    return r;
+}
+
+/* Minimal kernel32 prototypes, declared directly so runtime TUs do not
+   need windows.h. FILETIME is passed as an opaque 8-byte buffer and
+   LARGE_INTEGER as int64_t; both are layout-compatible. WINAPI is
+   __stdcall on 32-bit Windows and empty on Win64. */
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+#define A_WINAPI
+#else
+#define A_WINAPI __stdcall
+#endif
+extern void A_WINAPI GetSystemTimeAsFileTime(void *lpSystemTimeAsFileTime);
+extern int A_WINAPI QueryPerformanceCounter(long long *lpPerformanceCount);
+extern int A_WINAPI QueryPerformanceFrequency(long long *lpPerformanceFrequency);
+extern void A_WINAPI Sleep(unsigned long dwMilliseconds);
+
+/* FILETIME counts 100 ns intervals since 1601-01-01 UTC; the Unix epoch
+   offset is 11644473600 s. */
+int64_t a_win_time_ms(void) {
+    unsigned long long ft = 0;
+    GetSystemTimeAsFileTime(&ft);
+    return (int64_t)((ft - 116444736000000000ULL) / 10000ULL);
+}
+
+int64_t a_win_mono_ms(void) {
+    static long long freq = 0;
+    if (freq <= 0) {
+        long long f = 0;
+        if (!QueryPerformanceFrequency(&f) || f <= 0) return 0;
+        freq = f;
+    }
+    long long c = 0;
+    if (!QueryPerformanceCounter(&c) || c < 0) return 0;
+    return (c / freq) * 1000 + (c % freq) * 1000 / freq;
+}
+
+void a_win_sleep_ms(int64_t ms) {
+    while (ms > 0) {
+        unsigned long chunk = ms > 60000 ? 60000UL : (unsigned long)ms;
+        Sleep(chunk);
+        ms -= (int64_t)chunk;
+    }
+}
+#endif
 
