@@ -48,6 +48,7 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                        {"write_file", "write_file"},
                        {"append_file", "append_file"},
                        {"file_exists", "file_exists"},
+                       {"file_size", "file_size"},
                        {"list_dir", "list_dir"},
                        {"remove_file", "remove_file"},
                        {"create_dir", "create_dir"},

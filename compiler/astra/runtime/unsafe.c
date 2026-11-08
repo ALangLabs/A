@@ -40,8 +40,9 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
         uint64_t len;
         const char *p = str_data(argv[0], &len);
         if (i < 0 || (uint64_t)i >= len) panicf("unsafe.get: index out of bounds");
-        char c = p[i];
-        return a_char_new(&c, 1);
+        /* Raw byte access: strings store UTF-8 bytes, so this returns the
+           byte value (0-255) rather than a decoded code point. */
+        return mkint_full((uint64_t)(unsigned char)p[i]);
     }
     panicf("unsafe.get: unsupported container '%s'", type_name_cstr(argv[0]));
     return A_NONE;

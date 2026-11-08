@@ -9,7 +9,8 @@ inline void addUnsafeDocs(StringMap<BuiltinDoc>& docs) {
   docs.insert({
       // unsafe
       {"unsafe_get", {"unsafe_get", "unsafe_get(array, index) -> T",
-                       "Unchecked element access; no bounds check."}},
+                       "Unchecked element access; no bounds check. On a string, "
+                       "returns the raw stored byte (0-255) as an int."}},
       {"unsafe_set", {"unsafe_set", "unsafe_set(array, index, value)",
                        "Unchecked element assignment; no bounds check."}},
       {"unsafe_address_of", {"unsafe_address_of", "unsafe_address_of(array, index) -> *T",

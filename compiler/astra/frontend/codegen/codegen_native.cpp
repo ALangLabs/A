@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -3061,6 +3062,255 @@ struct Riscv64Target : NatTarget {
   void ret(std::string& o) const override { o += "    ret\n"; }
 };
 
+// ---------------------------------------------------------------- i386 ----
+// i386 SysV: aval (u64) does not fit one register. All "registers" are
+// memory slots in our frame; callSym relocates staged args into the
+// outgoing area per the callee's C signature. Returns arrive in edx:eax.
+//
+// Frame layout (esp-relative, esp constant — no pushes):
+//   +0    outgoing arg area (16 x 8B)
+//   +128  ACC (8B)
+//   +136  TMP0..TMP3 (4 x 8B)
+//   +168  ARG staging G0..G7 (8 x 8B)
+//   +232  emitter slots (8B each)
+struct I386Target : NatTarget {
+  static constexpr int kReserve = 232;
+  static constexpr int kOut = 0, kAcc = 128, kTmp = 136, kArg = 168;
+  mutable std::string lastA, lastB;
+  mutable int jcN_ = 0;
+  mutable std::set<int> usedArgs_;
+
+  static int offOf(const std::string& r) {
+    if (r == "@a") return kAcc;
+    if (r.size() >= 3 && r[0] == '@' && r[1] == 't')
+      return kTmp + 8 * (r[2] - '0');
+    if (r.size() >= 3 && r[0] == '@' && r[1] == 'g')
+      return kArg + 8 * (r[2] - '0');
+    return -1;
+  }
+  static std::string ref(int off) {
+    return std::to_string(off) + "(%esp)";
+  }
+  static std::string refAdd(int off, int add) {
+    return std::to_string(off + add) + "(%esp)";
+  }
+  int frameReserve() const override { return kReserve; }
+  void prologue(std::string& o, int frameBytes) const override {
+    // +8 keeps esp 16-aligned in the body (entry esp%16 == 8).
+    int total = frameBytes + 8;
+    o += "    subl $" + std::to_string(total) + ", %esp\n";
+    // Incoming argv pointer (our single arg) sits above the frame:
+    // retaddr at esp+total, arg0 at esp+total+4. Fetch into @g0.
+    o += "    movl " + std::to_string(total + 4) + "(%esp), %eax\n";
+    o += "    movl %eax, " + ref(kArg) + "\n";
+    o += "    movl $0, " + refAdd(kArg, 4) + "\n";
+  }
+  void epilogue(std::string& o, int frameBytes) const override {
+    int total = frameBytes + 8;
+    // aval return value -> edx:eax (acc lives in @g0).
+    o += "    movl " + ref(kArg) + ", %eax\n";
+    o += "    movl " + refAdd(kArg, 4) + ", %edx\n";
+    o += "    addl $" + std::to_string(total) + ", %esp\n";
+    o += "    ret\n";
+  }
+  std::string slotRef(int i) const override {
+    return std::to_string(kReserve + 8 * i) + "(%esp)";
+  }
+  // acc aliases arg0 staging: unary runtime calls (a_truthy_raw_slow etc.)
+  // rely on acc == argReg(0), matching the 64-bit targets where acc is x0/a0.
+  std::string acc() const override { return "@g0"; }
+  int nArgRegs() const override { return 8; }
+  std::string argReg(int i) const override {
+    usedArgs_.insert(i);
+    return "@g" + std::to_string(i);
+  }
+  std::string tmpReg(int i) const override { return "@t" + std::to_string(i); }
+  void movImm(std::string& o, uint64_t v, const std::string& r) const override {
+    int off = offOf(r);
+    o += "    movl $" + std::to_string((uint32_t)(v & 0xFFFFFFFFu)) + ", " +
+         ref(off) + "\n";
+    o += "    movl $" + std::to_string((uint32_t)(v >> 32)) + ", " +
+         refAdd(off, 4) + "\n";
+  }
+  void movReg(std::string& o, const std::string& d, const std::string& s) const override {
+    int so = offOf(s), doff = offOf(d);
+    o += "    movl " + ref(so) + ", %eax\n    movl %eax, " + ref(doff) + "\n";
+    o += "    movl " + refAdd(so, 4) + ", %eax\n    movl %eax, " + refAdd(doff, 4) + "\n";
+  }
+  void loadSlot(std::string& o, int slot, const std::string& r) const override {
+    int so = kReserve + 8 * slot, d = offOf(r);
+    o += "    movl " + ref(so) + ", %eax\n    movl %eax, " + ref(d) + "\n";
+    o += "    movl " + refAdd(so, 4) + ", %eax\n    movl %eax, " + refAdd(d, 4) + "\n";
+  }
+  void storeSlot(std::string& o, const std::string& r, int slot) const override {
+    int so = offOf(r), d = kReserve + 8 * slot;
+    o += "    movl " + ref(so) + ", %eax\n    movl %eax, " + ref(d) + "\n";
+    o += "    movl " + refAdd(so, 4) + ", %eax\n    movl %eax, " + refAdd(d, 4) + "\n";
+  }
+  void loadSlotAt(std::string& o, const std::string& baseReg,
+                  int64_t byteOff, const std::string& dstReg) const override {
+    int bo = offOf(baseReg), d = offOf(dstReg);
+    std::string disp = byteOff >= 0 ? std::to_string(byteOff)
+                                    : "-" + std::to_string(-byteOff);
+    o += "    movl " + ref(bo) + ", %eax\n";
+    o += "    movl " + disp + "(%eax), %ecx\n    movl %ecx, " + ref(d) + "\n";
+    o += "    movl " + disp + "+4(%eax), %ecx\n    movl %ecx, " + refAdd(d, 4) + "\n";
+  }
+  void copySlot(std::string& o, int from, int to) const override {
+    int fo = kReserve + 8 * from, d = kReserve + 8 * to;
+    o += "    movl " + ref(fo) + ", %eax\n    movl %eax, " + ref(d) + "\n";
+    o += "    movl " + refAdd(fo, 4) + ", %eax\n    movl %eax, " + refAdd(d, 4) + "\n";
+  }
+  void leaSlot(std::string& o, int slot, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movl %esp, %eax\n    addl $" +
+         std::to_string(kReserve + 8 * slot) + ", %eax\n";
+    o += "    movl %eax, " + ref(d) + "\n    movl $0, " + refAdd(d, 4) + "\n";
+  }
+  void leaSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movl $" + sym + ", %eax\n    movl %eax, " + ref(d) + "\n";
+    o += "    movl $0, " + refAdd(d, 4) + "\n";
+  }
+  void loadSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movl $" + sym + ", %eax\n";
+    o += "    movl (%eax), %ecx\n    movl %ecx, " + ref(d) + "\n";
+    o += "    movl 4(%eax), %ecx\n    movl %ecx, " + refAdd(d, 4) + "\n";
+  }
+  void storeSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movl $" + sym + ", %eax\n";
+    o += "    movl " + ref(d) + ", %ecx\n    movl %ecx, (%eax)\n";
+    o += "    movl " + refAdd(d, 4) + ", %ecx\n    movl %ecx, 4(%eax)\n";
+  }
+  // C arg sizes (bytes) per runtime symbol; unknown -> {4} (our fns take
+  // a single aval* argv). Second flag: edx must be zeroed after the call
+  // for callees returning a 32-bit int rather than a full aval.
+  static const std::unordered_map<std::string, std::pair<std::vector<int>, bool>>& sigs() {
+    static const std::unordered_map<std::string, std::pair<std::vector<int>, bool>> m = {
+        {"a_add_slow",{{8,8},false}},{"a_sub_slow",{{8,8},false}},
+        {"a_mul_slow",{{8,8},false}},{"a_div_slow",{{8,8},false}},
+        {"a_mod_slow",{{8,8},false}},{"a_pow",{{8,8},false}},
+        {"a_eq_slow",{{8,8},false}},{"a_ne_slow",{{8,8},false}},
+        {"a_lt_slow",{{8,8},false}},{"a_le_slow",{{8,8},false}},
+        {"a_gt_slow",{{8,8},false}},{"a_ge_slow",{{8,8},false}},
+        {"a_band_slow",{{8,8},false}},{"a_bor_slow",{{8,8},false}},
+        {"a_bxor_slow",{{8,8},false}},{"a_shl_slow",{{8,8},false}},
+        {"a_shr_slow",{{8,8},false}},
+        {"a_not",{{8},false}},{"a_neg_slow",{{8},false}},{"a_bnot_slow",{{8},false}},
+        {"a_truthy_raw_slow",{{8},false}},
+        {"a_bi_call",{{8,8,4},false}},{"a_call",{{8,8,4},false}},
+        {"a_builtin",{{8},false}},
+        {"a_str_new",{{4,8},false}},{"a_char_new",{{4,8},false}},
+        {"a_str",{{8},false}},{"a_repr",{{8},false}},{"a_len",{{8},false}},
+        {"a_str_concat",{{8,8},false}},{"a_str_joinsep",{{8,8,4},false}},
+        {"a_list_new",{{8,4},false}},{"a_list_push",{{8,8},false}},
+        {"a_tuple_new",{{8,4},false}},
+        {"a_dict_new",{{},false}},{"a_dict_set",{{8,8,8},false}},
+        {"a_dict_get",{{8,8,8},false}},
+        {"a_set_new",{{},false}},{"a_set_add",{{8,8},false}},
+        {"a_range_new",{{8,8,8},false}},{"a_range_contains",{{8,8},false}},
+        {"a_getitem",{{8,8},false}},{"a_setitem",{{8,8,8},false}},
+        {"a_slice",{{8,8,8,8},false}},{"a_contains",{{8,8},false}},
+        {"a_in_range",{{8,8,8},false}},{"a_in_range_inclusive",{{8,8,8},false}},
+        {"a_iter_new",{{8},false}},{"a_iter_next",{{8,4},false}},
+        {"a_fnon_new",{{8,8,4},false}},
+        {"a_env_set",{{8,8,8},false}},{"a_env_get",{{8,8},false}},
+        {"a_closure_env_new",{{8},false}},
+        {"a_method",{{8,4,8,8,4},false}},{"a_getattr",{{8,4},false}},
+        {"a_setattr",{{8,4,8},false}},
+        {"a_unwrap",{{8},false}},{"a_some_new",{{8},false}},
+        {"a_try_result",{{8},false}},{"a_match_fail",{{8},false}},
+        {"a_is_propagate",{{8},true}},{"a_obj_is_instance",{{8,4},true}},
+        {"a_runtime_init",{{},false}},
+    };
+    return m;
+  }
+  void callSym(std::string& o, const std::string& sym) const override {
+    // Always stage arg0: acc aliases @g0 and unary runtime calls rely on it.
+    int n = usedArgs_.empty() ? 1 : *usedArgs_.rbegin() + 1;
+    auto it = sigs().find(sym);
+    std::vector<int> sizes = it != sigs().end() ? it->second.first
+                                              : std::vector<int>{4};
+    bool ret32 = it != sigs().end() && it->second.second;
+    int dst = kOut;
+    for (int i = 0; i < n; ++i) {
+      int sz = i < (int)sizes.size() ? sizes[i] : 4;
+      int src = kArg + 8 * i;
+      o += "    movl " + ref(src) + ", %eax\n    movl %eax, " + ref(dst) + "\n";
+      if (sz == 8) {
+        o += "    movl " + refAdd(src, 4) + ", %eax\n    movl %eax, " +
+             refAdd(dst, 4) + "\n";
+      }
+      dst += sz;
+    }
+    usedArgs_.clear();
+    o += "    call " + sym + "\n";
+    if (ret32) o += "    movl $0, %edx\n";
+    // Return value arrives in edx:eax; acc is the @g0 staging slot.
+    o += "    movl %eax, " + ref(kArg) + "\n";
+    o += "    movl %edx, " + refAdd(kArg, 4) + "\n";
+  }
+  void jmp(std::string& o, const std::string& l) const override {
+    o += "    jmp " + l + "\n";
+  }
+  void jcc(std::string& o, const std::string& cc, const std::string& l) const override {
+    int ao = offOf(lastA), bo = offOf(lastB);
+    auto hi = [&]() {
+      o += "    movl " + refAdd(ao, 4) + ", %eax\n    movl " +
+           refAdd(bo, 4) + ", %ecx\n    cmpl %ecx, %eax\n";
+    };
+    auto lo = [&]() {
+      o += "    movl " + ref(ao) + ", %eax\n    movl " + ref(bo) +
+           ", %ecx\n    cmpl %ecx, %eax\n";
+    };
+    std::string sk = "__jc" + std::to_string(jcN_++);
+    if (cc == "eq") {
+      hi(); o += "    jne " + sk + "\n"; lo(); o += "    je " + l + "\n" + sk + ":\n";
+    } else if (cc == "ne") {
+      hi(); o += "    jne " + l + "\n"; lo(); o += "    jne " + l + "\n";
+    } else if (cc == "lt") {
+      hi(); o += "    jl " + l + "\n    jg " + sk + "\n"; lo();
+      o += "    jb " + l + "\n" + sk + ":\n";
+    } else if (cc == "le") {
+      hi(); o += "    jl " + l + "\n    jg " + sk + "\n"; lo();
+      o += "    jbe " + l + "\n" + sk + ":\n";
+    } else if (cc == "gt") {
+      hi(); o += "    jg " + l + "\n    jl " + sk + "\n"; lo();
+      o += "    ja " + l + "\n" + sk + ":\n";
+    } else {  // ge
+      hi(); o += "    jg " + l + "\n    jl " + sk + "\n"; lo();
+      o += "    jae " + l + "\n" + sk + ":\n";
+    }
+  }
+  void jz(std::string& o, const std::string& r, const std::string& l) const override {
+    int off = offOf(r);
+    o += "    movl " + ref(off) + ", %eax\n    orl " + refAdd(off, 4) +
+         ", %eax\n    jz " + l + "\n";
+  }
+  void jnz(std::string& o, const std::string& r, const std::string& l) const override {
+    int off = offOf(r);
+    o += "    movl " + ref(off) + ", %eax\n    orl " + refAdd(off, 4) +
+         ", %eax\n    jnz " + l + "\n";
+  }
+  void cmpRegs(std::string& o, const std::string& a, const std::string& b) const override {
+    (void)o;
+    lastA = a;
+    lastB = b;
+  }
+  void addImm(std::string& o, const std::string& r, int64_t v) const override {
+    int off = offOf(r);
+    o += "    addl $" + std::to_string((int32_t)v) + ", " + ref(off) + "\n";
+    o += "    adcl $0, " + refAdd(off, 4) + "\n";
+  }
+  void zeroReg(std::string& o, const std::string& r) const override {
+    int off = offOf(r);
+    o += "    movl $0, " + ref(off) + "\n    movl $0, " + refAdd(off, 4) + "\n";
+  }
+  void ret(std::string& o) const override { o += "    ret\n"; }
+};
+
 }  // namespace
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
@@ -3078,6 +3328,15 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
   }
   if (arch == "riscv64" || arch == "riscv64gc") {
     Riscv64Target t;
+    NativeEmitter e(graph, sema, t, testMode);
+    return e.run(out, error);
+  }
+  if (arch == "i386" || arch == "x86") {
+    if (testMode) {
+      error = "native backend: i386 test mode unsupported";
+      return false;
+    }
+    I386Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
   }

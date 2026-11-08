@@ -13,7 +13,8 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
     }
     TypePtr sequence = inferExpr(*call.args[0].value);
     TypePtr resolved = resolveType(sequence);
-    if (resolved->kind != TypeKind::Array) {
+    const bool isString = resolved->kind == TypeKind::String;
+    if (resolved->kind != TypeKind::Array && !isString) {
       sink_.error(call.args[0].value->span,
                   "'" + name + "' requires an array, found " + typePhrase(resolved) + ".",
                   "Unchecked access is supported only for arrays and array views.");
@@ -22,7 +23,19 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
     }
     requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
                    "The index passed to '" + name + "'");
-    if (name == "unsafe_get") return resolved->elem;
+    if (name == "unsafe_get") {
+      /* On a string, unsafe.get returns the raw stored byte (0-255) as an
+         int — this is the only way to inspect non-UTF-8 file bytes. */
+      if (isString) return typeInt(64, true);
+      return resolved->elem;
+    }
+    if (isString) {
+      sink_.error(call.args[0].value->span,
+                  "'unsafe_set' does not support strings.",
+                  "Strings are immutable; unchecked writes are supported only for arrays.");
+      inferExpr(*call.args[2].value);
+      return typeVoid();
+    }
     checkArgAgainst(*call.args[2].value, resolved->elem, "in 'unsafe_set'");
     return typeVoid();
   }

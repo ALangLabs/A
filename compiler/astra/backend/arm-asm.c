@@ -138,8 +138,10 @@ static void parse_operand(ASTRAState *s1, Operand *op)
             op->type = OP_IM8N;
         else if (op->e.v == (uint8_t)op->e.v)
             op->type = OP_IM8;
-    } else
-        expect("operand");
+    }
+    /* Symbols are kept as OP_IM32 with e.sym set; instruction handlers that
+       accept symbol operands (movw/movt, literal loads, branches) emit the
+       appropriate relocation. Others will reject via their own checks. */
 }
 
 /* XXX: make it faster ? */
@@ -278,7 +280,17 @@ static void asm_binary_opcode(ASTRAState *s1, int token)
         case TOK_ASM_movteq:
         case TOK_ASM_movweq:
             if (ops[1].type == OP_IM8 || ops[1].type == OP_IM8N || ops[1].type == OP_IM32) {
-                if (ops[1].e.v >= 0 && ops[1].e.v <= 0xFFFF) {
+                if (ops[1].e.sym) {
+                    int reloc_type = (ARM_INSTRUCTION_GROUP(token) == TOK_ASM_movteq)
+                                         ? R_ARM_MOVT_ABS
+                                         : R_ARM_MOVW_ABS_NC;
+                    unsigned long loc = ind;
+                    asm_emit_opcode(token, ((ARM_INSTRUCTION_GROUP(token) == TOK_ASM_movteq)
+                                                ? 0x3400000
+                                                : 0x3000000) |
+                                               (ops[0].reg << 12));
+                    greloca(cur_text_section, ops[1].e.sym, loc, reloc_type, ops[1].e.v);
+                } else if (ops[1].e.v >= 0 && ops[1].e.v <= 0xFFFF) {
                     uint16_t immediate_value = ops[1].e.v;
                     switch (ARM_INSTRUCTION_GROUP(token)) {
                     case TOK_ASM_movteq:

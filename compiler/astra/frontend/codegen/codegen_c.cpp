@@ -91,6 +91,7 @@ int builtinRuntimeId(const std::string& name) {
       {"json_set", 186}, {"json_delete", 187},
       {"struct_name", 188}, {"struct_methods", 189},
       {"fn_signature", 190}, {"fn_doc", 191},
+      {"file_size", 192},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

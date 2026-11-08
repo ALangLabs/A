@@ -284,6 +284,7 @@ aval bi_assert_eq(uint64_t n, aval *argv);
 aval bi_input(uint64_t n, aval *argv);
 const char *path_arg(aval v, const char *what);
 aval bi_read_file(uint64_t n, aval *argv);
+aval bi_file_size(uint64_t n, aval *argv);
 aval bi_write_file(uint64_t n, aval *argv);
 aval bi_append_file(uint64_t n, aval *argv);
 aval bi_file_exists(uint64_t n, aval *argv);

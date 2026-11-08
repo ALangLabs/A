@@ -103,7 +103,8 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "py_buffer_info", bi_py_buffer_info },
     { "json_set", bi_json_set }, { "json_delete", bi_json_delete },
     { "struct_name", bi_struct_name }, { "struct_methods", bi_struct_methods },
-    { "fn_signature", bi_fn_signature }, { "fn_doc", bi_fn_doc }
+    { "fn_signature", bi_fn_signature }, { "fn_doc", bi_fn_doc },
+    { "file_size", bi_file_size }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

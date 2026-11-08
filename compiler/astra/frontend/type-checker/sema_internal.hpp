@@ -57,7 +57,7 @@ inline bool isKnownBuiltin(const std::string& name) {
       "print",    "eprint",   "input",     "len",      "str",      "abs",
       "int",      "float",    "min",       "max",      "pow",      "flush",
       "read_file", "write_file",
-      "append_file", "file_exists", "list_dir", "remove_file", "create_dir",
+      "append_file", "file_exists", "file_size", "list_dir", "remove_file", "create_dir",
       "remove_dir", "rename", "current_dir", "now", "sleep", "panic", "assert",
       "open", "close",
       "assert_eq", "map",  "filter",   "reduce",   "any",

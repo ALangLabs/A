@@ -103,6 +103,20 @@ TypePtr Sema::checkBuiltinIo(const std::string& name, CallExpr& call) {
     return typeBool();
   }
 
+  if (name == "file_size") {
+    if (call.args.size() != 1) {
+      builtinArityError(name, call, 1);
+      inferCallArgTypes(call);
+      return typeInt(64, true);
+    }
+    TypePtr type = inferExpr(*call.args[0].value);
+    if (!unify(type, typeString())) {
+      reportMismatch(type, typeString(), call.args[0].value->span,
+                     "in the path passed to 'file_size'");
+    }
+    return typeInt(64, true);
+  }
+
   if (name == "list_dir") {
     if (call.args.size() != 1) {
       builtinArityError(name, call, 1);

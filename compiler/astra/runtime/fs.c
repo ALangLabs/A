@@ -50,6 +50,17 @@ static aval write_file_impl(aval pathv, aval textv, const char *mode, const char
 aval bi_write_file(uint64_t n, aval *argv) { want_args("write_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "wb", "write_file"); }
 aval bi_append_file(uint64_t n, aval *argv) { want_args("append_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "ab", "append_file"); }
 
+aval bi_file_size(uint64_t n, aval *argv) {
+    want_args("file_size", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+    FILE *f = fopen(path, "rb");
+    if (!f) return mkint_full(-1);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return mkint_full(-1); }
+    long sz = ftell(f);
+    fclose(f);
+    return mkint_full(sz < 0 ? -1 : (int64_t)sz);
+}
+
 aval bi_file_exists(uint64_t n, aval *argv) {
     want_args("file_exists", n, 1, 1);
     FILE *f = fopen(path_arg(argv[0], "path"), "rb");
