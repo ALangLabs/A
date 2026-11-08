@@ -1,6 +1,8 @@
 /* va_list.c - astra support for va_list on X86_64 */
 
-#if defined __x86_64__
+/* The SysV va_list layout below does not apply to Win64, where
+   __builtin_va_list is a plain char* (see include/astradefs.h). */
+#if defined __x86_64__ && !defined _WIN32
 
 /* Avoid include files, they may not be available when cross compiling */
 extern void abort(void);
