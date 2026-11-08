@@ -1,5 +1,5 @@
 # std.collections selftest — run: ./build/a test stdlib/std/collections/selftest.a
-from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter, defaultdict, namedtuple
+from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter, counter_of, defaultdict, namedtuple, user_list_of, user_dict_of, chain_map_of
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -97,3 +97,46 @@ fn test_ordereddict_popitem_default():
     (k2, v2) = od.popitem(false)  # explicit FIFO still works
     assert_eq(k2, "a")
     assert_eq(v2, 1)
+
+fn test_counter_of_and_eq():
+    c = counter_of(["a", "b", "a", "c", "a"])
+    assert_eq(c.count("a"), 3)
+    assert_eq(c.count("z"), 0)
+    assert_eq(c.get("b"), 1)
+    c2 = counter_of({"x": 2, "y": 1})
+    assert_eq(c2.count("x"), 2)
+    assert_eq(c2.count("y"), 1)
+    c3 = counter_of(["a", "b", "a", "c", "a"])
+    assert_eq(c.eq(c3), true)
+    c4 = counter_of(["a"])
+    assert_eq(c.eq(c4), false)
+
+fn test_defaultdict_factory_alias():
+    dd = defaultdict(_zero)
+    f = dd.default_factory()
+    assert_eq(f(), 0)
+
+fn test_userlist_iadd():
+    ul = user_list_of([1, 2])
+    r = ul.iadd([3])
+    assert_eq(ul.to_list(), [1, 2, 3])
+    assert_eq(r.to_list(), [1, 2, 3])
+
+fn test_userdict_ior():
+    ud = user_dict_of({"a": 1})
+    r = ud.ior({"b": 2})
+    assert_eq(ud.get("b"), 2)
+    assert_eq(r.get("a"), 1)
+
+fn test_chainmap_reversed():
+    cm = chain_map_of([{"a": 1}, {"b": 2}])
+    ks = cm.reversed()
+    assert_eq(ks[0], "b")
+    assert_eq(ks[1], "a")
+
+fn test_ordereddict_ior():
+    od = OrderedDict({})
+    od.set("a", 1)
+    r = od.ior({"b": 2})
+    assert_eq(od.get("b"), 2)
+    assert_eq(r.get("a"), 1)

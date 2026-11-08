@@ -176,3 +176,18 @@ fn test_module_level_other_fns():
     assert_eq(len(sh), 4)
     rr = random.randrange(5, 10, 2)
     assert(rr >= 5 and rr < 10)
+
+fn test_distributions():
+    random.seed(99)
+    g = random.gauss(0.0, 1.0)
+    assert(g > -10.0 and g < 10.0)
+    n = random.normalvariate(5.0, 2.0)
+    assert(n > -20.0 and n < 30.0)
+    e = random.expovariate(1.0)
+    assert(e >= 0.0)
+    # independent Random stream
+    rng = random.Random_new(3)
+    g2 = rng.gauss(0.0, 1.0)
+    assert(g2 > -10.0 and g2 < 10.0)
+    e2 = rng.expovariate(2.0)
+    assert(e2 >= 0.0)

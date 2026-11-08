@@ -24,3 +24,15 @@ fn test_template():
     # custom delimiter
     t4 = string.Template_new("hi %name%", "%")
     assert_eq(t4.substitute({"name": "z"}), "hi z%")
+
+fn test_translate_maketrans():
+    t = string.maketrans("abc", "xyz")
+    assert_eq(string.translate("abcdef", t), "xyzdef")
+    # delete via None value
+    d = {"l": None}
+    assert_eq(string.translate("hello", d), "heo")
+    # multi-char replacement value
+    r = {"a": "AAA"}
+    assert_eq(string.translate("cat", r), "cAAAt")
+    # empty table keeps string
+    assert_eq(string.translate("same", {}), "same")

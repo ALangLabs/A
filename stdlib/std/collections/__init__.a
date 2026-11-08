@@ -6,7 +6,7 @@
 from "list.a" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
 from "dict.a" import dict_get, dict_has
 from "namedtuple.a" import namedtuple, NamedTuple, NamedTupleSpec
-from "counter.a" import Counter
+from "counter.a" import Counter, counter_of
 from "ordereddict.a" import OrderedDict, ordered_dict_fromkeys
 from "defaultdict.a" import defaultdict, DefaultDict
 from "chainmap.a" import ChainMap, chain_map, chain_map_of

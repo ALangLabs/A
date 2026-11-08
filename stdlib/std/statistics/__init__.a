@@ -13,6 +13,7 @@
 
 import std:math
 import std:core
+import std:json
 
 fn _check_nonempty(data, name):
     if len(data) < 1:
@@ -168,6 +169,33 @@ fn multimode(data):
             seen[k] = true
             modes.append(x)
     return modes
+
+fn median_absolute_deviation(data, scale = "normal"):
+    """Median absolute deviation from the median (MAD).
+
+    scale is "normal" (default; multiplied by 1.4826 to estimate sigma
+    for normally distributed data), "mad" (raw median absolute
+    deviation, scale factor 1.0), or a number used directly as the
+    scale factor — matching CPython statistics.median_absolute_deviation.
+    """
+    _check_nonempty(data, "median_absolute_deviation")
+    med = median(data)
+    devs = []
+    for x in data:
+        d = _to_float(x) - med
+        if d < 0.0:
+            d = -d
+        devs.append(d)
+    mad = median(devs)
+    if str(scale) == "normal":
+        return mad * 1.4826
+    if str(scale) == "mad":
+        return mad
+    k = json.kind(scale)
+    if k == "int" or k == "float":
+        return mad * _to_float(scale)
+    core.panic("median_absolute_deviation scale must be 'normal', 'mad', or a number")
+    return mad
 
 fn _quantile_point(xs, h):
     # xs sorted ascending; h is a 1-based position in (0, len(xs)) possibly fractional.

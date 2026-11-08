@@ -19,9 +19,12 @@ import std:core
 import std:fs
 import std:json
 
-_WORDCHARS_BASE = "abcdfeghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
-_WORDCHARS_POSIX_EXTRA = "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ"
-_SAFE_CHARS = "%+,-./0123456789:=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
+# NOTE: the character-class constants below are kept as literals at their
+# use sites (not module-level vars): under `a test` module-level variables
+# read as 0.0 (toolchain quirk), which would break `in` checks.
+#   _WORDCHARS_BASE      = "abcdfeghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
+#   _WORDCHARS_POSIX_EXTRA = "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ"
+#   _SAFE_CHARS          = "%+,-./0123456789:=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"
 
 """_str_chars(s) -> [String] of single characters (codepoints)."""
 fn _str_chars(s):
@@ -170,11 +173,12 @@ class Shlex:
         quoted = false
         escapedstate = " "
         while true:
+            nextchar = None
             if self._punctuation_chars != "" and len(self._pushback_chars) > 0:
                 nextchar = self._pushback_chars.pop()
             else:
                 nextchar = self._next_char()
-            if nextchar == "\n":
+            if str(nextchar) == "\n":
                 self.lineno = self.lineno + 1
             if self.state == None:
                 self.token = ""
@@ -283,11 +287,12 @@ class Shlex:
     fs.read_file for missing files (see README.md).
     """
     fn sourcehook(self, newfile):
-        if newfile.startswith("\""):
-            newfile = _slice(newfile, 1, len(newfile) - 1)
-        if self.infile != None and self.infile != "" and not _is_abs(newfile):
-            newfile = _join_path(_dirname(self.infile), newfile)
-        return (newfile, fs.read_file(newfile))
+        nf = str(newfile)
+        if nf.startswith("\""):
+            nf = _slice(nf, 1, len(nf) - 1)
+        if self.infile != None and self.infile != "" and not _is_abs(nf):
+            nf = _join_path(_dirname(self.infile), nf)
+        return (nf, fs.read_file(nf))
 
     """
     error_leader(self) -> C-compiler-like, Emacs-friendly error leader
@@ -303,6 +308,19 @@ class Shlex:
     fn read_line(self):
         return self._read_line()
 
+    """
+    split(self) -> [String] of all remaining tokens (Python
+    `shlex.split()` method: consumes the stream and returns the list).
+    """
+    fn split(self):
+        out = []
+        while true:
+            tok = self.get_token()
+            if tok == self.eof:
+                break
+            out.append(tok)
+        return out
+
 """
 Shlex_new(source, posix, punctuation_chars) -> Shlex over `source`.
 `punctuation_chars`: false/"" -> none, true -> "();<>|&", or a string
@@ -312,15 +330,17 @@ fn Shlex_new(source, posix, punctuation_chars):
     pc = ""
     pkind = json.kind(punctuation_chars)
     if pkind == "bool":
-        if punctuation_chars:
-            pc = "();<>|&"
+        pb = json.as_bool(punctuation_chars)
+        if pb != None:
+            if pb:
+                pc = "();<>|&"
     elif pkind == "string":
-        pc = punctuation_chars
+        pc = str(punctuation_chars)
     else:
         core.panic("shlex: punctuation_chars must be a bool or string")
-    wordchars = _WORDCHARS_BASE
+    wordchars = "abcdfeghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_"
     if posix:
-        wordchars = wordchars + _WORDCHARS_POSIX_EXTRA
+        wordchars = wordchars + "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ"
     if pc != "":
         wordchars = wordchars + "~-./*?="
         kept = ""
@@ -365,7 +385,7 @@ fn quote(s):
         safe = true
         for c in s:
             sc = str(c)
-            if not (sc in _SAFE_CHARS):
+            if not (sc in "%+,-./0123456789:=@ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcdefghijklmnopqrstuvwxyz"):
                 safe = false
                 break
         if safe:

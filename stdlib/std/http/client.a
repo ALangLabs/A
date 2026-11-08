@@ -341,7 +341,7 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
             return BodyParts("", [])
         if want_bytes:
             return BodyParts("", _read_n(conn, n))
-        pre = b2s(conn._buf)
+        pre = conn._buf
         conn._buf = []
         (text, raw) = net.recv_body(conn.sock, n, pre)
         if text != None:
@@ -354,7 +354,7 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
     if want_bytes:
         return BodyParts("", _read_to_close(conn))
     # close-delimited: read straight into a flat buffer until EOF
-    pre = b2s(conn._buf)
+    pre = conn._buf
     conn._buf = []
     (text, raw) = net.recv_body_all(conn.sock, pre)
     if text != None:

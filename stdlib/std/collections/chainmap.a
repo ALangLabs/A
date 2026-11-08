@@ -147,6 +147,19 @@ class ChainMap:
         self._first().update(other)
 
     """
+    reversed() -> keys in reverse lookup order (Python
+    `reversed(cm)` iterates the mapping keys last-to-first).
+    """
+    fn reversed(self):
+        ks = self.keys()
+        out = []
+        i = len(ks) - 1
+        while i >= 0:
+            out.append(ks[i])
+            i = i - 1
+        return out
+
+    """
     copy() -> shallow copy: new ChainMap over the same map objects
     (Python `cm.copy()`).
     """

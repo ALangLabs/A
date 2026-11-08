@@ -51,4 +51,14 @@ fn main():
     test_quantiles()
     test_covariance_correlation()
     test_linear_regression()
+    test_median_absolute_deviation()
     print("statistics selftest OK")
+
+fn test_median_absolute_deviation():
+    # [1,2,3,4,5]: median 3, deviations [2,1,0,1,2], MAD 1
+    assert_close(statistics.median_absolute_deviation([1, 2, 3, 4, 5], "mad"), 1.0)
+    assert_close(statistics.median_absolute_deviation([1, 2, 3, 4, 5]), 1.0 * 1.4826)
+    # custom numeric scale
+    assert_close(statistics.median_absolute_deviation([1, 2, 3, 4, 5], 2), 2.0)
+    # even count: [1,2,3,4] median 2.5, devs [1.5,.5,.5,1.5] -> MAD 1.0
+    assert_close(statistics.median_absolute_deviation([1, 2, 3, 4], "mad"), 1.0)

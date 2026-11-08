@@ -126,3 +126,52 @@ fn test_filterfalse_tee_indexed():
     ix2 = iter.indexed(["a"], 5)
     assert_eq(ix2[0][0], 5)
     assert_eq(ix2[0][1], "a")
+
+fn _add(a, b):
+    return a + b
+
+fn test_starmap_cycle_count():
+    pairs = [[1, 2], [3, 4], [5, 6]]
+    assert_eq(iter.starmap(_add, pairs), [3, 7, 11])
+    assert_eq(iter.starmap(_add, []), [])
+    assert_eq(iter.cycle([1, 2], 3), [1, 2, 1, 2, 1, 2])
+    assert_eq(iter.cycle([], 4), [])
+    assert_eq(iter.cycle([9], 0), [])
+    assert_eq(iter.count_range(0, 1, 4), [0, 1, 2, 3])
+    assert_eq(iter.count_range(5, 2, 3), [5, 7, 9])
+    assert_eq(iter.count_range(10, -3, 3), [10, 7, 4])
+
+fn test_zip_all():
+    lists = []
+    lists.append([1, 2, 3])
+    lists.append(["a", "b"])
+    lists.append([true, false, true])
+    z = iter.zip_all(lists)
+    assert_eq(len(z), 2)
+    assert_eq(z[0][0], 1)
+    assert_eq(z[0][1], "a")
+    assert_eq(z[0][2], true)
+    assert_eq(z[1][0], 2)
+    assert_eq(z[1][1], "b")
+    assert_eq(z[1][2], false)
+    assert_eq(iter.zip_all([]), [])
+    zshort = []
+    zshort.append([])
+    zshort.append([1])
+    assert_eq(iter.zip_all(zshort), [])
+    lists2 = []
+    lists2.append([1, 2])
+    lists2.append(["a"])
+    lists2.append([7, 8, 9])
+    zl = iter.zip_longest_all(lists2, 0)
+    assert_eq(len(zl), 3)
+    assert_eq(zl[0][0], 1)
+    assert_eq(zl[0][1], "a")
+    assert_eq(zl[0][2], 7)
+    assert_eq(zl[1][0], 2)
+    assert_eq(zl[1][1], 0)
+    assert_eq(zl[1][2], 8)
+    assert_eq(zl[2][0], 0)
+    assert_eq(zl[2][1], 0)
+    assert_eq(zl[2][2], 9)
+    assert_eq(iter.zip_longest_all([], []), [])

@@ -41,6 +41,11 @@ class UserList<T>:
     fn extend(self, xs: [T]):
         self.data.extend(xs)
 
+    """iadd(xs) -> extend in place and return self (Python `ul += xs`)."""
+    fn iadd(self, xs: [T]):
+        self.extend(xs)
+        return self
+
     fn insert(self, i, v):
         self.data.insert(i, v)
 

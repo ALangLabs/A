@@ -1,0 +1,26 @@
+# std.shlex selftest — run: ./build/a test stdlib/std/shlex/selftest.a
+from "std/shlex/__init__.a" import Shlex, Shlex_new, split, quote, join
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_split_and_quote():
+    assert_eq(split("a b  c", false, true), ["a", "b", "c"])
+    assert_eq(split("x 'y z' w", false, true), ["x", "y z", "w"])
+    assert_eq(quote("plain"), "plain")
+    assert_eq(quote(""), "''")
+    assert_eq(quote("a b"), "'a b'")
+    assert_eq(join(["ls", "-l", "a b"]), "ls -l 'a b'")
+
+fn test_shlex_instance_split():
+    lx = Shlex_new("one two three", true, false)
+    toks = lx.split()
+    assert_eq(len(toks), 3)
+    assert_eq(toks[0], "one")
+    assert_eq(toks[2], "three")
+    # stream is consumed: a second split yields nothing
+    assert_eq(len(lx.split()), 0)
+
+test_split_and_quote()
+test_shlex_instance_split()
+print("shlex selftest ok")

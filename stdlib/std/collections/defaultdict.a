@@ -98,6 +98,10 @@ class DefaultDict<T>:
         self.data.pop(k)
         return (k, v)
 
+    """default_factory() -> the stored factory (Python `.default_factory`)."""
+    fn default_factory(self):
+        return self.factory
+
     fn contains(self, k):
         return k in self.data
 

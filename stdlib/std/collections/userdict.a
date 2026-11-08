@@ -90,6 +90,11 @@ class UserDict:
     fn update(self, other):
         self.data.update(other)
 
+    """ior(other) -> update in place and return self (Python `ud |= other`)."""
+    fn ior(self, other):
+        self.update(other)
+        return self
+
     fn clear(self):
         self.data.clear()
 

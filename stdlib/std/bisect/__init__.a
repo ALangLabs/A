@@ -1,0 +1,96 @@
+# std.bisect — port of Python Lib/bisect.py (pure-A subset).
+#
+# Binary-search insertion points into a sorted array, plus the insort
+# helpers that insert while keeping the array sorted.
+#
+# Deviations from Python:
+#   * Works on plain A arrays `[T]`; there are no C accelerator variants.
+#   * `lo`/`hi` are plain i64 bounds; `hi = -1` (the default) means
+#     "to the end of the array" — Python uses `hi = len(a)` via None,
+#     which A's positional defaults cannot express for a length that
+#     varies per call. Pass an explicit `hi` for a sub-range.
+#   * Python raises no errors here either; out-of-range lo/hi are clamped
+#     to the array bounds like CPython's slice semantics.
+#   * `bisect`/`bisect_right` are the same function (Python aliases them);
+#     both names are exported.
+#   * `bisect_left`/`bisect_right` return i64 indices; `insort_*` mutate
+#     the array in place and return nothing (Python returns None too).
+#   * `bisort` returns a NEW sorted array (Python returns a sorted copy
+#     via `sorted`-equivalent insertion; the input is not mutated).
+
+"""
+_clamp_bounds(n, lo, hi) -> (lo', hi') with lo/hi clamped into [0, n].
+"""
+fn _clamp_bounds(n, lo, hi):
+    l = lo
+    if l < 0:
+        l = 0
+    if l > n:
+        l = n
+    h = hi
+    if h < 0 or h > n:
+        h = n
+    return (l, h)
+
+"""
+bisect_left(xs, x, lo = 0, hi = -1) -> leftmost insertion index for x.
+All elements before the result compare < x (or are equal and were
+inserted earlier); i.e. xs[i] < x for i < result <= xs[i].
+"""
+fn bisect_left(xs, x, lo = 0, hi = -1):
+    n = len(xs)
+    (l, h) = _clamp_bounds(n, lo, hi)
+    while l < h:
+        mid = l + (h - l) / 2
+        if xs[mid] < x:
+            l = mid + 1
+        else:
+            h = mid
+    return l
+
+"""
+bisect_right(xs, x, lo = 0, hi = -1) -> rightmost insertion index for x.
+xs[i] <= x for i < result <= xs[i].
+"""
+fn bisect_right(xs, x, lo = 0, hi = -1):
+    n = len(xs)
+    (l, h) = _clamp_bounds(n, lo, hi)
+    while l < h:
+        mid = l + (h - l) / 2
+        if x < xs[mid]:
+            h = mid
+        else:
+            l = mid + 1
+    return l
+
+"""bisect(xs, x, lo = 0, hi = -1) -> alias of bisect_right (Python parity)."""
+fn bisect(xs, x, lo = 0, hi = -1):
+    return bisect_right(xs, x, lo, hi)
+
+"""
+insort_left(xs, x, lo = 0, hi = -1) -> insert x before any equal entries,
+keeping xs sorted. Mutates xs; returns nothing.
+"""
+fn insort_left(xs, x, lo = 0, hi = -1):
+    xs.insert(bisect_left(xs, x, lo, hi), x)
+
+"""
+insort_right(xs, x, lo = 0, hi = -1) -> insert x after any equal entries,
+keeping xs sorted. Mutates xs; returns nothing.
+"""
+fn insort_right(xs, x, lo = 0, hi = -1):
+    xs.insert(bisect_right(xs, x, lo, hi), x)
+
+"""insort(xs, x, lo = 0, hi = -1) -> alias of insort_right (Python parity)."""
+fn insort(xs, x, lo = 0, hi = -1):
+    insort_right(xs, x, lo, hi)
+
+"""
+bisort(xs) -> NEW array with xs's elements sorted (stable insertion sort
+via insort_right — Python 3.10+ `bisect.bisort`). Does not mutate xs.
+"""
+fn bisort(xs):
+    out = []
+    for x in xs:
+        insort_right(out, x)
+    return out

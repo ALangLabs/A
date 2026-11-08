@@ -272,6 +272,38 @@ class Random:
         lo = _next31(self)
         return hi * 2147483648 + lo
 
+    """
+    gauss(self, mu, sigma) -> float; normal distribution via the
+    Box-Muller transform (Python random.gauss; no cached second value —
+    each call consumes two uniforms, a documented deviation).
+    """
+    fn gauss(self, mu, sigma):
+        u1 = self.random()
+        while u1 <= 0.0:
+            u1 = self.random()
+        u2 = self.random()
+        r = math.sqrt(-2.0 * math.log(u1))
+        theta = 6.283185307179586 * u2
+        m = mu + 0.0
+        s = sigma + 0.0
+        return m + s * r * math.cos(theta)
+
+    """normalvariate(self, mu, sigma) -> alias of gauss (Python parity)."""
+    fn normalvariate(self, mu, sigma):
+        return self.gauss(mu, sigma)
+
+    """
+    expovariate(self, lambd) -> float; exponential distribution with
+    rate parameter lambd (Python random.expovariate).
+    """
+    fn expovariate(self, lambd):
+        if lambd <= 0.0:
+            core.panic("expovariate: lambd must be positive")
+        u = self.random()
+        while u >= 1.0:
+            u = self.random()
+        return -math.log(1.0 - u) / (lambd + 0.0)
+
     """randbytes(self, n) -> [i64] of n bytes, each in 0..255."""
     fn randbytes(self, n):
         out = []
@@ -406,5 +438,26 @@ fn getrandbits(k):
 fn randbytes(n):
     r = _load()
     v = r.randbytes(n)
+    _store(r)
+    return v
+
+"""gauss(mu, sigma) -> normally distributed float (global stream)."""
+fn gauss(mu, sigma):
+    r = _load()
+    v = r.gauss(mu, sigma)
+    _store(r)
+    return v
+
+"""normalvariate(mu, sigma) -> alias of gauss (global stream)."""
+fn normalvariate(mu, sigma):
+    r = _load()
+    v = r.normalvariate(mu, sigma)
+    _store(r)
+    return v
+
+"""expovariate(lambd) -> exponentially distributed float (global stream)."""
+fn expovariate(lambd):
+    r = _load()
+    v = r.expovariate(lambd)
     _store(r)
     return v

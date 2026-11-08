@@ -2,4 +2,4 @@
 #
 # Pure-A subset of Python 3.14 `Lib/pprint.py`. See README.md for the
 # coverage matrix and semantic deviations.
-from "pretty.a" import PrettyPrinter, PrettyPrinter_new, SafeRepr, Buf, pprint, pformat, saferepr, isreadable, isrecursive, pp
+from "pretty.a" import PrettyPrinter, PrettyPrinter_new, SafeRepr, Buf, pprint, pformat, saferepr, isreadable, isrecursive, pp, pformat_full

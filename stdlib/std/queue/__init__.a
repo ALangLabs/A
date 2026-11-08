@@ -1,0 +1,118 @@
+# std.queue — port of Python Lib/queue.py (pure-A subset).
+#
+# A FIFO queue with an optional size bound. Python's Queue is thread-safe
+# and blocks on put/get when full/empty; A has no blocking primitives in
+# this port, so `put`/`get` PANIC on a full/empty queue (the
+# `put_nowait`/`get_nowait` behaviour) and `join` busy-waits with
+# `time.sleep(1)` ms between polls. Use `try_put`/`try_get` for the
+# non-blocking Optional-returning variants (Python's `put_nowait` /
+# `get_nowait` with `queue.Empty`/`queue.Full` mapped to None).
+#
+# Deviations:
+#   * `maxsize <= 0` means unbounded (Python `maxsize=0`).
+#   * `task_done`/`join` track the unfinished-task counter exactly like
+#     Python: every successful `put` increments it, `task_done` decrements
+#     (panics below zero like Python's ValueError).
+#   * `queue.Empty`/`queue.Full` exceptions -> core.panic / None returns.
+import std:core
+import std:time
+
+"""
+Queue<T>: bounded FIFO queue.
+`items` is public for inspection; prefer the methods.
+"""
+class Queue<T>:
+    items: [T]
+    maxsize: i64
+    unfinished: i64
+
+    """_check_open / capacity helpers."""
+    fn full(self):
+        return self.maxsize > 0 and len(self.items) >= self.maxsize
+
+    """empty(self) -> true when no items are waiting."""
+    fn empty(self):
+        return len(self.items) == 0
+
+    """qsize(self) -> number of waiting items (Python `qsize()`)."""
+    fn qsize(self):
+        return len(self.items)
+
+    """size(self) -> alias of qsize."""
+    fn size(self):
+        return self.qsize()
+
+    """
+    put(self, item) -> append item and count one unfinished task;
+    panics when the queue is full (Python `put_nowait` -> queue.Full).
+    """
+    fn put(self, item):
+        if self.full():
+            core.panic("Queue is full")
+        self.items.append(item)
+        self.unfinished = self.unfinished + 1
+
+    """
+    try_put(self, item) -> true when the item was queued, false when
+    the queue is full (non-blocking; never panics on capacity).
+    """
+    fn try_put(self, item):
+        if self.full():
+            return false
+        self.put(item)
+        return true
+
+    """
+    get(self) -> remove and return the oldest item; panics when empty
+    (Python `get_nowait` -> queue.Empty).
+    """
+    fn get(self) -> T:
+        if len(self.items) == 0:
+            core.panic("Queue is empty")
+        return self.items.pop(0)
+
+    """
+    try_get(self) -> oldest item or None when empty (non-blocking).
+    """
+    fn try_get(self):
+        if len(self.items) == 0:
+            return None
+        return self.items.pop(0)
+
+    """peek(self) -> oldest item without removing; None when empty."""
+    fn peek(self):
+        if len(self.items) == 0:
+            return None
+        return self.items[0]
+
+    """
+    task_done(self) -> mark one unfinished task complete; panics when
+    the counter would go negative (Python ValueError).
+    """
+    fn task_done(self):
+        if self.unfinished <= 0:
+            core.panic("task_done() called too many times")
+        self.unfinished = self.unfinished - 1
+
+    """
+    join(self) -> block until every queued item has had task_done()
+    called (Python `join`). Busy-waits on a 1 ms sleep.
+    """
+    fn join(self):
+        while self.unfinished > 0:
+            time.sleep(1)
+
+    """clear(self) -> drop all waiting items (unfinished count kept)."""
+    fn clear(self):
+        self.items = []
+
+    """to_list(self) -> copy of the waiting items, oldest first."""
+    fn to_list(self):
+        return self.items.copy()
+
+"""
+queue_new(maxsize = 0) -> empty unbounded (or bounded when maxsize > 0)
+Queue. `maxsize <= 0` means infinite capacity.
+"""
+fn queue_new(maxsize = 0):
+    return Queue([], maxsize, 0)

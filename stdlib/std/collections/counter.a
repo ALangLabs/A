@@ -246,3 +246,44 @@ class Counter:
             if k not in self.counts:
                 out.counts[k] = other.counts[k]
         return out
+
+    """
+    count(k) -> occurrences of k; alias of get (Python `c[k]` returns 0
+    for missing keys via __missing__).
+    """
+    fn count(self, k):
+        return self.get(k)
+
+    """
+    eq(other) -> true when both counters have identical counts
+    (Python Counter.__eq__ compares as mappings).
+    """
+    fn eq(self, other):
+        if len(self.counts) != len(other.counts):
+            return false
+        for k in self.counts:
+            if k not in other.counts:
+                return false
+            if self.counts[k] != other.counts[k]:
+                return false
+        return true
+
+"""
+counter_of(xs) -> Counter built from an iterable: an array counts each
+element once (Python `Counter(iterable)`), a map counts its values as
+multiplicities (Python `Counter(mapping)`). For another Counter pass
+`other.counts` or use update_counter.
+"""
+fn counter_of(xs):
+    c = Counter({})
+    kind = json.kind(xs)
+    if kind == "object":
+        m = json.as_map(xs)!
+        for k in m:
+            c._bump(k, json.as_int(m[k])!)
+    elif kind == "array":
+        for x in json.as_array(xs)!:
+            c._bump(x, 1)
+    else:
+        core.panic("counter_of expects an array or map")
+    return c

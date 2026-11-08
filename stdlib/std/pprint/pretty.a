@@ -458,7 +458,7 @@ class PrettyPrinter:
             if b:
                 return SafeRepr("True", true, false)
             return SafeRepr("False", true, false)
-        if kind == "number":
+        if kind == "int" or kind == "float" or kind == "number":
             if json.as_int(object) != None:
                 n = (json.as_int(object))!
                 if self.underscore_numbers:
@@ -614,3 +614,13 @@ fn isrecursive(object):
 """pp(object) -> pprint with sort_dicts=false (Python pprint.pp)."""
 fn pp(object):
     _default_printer(false).pprint(object)
+
+"""
+pformat_full(object, indent, width, depth, compact, sort_dicts,
+underscore_numbers) -> pretty-printed string with the full Python
+pformat parameter set exposed positionally (A has no keyword args).
+depth <= 0 means unlimited (Python depth=None).
+"""
+fn pformat_full(object, indent, width, depth, compact, sort_dicts, underscore_numbers):
+    p = PrettyPrinter_new(indent, width, depth, compact, sort_dicts, underscore_numbers)
+    return p.pformat(object)

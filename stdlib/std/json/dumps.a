@@ -1,0 +1,227 @@
+# std.json.dumps — Python `json.dumps`/`json.loads` port (pure A).
+#
+# This file lives next to (not inside) `__init__.a` because `import json`
+# inside the package `__init__` would resolve to the package itself
+# (self-import -> codegen failure). Bare `import json` here binds the
+# *native* module (parse/stringify/pretty/is_valid/get/at/len/has/keys/
+# kind/as_*).
+#
+# `dumps(value, indent = -1, sort_keys = false, separators = None)`:
+#   * indent < 0  -> compact single-line output with separators
+#     (", ", ": ") — matching Python's default `json.dumps` spacing.
+#   * indent >= 0 -> pretty-printed with `indent` spaces per level and
+#     separators (",", ": ") — matching Python's `indent=` behaviour.
+#   * sort_keys   -> object keys sorted when every key is a string
+#     (non-string keys keep insertion order, same rule as std.pprint).
+#   * separators  -> optional [item_separator, key_separator] pair that
+#     overrides the defaults.
+#   * floats that are NaN/Infinity serialize as null (documented
+#     deviation: Python emits NaN/Infinity literals which are not valid
+#     strict JSON).
+#   * tuples/sets serialize as arrays; dict keys that are not strings
+#     are converted with str() (Python converts int keys too).
+#   * ensure_ascii is not supported: non-ASCII passes through as UTF-8.
+#
+# `loads(text)` -> parsed value; panics on invalid JSON (Python raises
+# JSONDecodeError — A has no exceptions).
+# NOTE: `import std:json` here would resolve to *this package* (self
+# import -> codegen failure); bare `import json` binds the native module.
+import json
+import std:core
+import std:bytes
+
+"""
+_jnum(x) -> JSON number text: ints via str(), floats via str() with
+non-finite values mapped to null.
+"""
+fn _jnum(x):
+    i = json.as_int(x)
+    if i == None:
+        f = json.as_float(x)
+        if f == None:
+            return str(x)
+        s = str(f!)
+        if s.contains("nan") or s.contains("NaN") or s.contains("inf") or s.contains("Inf"):
+            return "null"
+        return s
+    return str(i!)
+
+"""_jhex(n) -> 4-digit lowercase hex of n (0 <= n < 65536)."""
+fn _jhex(n):
+    digits = "0123456789abcdef"
+    out = ""
+    i = 0
+    while i < 4:
+        d = n % 16
+        out = str(digits[d]) + out
+        n = n / 16
+        i = i + 1
+    return out
+
+"""
+_jescape(s) -> JSON-quoted string: escapes '"', '\\', \n, \r, \t and
+other characters below U+0020 as \uXXXX (detected via `ch < " "`, the
+same single-char ordering used by std.string).
+"""
+fn _jescape(s):
+    out = "\""
+    cs = s.chars()
+    i = 0
+    while i < len(cs):
+        ch = str(cs[i])
+        if ch == "\"":
+            out = out + "\\\""
+        elif ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        elif ch < " ":
+            # control character: emit \u00XX (all are < 0x20 -> 2 hex
+            # digits suffice; _jhex pads to 4 like Python's \uXXXX)
+            out = out + "\\u00" + _jhex(_ord8(ch))
+        else:
+            out = out + ch
+        i = i + 1
+    out = out + "\""
+    return out
+
+# _ord8(ch) -> code point of a single char as i64, for the \u00XX escape.
+# Uses std.bytes.ord (UTF-8 codepoint decode); only called for chars
+# below U+0020 where the result is exact.
+fn _ord8(ch):
+    o = bytes.ord(ch)
+    if o == None:
+        return 0
+    return o!
+
+"""
+_key_text(k) -> JSON object key text: the string itself when k is a
+string, str(k) otherwise (Python stringifies int/float/bool keys).
+"""
+fn _key_text(k):
+    k2 = json.as_str(k)
+    if k2 == None:
+        return str(k)
+    return k2!
+
+"""_all_str_keys(ks) -> true when every map key has json.kind "string"."""
+fn _all_str_keys(ks):
+    for k in ks:
+        if json.kind(k) != "string":
+            return false
+    return true
+
+"""_pad(n) -> n spaces (indent unit builder)."""
+fn _pad(n):
+    out = ""
+    i = 0
+    while i < n:
+        out = out + " "
+        i = i + 1
+    return out
+
+"""
+_dump(value, indent, sort_keys, item_sep, key_sep, depth) -> JSON text.
+indent < 0 -> single line; indent >= 0 -> newline + (depth+1)*indent
+spaces before each element and depth*indent before the closing
+bracket (Python's indent semantics).
+"""
+fn _dump(value, indent, sort_keys, item_sep, key_sep, depth):
+    kind = json.kind(value)
+    if kind == "null":
+        return "null"
+    if kind == "bool":
+        if json.as_bool(value)!:
+            return "true"
+        return "false"
+    if kind == "int" or kind == "float" or kind == "number":
+        return _jnum(value)
+    if kind == "string":
+        s = json.as_str(value)
+        if s == None:
+            return _jescape(str(value))
+        return _jescape(s!)
+    if kind == "array":
+        arr = json.as_array(value)
+        if arr == None:
+            core.panic("json.dumps: unserializable array value")
+        xs = arr!
+        n = len(xs)
+        if n == 0:
+            return "[]"
+        if indent < 0:
+            parts = []
+            for x in xs:
+                parts.append(_dump(x, indent, sort_keys, item_sep, key_sep, depth))
+            return "[" + item_sep.join(parts) + "]"
+        pad_child = _pad(indent * (depth + 1))
+        pad_self = _pad(indent * depth)
+        parts = []
+        for x in xs:
+            parts.append("\n" + pad_child + _dump(x, indent, sort_keys, item_sep, key_sep, depth + 1))
+        return "[" + item_sep.join(parts) + "\n" + pad_self + "]"
+    if kind == "object":
+        mm = json.as_map(value)
+        if mm == None:
+            core.panic("json.dumps: unserializable object value")
+        m = mm!
+        ks = []
+        for k in m:
+            ks.append(k)
+        all_str = _all_str_keys(ks)
+        use_sorted = sort_keys and all_str
+        if use_sorted:
+            sks = []
+            for k in ks:
+                sks.append(_key_text(k))
+            sks.sort()
+            ks = sks
+        n = len(ks)
+        if n == 0:
+            return "\{\}"
+        if indent < 0:
+            parts = []
+            for k in ks:
+                # sorted branch: ks holds the key strings themselves
+                kk = _key_text(k)
+                parts.append(_jescape(kk) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth))
+            return "\{" + item_sep.join(parts) + "\}"
+        pad_child = _pad(indent * (depth + 1))
+        pad_self = _pad(indent * depth)
+        parts = []
+        for k in ks:
+            kk = _key_text(k)
+            parts.append("\n" + pad_child + _jescape(kk) + key_sep + _dump(m[k], indent, sort_keys, item_sep, key_sep, depth + 1))
+        return "\{" + item_sep.join(parts) + "\n" + pad_self + "\}"
+    core.panic("json.dumps: value of kind '" + kind + "' is not serializable")
+    return ""
+
+"""
+dumps(value, indent = -1, sort_keys = false, separators = None) -> JSON
+string (Python json.dumps). `separators` is an optional [item_sep,
+key_sep] pair overriding the defaults (", "/": " compact,
+","/": " when indent >= 0).
+"""
+fn dumps(value, indent = -1, sort_keys = false, separators = None):
+    item_sep = ", "
+    key_sep = ": "
+    if indent >= 0:
+        item_sep = ","
+        key_sep = ": "
+    if json.kind(separators) == "array":
+        a = (json.as_array(separators))!
+        if len(a) >= 2:
+            item_sep = str(a[0])
+            key_sep = str(a[1])
+    return _dump(value, indent, sort_keys, item_sep, key_sep, 0)
+
+"""
+loads(text) -> parsed JSON value (Python json.loads). Panics on invalid
+JSON (Python raises JSONDecodeError).
+"""
+fn loads(text):
+    return json.parse(text)

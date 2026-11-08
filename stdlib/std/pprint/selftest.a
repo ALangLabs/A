@@ -1,6 +1,6 @@
 # std.pprint selftest — PrettyPrinter_new + module-level helpers.
 # Run: ./build/a test stdlib/std/pprint/selftest.a
-from "pretty.a" import PrettyPrinter_new, PrettyPrinter, pprint, pformat, saferepr, isreadable, isrecursive, pp
+from "pretty.a" import PrettyPrinter_new, PrettyPrinter, pprint, pformat, saferepr, isreadable, isrecursive, pp, pformat_full
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -44,3 +44,13 @@ fn main():
     test_sort_dicts()
     test_raw_constructor_still_works()
     print("std.pprint selftest: all tests passed")
+
+fn test_pformat_full():
+    # pformat_full exposes the full parameter set positionally
+    s = pformat_full({"b": 1, "a": 2}, 1, 200, 0, false, false, false)
+    bi = s.find("'b'")
+    ai = s.find("'a'")
+    assert_true(bi >= 0 and ai >= 0 and bi < ai)
+    # underscore_numbers honoured for bare ints
+    n = pformat_full(1234567, 1, 200, 0, false, true, true)
+    assert_eq(n, "1_234_567")

@@ -237,3 +237,59 @@ class Template:
 """Template_new(template, delimiter = "$") -> Template."""
 fn Template_new(template, delimiter = "$"):
     return Template(str(template), str(delimiter))
+
+# --- str.translate / str.maketrans port ---------------------------------------
+#
+# Python `s.translate(table)` maps each character through `table`, a dict
+# produced by `str.maketrans` (or any mapping ord->ord/str/None). A map
+# keys are strings, so tables here key single-character strings:
+#
+#   t = string.maketrans("abc", "xyz")     # a->x, b->y, c->z
+#   s.translate(t)  ->  string.translate(s, t)
+#   string.translate(s, {"a": None})       # delete 'a'
+#
+# Deviations:
+#   * Keys/values are single-character strings (not ordinals); a value of
+#     None deletes the character, any other string replaces it.
+#   * maketrans(x, y) requires equal-length strings (Python allows the
+#     two-arg form only for equal lengths too).
+#   * Characters not present in the table pass through unchanged
+#     (Python: missing keys are kept).
+
+"""
+maketrans(frm, to) -> {char: char} translation table for equal-length
+strings (Python str.maketrans(x, y)).
+"""
+fn maketrans(frm, to):
+    a = str(frm)
+    b = str(to)
+    if len(a) != len(b):
+        core.panic("maketrans: 'from' and 'to' strings must have equal length")
+    table = {}
+    i = 0
+    while i < len(a):
+        table[str(a[i])] = str(b[i])
+        i = i + 1
+    return table
+
+"""
+translate(s, table) -> s with each character replaced per `table`
+({single-char-string: replacement-or-None}); absent keys are kept and
+None values delete the character (Python str.translate).
+"""
+fn translate(s, table):
+    src = str(s)
+    out = ""
+    i = 0
+    while i < len(src):
+        ch = str(src[i])
+        if ch in table:
+            v = table[ch]
+            if v == None:
+                i = i + 1
+                continue
+            out = out + str(v)
+        else:
+            out = out + ch
+        i = i + 1
+    return out

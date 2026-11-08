@@ -1,0 +1,62 @@
+# std.queue selftest — run: ./build/a test stdlib/std/queue/selftest.a
+from "std/queue/__init__.a" import queue_new, Queue
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn test_fifo():
+    q = queue_new()
+    assert_true(q.empty())
+    q.put(1)
+    q.put(2)
+    q.put(3)
+    assert_eq(q.qsize(), 3)
+    assert_eq(q.get(), 1)
+    assert_eq(q.get(), 2)
+    assert_eq(q.peek(), 3)
+    assert_eq(q.try_get(), 3)
+    assert_eq(q.try_get(), None)
+
+fn test_bounded():
+    q = queue_new(2)
+    assert_true(q.try_put("a"))
+    assert_true(q.try_put("b"))
+    assert_eq(q.try_put("c"), false)
+    assert_eq(q.qsize(), 2)
+    q.get()
+    assert_true(q.try_put("c"))
+    assert_eq(q.to_list(), ["b", "c"])
+
+fn test_task_done_join():
+    q = queue_new()
+    q.put("job")
+    q.put("job2")
+    q.task_done()
+    q.get()
+    q.task_done()
+    q.get()
+    q.join()  # returns immediately once unfinished == 0
+
+fn test_unfinished():
+    q = queue_new()
+    q.put(1)
+    q.try_get()
+    # unfinished stays 1 until task_done (Python semantics)
+    q.task_done()
+    q.join()
+
+fn test_generic():
+    q = Queue([1.5], 0, 0)
+    q.put(2.5)
+    assert_eq(q.get(), 1.5)
+    assert_eq(q.get(), 2.5)
+
+test_fifo()
+test_bounded()
+test_task_done_join()
+test_unfinished()
+test_generic()
+print("queue selftest ok")
