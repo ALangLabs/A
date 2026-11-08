@@ -1,6 +1,7 @@
 add_library(a_optimization STATIC
     optimizer_constfold.cpp
     optimizer_dce.cpp
+    optimizer_fma.cpp
     optimizer_inline.cpp
     optimizer_licm.cpp
     optimizer_level.cpp

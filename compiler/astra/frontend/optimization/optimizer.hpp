@@ -28,6 +28,7 @@ struct OptimizationStats {
   int operationsSimplified = 0;
   int branchesFolded = 0;
   int deadStoresEliminated = 0;
+  int fmaFused = 0;
 
   void merge(const OptimizationStats& other) {
     constantsFolded += other.constantsFolded;
@@ -40,13 +41,14 @@ struct OptimizationStats {
     operationsSimplified += other.operationsSimplified;
     branchesFolded += other.branchesFolded;
     deadStoresEliminated += other.deadStoresEliminated;
+    fmaFused += other.fmaFused;
   }
 
   bool isClean() const {
     return constantsFolded == 0 && deadInstructions == 0 && deadBlocks == 0 &&
            functionsInlined == 0 && loopsHoisted == 0 && copiesPropagated == 0 &&
            subexpressionsEliminated == 0 && operationsSimplified == 0 &&
-           branchesFolded == 0 && deadStoresEliminated == 0;
+           branchesFolded == 0 && deadStoresEliminated == 0 && fmaFused == 0;
   }
 };
 
@@ -91,6 +93,11 @@ OptimizationStats instCombine(Program& program);
 // constant under the propagated facts, and folds instructions plus
 // branch-on-constant terminators in the surviving reachable region.
 OptimizationStats conditionalConstantPropagation(Program& program);
+
+// LLVM contraction lite (Mojo/dot-product kernel pattern): rewrites a
+// single-use `a*b + c` floating-point mul+add pair into an Fma instruction
+// so the multiply-add rounds once (single-rounding fused multiply-add).
+OptimizationStats fuseFma(Program& program);
 
 // Runs all passes until the program stops changing (bounded).
 OptimizationStats runAll(Program& program);

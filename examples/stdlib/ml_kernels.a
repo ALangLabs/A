@@ -1,0 +1,40 @@
+# Native ML kernels: blocked matmul, stable softmax, fused attention.
+# These are Mojo/MAX-style fused C kernels (fma hot loops, cache tiling)
+# behind the linalg_* builtins, not pure-A loops. See docs/wiki/kernels.md.
+import std:core
+import std:math
+import std:time
+
+# Dense matmul: C[i] = A[i][:] . B[:, :] for flat row-major storage.
+a = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+b = [7.0, 8.0, 9.0, 10.0, 11.0, 12.0]
+c = matmul(a, b, 2, 3, 2)
+print(c)
+core.assert(c[0] == 58.0 and c[3] == 154.0)
+
+# Numerically stable softmax: huge logits cannot overflow.
+s = softmax([1000.0, 999.0])
+print(s)
+core.assert(s[0] > 0.7 and s[1] < 0.3)
+
+# Fused single-query attention: scores + softmax + weighted sum, no
+# intermediate lists.
+o = attention([1.0, 0.0], [1.0, 0.0, 0.0, 1.0], [1.0, 2.0, 3.0, 4.0], 2, 2, 2)
+print(o)
+core.assert(math.abs(o[0] - 1.6604769013466862) < 0.000001)
+
+# Throughput sanity: a 256x256 blocked matmul over flat storage.
+m = 256
+k = 256
+n = 256
+x = []
+y = []
+for i in 0..(m * k):
+    x.append(1.0)
+for i in 0..(k * n):
+    y.append(2.0)
+t0 = time.now()
+r = matmul(x, y, m, k, n)
+t1 = time.now()
+print(r[0], r[m * n - 1], t1 - t0)
+core.assert(r[0] == 512.0)

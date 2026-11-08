@@ -334,6 +334,38 @@ print(y)
   check(!contains(main, "branch"), "sccp: no conditional branch remains");
 }
 
+void testFmaFusion() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn linear(a: f64, b: f64, c: f64) -> f64:
+    return a * b + c
+print(linear(1.5, 2.0, 3.0))
+)",
+                                 pipeline);
+  check(ok, "fma: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::fuseFma(pipeline.program);
+  check(stats.fmaFused >= 1, "fma: a*b + c fused into fma");
+  const std::string fn = functionByName(pipeline.program, "linear");
+  check(contains(fn, "fma"), "fma: fused instruction is printed as fma");
+}
+
+void testFmaFusionSkipsInts() {
+  Pipeline pipeline;
+  const bool ok = buildProgram(R"(
+fn iaddmul(a: int, b: int, c: int) -> int:
+    return a * b + c
+print(iaddmul(2, 3, 4))
+)",
+                                 pipeline);
+  check(ok, "fma-int: program analyzes");
+  if (!ok) return;
+
+  const auto stats = a::ir::fuseFma(pipeline.program);
+  check(stats.fmaFused == 0, "fma-int: integer multiply-add is never fused");
+}
+
 }  // namespace
 
 int main() {
@@ -351,6 +383,8 @@ int main() {
   testDeadStoreElimination();
   testOptLevels();
   testRunAll();
+  testFmaFusion();
+  testFmaFusionSkipsInts();
 
   if (failures == 0) {
     std::cout << "ir tests passed\n";

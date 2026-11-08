@@ -57,6 +57,7 @@ const char* opName(Op op) {
     case Op::ExtractValue: return "extractvalue";
     case Op::InsertValue: return "insertvalue";
     case Op::Freeze: return "freeze";
+    case Op::Fma: return "fma";
     case Op::Opaque: return "opaque";
   }
   return "?";

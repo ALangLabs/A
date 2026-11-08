@@ -12,6 +12,7 @@ OptimizationStats runAll(Program& program) {
     pass.merge(commonSubexpressionElimination(program));
     pass.merge(branchFolding(program));
     pass.merge(conditionalConstantPropagation(program));
+    pass.merge(fuseFma(program));
     pass.merge(deadCodeElimination(program));
     pass.merge(inlineFunctions(program));
     pass.merge(constantFold(program));
@@ -40,6 +41,7 @@ OptimizationStats runOptPipeline(Program& program, OptLevel level) {
       total.merge(commonSubexpressionElimination(program));
       total.merge(branchFolding(program));
       total.merge(conditionalConstantPropagation(program));
+      total.merge(fuseFma(program));
       total.merge(deadCodeElimination(program));
       return total;
     }

@@ -45,6 +45,7 @@ inline bool isPureOp(Op op) {
     case Op::ExtractValue:
     case Op::InsertValue:
     case Op::Freeze:
+    case Op::Fma:
       return true;
     default:
       return false;
@@ -342,6 +343,23 @@ inline bool foldUnary(const std::string& op, const Const& value, Const& out) {
     return false;
   }
   return false;
+}
+
+// Folds `fma(a, b, c)` == a*b + c. All-int uses wrapping arithmetic (exact
+// mod 2^64, same as the other folds); float/mixed uses std::fma so the
+// folded result matches single-rounding hardware semantics.
+inline bool foldFma(const Const& a, const Const& b, const Const& c, Const& out) {
+  auto isNum = [](const Const& v) { return isInt(v) || isFloat(v); };
+  if (!isNum(a) || !isNum(b) || !isNum(c)) return false;
+  if (isInt(a) && isInt(b) && isInt(c)) {
+    out = makeInt(wrapAdd(wrapMul(a.i, b.i), c.i));
+    return true;
+  }
+  const double av = isInt(a) ? static_cast<double>(a.i) : a.f;
+  const double bv = isInt(b) ? static_cast<double>(b.i) : b.f;
+  const double cv = isInt(c) ? static_cast<double>(c.i) : c.f;
+  out = makeFloat(std::fma(av, bv, cv));
+  return true;
 }
 
 }  // namespace ir

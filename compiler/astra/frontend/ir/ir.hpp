@@ -62,6 +62,9 @@ enum class Op {
   ExtractValue,
   InsertValue,
   Freeze,
+  // LLVM fma contraction: `fma(a, b, c)` == a*b + c with a single rounding.
+  // Operands are [a, b, c]. Produced by the fuseFma optimizer pass.
+  Fma,
   Opaque,
 };
 

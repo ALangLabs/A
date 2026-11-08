@@ -96,6 +96,19 @@ OptimizationStats constantFold(Program& program) {
             ++stats.constantsFolded;
             continue;
           }
+          if (inst.op == Op::Fma && inst.operands.size() == 3) {
+            auto a = known.find(inst.operands[0]);
+            auto b = known.find(inst.operands[1]);
+            auto c = known.find(inst.operands[2]);
+            if (a == known.end() || b == known.end() || c == known.end()) continue;
+            Const folded;
+            if (!foldFma(a->second, b->second, c->second, folded)) continue;
+            applyConst(inst, folded);
+            known[inst.id] = folded;
+            changed = true;
+            ++stats.constantsFolded;
+            continue;
+          }
           if (inst.op == Op::Phi && !inst.operands.empty()) {
             auto first = known.find(inst.operands.front());
             if (first == known.end()) continue;

@@ -77,6 +77,7 @@ void printInst(std::ostream& os, const Inst& inst) {
     case Op::ExtractValue: os << "extractvalue " << inst.intValue; break;
     case Op::InsertValue: os << "insertvalue " << inst.intValue; break;
     case Op::Freeze: os << "freeze"; break;
+    case Op::Fma: os << "fma"; break;
     case Op::Opaque: os << inst.text; break;
   }
   if (inst.op == Op::Phi) {

@@ -62,6 +62,15 @@ bool sccpFoldInst(const Inst& inst, const std::unordered_map<int, Const>& known,
         if (operand != known.end()) { out = operand->second; return true; }
       }
       return false;
+    case Op::Fma:
+      if (inst.operands.size() == 3) {
+        auto a = known.find(inst.operands[0]);
+        auto b = known.find(inst.operands[1]);
+        auto c = known.find(inst.operands[2]);
+        if (a != known.end() && b != known.end() && c != known.end())
+          return foldFma(a->second, b->second, c->second, out);
+      }
+      return false;
     case Op::Phi: {
       if (inst.operands.empty()) return false;
       bool have = false;
