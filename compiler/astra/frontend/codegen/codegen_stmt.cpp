@@ -324,7 +324,20 @@ void AsmEmitter::emitStmt(const Stmt* s, bool topLevel) {
 
 // cur += step with INT64 saturation toward `end` (mirrors the C emitter's
 // range fast path). curS/endS/stepS hold raw int64 (not avals).
-void AsmEmitter::emitRangeIncr(int curS, int endS, int stepS) {
+// stepConst == +1/-1 means the step is a compile-time constant of that
+// sign: the loop-head compare proves cur stays within (lo, hi) bounds,
+// so the plain add can never overflow (cur+1 <= hi <= INT64_MAX for
+// step +1; cur-1 >= end >= INT64_MIN for step -1) and the whole checked
+// sequence collapses to a single memory add.
+void AsmEmitter::emitRangeIncr(int curS, int endS, int stepS, int64_t stepConst) {
+    if (stepConst == 1) {
+      emit("    addq $1, " + slotRef(curS) + "\n");
+      return;
+    }
+    if (stepConst == -1) {
+      emit("    subq $1, " + slotRef(curS) + "\n");
+      return;
+    }
     std::string posL = newLabel("rincrp");
     std::string setEndL = newLabel("rincre");
     std::string nextL = newLabel("rincrn");
@@ -695,7 +708,13 @@ void AsmEmitter::emitFor(const ForStmt& st) {
       loopCont_.pop_back();
       popScope();
       emitLabel(contL);
-      emitRangeIncr(curS, endS, stepS);
+      int64_t stepConst = 0;
+      if (stE == nullptr) stepConst = 1;
+      else if (stE->kind == ExprKind::IntLit) {
+        int64_t v = static_cast<const IntLitExpr*>(stE)->value;
+        if (v == 1 || v == -1) stepConst = v;
+      }
+      emitRangeIncr(curS, endS, stepS, stepConst);
       jmp(loopL);
       emitLabel(endL);
       loopXmmExit(xmmMark);

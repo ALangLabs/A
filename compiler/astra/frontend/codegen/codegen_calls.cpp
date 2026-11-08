@@ -756,6 +756,40 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
         return;
       }
       if (id == 12) {
+        // Fused sqrt(f64(i)) for a raw-safe int operand: cvtsi2sd then
+        // sqrtsd, all in %xmm0 — no intermediate spill slot (each spill
+        // costs a store-forwarding stall). The conversion result is
+        // finite by construction, so only the domain check + canon emit
+        // of tryEmitFloatInt/tryEmitSqrtSlot apply.
+        const Expr* arg = call.args[0].value.get();
+        if (arg && arg->kind == ExprKind::Call &&
+            static_cast<const CallExpr*>(arg)->builtinId == BuiltinId::F64 &&
+            static_cast<const CallExpr*>(arg)->args.size() == 1 &&
+            exprIsInt(static_cast<const CallExpr*>(arg)->args[0].value.get()) &&
+            rawSafeExpr(static_cast<const CallExpr*>(arg)->args[0].value.get())) {
+          const Expr* inner =
+              static_cast<const CallExpr*>(arg)->args[0].value.get();
+          std::string domL = newLabel("sqd"), doneL = newLabel("squareok"),
+                      nanL = newLabel("sqrnan");
+          rawInvAll();  // direct slotRef traffic below bypasses the reg cache
+          int s = allocSlot();
+          emitRawExpr(inner, s);
+          loadSlot(s);
+          emit("    cvtsi2sd %rax, %xmm0\n");
+          emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
+               domL + "\n    sqrtsd %xmm0, %xmm0\n");
+          emit("    ucomisd %xmm0, %xmm0\n");
+          emit("    jp " + nanL + "\n");
+          emit("    movq %xmm0, %rax\n");
+          emit("    jmp " + doneL + "\n");
+          emitLabel(nanL);
+          emit("    mov $0x7ff8000000000000, %rax\n");
+          emit("    jmp " + doneL + "\n");
+          emitLabel(domL);
+          emitPanicStr("math domain error");
+          emitLabel(doneL);
+          return;
+        }
         int s = evalSlot(call.args[0].value.get());
         tryEmitSqrtSlot(id, s);
         return;

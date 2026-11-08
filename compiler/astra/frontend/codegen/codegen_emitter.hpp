@@ -547,7 +547,9 @@ class AsmEmitter {
 
   // cur += step with INT64 saturation toward `end` (mirrors the C emitter's
   // range fast path). curS/endS/stepS hold raw int64 (not avals).
-    void emitRangeIncr(int curS, int endS, int stepS);
+  // stepConst == +1/-1 elides the checked sequence (provably no overflow,
+  // see emitRangeIncr); it defaults to 0 (generic runtime step).
+    void emitRangeIncr(int curS, int endS, int stepS, int64_t stepConst = 0);
 
   // ---- LICM / bounds-check-elimination support ------------------------------
   // Conservative purity scan shared by the array-iteration LICM (emitForArray)
