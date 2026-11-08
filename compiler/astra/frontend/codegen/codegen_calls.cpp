@@ -718,10 +718,11 @@ bool AsmEmitter::tryEmitFloatInt(const Expr* arg) {
       loadSlot(s, "%rax");
     }
     emit("    cvtsi2sd %rax, %xmm0\n");
+    // int->double conversion is finite by construction: no NaN canonical-
+    // ization needed (emitXmm0ToAval would add a dead check per call).
     int t = allocSlot();
-    std::string doneL = newLabel("f2d");
-    emitXmm0ToAval(t, doneL);
-    emitLabel(doneL);
+    emit("    movsd %xmm0, " + slotRef(t) + "\n");
+    emit("    mov " + slotRef(t) + ", %rax\n");
     return true;
   }
 
@@ -778,8 +779,9 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
         // Fused sqrt(f64(i)) for a raw-safe int operand: cvtsi2sd then
         // sqrtsd, all in %xmm0 — no intermediate spill slot (each spill
         // costs a store-forwarding stall). The conversion result is
-        // finite by construction, so only the domain check + canon emit
-        // of tryEmitFloatInt/tryEmitSqrtSlot apply.
+        // finite by construction, so the NaN canon checks (dead for
+        // int->double and sqrtsd(non-negative finite)) are elided;
+        // only the domain panic remains.
         const Expr* arg = call.args[0].value.get();
         if (arg && arg->kind == ExprKind::Call &&
             static_cast<const CallExpr*>(arg)->builtinId == BuiltinId::F64 &&
@@ -788,8 +790,7 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
             rawSafeExpr(static_cast<const CallExpr*>(arg)->args[0].value.get())) {
           const Expr* inner =
               static_cast<const CallExpr*>(arg)->args[0].value.get();
-          std::string domL = newLabel("sqd"), doneL = newLabel("squareok"),
-                      nanL = newLabel("sqrnan");
+          std::string domL = newLabel("sqd"), doneL = newLabel("squareok");
           rawInvAll();  // direct slotRef traffic below bypasses the reg cache
           // Materialize the raw int64 directly into %rax. A loop-resident
           // raw variable (loopXmm_) is read from its XMM register, not
@@ -817,12 +818,7 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
           emit("    cvtsi2sd %rax, %xmm0\n");
           emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
                domL + "\n    sqrtsd %xmm0, %xmm0\n");
-          emit("    ucomisd %xmm0, %xmm0\n");
-          emit("    jp " + nanL + "\n");
           emit("    movq %xmm0, %rax\n");
-          emit("    jmp " + doneL + "\n");
-          emitLabel(nanL);
-          emit("    mov $0x7ff8000000000000, %rax\n");
           emit("    jmp " + doneL + "\n");
           emitLabel(domL);
           emitPanicStr("math domain error");
