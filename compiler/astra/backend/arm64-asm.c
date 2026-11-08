@@ -409,23 +409,28 @@ static void gen_movk(int rd, uint16_t imm, int shift, int is_64bit)
     gen_mov_with_base(rd, imm, shift, is_64bit, ARM64_MOVK);
 }
 
-/* Generate ADD (immediate) */
-static void gen_add_imm(int rd, int rn, uint32_t imm, int is_64bit, int setflags)
+/* Returns nonzero if imm fits the ADD/SUB (immediate) encoding:
+   either imm12 (0..0xFFF) or imm12 << 12 (multiple of 4096, <= 0xFFF000). */
+static int addsub_imm_encodable(uint64_t imm)
 {
-    uint32_t instr = ARM64_ADD_IMM;
+    return imm <= 0xFFF || (!(imm & 0xFFF) && (imm >> 12) <= 0xFFF);
+}
+
+/* Emit a single ADD/SUB (immediate); imm must satisfy addsub_imm_encodable. */
+static void gen_addsub_imm_one(int is_sub, int rd, int rn, uint64_t imm,
+                               int is_64bit, int setflags)
+{
+    uint32_t instr = is_sub ? ARM64_SUB_IMM : ARM64_ADD_IMM;
     uint32_t imm12;
 
     if (is_64bit) instr |= ARM64_SF(1);
     if (setflags) instr |= ARM64_S(1);
 
     if (imm <= 0xFFF) {
-        imm12 = imm;
-    } else if (!(imm & 0xFFF) && (imm >> 12) <= 0xFFF) {
-        instr |= ARM64_SH(1);
-        imm12 = imm >> 12;
+        imm12 = (uint32_t)imm;
     } else {
-        astra_error("add immediate out of range");
-        return;
+        instr |= ARM64_SH(1);
+        imm12 = (uint32_t)(imm >> 12);
     }
 
     instr |= ARM64_IMM12(imm12);
@@ -434,29 +439,48 @@ static void gen_add_imm(int rd, int rn, uint32_t imm, int is_64bit, int setflags
     emit_instr32(instr);
 }
 
-/* Generate SUB (immediate) */
-static void gen_sub_imm(int rd, int rn, uint32_t imm, int is_64bit, int setflags)
+/* Emit ADD/SUB (immediate), splitting large immediates into several
+   instructions when they do not fit the 12-bit (optionally shifted)
+   encoding.  For the flag-setting variants only the final instruction
+   sets flags, so the result flags match a single-instruction encoding. */
+static void gen_addsub_imm(int is_sub, int rd, int rn, uint64_t imm,
+                           int is_64bit, int setflags)
 {
-    uint32_t instr = ARM64_SUB_IMM;
-    uint32_t imm12;
+    uint64_t rem = imm;
+    int first = 1;
 
-    if (is_64bit) instr |= ARM64_SF(1);
-    if (setflags) instr |= ARM64_S(1);
-
-    if (imm <= 0xFFF) {
-        imm12 = imm;
-    } else if (!(imm & 0xFFF) && (imm >> 12) <= 0xFFF) {
-        instr |= ARM64_SH(1);
-        imm12 = imm >> 12;
-    } else {
-        astra_error("sub immediate out of range");
+    if (addsub_imm_encodable(rem)) {
+        gen_addsub_imm_one(is_sub, rd, rn, rem, is_64bit, setflags);
         return;
     }
+    while (rem) {
+        uint64_t chunk;
+        int last;
+        if (rem <= 0xFFF) {
+            chunk = rem;
+        } else {
+            uint64_t hi = rem & ~(uint64_t)0xFFF;
+            chunk = hi > 0xFFF000 ? 0xFFF000 : hi;
+        }
+        last = (chunk == rem);
+        /* After the first chunk the running value lives in rd. */
+        gen_addsub_imm_one(is_sub, rd, first ? rn : rd, chunk, is_64bit,
+                           setflags && last);
+        rem -= chunk;
+        first = 0;
+    }
+}
 
-    instr |= ARM64_IMM12(imm12);
-    instr |= ARM64_RN(rn);
-    instr |= ARM64_RD(rd);
-    emit_instr32(instr);
+/* Generate ADD (immediate) */
+static void gen_add_imm(int rd, int rn, uint64_t imm, int is_64bit, int setflags)
+{
+    gen_addsub_imm(0, rd, rn, imm, is_64bit, setflags);
+}
+
+/* Generate SUB (immediate) */
+static void gen_sub_imm(int rd, int rn, uint64_t imm, int is_64bit, int setflags)
+{
+    gen_addsub_imm(1, rd, rn, imm, is_64bit, setflags);
 }
 
 /* Generate data processing register instruction */

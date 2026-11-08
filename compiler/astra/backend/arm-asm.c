@@ -1182,19 +1182,28 @@ static void asm_single_data_transfer_opcode(ASTRAState *s1, int token)
 
     if (ops[2].type == OP_IM32 || ops[2].type == OP_IM8 || ops[2].type == OP_IM8N) {
         int v = ops[2].e.v;
+        /* For word transfers (ldr/str) the 12-bit immediate is scaled by 4,
+           giving a byte-offset range of 0..16380 (multiple of 4).  Byte and
+           exclusive/halfword transfers use the raw 12-bit value (0..4095). */
+        int word_transfer = (ARM_INSTRUCTION_GROUP(token) == TOK_ASM_streq ||
+                             ARM_INSTRUCTION_GROUP(token) == TOK_ASM_ldreq);
+        int scale = word_transfer ? 2 : 0;
+        int limit = word_transfer ? 0x3FFC : 0xFFF;
+        int align_mask = (1 << scale) - 1;
         if (op2_minus)
             astra_error("minus before '#' not supported for immediate values");
         if (v >= 0) {
             opcode |= 1 << 23; // up
-            if (v >= 0x1000)
+            if (v > limit || (v & align_mask))
                 astra_error("offset out of range for '%s'", get_tok_str(token, NULL));
             else
-                opcode |= v;
+                opcode |= v >> scale;
         } else { // down
-            if (v <= -0x1000)
+            int m = -v;
+            if (m > limit || (m & align_mask))
                 astra_error("offset out of range for '%s'", get_tok_str(token, NULL));
             else
-                opcode |= -v;
+                opcode |= m >> scale;
         }
     } else if (ops[2].type == OP_REG32) {
         if (!op2_minus)
