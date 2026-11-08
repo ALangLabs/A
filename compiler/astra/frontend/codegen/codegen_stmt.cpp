@@ -640,17 +640,47 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loadSlot(acc->slot, "%rcx");
     emit(std::string("    movq %rcx, ") + xr + "\n");
     emitLabel(loopL);
-    // continue while (step>0 ? cur<end : cur>end)
-    emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
-         ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
-    emit("    test %rdx, %rdx\n    jns " + bodyL + "_p\n");
-    emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
-    emitLabel(bodyL + "_p");
-    emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
+    // continue while (step>0 ? cur<end : cur>end). Constant steps skip
+    // the sign dispatch entirely at the cost of one compare.
+    {
+      const Expr* stE = nullptr;
+      if (iter && iter->kind == ExprKind::Range)
+        stE = static_cast<const RangeExpr&>(*iter).step.get();
+      int64_t nec = 0;
+      if (stE == nullptr)
+        nec = 1;
+      else if (stE->kind == ExprKind::IntLit) {
+        int64_t v = static_cast<const IntLitExpr*>(stE)->value;
+        if (v == 1 || v == -1) nec = v;
+      }
+      if (nec == 1) {
+        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
+             ", %rcx\n    cmp %rcx, %rax\n    jge " + endL + "\n");
+        emitLabel(bodyL);
+      } else if (nec == -1) {
+        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
+             ", %rcx\n    cmp %rcx, %rax\n    jle " + endL + "\n");
+        emitLabel(bodyL);
+      } else {
+        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
+             ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
+        emit("    test %rdx, %rdx\n    jns " + bodyL + "_p\n");
+        emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
+        emitLabel(bodyL + "_p");
+        emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
+        emitLabel(bodyL);
+      }
+    }
     // Loop variable at every iteration (mirrors the generic counted path).
-    int varS = allocSlot();
+    // If the body never writes the loop var, its binding can *be* the
+    // induction counter (no per-iteration copy to a staging slot).
+    std::unordered_set<std::string> lvWrites;
+    const bool bodyPure = scanStmtsPure(st.body, &lvWrites);
+    const bool aliasVar =
+        bodyPure && !lvWrites.count(st.var);
+    int varS = aliasVar ? curS : allocSlot();
     emitLabel(bodyL);
-    copySlot(curS, varS);
+    if (!aliasVar) copySlot(curS, varS);
     pushScope();
     bindLocal(st.var, varS);
     if (promoteNames_.count(st.var)) {
