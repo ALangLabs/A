@@ -234,6 +234,7 @@ int builtinRuntimeId(const std::string& name) {
       {"struct_name", 188}, {"struct_methods", 189},
       {"fn_signature", 190}, {"fn_doc", 191},
       {"file_size", 192},
+      {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -334,7 +335,9 @@ class NativeEmitter {
   bool isStdlibModule(int moduleId) const {
     if (moduleId < 0) return false;
     const Module& mod = graph_.at(moduleId);
-    if (mod.name == "prelude") return true;
+    // Prelude bodies are emitted for real — stubbing them broke every
+    // prelude-level helper (ic, join helpers, etc.) on native targets.
+    if (mod.name == "prelude") return false;
     return mod.path.find("stdlib/") != std::string::npos ||
            mod.path.find("/stdlib/") != std::string::npos;
   }
