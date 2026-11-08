@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <cstring>
 #include <memory>
 #include <set>
@@ -297,6 +298,9 @@ struct EnumVariantInfo {
   bool algebraic = false;
   int tag = 0;
   std::vector<std::string> payloadFields;
+  int moduleId = -1;
+  std::string enumName;
+  std::string variantName;
 };
 
 enum class BKind { Local, Global, Param, FnValue, Builtin, StructCtor,
@@ -349,6 +353,104 @@ class NativeEmitter {
     out = bss_.str() + rodata_.str() + t_.extraRodata() + text_.str();
     return true;
   }
+  // Per-unit split (native): functions/ctors per module; top-levels stay
+  // inlined in the entry unit's `main` (native top-levels are frame
+  // locals, so moving them into per-module functions would break sharing).
+  // Symbols are stable (Phase 1), so units link as ordinary externs.
+  bool runPerUnit(std::vector<AsmUnit>& out, std::string& error,
+                  const std::vector<int>* only = nullptr) {
+    error_ = &error;
+    perUnitMode_ = true;
+    collectGlobals();
+    buildGlobalScope();
+    std::vector<int> order = graph_.order;
+    if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
+    std::set<int> inOrder(order.begin(), order.end());
+    for (const Module& mod : graph_.modules) {
+      if (!inOrder.count(mod.id)) {
+        order.push_back(mod.id);
+        inOrder.insert(mod.id);
+      }
+    }
+    std::vector<int> wanted = order;
+    if (only && !only->empty()) {
+      std::set<int> keep(only->begin(), only->end());
+      wanted.clear();
+      for (int mid : order) if (keep.count(mid)) wanted.push_back(mid);
+      for (int mid : *only)
+        if (!inOrder.count(mid) && keep.count(mid)) wanted.push_back(mid);
+    }
+    for (int mid : wanted) {
+      if (failed_) return false;
+      AsmUnit unit;
+      unit.moduleId = mid;
+      emitUnit(mid, unit.text);
+      if (failed_) return false;
+      out.push_back(std::move(unit));
+    }
+    return true;
+  }
+  void emitUnit(int moduleId, std::string& out) {
+    text_ = std::ostringstream();
+    rodata_ = std::ostringstream();
+    bss_ = std::ostringstream();
+    labelCounter_ = 0;
+    counter_ = 0;
+    lambdaSeq_.erase(moduleId);
+    for (StructInfo* st : structList_)
+      if (st->moduleId == moduleId) emitStructCtor(st);
+    for (FnInfo* f : fnList_) {
+      if (failed_) break;
+      if (f->moduleId == moduleId) emitFunction(f);
+    }
+    if (!failed_ && moduleId == graph_.entry) emitMain();
+    if (!failed_) drainLambdasFor(moduleId);
+    if (failed_) return;
+    emitModuleBss(moduleId);
+    out = bss_.str() + rodata_.str() + t_.extraRodata() + text_.str();
+  }
+  void drainLambdasFor(int moduleId) {
+    // lambdaQueue_ is in creation order (nested appended); emit this
+    // module's jobs in order, handling newly queued nested jobs.
+    for (std::size_t i = 0; i < lambdaQueue_.size(); ++i) {
+      if (failed_) return;
+      if (lambdaQueue_[i].moduleId != moduleId) continue;
+      // Skip already-emitted jobs (marked by empty decl? no: track via
+      // emitted flag in decl pointer? Use a separate emitted set).
+      // Simpler: emitLambdas originally emits all in order; for split,
+      // emit only this module's pending jobs and remove them.
+      LambdaJob job = lambdaQueue_[i];
+      lambdaQueue_.erase(lambdaQueue_.begin() + (std::ptrdiff_t)i);
+      --i;
+      emitLambdaJob(job);
+    }
+  }
+  void emitModuleBss(int moduleId) {
+    std::vector<std::string> tops;
+    for (const auto& kv : topLevelGlobals_) {
+      const std::string& key = kv.first;
+      auto colon = key.find(':');
+      if (colon == std::string::npos) continue;
+      if (key.substr(0, colon) != std::to_string(moduleId)) continue;
+      tops.push_back(kv.second);
+    }
+    std::sort(tops.begin(), tops.end());
+    tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
+    for (const std::string& g : tops)
+      bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
+    for (FnInfo* f : fnList_)
+      if (!f->isMethod && f->moduleId == moduleId)
+        bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n"
+             << f->globalVar << ":\n    .space 8\n";
+    for (StructInfo* st : structList_)
+      if (st->moduleId == moduleId)
+        bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n"
+             << st->globalVar << ":\n    .space 8\n";
+    for (auto& kv : enums_)
+      if (!kv.second.algebraic && kv.second.moduleId == moduleId)
+        bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
+             << kv.second.globalVar << ":\n    .space 8\n";
+  }
 
  private:
   const ModuleGraph& graph_;
@@ -359,6 +461,9 @@ class NativeEmitter {
   std::string* error_ = nullptr;
   bool failed_ = false;
   int counter_ = 0;
+  bool perUnitMode_ = false;
+  mutable std::unordered_map<int, std::string> moduleTags_;
+  std::unordered_map<int, int> lambdaSeq_;
   int labelCounter_ = 0;
   int slotCounter_ = 0;
   std::ostringstream text_;
@@ -558,10 +663,10 @@ class NativeEmitter {
     std::string sname = ty->structName;
     std::size_t sep = sname.find_last_of(".:");
     if (sep != std::string::npos) sname = sname.substr(sep + 1);
-    auto it = structs_.find(sname);
-    if (it == structs_.end()) return nullptr;
-    auto mit = it->second->methods.find("drop");
-    return mit == it->second->methods.end() ? nullptr : mit->second;
+    StructInfo* st = findStructByName(sname);
+    if (!st) return nullptr;
+    auto mit = st->methods.find("drop");
+    return mit == st->methods.end() ? nullptr : mit->second;
   }
   // Emit dropFn(self) for a binding; self loaded from slot or global sym.
   void emitDropCall(const ABinding& b) {
@@ -1144,9 +1249,71 @@ class NativeEmitter {
     return out;
   }
 
+  StructInfo* findStructByName(const std::string& name) const {
+    if (curModuleId_ >= 0) {
+      for (StructInfo* st : structList_)
+        if (st->name == name && st->moduleId == curModuleId_) return st;
+    }
+    for (StructInfo* st : structList_)
+      if (st->name == name) return st;
+    auto it = structs_.find(name);
+    return it == structs_.end() ? nullptr : it->second;
+  }
+  std::string moduleTag(int moduleId) const {
+    auto it = moduleTags_.find(moduleId);
+    if (it != moduleTags_.end()) return it->second;
+    std::string path;
+    if (moduleId >= 0 && moduleId < (int)graph_.modules.size())
+      path = graph_.at(moduleId).path;
+    std::string canonical = path;
+    {
+      std::error_code ec;
+      auto c = std::filesystem::weakly_canonical(path, ec);
+      if (!ec) canonical = c.string();
+      if (canonical.empty()) canonical = path;
+    }
+    std::string tag = stableTag(canonical);
+    moduleTags_[moduleId] = tag;
+    return tag;
+  }
+  const EnumVariantInfo* findEnumVariant(const std::string& enumName,
+                                         const std::string& variant,
+                                         int preferModule = -2) const {
+    int prefer = preferModule == -2 ? curModuleId_ : preferModule;
+    const EnumVariantInfo* fallback = nullptr;
+    for (const auto& kv : enums_) {
+      const EnumVariantInfo& ev = kv.second;
+      if (ev.enumName == enumName && ev.variantName == variant) {
+        if (ev.moduleId == prefer) return &ev;
+        if (!fallback) fallback = &ev;
+      }
+    }
+    return fallback;
+  }
+  const EnumVariantInfo* findEnumByShort(const std::string& variant,
+                                         int preferModule = -2) const {
+    int prefer = preferModule == -2 ? curModuleId_ : preferModule;
+    const EnumVariantInfo* fallback = nullptr;
+    for (const auto& kv : enums_) {
+      const EnumVariantInfo& ev = kv.second;
+      if (ev.variantName == variant) {
+        if (ev.moduleId == prefer) return &ev;
+        if (!fallback) fallback = &ev;
+      }
+    }
+    return fallback;
+  }
   // ---- registration (mirrors emitC) -----------------------------------------
   void collectGlobals() {
-    int fnId = 0, stId = 0;
+    std::unordered_map<std::string, int> seenSym;
+    auto symWithSuffix = [&](const std::string& base) -> std::string {
+      int n = seenSym[base]++;
+      if (n == 0) return base;
+      return base + "_" + std::to_string(n);
+    };
+    for (const Module& mod : graph_.modules) {
+      if (mod.id >= 0) (void)moduleTag(mod.id);
+    }
     for (const Module& mod : graph_.modules) {
       if (!mod.program) continue;
       for (const StmtPtr& s : mod.program->statements) {
@@ -1156,8 +1323,13 @@ class NativeEmitter {
           info->decl = fn;
           info->name = fn->name;
           info->moduleId = mod.id;
-          info->cname = "__na_f" + std::to_string(fnId++);
-          info->globalVar = "__na_gf" + std::to_string(fnId);
+          {
+            std::string mtag = moduleTag(mod.id);
+            std::size_t arity = fn->comptimeParams.size() + fn->params.size();
+            std::string dh = stableTag(fn->name + "#" + std::to_string(arity));
+            info->cname = symWithSuffix("__na_f_" + mtag + "_" + dh);
+            info->globalVar = symWithSuffix("__na_gf_" + mtag + "_" + dh);
+          }
           for (const ComptimeParam& p : fn->comptimeParams) {
             info->paramNames.push_back(p.name);
             info->paramDefaults.push_back(nullptr);
@@ -1175,9 +1347,13 @@ class NativeEmitter {
           info->decl = st;
           info->name = st->name;
           info->moduleId = mod.id;
-          info->ctorCname = "__na_ctor" + std::to_string(stId);
-          info->globalVar = "__na_gs" + std::to_string(stId);
-          info->nameLabel = "__na_sn_" + std::to_string(stId++);
+          {
+            std::string mtag = moduleTag(mod.id);
+            std::string sh = stableTag(st->name);
+            info->ctorCname = symWithSuffix("__na_ctor_" + mtag + "_" + sh);
+            info->globalVar = symWithSuffix("__na_gs_" + mtag + "_" + sh);
+            info->nameLabel = symWithSuffix("__na_sn_" + mtag + "_" + sh);
+          }
           for (const FieldDecl& f : st->fields) info->fieldNames.push_back(f.name);
           structs_[st->name] = info;
           structList_.push_back(info);
@@ -1188,8 +1364,14 @@ class NativeEmitter {
             mi->moduleId = mod.id;
             mi->isMethod = true;
             mi->structName = st->name;
-            mi->cname = "__na_m" + std::to_string(fnId++);
-            mi->globalVar = "__na_gf" + std::to_string(fnId);
+            {
+              std::string mtag = moduleTag(mod.id);
+              std::string sh = stableTag(st->name);
+              std::size_t arity = m->comptimeParams.size() + m->params.size();
+              std::string dh = stableTag(m->name + "#" + std::to_string(arity));
+              mi->cname = symWithSuffix("__na_m_" + mtag + "_" + sh + "_" + dh);
+              mi->globalVar = symWithSuffix("__na_gf_" + mtag + "_" + sh + "_" + dh);
+            }
             for (const ComptimeParam& p : m->comptimeParams) {
               mi->paramNames.push_back(p.name);
               mi->paramDefaults.push_back(nullptr);
@@ -1213,15 +1395,21 @@ class NativeEmitter {
             ev.tag = tag++;
             ev.value = v.value ? evalConstInt(v.value.get(), next) : next;
             next = ev.value + 1;
-            ev.globalVar = "__na_ev_" + e->name + "_" + v.name + "_" +
-                           (ev.value < 0 ? "m" : "") +
-                           std::to_string(ev.value < 0 ? -ev.value : ev.value);
+            ev.moduleId = mod.id;
+            ev.enumName = e->name;
+            ev.variantName = v.name;
+            {
+              std::string mtag = moduleTag(mod.id);
+              std::string eh = stableTag(e->name);
+              std::string vh = stableTag(v.name);
+              ev.globalVar = symWithSuffix("__na_ev_" + mtag + "_" + eh + "_" + vh);
+            }
             for (const FieldDecl& f : v.fields) ev.payloadFields.push_back(f.name);
-            enums_[e->name + "." + v.name] = ev;
+            enums_[std::to_string(mod.id) + ":" + e->name + "." + v.name] = ev;
           }
         } else if (s->kind == StmtKind::Let) {
           const LetStmt* let = static_cast<const LetStmt*>(s.get());
-          std::string cname = "__na_top_" + std::to_string(counter_++);
+          std::string cname = symWithSuffix("__na_top_" + moduleTag(mod.id) + "_" + stableTag(let->name));
           globals_.push_back(cname);
           topLevelGlobals_[std::to_string(mod.id) + ":" + let->name] = cname;
         } else if (s->kind == StmtKind::Assign) {
@@ -1230,7 +1418,7 @@ class NativeEmitter {
             const std::string& nm = static_cast<const IdentExpr*>(as->target.get())->name;
             std::string key = std::to_string(mod.id) + ":" + nm;
             if (!topLevelGlobals_.count(key)) {
-              std::string cname = "__na_top_" + std::to_string(counter_++);
+              std::string cname = symWithSuffix("__na_top_" + moduleTag(mod.id) + "_" + stableTag(nm));
               globals_.push_back(cname);
               topLevelGlobals_[key] = cname;
             }
@@ -1249,8 +1437,9 @@ class NativeEmitter {
       if (u->op == "-") return -evalConstInt(u->operand.get(), 0);
     }
     if (e->kind == ExprKind::Ident) {
-      auto it = enums_.find(static_cast<const IdentExpr*>(e)->name);
-      if (it != enums_.end()) return it->second.value;
+      const std::string& nm = static_cast<const IdentExpr*>(e)->name;
+      if (const EnumVariantInfo* ev = findEnumByShort(nm))
+        return ev->value;
     }
     return fallback;
   }
@@ -1314,9 +1503,10 @@ class NativeEmitter {
         b.kind = BKind::EnumValue;
         b.sym = kv.second.globalVar;
         b.en = &kv.second;
-        g[kv.first] = b;
-        std::string shortName = kv.first.substr(kv.first.find('.') + 1);
-        if (!g.count(shortName)) g[shortName] = b;
+        b.aux = kv.second.variantName;
+        std::string qual = kv.second.enumName + "." + kv.second.variantName;
+        if (!g.count(qual)) g[qual] = b;
+        if (!g.count(b.aux)) g[b.aux] = b;
       }
     }
     for (const char* nm : {"math", "io", "fs", "strings", "collections", "core",
@@ -1820,7 +2010,9 @@ class NativeEmitter {
     t_.epilogue(epi, frame);
     text_ << epi;
 
-    // .bss globals
+    // .bss globals (single-unit only; per-unit bss is partitioned by
+    // emitModuleBss to avoid duplicate definitions across objects).
+    if (!perUnitMode_) {
     for (const std::string& g : globals_) {
       bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
     }
@@ -1844,6 +2036,7 @@ class NativeEmitter {
           bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
                << kv.second.globalVar << ":\n    .space 8\n";
       }
+    }
     }
     scopes_.clear();
     scopeDeclOrder_.clear();
@@ -2296,7 +2489,7 @@ class NativeEmitter {
     LambdaJob job;
     job.decl = &lam;
     job.moduleId = curModuleId_;
-    job.cname = "__na_lam" + std::to_string(counter_++);
+    job.cname = "__na_lam_" + moduleTag(curModuleId_) + "_" + std::to_string(lambdaSeq_[curModuleId_]++);
     for (auto& name : refs) {
       ABinding* b = lookup(name);
       if (b && (b->kind == BKind::Local || b->kind == BKind::Param ||
@@ -2330,7 +2523,7 @@ class NativeEmitter {
         callSym("a_env_set");
       }
     }
-    std::string nm = "__na_lnm_" + std::to_string(counter_++);
+    std::string nm = "__na_lnm_" + moduleTag(curModuleId_) + "_" + std::to_string(lambdaSeq_[curModuleId_]++);
     rodata_ << "    .section .rodata\n" << nm << ":\n    .byte ";
     for (unsigned char c : "lambda") rodata_ << (int)c << ",";
     rodata_ << "0\n";
@@ -2426,7 +2619,22 @@ class NativeEmitter {
           loadSlot(subjS, A(0));
           callSym("a_eq_slow");
         } else {
-          // compare dict __tag entry
+          // compare dict __tag entry against the variant's integer tag
+          std::int64_t tagVal = -1;
+          if (auto* fe = dynamic_cast<const FieldExpr*>(p.ctor.get())) {
+            if (auto* ie = dynamic_cast<const IdentExpr*>(fe->object.get())) {
+              if (const EnumVariantInfo* ev = findEnumVariant(ie->name, fe->field))
+                tagVal = ev->tag;
+            }
+            if (tagVal < 0) {
+              if (const EnumVariantInfo* ev = findEnumByShort(fe->field))
+                tagVal = ev->tag;
+            }
+          }
+          if (tagVal >= 0) {
+            movImm(mkintA(tagVal), acc());
+            storeAcc(cs);
+          }
           int tagS = strLitSlot("__tag");
           int noneS = noneSlot();
           loadSlot(noneS, A(2));
@@ -2519,18 +2727,18 @@ class NativeEmitter {
         return;
       }
       case Pattern::Kind::Variant: {
-        for (auto& sub : p.subpatterns) {
-          if (sub.kind == Pattern::Kind::Binding) {
-            int tagS = strLitSlot(sub.name);
-            int noneS = noneSlot();
-            int vs = allocSlot();
-            loadSlot(noneS, A(2));
-            loadSlot(tagS, A(1));
-            loadSlot(subjS, A(0));
-            callSym("a_dict_get");
-            storeAcc(vs);
-            bindLocal(sub.name, vs);
-          }
+        for (std::size_t i = 0; i < p.subpatterns.size(); ++i) {
+          std::string key = i < p.variantFields.size() ? p.variantFields[i]
+                                                       : p.subpatterns[i].name;
+          int tagS = strLitSlot(key);
+          int noneS = noneSlot();
+          int vs = allocSlot();
+          loadSlot(noneS, A(2));
+          loadSlot(tagS, A(1));
+          loadSlot(subjS, A(0));
+          callSym("a_dict_get");
+          storeAcc(vs);
+          declarePatternBindings(p.subpatterns[i], vs);
         }
         return;
       }
@@ -2952,15 +3160,27 @@ class NativeEmitter {
         callSym("a_getattr");
         // Already-optional field values are returned as-is so `a?.b` flattens
         // to None instead of Some(None); for non-optional/dynamic fields wrap a
-        // present value in Some but flatten a None.
+        // present value in Some but flatten a None and pass an already-Some
+        // value through (untyped optional fields).
         if (!x.fieldOptional) {
+          int valS = allocSlot();
+          storeAcc(valS);
           std::string vnone = newLabel("safevn");
+          std::string vkeep = newLabel("safevk");
           std::string vdone = newLabel("safevd");
+          loadSlot(valS, A(0));
           jmpIfNone(vnone);
+          loadSlot(valS, A(0));
+          callSym("a_is_option");
+          jnz(acc(), vkeep);
+          loadSlot(valS, A(0));
           callSym("a_some_new");
           jmp(vdone);
           emitLabel(vnone);
           movImm(kTag | 0x2ULL, acc());
+          jmp(vdone);
+          emitLabel(vkeep);
+          loadSlot(valS, acc());
           emitLabel(vdone);
         }
         storeAcc(rs);
@@ -3109,6 +3329,33 @@ class NativeEmitter {
               return;
             }
           }
+          // Algebraic enum variant construction: Enum.Variant(args...).
+          {
+            TypePtr eot = resolveType(fx.object->inferredType);
+            if (eot && eot->kind == TypeKind::Enum) {
+              std::string en = eot->structName;
+              std::size_t sep = en.find_last_of(".:");
+              if (sep != std::string::npos) en = en.substr(sep + 1);
+              const EnumVariantInfo* ev =
+                  findEnumVariant(en, fx.field, eot->moduleId);
+              if (ev && ev->algebraic) {
+                emitEnumVariantValue(*ev, fx.field);
+                int ds = allocSlot();
+                storeAcc(ds);
+                for (std::size_t i = 0;
+                     i < args.size() && i < ev->payloadFields.size(); ++i) {
+                  int vs = evalToSlot(args[i]);
+                  int ks = strLitSlot(ev->payloadFields[i]);
+                  loadSlot(ds, A(0));
+                  loadSlot(ks, A(1));
+                  loadSlot(vs, A(2));
+                  callSym("a_dict_set");
+                }
+                loadSlot(ds, acc());
+                return;
+              }
+            }
+          }
           // struct method with known type -> direct call (self = argv[1])
           TypePtr ot = resolveType(fx.object->inferredType);
           if (std::getenv("A_DEBUG_NATIVE"))
@@ -3124,8 +3371,7 @@ class NativeEmitter {
             std::string sname = ot->structName;
             std::size_t sep = sname.find_last_of(".:");
             if (sep != std::string::npos) sname = sname.substr(sep + 1);
-            auto sit = structs_.find(sname);
-            if (sit != structs_.end()) st = sit->second;
+            st = findStructByName(sname);
             if (st) {
               auto mit = st->methods.find(fx.field);
               if (mit != st->methods.end()) {
@@ -3227,10 +3473,10 @@ class NativeEmitter {
               if (mb->moduleId >= 0) {
                 // Enum variant via module: c.Color.Red
                 if (chain.size() >= 2) {
-                  auto it = enums_.find(chain[chain.size() - 2] + "." +
-                                        chain.back());
-                  if (it != enums_.end()) {
-                    emitEnumVariantValue(it->second, chain.back());
+                  if (const EnumVariantInfo* evp =
+                          findEnumVariant(chain[chain.size() - 2],
+                                          chain.back(), mb->moduleId)) {
+                    emitEnumVariantValue(*evp, chain.back());
                     return;
                   }
                 }
@@ -3286,16 +3532,15 @@ class NativeEmitter {
         if (x.object->kind == ExprKind::Ident) {
           const std::string& oname =
               static_cast<const IdentExpr*>(x.object.get())->name;
-          auto it = enums_.find(oname + "." + x.field);
-          if (it != enums_.end()) {
-            emitEnumVariantValue(it->second, x.field);
+          if (const EnumVariantInfo* evp = findEnumVariant(oname, x.field)) {
+            emitEnumVariantValue(*evp, x.field);
             return;
           }
           ABinding* mb = lookup(oname);
           if (mb && mb->kind == BKind::Module) {
-            auto it2 = enums_.find(x.field);
-            if (it2 != enums_.end()) {
-              emitEnumVariantValue(it2->second, x.field);
+            if (const EnumVariantInfo* evp =
+                    findEnumByShort(x.field, mb->moduleId)) {
+              emitEnumVariantValue(*evp, x.field);
               return;
             }
           }
@@ -4650,6 +4895,53 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
         "    .long 2, 0xFFFF0000, 2, 0xFFFF0000\n") + out;
     gcAsmFunctions(out);
     return true;
+  }
+  error = "native backend: arch '" + arch + "' not implemented";
+  return false;
+}
+
+bool emitNativePerUnit(const ModuleGraph& graph, const SemaResult& sema,
+                       const std::string& arch, const std::string& os,
+                       std::vector<AsmUnit>& out, std::string& error,
+                       bool testMode, const std::string* testFilter,
+                       const std::vector<int>* only) {
+  if (const char* forced = std::getenv("A_CODEGEN");
+      forced && std::string(forced) == "c") {
+    error = "native backend: disabled by A_CODEGEN=c";
+    return false;
+  }
+  if (arch == "i8086" || arch == "8086") {
+    error = "native backend: per-unit split not supported for i8086 (bare-metal flat image)";
+    return false;
+  }
+  if (arch == "x86_64" && os == "windows") {
+    Win64Target t;
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
+    return e.runPerUnit(out, error, only);
+  }
+  if (os == "windows") {
+    error = "native backend: no native target for '" + arch + "' on windows";
+    return false;
+  }
+  if (arch == "arm64" || arch == "aarch64") {
+    Arm64Target t;
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
+    return e.runPerUnit(out, error, only);
+  }
+  if (arch == "riscv64" || arch == "riscv64gc") {
+    Riscv64Target t;
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
+    return e.runPerUnit(out, error, only);
+  }
+  if (arch == "i386" || arch == "x86") {
+    I386Target t;
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
+    return e.runPerUnit(out, error, only);
+  }
+  if (arch == "arm" || arch == "arm32") {
+    Arm32Target t;
+    NativeEmitter e(graph, sema, t, testMode, testFilter);
+    return e.runPerUnit(out, error, only);
   }
   error = "native backend: arch '" + arch + "' not implemented";
   return false;

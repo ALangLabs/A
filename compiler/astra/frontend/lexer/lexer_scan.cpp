@@ -78,6 +78,35 @@ void Lexer::scanNumber() {
     return;
   }
 
+  if (peek() == '0' && (peek(1) == 'o' || peek(1) == 'O')) {
+    advance(); // '0'
+    advance(); // 'o'
+    std::string octDigits;
+    while (!atEnd() && ((peek() >= '0' && peek() <= '7') || peek() == '_')) {
+      char c = advance();
+      if (c != '_') octDigits.push_back(c);
+    }
+    Token token;
+    token.kind = Tok::Int;
+    token.lexeme = text_.substr(start, pos_ - start);
+    token.span = makeSpan(start, startLine, startCol);
+    if (octDigits.empty()) {
+      error(token.span, "Octal literal has no digits.", "Write octal digits after '0o', e.g. '0o17'.");
+      token.intValue = 0;
+    } else {
+      errno = 0;
+      char* end = nullptr;
+      unsigned long long val = std::strtoull(octDigits.c_str(), &end, 8);
+      if (errno == ERANGE) {
+        error(token.span, "Octal literal is too large.", "Literal must fit in 64 bits.");
+        val = 0;
+      }
+      token.intValue = static_cast<std::int64_t>(val);
+    }
+    tokens_.push_back(std::move(token));
+    return;
+  }
+
   while (!atEnd() && (isDigit(peek()) || peek() == '_')) advance();
 
   // A '.' starts a fractional part when the next character is a digit, or

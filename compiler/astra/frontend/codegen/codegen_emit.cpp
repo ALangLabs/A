@@ -69,7 +69,7 @@ int AsmEmitter::allocSlot() { return slotCounter_++; }
 int AsmEmitter::frameBytes() const { return ((slotCounter_ + 1) * 8 + 15) & ~15; }
 
 std::string AsmEmitter::newLabel(const std::string& pfx) {
-    return "__a_" + pfx + std::to_string(labelCounter_++);
+    return ".L__a_" + pfx + std::to_string(labelCounter_++);
   }
 
 void AsmEmitter::emitLabel(const std::string& l) { emit(l + ":"); }
@@ -226,7 +226,7 @@ uint64_t AsmEmitter::dblBits(double d) const {
 // Byte string in .rodata (.byte list: safest for the astra assembler).
 // Returns the label; bytes are NOT escaped so any content works.
 std::string AsmEmitter::emitStrData(const std::string& bytes, bool nulTerm) {
-    std::string l = "__a_d" + std::to_string(counter_++);
+    std::string l = ".L__a_d" + std::to_string(dataCounter_++);
     rodata_ << "    .section .rodata\n    .align 1\n" << l << ":\n    .byte ";
     bool first = true;
     auto put = [&](int b) {

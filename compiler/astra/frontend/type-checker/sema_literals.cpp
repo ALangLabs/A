@@ -18,6 +18,24 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
   if (object->kind == TypeKind::String) return typeChar();
   // Bytes index yields the byte value (i64 0..255), like Python's bytearray.
   if (object->kind == TypeKind::Bytes) return typeInt(64, true);
+  // Tuples are indexable when the element position is known at compile time;
+  // a literal index selects that element's exact type, otherwise the result is
+  // dynamically typed (still bounds-checked at run time).
+  if (object->kind == TypeKind::Tuple) {
+    if (auto* lit = dynamic_cast<IntLitExpr*>(expr.index.get())) {
+      std::int64_t i = lit->value;
+      if (i < 0) i += static_cast<std::int64_t>(object->params.size());
+      if (i >= 0 && i < static_cast<std::int64_t>(object->params.size()))
+        return object->params[static_cast<std::size_t>(i)];
+    }
+    if (!object->params.empty()) {
+      bool same = true;
+      for (const auto& p : object->params)
+        if (resolveType(p)->kind != resolveType(object->params[0])->kind) { same = false; break; }
+      if (same) return object->params[0];
+    }
+    auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return t;
+  }
   if (object->kind == TypeKind::Var) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
@@ -52,6 +70,15 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
   if (object->kind == TypeKind::Array) return typeArray(object->elem);
   if (object->kind == TypeKind::String) return typeString();
   if (object->kind == TypeKind::Bytes) return typeBytes();
+  if (object->kind == TypeKind::Tuple) {
+    if (!object->params.empty()) {
+      bool same = true;
+      for (const auto& p : object->params)
+        if (resolveType(p)->kind != resolveType(object->params[0])->kind) { same = false; break; }
+      if (same) return typeArray(object->params[0]);
+    }
+    auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return typeArray(t);
+  }
   if (object->kind == TypeKind::Var) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }

@@ -438,6 +438,7 @@ TypePtr Sema::inferCall(CallExpr& expr) {
   if (auto* ident = dynamic_cast<IdentExpr*>(expr.callee.get())) {
     const std::string& name = ident->name;
     if (VarSym* sym = lookupVar(name)) {
+      sym->used = true;  // using a value as a call target counts as a use
       return checkFunctionValueCall(name, sym->type, expr);
     }
     if (auto imported = fromBindings_.find(name); imported != fromBindings_.end()) {

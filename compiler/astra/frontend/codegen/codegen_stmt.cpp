@@ -29,10 +29,10 @@ namespace a::detail {
 FnInfo* AsmEmitter::dropFnFor(TypePtr type) {
     TypePtr t = resolveType(type);
     if (!t || t->kind != TypeKind::Struct) return nullptr;
-    auto sit = structs_.find(shortName(t->structName));
-    if (sit == structs_.end()) return nullptr;
-    auto mit = sit->second->methods.find("drop");
-    return mit == sit->second->methods.end() ? nullptr : mit->second;
+    StructInfo* st = findStructByName(shortName(t->structName));
+    if (!st) return nullptr;
+    auto mit = st->methods.find("drop");
+    return mit == st->methods.end() ? nullptr : mit->second;
   }
 
 void AsmEmitter::emitDropNow(int slot, FnInfo* fn) {

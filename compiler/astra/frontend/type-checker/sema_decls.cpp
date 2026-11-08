@@ -1,5 +1,7 @@
 #include "type-checker/sema_internal.hpp"
 
+#include <algorithm>
+
 namespace a {
 // ------------------------------------------------------------ declarations
 
@@ -198,6 +200,7 @@ void Sema::registerMethodSignatures(StructDecl& decl) {
   TypePtr selfType = typeStruct(q);
 
   // Inherit methods from baseClass if present
+  std::vector<std::string> inherited;
   if (!decl.baseClass.empty()) {
     std::string baseQ = qualified(decl.baseClass);
     auto baseIt = structs_.find(baseQ);
@@ -207,10 +210,11 @@ void Sema::registerMethodSignatures(StructDecl& decl) {
     if (baseIt != structs_.end()) {
       for (const auto& m : baseIt->second.methods) {
         sym.methods.insert(m);
+        inherited.push_back(m.first);
       }
     }
   }
-
+  std::vector<std::string> ownMethods;
   for (auto& methodPtr : decl.methods) {
     FnDecl& method = *methodPtr;
     fnModules_[&method] = currentModule_;
@@ -226,9 +230,16 @@ void Sema::registerMethodSignatures(StructDecl& decl) {
                   "The 'self' parameter does not take a type annotation.");
     }
     if (sym.methods.count(method.name)) {
-      sink_.error(method.nameSpan, "Duplicate method '" + method.name + "' in struct '" + decl.name + "'.");
-      continue;
+      bool overridesInherited =
+          std::find(inherited.begin(), inherited.end(), method.name) != inherited.end();
+      bool duplicateOwn =
+          std::find(ownMethods.begin(), ownMethods.end(), method.name) != ownMethods.end();
+      if (duplicateOwn || !overridesInherited) {
+        sink_.error(method.nameSpan, "Duplicate method '" + method.name + "' in struct '" + decl.name + "'.");
+        continue;
+      }
     }
+    ownMethods.push_back(method.name);
     for (const auto& field : sym.fields) {
       if (field.first == method.name) {
         sink_.error(method.nameSpan, "Method '" + method.name + "' conflicts with a field of the same name.");

@@ -124,15 +124,21 @@ class AsmEmitter {
   }
 
     bool run(std::string& out, std::string& error);
+    // Per-module emission (Phase 2): emits only the units in `only` (or all
+    // units when `only` is null/empty). Each unit is .bss+.rodata+.text.
+    bool runPerUnit(std::vector<AsmUnit>& out, std::string& error,
+                    const std::vector<int>* only = nullptr);
 
  private:
   const ModuleGraph& graph_;
   const SemaResult& sema_;
   std::string* error_ = nullptr;
   bool failed_ = false;
-  int counter_ = 0;
-  int labelCounter_ = 0;
+  int counter_ = 0;       // legacy global counter (kept for emitStrData fallback paths)
+  int dataCounter_ = 0;   // .L__a_d<N> string-data sequence, reset per unit
+  int labelCounter_ = 0;  // reset per unit in runPerUnit
   int slotCounter_ = 0;
+  mutable std::unordered_map<int, std::string> moduleTags_;
   std::ostringstream text_;
   std::ostringstream rodata_;
   std::ostringstream bss_;
@@ -155,6 +161,7 @@ class AsmEmitter {
   };
   std::vector<PendingLambda> lambdas_;
   int lambdaCounter_ = 0;
+  std::unordered_map<int, int> lambdaSeq_;  // per-module lambda sequence
 
   std::vector<std::unordered_map<std::string, ABinding>> scopes_;
   std::vector<std::string> loopBreak_;
@@ -543,6 +550,20 @@ class AsmEmitter {
 
   // ---- registration (mirrors Emitter) --------------------------------------
     void collectGlobals();
+    // Stable per-module symbol tags (Phase 1): 64-bit hash of the module's
+    // canonical path. Recomputed from graph_ on demand so every emitter
+    // instance derives identical names for the same program.
+    std::string moduleTag(int moduleId) const;
+    std::string modInitSym(int moduleId);
+    // Module-aware struct/enum lookups: prefer curModuleId_ so duplicate
+    // names in different modules resolve to the local definition (Phase 1
+    // stable symbols enable duplicates; identity when unique).
+    StructInfo* findStructByName(const std::string& name) const;
+    const EnumVariantInfo* findEnumVariant(const std::string& enumName,
+                                           const std::string& variant,
+                                           int preferModule = -2) const;
+    const EnumVariantInfo* findEnumByShort(const std::string& variant,
+                                           int preferModule = -2) const;
 
     std::int64_t evalConstIntA(const Expr* e, std::int64_t fallback);
 
@@ -564,6 +585,16 @@ class AsmEmitter {
     void emitFunction(FnInfo* f);
 
     void emitMain();
+    // Per-unit split of emitMain (Phase 2): emits `__a_modinit_<mtag>` holding
+    // one module's top-level statements; emitMainShared emits `main` (runtime
+    // init, fnon setup for all modules, test table, calls to modinits in
+    // graph.order, then `fn main()`).
+    void emitModuleInitBody(int moduleId);
+    void emitMainShared();
+    // Emits one module's unit (.bss+.rodata+.text) into `out`.
+    void emitUnit(int moduleId, std::string& out);
+    void drainLambdasFor(int moduleId);
+    void emitModuleBss(int moduleId);
 
   // ---- statements -------------------------------------------------------------
   // Emit deferred statements of frames [depth, size) innermost-first, LIFO

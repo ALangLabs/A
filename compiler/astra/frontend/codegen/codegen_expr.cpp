@@ -43,15 +43,25 @@ void AsmEmitter::emitSafeNav(const SafeNavExpr& x, const Expr* e) {
     // If the field is itself optional its value already is None/Some, so do not
     // wrap it again (that would produce Some(None) and break short-circuiting).
     // For non-optional (or dynamically typed) fields, flatten a None so chains
-    // like `a?.b?.c` short-circuit instead of yielding Some(None).
+    // like `a?.b?.c` short-circuit, and pass an already-Some value through so
+    // untyped optional fields do not become Some(Some(...)).
     if (!x.fieldOptional) {
-      std::string vnone = newLabel("safevn"), vdone = newLabel("safevd");
+      int valS = allocSlot();
+      storeRax(valS);
+      std::string vnone = newLabel("safevn"), vkeep = newLabel("safevk"),
+                  vdone = newLabel("safevd");
+      loadSlot(valS);
       movImm(kNone, "%rcx");
       emit("    cmp %rcx, %rax\n    je " + vnone + "\n");
-      emit("    mov %rax, %rdi\n    call a_some_new\n");
-      emit("    jmp " + vdone + "\n");
+      loadSlot(valS, "%rdi");
+      emit("    call a_is_option\n    test %rax, %rax\n    jne " + vkeep + "\n");
+      loadSlot(valS, "%rdi");
+      emit("    call a_some_new\n    jmp " + vdone + "\n");
       emitLabel(vnone);
       movImm(kNone);
+      emit("    jmp " + vdone + "\n");
+      emitLabel(vkeep);
+      loadSlot(valS);
       emitLabel(vdone);
     }
     storeRax(resS);
@@ -93,7 +103,23 @@ void AsmEmitter::emitPatternTest(const Pattern& p, int subjS, const std::string&
           emit("    jz " + failL + "\n");
           return;
         }
-        // Algebraic variant: dict with __tag.
+        // Algebraic variant: compare the subject's __tag against the variant's
+        // integer tag (p.ctor evaluates to the {__tag,__name} dict otherwise).
+        std::int64_t tagVal = -1;
+        if (auto* fe = dynamic_cast<const FieldExpr*>(p.ctor.get())) {
+          if (auto* ie = dynamic_cast<const IdentExpr*>(fe->object.get())) {
+            if (const EnumVariantInfo* ev = findEnumVariant(ie->name, fe->field))
+              tagVal = ev->tag;
+          }
+          if (tagVal < 0) {
+            if (const EnumVariantInfo* ev = findEnumByShort(fe->field))
+              tagVal = ev->tag;
+          }
+        }
+        if (tagVal >= 0) {
+          movImm(mkintA(tagVal), "%rcx");
+          emit("    mov %rcx, " + slotRef(vS));
+        }
         int tagKeyS = strLitSlot("__tag");
         int noneS = allocSlot();
         movImm(kNone, "%rcx");
@@ -167,17 +193,17 @@ void AsmEmitter::bindPatternVariables(const Pattern& p, int subjS) {
         return;
       }
       case Pattern::Kind::Variant: {
-        for (auto& sub : p.subpatterns) {
-          if (sub.kind == Pattern::Kind::Binding) {
-            int keyS = strLitSlot(sub.name);
-            int noneS = allocSlot();
-            movImm(kNone, "%rcx");
-            emit("    mov %rcx, " + slotRef(noneS));
-            call3slot("a_dict_get", subjS, keyS, noneS);
-            int valS = allocSlot();
-            storeRax(valS);
-            bindLocal(sub.name, valS);
-          }
+        for (std::size_t i = 0; i < p.subpatterns.size(); ++i) {
+          std::string key = i < p.variantFields.size() ? p.variantFields[i]
+                                                       : p.subpatterns[i].name;
+          int keyS = strLitSlot(key);
+          int noneS = allocSlot();
+          movImm(kNone, "%rcx");
+          emit("    mov %rcx, " + slotRef(noneS));
+          call3slot("a_dict_get", subjS, keyS, noneS);
+          int valS = allocSlot();
+          storeRax(valS);
+          bindPatternVariables(p.subpatterns[i], valS);
         }
         return;
       }
@@ -310,7 +336,7 @@ void AsmEmitter::emitLambda(const LambdaExpr& x) {
     PendingLambda pl;
     pl.expr = &x;
     pl.moduleId = curModuleId_;
-    pl.cname = "__lambda_" + std::to_string(lambdaCounter_++);
+    pl.cname = "__a_lam_" + moduleTag(curModuleId_) + "_" + std::to_string(lambdaSeq_[curModuleId_]++);
     std::set<std::string> names;
     collectIdents(x.body.get(), names);
     for (const std::string& nm : names) {
@@ -821,9 +847,10 @@ void AsmEmitter::emitField(const Expr* e) {
         ABinding* mb = lookup(first);
         if (mb && mb->kind == BKind::Module && mb->moduleId >= 0) {
           if (chain.size() >= 2) {
-            auto it = enums_.find(chain[chain.size() - 2] + "." + chain.back());
-            if (it != enums_.end()) {
-              EnumVariantInfo ev = it->second;
+            if (const EnumVariantInfo* evp =
+                    findEnumVariant(chain[chain.size() - 2], chain.back(),
+                                    mb->moduleId)) {
+              EnumVariantInfo ev = *evp;
               if (ev.algebraic) {
                 emitVariantDict(ev, chain.back());
               } else {
@@ -892,23 +919,21 @@ void AsmEmitter::emitField(const Expr* e) {
     // Enum variant: Color.Red
     if (x.object->kind == ExprKind::Ident) {
       const std::string& oname = static_cast<const IdentExpr&>(*x.object).name;
-      auto it = enums_.find(oname + "." + x.field);
-      if (it != enums_.end()) {
-        if (it->second.algebraic) {
-          emitVariantDict(it->second, x.field);
+      if (const EnumVariantInfo* evp = findEnumVariant(oname, x.field)) {
+        if (evp->algebraic) {
+          emitVariantDict(*evp, x.field);
         } else {
-          emit("    mov " + it->second.globalVar + "(%rip), %rax");
+          emit("    mov " + evp->globalVar + "(%rip), %rax");
         }
         return;
       }
       ABinding* mb = lookup(oname);
       if (mb && mb->kind == BKind::Module) {
-        auto it2 = enums_.find(x.field);
-        if (it2 != enums_.end()) {
-          if (it2->second.algebraic) {
-            emitVariantDict(it2->second, x.field);
+        if (const EnumVariantInfo* evp = findEnumByShort(x.field, mb->moduleId)) {
+          if (evp->algebraic) {
+            emitVariantDict(*evp, x.field);
           } else {
-            emit("    mov " + it2->second.globalVar + "(%rip), %rax");
+            emit("    mov " + evp->globalVar + "(%rip), %rax");
           }
           return;
         }

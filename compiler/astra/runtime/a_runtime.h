@@ -485,6 +485,7 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv);
 aval a_getattr(aval obj, const char *name);     /* field access */
 aval a_unwrap(aval v);                          /* postfix ! */
 aval a_some_new(aval v);                        /* Some(v) option value */
+int a_is_option(aval v);                        /* 1 when v is Some(...)/None */
 aval a_try_result(aval v);                      /* helper for err propagation */
 
 /* builtins */

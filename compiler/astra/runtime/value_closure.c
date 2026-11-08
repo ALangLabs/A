@@ -89,6 +89,11 @@ int is_result(aval v) {
     return o && o->type == T_RESULT;
 }
 
+int a_is_option(aval v) {
+    AObj *o = obj_of(v);
+    return o && o->type == T_RESULT && ((AResult *)o)->is_option;
+}
+
 int result_ok(aval v) { return ((AResult *)obj_of(v))->ok != 0; }
 static aval result_value(aval v) { return ((AResult *)obj_of(v))->value; }
 

@@ -227,6 +227,7 @@ struct Pattern {
   ExprPtr rangeEnd;
   ExprPtr ctor;                    // Variant patterns: dotted FieldExpr chain, e.g. Shape.Circle
   std::vector<Pattern> subpatterns;  // Variant/Tuple/Or sub-patterns
+  std::vector<std::string> variantFields;  // payload field names (Variant patterns)
   std::string name;                // Binding patterns
 };
 

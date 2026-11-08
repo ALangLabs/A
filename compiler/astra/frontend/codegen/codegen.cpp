@@ -26,6 +26,43 @@
 
 namespace a::detail {
 
+bool AsmEmitter::runPerUnit(std::vector<AsmUnit>& out, std::string& error,
+                            const std::vector<int>* only) {
+  error_ = &error;
+  collectGlobals();
+  buildGlobalScope();
+  std::vector<int> order = graph_.order;
+  if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
+  // Include any module missing from order (defensive; loader fills order).
+  std::set<int> inOrder(order.begin(), order.end());
+  for (const Module& mod : graph_.modules) {
+    if (!inOrder.count(mod.id)) {
+      order.push_back(mod.id);
+      inOrder.insert(mod.id);
+    }
+  }
+  std::vector<int> wanted = order;
+  if (only && !only->empty()) {
+    std::set<int> keep(only->begin(), only->end());
+    wanted.clear();
+    for (int mid : order)
+      if (keep.count(mid)) wanted.push_back(mid);
+    // Preserve caller order for anything not in graph order.
+    for (int mid : *only) {
+      if (!inOrder.count(mid) && keep.count(mid)) wanted.push_back(mid);
+    }
+  }
+  for (int mid : wanted) {
+    if (failed_) return false;
+    AsmUnit unit;
+    unit.moduleId = mid;
+    emitUnit(mid, unit.text);
+    if (failed_) return false;
+    out.push_back(std::move(unit));
+  }
+  return true;
+}
+
 bool AsmEmitter::run(std::string& out, std::string& error) {
     error_ = &error;
     collectGlobals();
@@ -108,6 +145,14 @@ bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
              std::string& error, bool testMode, const std::string* testFilter) {
   detail::AsmEmitter emitter(graph, sema, testMode, testFilter);
   return emitter.run(out, error);
+}
+
+bool emitAsmPerUnit(const ModuleGraph& graph, const SemaResult& sema,
+                    std::vector<AsmUnit>& out, std::string& error,
+                    bool testMode, const std::string* testFilter,
+                    const std::vector<int>* only) {
+  detail::AsmEmitter emitter(graph, sema, testMode, testFilter);
+  return emitter.runPerUnit(out, error, only);
 }
 
 }  // namespace a

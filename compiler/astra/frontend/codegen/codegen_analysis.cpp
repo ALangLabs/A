@@ -203,8 +203,7 @@ bool AsmEmitter::rawNameMayBeGlobal(const std::string& nm) const {
     for (StructInfo* st : structList_)
       if (st->name == nm) return true;
     for (const auto& kv : enums_) {
-      std::size_t dot = kv.first.find('.');
-      if (dot != std::string::npos && kv.first.substr(dot + 1) == nm) return true;
+      if (kv.second.variantName == nm) return true;
     }
     return false;
   }

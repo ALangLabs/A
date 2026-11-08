@@ -66,4 +66,15 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
                 const std::string& arch, const std::string& os,
                 std::string& out, std::string& error, bool testMode = false,
                 const std::string* testFilter = nullptr);
+
+// Per-unit native emission (functions-only split): one AsmUnit per module.
+// Top-level statements stay inlined in the entry unit's `main` (native
+// top-levels are frame locals); other units hold that module's
+// functions/ctors/lambdas. i8086 (bare-metal flat image) is excluded.
+bool emitNativePerUnit(const ModuleGraph& graph, const SemaResult& sema,
+                       const std::string& arch, const std::string& os,
+                       std::vector<AsmUnit>& out, std::string& error,
+                       bool testMode = false,
+                       const std::string* testFilter = nullptr,
+                       const std::vector<int>* only = nullptr);
 }  // namespace a

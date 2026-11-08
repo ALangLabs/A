@@ -192,8 +192,39 @@ struct EnumVariantInfo {
   bool algebraic = false;
   int tag = 0;
   std::vector<std::string> payloadFields;
+  int moduleId = -1;
+  std::string enumName;
+  std::string variantName;
 };
 
 enum class BKind { Local, Global, Param, Capture, FnValue, Builtin, StructCtor, EnumValue, Module, PyModule, PyFunc, NativeConst };
+
+// ---- Stable symbol hashing (per-module object cache, Phase 1) -------------
+// Names are derived from (module, declaration) content, never from program
+// order, so a cached object from an earlier build still links. FNV-1a 64-bit.
+inline std::uint64_t stableHash64(const std::string& s) {
+  std::uint64_t h = 1469598103934665603ULL;
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+inline std::uint64_t stableHash64Init(std::uint64_t h, const std::string& s) {
+  for (unsigned char c : s) {
+    h ^= c;
+    h *= 1099511628211ULL;
+  }
+  return h;
+}
+inline std::string stableHex64(std::uint64_t h) {
+  char b[17];
+  std::snprintf(b, sizeof b, "%016llx",
+                static_cast<unsigned long long>(h));
+  return std::string(b);
+}
+inline std::string stableTag(const std::string& s) {
+  return stableHex64(stableHash64(s));
+}
 
 }  // namespace a

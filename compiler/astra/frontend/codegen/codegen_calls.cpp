@@ -1405,15 +1405,37 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
           return;
         }
       }
+      // Algebraic enum variant construction: Enum.Variant(args...). Sema has
+      // already validated arity/types; build the {__tag,__name} dict and store
+      // each payload under its declared field name.
+      {
+        TypePtr eot = resolveType(f.object->inferredType);
+        if (eot && eot->kind == TypeKind::Enum) {
+          const EnumVariantInfo* ev = findEnumVariant(
+              shortName(eot->structName), f.field, eot->moduleId);
+          if (ev && ev->algebraic) {
+            emitVariantDict(*ev, f.field);
+            int dS = allocSlot();
+            storeRax(dS);
+            for (std::size_t i = 0;
+                 i < call.args.size() && i < ev->payloadFields.size(); ++i) {
+              int vS = evalSlot(call.args[i].value.get());
+              int kS = strLitSlot(ev->payloadFields[i]);
+              call3slot("a_dict_set", dS, kS, vS);
+            }
+            loadSlot(dS);
+            return;
+          }
+        }
+      }
       // Struct method with known receiver type.
       TypePtr ot = resolveType(f.object->inferredType);
       FnInfo* method = nullptr;
       std::vector<std::string> restParams;
       if (ot && ot->kind == TypeKind::Struct) {
-        auto sit = structs_.find(shortName(ot->structName));
-        if (sit != structs_.end()) {
-          auto mit = sit->second->methods.find(f.field);
-          if (mit != sit->second->methods.end()) method = mit->second;
+        if (StructInfo* st = findStructByName(shortName(ot->structName))) {
+          auto mit = st->methods.find(f.field);
+          if (mit != st->methods.end()) method = mit->second;
         }
       }
       if (!method) {

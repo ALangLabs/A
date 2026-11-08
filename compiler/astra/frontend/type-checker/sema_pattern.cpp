@@ -112,32 +112,65 @@ void Sema::checkPattern(Pattern& pattern, TypePtr subjectType, std::vector<Patte
 
   if (pattern.kind == Pattern::Kind::Variant) {
     TypePtr subject = resolveType(subjectType);
-    if (subject->kind != TypeKind::Enum) {
-      if (subject->kind != TypeKind::Error) {
-        sink_.error(pattern.span,
-                    "A variant pattern cannot match a value of type " + typeName(subjectType) +
-                        ".",
-                    "Variant patterns require a subject of algebraic enum type.");
-      }
-      return;
-    }
-    auto infoIt = enums_.find(subject->structName);
-    if (infoIt == enums_.end() || !infoIt->second.algebraic) {
-      sink_.error(pattern.span,
-                  "A variant pattern cannot match a value of type " + typeName(subjectType) + ".",
-                  "Only enums with payload variants support destructuring patterns.");
-      return;
-    }
-    EnumInfo& info = infoIt->second;
     auto* ctor = dynamic_cast<FieldExpr*>(pattern.ctor.get());
     if (!ctor) {
       sink_.error(pattern.span, "Variant patterns must be qualified, e.g. Shape.Circle(...).");
       return;
     }
-    if (!enumNamespaceUse(ctor->object, info.name)) {
+    const bool dynamicSubject =
+        subject->kind == TypeKind::Var || subject->kind == TypeKind::Error;
+    EnumInfo* infoPtr = nullptr;
+    if (!dynamicSubject) {
+      if (subject->kind != TypeKind::Enum) {
+        sink_.error(pattern.span,
+                    "A variant pattern cannot match a value of type " + typeName(subjectType) +
+                        ".",
+                    "Variant patterns require a subject of algebraic enum type.");
+        return;
+      }
+      auto infoIt = enums_.find(subject->structName);
+      if (infoIt == enums_.end() || !infoIt->second.algebraic) {
+        sink_.error(pattern.span,
+                    "A variant pattern cannot match a value of type " + typeName(subjectType) + ".",
+                    "Only enums with payload variants support destructuring patterns.");
+        return;
+      }
+      infoPtr = &infoIt->second;
+    } else {
+      // Dynamic (unannotated) subject: identify the enum from the pattern's
+      // namespace (Shape.Circle / mod.Shape.Circle).
+      std::string ns;
+      if (auto* ie = dynamic_cast<IdentExpr*>(ctor->object.get())) ns = ie->name;
+      else if (auto* fe = dynamic_cast<FieldExpr*>(ctor->object.get())) ns = fe->field;
+      if (!ns.empty()) {
+        auto it = enums_.find(qualified(ns));
+        if (it == enums_.end()) it = enums_.find(ns);
+        if (it != enums_.end() && it->second.algebraic) {
+          infoPtr = &it->second;
+        } else {
+          for (auto& kv : enums_)
+            if (kv.second.algebraic && shortName(kv.first) == ns) {
+              infoPtr = &kv.second;
+              break;
+            }
+        }
+      }
+      if (!infoPtr) {
+        // Cannot identify the enum statically: check payloads as dynamic values.
+        for (auto& sub : pattern.subpatterns) {
+          auto v = std::make_shared<Type>();
+          v->kind = TypeKind::Var;
+          v->allowUnresolved = true;
+          checkPattern(sub, v, bindings);
+        }
+        return;
+      }
+    }
+    EnumInfo& info = *infoPtr;
+    if (!dynamicSubject && !enumNamespaceUse(ctor->object, info.name)) {
       sink_.error(pattern.span,
                   "Variant pattern '" + ctor->field + "' does not belong to enum '" +
-                      shortName(subject->structName) + "'.");
+                      shortName(info.name) + "'.");
       return;
     }
     const VariantInfo* variant = info.findVariant(ctor->field);
@@ -159,6 +192,8 @@ void Sema::checkPattern(Pattern& pattern, TypePtr subjectType, std::vector<Patte
     for (std::size_t i = 0; i < info.typeParamVars.size() && i < subject->params.size(); ++i) {
       mapping[info.typeParamVars[i]] = subject->params[i];
     }
+    pattern.variantFields.clear();
+    for (const auto& field : variant->fields) pattern.variantFields.push_back(field.first);
     for (std::size_t i = 0; i < pattern.subpatterns.size(); ++i) {
       TypePtr fieldType =
           mapping.empty() ? variant->fields[i].second
@@ -305,6 +340,10 @@ TypePtr Sema::inferTry(TryExpr& expr) {
           sink_.error(expr.span, "The value produced by '? does not match the function's "
                                  "optional return type.");
         }
+      } else if (ret->kind == TypeKind::Var) {
+        // Unannotated (inferred/dynamic) return type: accept the propagation
+        // and let the first concrete return refine the signature.
+        unify(currentReturnType_, operand);
       } else if (ret->kind != TypeKind::Error) {
         sink_.error(expr.span,
                     "Using '?' on an optional requires the function to return an optional.",
@@ -335,6 +374,9 @@ TypePtr Sema::inferTry(TryExpr& expr) {
       if (!unify(ret->errorType, resolved->errorType)) {
         sink_.error(expr.span, "The error type of '?' does not match the function's return type.");
       }
+    } else if (ret->kind == TypeKind::Var) {
+      // Inferred/dynamic return type: accept Result propagation too.
+      unify(currentReturnType_, operand);
     } else if (ret->kind == TypeKind::Optional) {
       sink_.error(expr.span,
                   "Using '?' on a Result inside a function returning an optional loses the "

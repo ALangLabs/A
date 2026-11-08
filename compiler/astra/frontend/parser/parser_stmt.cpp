@@ -241,9 +241,34 @@ StmtPtr Parser::parseFromImport() {
 StmtPtr Parser::parseSimpleStatement() {
   Span start = cur().span;
   auto target = parseExpression();
+  // Unparenthesized tuple targets: `a, b = pair`. A top-level comma after the
+  // first expression is only meaningful as a destructuring target here.
+  if (check(Tok::Comma)) {
+    auto tuple = std::make_unique<TupleExpr>();
+    tuple->span = target->span;
+    tuple->elements.push_back(std::move(target));
+    while (match(Tok::Comma)) {
+      if (check(Tok::Newline) || check(Tok::Eof) || check(Tok::Dedent)) break;
+      tuple->elements.push_back(parseExpression());
+    }
+    tuple->span = Span::join(start, previousSpan());
+    target = std::move(tuple);
+  }
   if (isAssignmentOp(cur().kind)) {
     const Token& opTok = advance();
     auto value = parseExpression();
+    // `a, b = 1, 2`: allow a bare comma tuple on the right for destructuring.
+    if (dynamic_cast<TupleExpr*>(target.get()) != nullptr && check(Tok::Comma)) {
+      auto rhs = std::make_unique<TupleExpr>();
+      rhs->span = value->span;
+      rhs->elements.push_back(std::move(value));
+      while (match(Tok::Comma)) {
+        if (check(Tok::Newline) || check(Tok::Eof) || check(Tok::Dedent)) break;
+        rhs->elements.push_back(parseExpression());
+      }
+      rhs->span = Span::join(start, previousSpan());
+      value = std::move(rhs);
+    }
     expectNewline();
     if (dynamic_cast<TupleExpr*>(target.get()) != nullptr) {
       if (opTok.kind != Tok::Eq) {

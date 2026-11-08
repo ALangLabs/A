@@ -19,11 +19,33 @@ namespace a {
 inline std::recursive_mutex gVarMutex;
 
 // True when control can never continue past this statement.
+namespace detail {
+// A `break` that targets the current loop: found directly or inside an `if`,
+// but not inside a nested loop/for/while/do (their breaks belong to them).
+inline bool hasLoopBreak(const Stmt& stmt);
+inline bool hasLoopBreakInBody(const std::vector<StmtPtr>& body) {
+  for (const auto& s : body)
+    if (s && hasLoopBreak(*s)) return true;
+  return false;
+}
+inline bool hasLoopBreak(const Stmt& stmt) {
+  if (dynamic_cast<const BreakStmt*>(&stmt)) return true;
+  if (const auto* node = dynamic_cast<const IfStmt*>(&stmt)) {
+    for (const auto& branch : node->branches)
+      if (hasLoopBreakInBody(branch.body)) return true;
+    if (!node->elseBody.empty() && hasLoopBreakInBody(node->elseBody)) return true;
+  }
+  return false;
+}
+}  // namespace detail
+
 inline bool terminatesFlow(const Stmt& stmt) {
   if (dynamic_cast<const ReturnStmt*>(&stmt)) return true;
   if (dynamic_cast<const BreakStmt*>(&stmt)) return true;
   if (dynamic_cast<const ContinueStmt*>(&stmt)) return true;
-  if (dynamic_cast<const LoopStmt*>(&stmt)) return true;  // loop ... only exits via break
+  // `loop` only continues forever when nothing can `break` out of it.
+  if (const auto* node = dynamic_cast<const LoopStmt*>(&stmt))
+    return !detail::hasLoopBreakInBody(node->body);
   if (const auto* node = dynamic_cast<const IfStmt*>(&stmt)) {
     if (node->elseBody.empty()) return false;
     for (const auto& branch : node->branches) {

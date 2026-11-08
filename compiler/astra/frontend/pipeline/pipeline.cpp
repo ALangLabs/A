@@ -3,6 +3,8 @@
 #include <cerrno>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -21,6 +23,8 @@
 #include <sys/wait.h>
 #endif
 #include <utility>
+#include <numeric>
+#include <unordered_map>
 #include <vector>
 #include "diagnostics/diagnostics.hpp"
 #include "codegen/codegen.hpp"
@@ -509,34 +513,75 @@ inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
 // Runtime C/headers are compiled into every binary, so a change to any of
 // them must invalidate cached binaries: without this, editing net.c or
 // bytes_conv.c and re-running `a run` silently reused the old executable.
+// Process-local memoization for runtime file stats: precheck, binary plan
+// and per-unit keys all hash the same runtime files in one `a` invocation.
+// Files do not change mid-invocation, so stats are captured once. Hashes
+// are byte-identical to the uncached path (same mix calls, same order).
+struct RuntimeStat {
+  std::string path;
+  std::uint64_t sz = 0;
+  std::uint64_t mt = 0;
+  bool missing = false;
+};
+inline const std::vector<RuntimeStat>& runtimeStats(const std::string& runtimeC) {
+  static std::unordered_map<std::string, std::vector<RuntimeStat>> cache;
+  auto it = cache.find(runtimeC);
+  if (it != cache.end()) return it->second;
+  std::vector<RuntimeStat> stats;
+  if (!runtimeC.empty()) {
+    std::filesystem::path src = std::filesystem::path(runtimeC).parent_path();
+    if (!src.empty()) {
+      std::vector<std::string> files;
+      std::function<void(const std::filesystem::path&, int)> collect =
+          [&](const std::filesystem::path& dir, int depth) {
+        std::error_code dec;
+        std::filesystem::directory_iterator dit(
+            dir, std::filesystem::directory_options::skip_permission_denied, dec);
+        if (dec) return;
+        for (std::filesystem::directory_iterator end; dit != end; dit.increment(dec)) {
+          if (dec) return;
+          std::error_code sec;
+          const std::filesystem::path p = dit->path();
+          std::filesystem::file_status st = dit->symlink_status(sec);
+          if (std::filesystem::is_directory(st)) {
+            if (depth < 1) collect(p, depth + 1);
+            continue;
+          }
+          const std::string ext = p.extension().string();
+          if (ext == ".c" || ext == ".h") files.push_back(p.string());
+        }
+      };
+      collect(src, 0);
+      std::sort(files.begin(), files.end());
+      for (const std::string& f : files) {
+        RuntimeStat rs;
+        rs.path = f;
+        std::error_code ec;
+        auto st = std::filesystem::status(f, ec);
+        if (!std::filesystem::exists(st)) rs.missing = true;
+        else {
+          rs.sz = static_cast<std::uint64_t>(std::filesystem::file_size(f, ec));
+          rs.mt = static_cast<std::uint64_t>(
+              std::filesystem::last_write_time(f, ec).time_since_epoch().count());
+        }
+        stats.push_back(std::move(rs));
+      }
+    }
+  }
+  auto res = cache.emplace(runtimeC, std::move(stats)).first;
+  return res->second;
+}
 inline void mixRuntimeSources(std::uint64_t& h, const std::string& runtimeC) {
   if (runtimeC.empty()) return;
-  std::error_code ec;
-  std::filesystem::path src = std::filesystem::path(runtimeC).parent_path();
-  if (src.empty()) return;
-  std::vector<std::string> files;
-  std::function<void(const std::filesystem::path&, int)> collect =
-      [&](const std::filesystem::path& dir, int depth) {
-    std::error_code dec;
-    std::filesystem::directory_iterator it(
-        dir, std::filesystem::directory_options::skip_permission_denied, dec);
-    if (dec) return;
-    for (std::filesystem::directory_iterator end; it != end; it.increment(dec)) {
-      if (dec) return;
-      std::error_code sec;
-      const std::filesystem::path p = it->path();
-      std::filesystem::file_status st = it->symlink_status(sec);
-      if (std::filesystem::is_directory(st)) {
-        if (depth < 1) collect(p, depth + 1);
-        continue;
-      }
-      const std::string ext = p.extension().string();
-      if (ext == ".c" || ext == ".h") files.push_back(p.string());
+  for (const RuntimeStat& rs : runtimeStats(runtimeC)) {
+    if (rs.missing) {
+      h = mixBytes(h, "<missing>:" + rs.path);
+    } else {
+      h = mixBytes(h, rs.path);
+      h = mixInt(h, rs.sz);
+      h = mixInt(h, rs.mt);
     }
-      };
-  collect(src, 0);
-  std::sort(files.begin(), files.end());
-  for (const std::string& f : files) h = mixFileStat(h, f);
+  }
 }
 
 // The compiler binary itself is part of every cache key: rebuilding `a`
@@ -894,6 +939,405 @@ inline std::string precheckKey(const std::string& path,
 
 }  // namespace run_cache
 
+namespace objcache {
+
+inline bool envFlagOff(const char* name) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return false;
+  std::string s = lowerStr(v);
+  return s == "0" || s == "off" || s == "no" || s == "none" || s == "false";
+}
+inline bool splitUnitsEnabled() {
+  // Per-module units are the default after Phase 3; A_SPLIT_UNITS=0 opts back
+  // into the single-unit emitAsm/emitNative path.
+  return !envFlagOff("A_SPLIT_UNITS");
+}
+inline bool objCacheEnabled() {
+  return !run_cache::disabled();
+}
+inline bool debugUnits() {
+  const char* v = std::getenv("A_DEBUG_UNITS");
+  return v && *v && lowerStr(v) != "0";
+}
+inline std::string objCacheDir() {
+  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) {
+    std::error_code ec;
+    std::filesystem::path parent = std::filesystem::path(d).parent_path();
+    return (parent.empty() ? std::filesystem::path(d) : parent / "obj").string();
+  }
+  std::string base;
+#ifdef _WIN32
+  char tmp[MAX_PATH];
+  DWORD n = GetTempPathA(MAX_PATH, tmp);
+  base = std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "a_cache";
+#else
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
+    base = std::string(x) + "/a";
+  else if (const char* home = std::getenv("HOME"); home && *home)
+    base = std::string(home) + "/.cache/a";
+  else base = "/tmp/a_cache";
+#endif
+  return base + "/obj";
+}
+inline std::string hex64(std::uint64_t h) {
+  char b[17];
+  std::snprintf(b, sizeof b, "%016llx",
+                static_cast<unsigned long long>(h));
+  return std::string(b);
+}
+
+inline std::string typeSig(const TypeExprPtr& t) {
+  if (!t) return "_";
+  if (const auto* n = dynamic_cast<const NamedTypeExpr*>(t.get())) {
+    std::string s = "N:";
+    for (const auto& q : n->qualifiers) { s += q; s += "::"; }
+    s += n->name;
+    if (!n->typeArgs.empty()) {
+      s += "<";
+      for (std::size_t i = 0; i < n->typeArgs.size(); ++i) {
+        if (i) s += ",";
+        s += typeSig(n->typeArgs[i]);
+      }
+      s += ">";
+    }
+    return s;
+  }
+  if (const auto* a = dynamic_cast<const ArrayTypeExpr*>(t.get())) {
+    return "A[" + std::to_string(a->length) + "]:" + typeSig(a->element);
+  }
+  if (const auto* o = dynamic_cast<const OptionalTypeExpr*>(t.get())) {
+    return "O:" + typeSig(o->element);
+  }
+  if (const auto* tp = dynamic_cast<const TupleTypeExpr*>(t.get())) {
+    std::string s = "T(";
+    for (std::size_t i = 0; i < tp->elements.size(); ++i) {
+      if (i) s += ",";
+      s += typeSig(tp->elements[i]);
+    }
+    return s + ")";
+  }
+  if (const auto* m = dynamic_cast<const MapTypeExpr*>(t.get())) {
+    return "D:" + typeSig(m->key) + ":" + typeSig(m->value);
+  }
+  if (const auto* s = dynamic_cast<const SetTypeExpr*>(t.get())) {
+    return "S:" + typeSig(s->element);
+  }
+  if (const auto* f = dynamic_cast<const FunctionTypeExpr*>(t.get())) {
+    std::string s = "F(";
+    for (std::size_t i = 0; i < f->params.size(); ++i) {
+      if (i) s += ",";
+      s += typeSig(f->params[i]);
+    }
+    return s + ")->" + typeSig(f->returnType);
+  }
+  return "?";
+}
+inline std::string exprSig(const Expr* e) {
+  if (!e) return "_";
+  switch (e->kind) {
+    case ExprKind::IntLit: {
+      return "I" + std::to_string(static_cast<const IntLitExpr*>(e)->value);
+    }
+    case ExprKind::FloatLit: {
+      std::uint64_t bits = 0;
+      double d = static_cast<const FloatLitExpr*>(e)->value;
+      std::memcpy(&bits, &d, 8);
+      return "F" + hex64(bits);
+    }
+    case ExprKind::Ident: {
+      return "V" + static_cast<const IdentExpr*>(e)->name;
+    }
+    case ExprKind::Unary: {
+      const UnaryExpr* u = static_cast<const UnaryExpr*>(e);
+      return "U" + u->op + exprSig(u->operand.get());
+    }
+    case ExprKind::Binary: {
+      const BinaryExpr* b = static_cast<const BinaryExpr*>(e);
+      return "B" + b->op + "(" + exprSig(b->lhs.get()) + "," +
+             exprSig(b->rhs.get()) + ")";
+    }
+    default:
+      return "E" + std::to_string(static_cast<int>(e->kind));
+  }
+}
+inline void mixFnSig(std::uint64_t& h, const FnDecl* fn) {
+  if (!fn) return;
+  h = run_cache::mixBytes(h, "F:" + fn->name);
+  std::size_t arity = fn->comptimeParams.size() + fn->params.size();
+  h = run_cache::mixInt(h, static_cast<std::uint64_t>(arity));
+  for (const ComptimeParam& p : fn->comptimeParams) {
+    h = run_cache::mixBytes(h, "C:" + p.name + ":" + typeSig(p.type));
+  }
+  for (const ParamDecl& p : fn->params) {
+    h = run_cache::mixBytes(h, "P:" + p.name + ":" + typeSig(p.type) +
+                                   (p.variadic ? ":v" : ""));
+  }
+  h = run_cache::mixBytes(h, "R:" + typeSig(fn->returnType));
+  for (const auto& tp : fn->typeParams) h = run_cache::mixBytes(h, "T:" + tp);
+  for (const auto& w : fn->whereClause) h = run_cache::mixBytes(h, "W:" + w);
+}
+inline std::uint64_t sighash(const Module& mod) {
+  std::uint64_t h = 1469598103934665603ULL;
+  h = run_cache::mixBytes(h, "sig1");
+  if (!mod.program) return h;
+  for (const StmtPtr& s : mod.program->statements) {
+    switch (s->kind) {
+      case StmtKind::FnDecl: {
+        mixFnSig(h, static_cast<const FnDecl*>(s.get()));
+        break;
+      }
+      case StmtKind::StructDecl: {
+        const StructDecl* st = static_cast<const StructDecl*>(s.get());
+        h = run_cache::mixBytes(h, "S:" + st->name + ":" + st->baseClass);
+        for (const auto& tp : st->typeParams)
+          h = run_cache::mixBytes(h, "T:" + tp);
+        for (const FieldDecl& f : st->fields)
+          h = run_cache::mixBytes(h, "f:" + f.name + ":" + typeSig(f.type));
+        for (const auto& m : st->methods) mixFnSig(h, m.get());
+        break;
+      }
+      case StmtKind::EnumDecl: {
+        const EnumDecl* e = static_cast<const EnumDecl*>(s.get());
+        h = run_cache::mixBytes(h, "E:" + e->name);
+        for (const auto& tp : e->typeParams)
+          h = run_cache::mixBytes(h, "T:" + tp);
+        for (const EnumVariant& v : e->variants) {
+          h = run_cache::mixBytes(h, "v:" + v.name + "=" + exprSig(v.value.get()));
+          for (const FieldDecl& f : v.fields)
+            h = run_cache::mixBytes(h, "p:" + f.name + ":" + typeSig(f.type));
+        }
+        break;
+      }
+      case StmtKind::Let: {
+        const LetStmt* let = static_cast<const LetStmt*>(s.get());
+        h = run_cache::mixBytes(h, "L:" + let->name + ":" + typeSig(let->type));
+        break;
+      }
+      case StmtKind::TypeAlias: {
+        const TypeAliasDecl* ta = static_cast<const TypeAliasDecl*>(s.get());
+        h = run_cache::mixBytes(h, "A:" + ta->name + ":" + typeSig(ta->type));
+        break;
+      }
+      case StmtKind::TraitDecl: {
+        const TraitDecl* tr = static_cast<const TraitDecl*>(s.get());
+        h = run_cache::mixBytes(h, "R:" + tr->name);
+        for (const TraitSig& m : tr->methods)
+          h = run_cache::mixBytes(h, "m:" + m.name + ":" +
+              std::to_string(m.params.size()) + ":" + typeSig(m.returnType));
+        for (const auto& tp : tr->typeParams)
+          h = run_cache::mixBytes(h, "T:" + tp);
+        break;
+      }
+      case StmtKind::ImplDecl: {
+        const ImplDecl* im = static_cast<const ImplDecl*>(s.get());
+        h = run_cache::mixBytes(
+            h, "I:" + im->traitName + ":" + im->targetName);
+        for (const auto& m : im->methods) mixFnSig(h, m.get());
+        break;
+      }
+      case StmtKind::Import: {
+        const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+        std::string tag = "IP:";
+        if (im->pythonModuleImport) tag += "py:" + im->pythonModule;
+        else if (im->nativeModule) tag += "nat:" + im->bareName;
+        else if (im->stdModuleImport) tag += "std:" + im->stdModule;
+        else tag += im->path + ":" + im->bareName;
+        h = run_cache::mixBytes(h, tag);
+        break;
+      }
+      case StmtKind::FromImport: {
+        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        std::string tag = "FP:";
+        if (im->pythonModuleImport) tag += "py:" + im->pythonModule;
+        else if (im->nativeModule) tag += "nat:" + im->bareName;
+        else if (im->stdModuleImport) tag += "std:" + im->stdModule;
+        else tag += im->path + ":" + im->bareName;
+        h = run_cache::mixBytes(h, tag);
+        for (const auto& item : im->items)
+          h = run_cache::mixBytes(h, "item:" + item.name + ":" + item.alias);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return h;
+}
+inline std::set<int> directImports(const ModuleGraph& g, int moduleId) {
+  std::set<int> out;
+  if (moduleId < 0 || moduleId >= (int)g.modules.size()) return out;
+  const Module& mod = g.at(moduleId);
+  if (mod.program) {
+    for (const StmtPtr& s : mod.program->statements) {
+      if (s->kind == StmtKind::Import) {
+        int id = static_cast<const ImportStmt*>(s.get())->moduleId;
+        if (id >= 0) out.insert(id);
+      } else if (s->kind == StmtKind::FromImport) {
+        int id = static_cast<const FromImportStmt*>(s.get())->moduleId;
+        if (id >= 0) out.insert(id);
+      }
+    }
+  }
+  // The prelude is implicitly loaded before every program.
+  if (g.preludeId >= 0 && g.preludeId != moduleId && moduleId >= 0)
+    out.insert(g.preludeId);
+  return out;
+}
+inline std::set<int> transitiveImports(const ModuleGraph& g, int moduleId) {
+  std::set<int> seen;
+  std::vector<int> stack;
+  for (int d : directImports(g, moduleId)) stack.push_back(d);
+  while (!stack.empty()) {
+    int cur = stack.back();
+    stack.pop_back();
+    if (!seen.insert(cur).second) continue;
+    for (int d : directImports(g, cur)) {
+      if (!seen.count(d)) stack.push_back(d);
+    }
+  }
+  return seen;
+}
+// Unit key (Phase 3): content of M plus the interface closure it was built
+// against. The entry unit additionally keys on every module's interface
+// (its fnon setup table covers all modules) and on the test filter.
+inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
+                           int optimizationLevel, bool testMode,
+                           const std::string* testFilter,
+                           const std::string* entrySource, int moduleId,
+                           std::uint64_t sigh, const std::set<int>& deps) {
+  std::string astraBin, runtimeC, runtimeDir;
+  std::uint64_t h = 1469598103934665603ULL;
+  h = run_cache::mixBytes(h, "unit1");
+  h = run_cache::mixBytes(h, kVersion);
+  h = run_cache::mixBytes(h, "split1");
+  h = run_cache::mixBytes(h, td.arch);
+  h = run_cache::mixBytes(h, td.os);
+  h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
+  const char* codegen = std::getenv("A_CODEGEN");
+  h = run_cache::mixBytes(h, codegen ? codegen : "");
+  const char* rcc = std::getenv("A_RUNTIME_CC");
+  h = run_cache::mixBytes(h, rcc ? rcc : "");
+  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
+  h = run_cache::mixBytes(h, rcflags ? rcflags : "");
+  if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
+    h = run_cache::mixFileStat(h, astraBin);
+    h = run_cache::mixBytes(h, runtimeDir);
+    run_cache::mixRuntimeSources(h, runtimeC);
+    h = run_cache::mixFileStat(h, runtimeDir + "/libaruntime.a");
+    for (const std::string& cand : {runtimeDir + "/libastra1.a",
+                                    runtimeDir + "/lib/libastra1.a"}) {
+      if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
+    }
+  }
+  {
+    const std::string self = run_cache::selfExePath();
+    if (!self.empty()) h = run_cache::mixFileStat(h, self);
+  }
+  const ModuleGraph& g = *m.graph;
+  const Module& mod = g.at(moduleId);
+  h = run_cache::mixBytes(h, "M:" + mod.path);
+  std::string text;
+  if (!run_cache::readFileText(mod.path, text)) {
+    if (mod.id == g.entry && entrySource) text = *entrySource;
+    else { h = run_cache::mixBytes(h, "<missing>"); }
+  }
+  h = run_cache::mixBytes(h, text);
+  h = run_cache::mixInt(h, sigh);
+  // Dependencies in sorted order for determinism.
+  std::vector<int> sorted(deps.begin(), deps.end());
+  for (int d : sorted) {
+    h = run_cache::mixBytes(h, "D:" + g.at(d).path);
+    h = run_cache::mixInt(h, sighash(g.at(d)));
+  }
+  if (moduleId == g.entry) {
+    h = run_cache::mixInt(h, testMode ? 1 : 0);
+    if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
+  }
+  return hex64(h);
+}
+// Shared per-build key inputs (Phase 3 perf): runtime/astra/compiler
+// identity and per-module sighashes/sources are computed once, not per unit.
+struct KeyContext {
+  std::uint64_t runtimeBase = 0;
+  std::unordered_map<int, std::uint64_t> sighById;
+  std::unordered_map<int, std::string> sourceById;
+};
+inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
+                                 int optimizationLevel,
+                                 const std::string* entrySource) {
+  KeyContext ctx;
+  std::uint64_t h = 1469598103934665603ULL;
+  h = run_cache::mixBytes(h, "unit1");
+  h = run_cache::mixBytes(h, kVersion);
+  h = run_cache::mixBytes(h, "split1");
+  h = run_cache::mixBytes(h, td.arch);
+  h = run_cache::mixBytes(h, td.os);
+  h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
+  const char* codegen = std::getenv("A_CODEGEN");
+  h = run_cache::mixBytes(h, codegen ? codegen : "");
+  const char* rcc = std::getenv("A_RUNTIME_CC");
+  h = run_cache::mixBytes(h, rcc ? rcc : "");
+  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
+  h = run_cache::mixBytes(h, rcflags ? rcflags : "");
+  std::string astraBin, runtimeC, runtimeDir;
+  if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
+    h = run_cache::mixFileStat(h, astraBin);
+    h = run_cache::mixBytes(h, runtimeDir);
+    run_cache::mixRuntimeSources(h, runtimeC);
+    h = run_cache::mixFileStat(h, runtimeDir + "/libaruntime.a");
+    for (const std::string& cand : {runtimeDir + "/libastra1.a",
+                                    runtimeDir + "/lib/libastra1.a"}) {
+      if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
+    }
+  }
+  {
+    const std::string self = run_cache::selfExePath();
+    if (!self.empty()) h = run_cache::mixFileStat(h, self);
+  }
+  ctx.runtimeBase = h;
+  const ModuleGraph& g = *m.graph;
+  for (const Module& mod : g.modules) {
+    ctx.sighById[mod.id] = sighash(mod);
+    std::string text;
+    if (!run_cache::readFileText(mod.path, text)) {
+      if (mod.id == g.entry && entrySource) text = *entrySource;
+      else text = "<missing>";
+    }
+    ctx.sourceById[mod.id] = std::move(text);
+  }
+  return ctx;
+}
+inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
+                                  bool testMode,
+                                  const std::string* testFilter, int moduleId,
+                                  const std::set<int>& deps) {
+  std::uint64_t h = ctx.runtimeBase;
+  const ModuleGraph& g = *m.graph;
+  const Module& mod = g.at(moduleId);
+  h = run_cache::mixBytes(h, "M:" + mod.path);
+  auto sit = ctx.sourceById.find(moduleId);
+  h = run_cache::mixBytes(h, sit == ctx.sourceById.end() ? "<missing>" : sit->second);
+  auto sighIt = ctx.sighById.find(moduleId);
+  h = run_cache::mixInt(h, sighIt == ctx.sighById.end() ? 0 : sighIt->second);
+  std::vector<int> sorted(deps.begin(), deps.end());
+  for (int d : sorted) {
+    h = run_cache::mixBytes(h, "D:" + g.at(d).path);
+    auto dit = ctx.sighById.find(d);
+    h = run_cache::mixInt(h, dit == ctx.sighById.end() ? 0 : dit->second);
+  }
+  if (moduleId == g.entry) {
+    h = run_cache::mixInt(h, testMode ? 1 : 0);
+    if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
+  }
+  return hex64(h);
+}
+inline std::string unitCachePath(const std::string& key) {
+  return objCacheDir() + "/" + key + ".o";
+}
+
+}  // namespace objcache
+
+
 // Locates the A runtime C source (compiler/astra/runtime/a_runtime.c) that
 // is compiled/linked with the emitted source. Candidates: $A_RUNTIME_C, next
 // to the astra binary (staged astralib-<arch> copy), the source tree
@@ -1230,6 +1674,503 @@ int astraBuild(const std::string& arch, const std::string& os,
   return 0;
 }
 
+// ---- per-module split build (Phase 2 + 3) -------------------------------
+struct AstraPlan {
+  std::string astraBin;
+  std::string runtimeC;
+  std::string runtimeDir;
+  std::string libDir;
+  std::string rtArchive;
+  std::vector<std::string> rtSrcs;
+  std::vector<std::string> baseArgs;
+};
+// Replicates the compiler-flag discovery in astraBuild (lib dir, includes,
+// lazy libaruntime.a) so per-unit assembly uses identical flags.
+bool prepareAstraPlan(const std::string& arch, const std::string& os,
+                      int optimizationLevel, std::ostream& err,
+                      AstraPlan& plan) {
+  if (!findRuntime(arch, os, plan.astraBin, plan.runtimeC, plan.runtimeDir)) {
+    err << "error: cannot locate A runtime (a_runtime.c) for target '" << arch
+        << "'; set A_RUNTIME_C or build with cmake\n";
+    return false;
+  }
+  if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) {
+    plan.rtSrcs.push_back(plan.runtimeC);
+  } else {
+    std::error_code ec;
+    for (const auto& de : std::filesystem::directory_iterator(plan.runtimeDir, ec)) {
+      if (de.path().extension() == ".c") plan.rtSrcs.push_back(de.path().string());
+    }
+    if (plan.rtSrcs.empty()) plan.rtSrcs.push_back(plan.runtimeC);
+    else std::sort(plan.rtSrcs.begin(), plan.rtSrcs.end());
+  }
+  std::string optFlag = "-O" + std::to_string(optimizationLevel < 0 ? 0 : (optimizationLevel > 3 ? 3 : optimizationLevel));
+  plan.baseArgs = {optFlag, "-I" + plan.runtimeDir};
+  auto hasFile = [](const std::string& p) {
+    std::error_code ec; return std::filesystem::exists(p, ec);
+  };
+  plan.libDir = "";
+  for (const std::string& cand : {plan.runtimeDir + "/libastra1.a",
+                                  plan.runtimeDir + "/lib/libastra1.a"}) {
+    if (hasFile(cand)) { plan.libDir = plan.runtimeDir; break; }
+  }
+  if (plan.libDir.empty()) {
+    std::vector<std::string> libnames = {"astralib-" + arch};
+    if (arch == hostArch()) libnames.push_back("astralib");
+    auto slash = plan.astraBin.find_last_of('/');
+    std::vector<std::string> bases;
+    if (slash != std::string::npos) {
+      std::string d = plan.astraBin.substr(0, slash);
+      bases = {d, d + "/..", d + "/../.."};
+    } else bases = {".", ".."};
+    for (const auto& b : bases) {
+      for (const auto& ln : libnames) {
+        std::string cand = b + "/" + ln;
+        if (hasFile(cand + "/libastra1.a") || hasFile(cand + "/lib/libastra1.a")) {
+          plan.libDir = std::filesystem::absolute(cand).string();
+          break;
+        }
+      }
+      if (!plan.libDir.empty()) break;
+    }
+  }
+  if (!plan.libDir.empty()) plan.baseArgs.push_back("-B" + plan.libDir);
+  if (os == "windows") {
+    for (const std::string& base : {plan.libDir, plan.runtimeDir}) {
+      if (base.empty()) continue;
+      for (const char* sub : {"/include", "/include/winapi"}) {
+        std::string d = base + sub;
+        std::error_code ec2;
+        if (std::filesystem::is_directory(d, ec2))
+          plan.baseArgs.push_back("-I" + d);
+      }
+    }
+  } else if (arch == hostArch()) {
+    plan.baseArgs.insert(plan.baseArgs.end(), {"-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
+                     "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include"});
+  } else {
+    std::vector<std::string> xinc, xlibs;
+    crossSearchDirs(arch, xinc, xlibs);
+    for (const auto& d : xinc) plan.baseArgs.push_back("-I" + d);
+    for (const auto& d : xlibs) plan.baseArgs.push_back("-L" + d);
+    if (xinc.empty() && xlibs.empty()) {
+      err << "note: no sysroot found for target '" << arch
+          << "'; set A_SYSROOT or A_SYSROOT_" << arch << " to a cross toolchain root\n";
+    }
+  }
+  plan.rtArchive = plan.runtimeDir + "/libaruntime.a";
+  if (optimizationLevel == 2 && !hasFile(plan.rtArchive) && os != "windows" &&
+      !buildRuntimeArchiveCC(arch, plan.runtimeDir, plan.rtSrcs, plan.rtArchive)) {
+    std::error_code ec;
+    const std::string objDir = plan.runtimeDir + "/rt_obj";
+    std::filesystem::create_directories(objDir, ec);
+    std::vector<std::string> robjs;
+    bool ok = true;
+    for (const std::string& src : plan.rtSrcs) {
+      std::string obj = objDir + "/" +
+          std::filesystem::path(src).stem().string() + ".o";
+      if (!hasFile(obj)) {
+        std::vector<std::string> ca = plan.baseArgs;
+        ca.push_back("-c"); ca.push_back(src); ca.push_back("-o"); ca.push_back(obj);
+        if (runAstra(arch, os, ca) != 0) { ok = false; break; }
+      }
+      robjs.push_back(obj);
+    }
+    if (ok && !robjs.empty()) {
+      std::vector<std::string> aa = {"-ar", "rcs", plan.rtArchive};
+      aa.insert(aa.end(), robjs.begin(), robjs.end());
+      ok = runAstra(arch, os, aa) == 0 && hasFile(plan.rtArchive);
+    }
+    if (!ok) err << "note: could not prebuild libaruntime.a for '" << arch
+                 << "'; falling back to per-program runtime compile\n";
+  }
+  return true;
+}
+int assembleOne(const std::string& arch, const std::string& os,
+                const std::vector<std::string>& baseArgs,
+                const std::string& srcPath, const std::string& objPath) {
+  std::vector<std::string> args = baseArgs;
+  args.push_back("-c"); args.push_back(srcPath);
+  args.push_back("-o"); args.push_back(objPath);
+  return runAstra(arch, os, args);
+}
+#ifndef _WIN32
+int assembleAll(const std::string& arch, const std::string& os,
+                const std::vector<std::string>& baseArgs,
+                const std::vector<std::pair<std::string, std::string>>& jobsList,
+                int parallel) {
+  if (parallel <= 1 || jobsList.size() <= 1) {
+    int rc = 0;
+    for (const auto& j : jobsList) {
+      rc |= assembleOne(arch, os, baseArgs, j.first, j.second);
+    }
+    return rc;
+  }
+  std::string astraBin = findAstra(arch, os);
+  struct Child { pid_t pid; std::size_t idx; };
+  std::vector<Child> running;
+  std::vector<int> failed(jobsList.size(), 0);
+  std::size_t next = 0;
+  auto tryLaunch = [&]() -> bool {
+    if (next >= jobsList.size()) return false;
+    if ((int)running.size() >= parallel) return false;
+    const std::string& src = jobsList[next].first;
+    const std::string& obj = jobsList[next].second;
+    std::vector<std::string> args = baseArgs;
+    args.push_back("-c"); args.push_back(src);
+    args.push_back("-o"); args.push_back(obj);
+    std::vector<char*> av;
+    av.push_back(const_cast<char*>(astraBin.c_str()));
+    for (auto& s : args) av.push_back(const_cast<char*>(s.c_str()));
+    av.push_back(nullptr);
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+      execvp(astraBin.c_str(), av.data());
+      _exit(127);
+    }
+    running.push_back({pid, next});
+    ++next;
+    return true;
+  };
+  while (!running.empty() || next < jobsList.size()) {
+    while (tryLaunch()) {}
+    if (running.empty()) {
+      // Fork failed: fall back to serial for the rest.
+      for (; next < jobsList.size(); ++next)
+        failed[next] = assembleOne(arch, os, baseArgs, jobsList[next].first, jobsList[next].second);
+      break;
+    }
+    int status = 0;
+    pid_t w = waitpid(-1, &status, 0);
+    if (w < 0) {
+      if (errno == EINTR) continue;
+      break;
+    }
+    for (auto it = running.begin(); it != running.end(); ++it) {
+      if (it->pid == w) {
+        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) failed[it->idx] = 1;
+        running.erase(it);
+        break;
+      }
+    }
+  }
+  int rc = 0;
+  for (int f : failed) rc |= f;
+  return rc;
+}
+#else
+int assembleAll(const std::string& arch, const std::string& os,
+                const std::vector<std::string>& baseArgs,
+                const std::vector<std::pair<std::string, std::string>>& jobsList,
+                int) {
+  int rc = 0;
+  for (const auto& j : jobsList) rc |= assembleOne(arch, os, baseArgs, j.first, j.second);
+  return rc;
+}
+#endif
+int linkUnits(const std::string& arch, const std::string& os,
+              const AstraPlan& plan, int optimizationLevel,
+              const std::vector<std::string>& objs, const std::string& outPath,
+              std::ostream& err) {
+  std::vector<std::string> args = plan.baseArgs;
+  for (const auto& o : objs) args.push_back(o);
+  if (optimizationLevel == 2 && std::filesystem::exists(plan.rtArchive))
+    args.push_back(plan.rtArchive);
+  else
+    args.insert(args.end(), plan.rtSrcs.begin(), plan.rtSrcs.end());
+  args.push_back("-o"); args.push_back(outPath);
+  int rc = runAstra(arch, os, args);
+  if (rc != 0) err << "error: astra failed to link program\n";
+  return rc;
+}
+// Splits a large unit's assembly text into independent chunks for parallel
+// `astra -c` (intra-unit parallel assemble). Header (bss+rodata) is kept in
+// chunk 0 (bss must appear once); rodata is duplicated in later chunks so
+// object-local `.L` string references resolve in each chunk. Text is split
+// at function boundaries (`    .text` lines) and balanced by line count.
+inline std::vector<std::string> splitUnitText(const std::string& text, int parts) {
+  std::vector<std::string> out;
+  if (parts <= 1 || text.empty()) { out.push_back(text); return out; }
+  std::vector<std::string> lines;
+  {
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) lines.push_back(line + "\n");
+  }
+  long firstText = -1;
+  for (std::size_t i = 0; i < lines.size(); ++i) {
+    if (lines[i] == "    .text\n") { firstText = (long)i; break; }
+  }
+  if (firstText < 0) { out.push_back(text); return out; }
+  long rodataIdx = -1;
+  for (std::size_t i = 0; i < (std::size_t)firstText; ++i) {
+    if (lines[i].find(".section .rodata") != std::string::npos) { rodataIdx = (long)i; break; }
+  }
+  std::string bssText, rodataText;
+  if (rodataIdx >= 0) {
+    for (long i = 0; i < rodataIdx; ++i) bssText += lines[(std::size_t)i];
+    for (long i = rodataIdx; i < firstText; ++i) rodataText += lines[(std::size_t)i];
+  } else {
+    for (long i = 0; i < firstText; ++i) bssText += lines[(std::size_t)i];
+  }
+  std::vector<std::string> funcs;
+  std::vector<std::size_t> funcLines;
+  // first func starts at firstText; subsequent funcs at each `    .text`
+  std::vector<std::size_t> starts;
+  for (std::size_t i = (std::size_t)firstText; i < lines.size(); ++i) {
+    if (lines[i] == "    .text\n") starts.push_back(i);
+  }
+  if (starts.empty()) { out.push_back(text); return out; }
+  for (std::size_t k = 0; k < starts.size(); ++k) {
+    std::size_t s = starts[k];
+    std::size_t e = (k + 1 < starts.size()) ? starts[k + 1] : lines.size();
+    std::string f;
+    for (std::size_t i = s; i < e; ++i) f += lines[i];
+    funcs.push_back(std::move(f));
+    funcLines.push_back(e - s);
+  }
+  if ((int)funcs.size() < 2) { out.push_back(text); return out; }
+  int nparts = std::min(parts, (int)funcs.size());
+  // Greedy balance by line count.
+  std::vector<std::vector<int>> groups((std::size_t)nparts);
+  std::vector<std::size_t> gsum((std::size_t)nparts, 0);
+  std::vector<int> order(funcs.size());
+  std::iota(order.begin(), order.end(), 0);
+  std::sort(order.begin(), order.end(), [&](int a, int b){ return funcLines[(std::size_t)a] > funcLines[(std::size_t)b]; });
+  for (int idx : order) {
+    int best = 0;
+    for (int g = 1; g < nparts; ++g) if (gsum[(std::size_t)g] < gsum[(std::size_t)best]) best = g;
+    groups[(std::size_t)best].push_back(idx);
+    gsum[(std::size_t)best] += funcLines[(std::size_t)idx];
+  }
+  for (int g = 0; g < nparts; ++g) {
+    std::string chunk = (g == 0 ? bssText : "") + rodataText;
+    // Preserve source order within group for determinism.
+    std::sort(groups[(std::size_t)g].begin(), groups[(std::size_t)g].end());
+    for (int idx : groups[(std::size_t)g]) chunk += funcs[(std::size_t)idx];
+    out.push_back(std::move(chunk));
+  }
+  return out;
+}
+// Builds `outPath` from per-module units (entry unit holds `main`).
+// Returns 0 on success, 1 on failure. Emits/assembles only cache misses
+// when the object cache is active; A_NO_CACHE disables it, but the split
+// layout is kept so cached/uncached binaries are byte-comparable.
+int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
+                    const std::string& outPath, std::ostream& err,
+                    int optimizationLevel, bool testMode,
+                    const std::string* testFilter,
+                    const std::string* entrySource, int parallel) {
+  // Assembly itself is embarrassingly parallel; default to 4 workers even
+  // when frontend jobs=1 (A_JOBS/-j still cap it at 1 when explicitly 1
+  // and A_JOBS is set? No: explicit -j1 keeps serial assembly for
+  // determinism tests; only the default (jobs==0, no A_JOBS) auto-scales).
+  // NOTE: compileAndRun passes config.jobs (default 1) here, so without -j
+  // we would stay serial; treat 1 as auto=4 for assembly to meet the
+  // incremental-build perf gate (frontend jobs remain serial).
+  if (parallel <= 0) {
+    const char* j = std::getenv("A_JOBS");
+    if (j && *j) { try { parallel = std::stoi(j); } catch (...) { parallel = 4; } }
+    else parallel = 4;
+  } else if (parallel == 1 && !std::getenv("A_JOBS")) {
+    // Default `a run`/`a build` (jobs=1, no A_JOBS): parallel assembly.
+    parallel = 4;
+  }
+  const ModuleGraph& g = *m.graph;
+  std::vector<int> order = g.order;
+  if (order.empty() && g.entry >= 0) order.push_back(g.entry);
+  {
+    std::set<int> inOrder(order.begin(), order.end());
+    for (const Module& mod : g.modules)
+      if (!inOrder.count(mod.id)) order.push_back(mod.id);
+  }
+  bool useObjCache = objcache::objCacheEnabled();  // per-target key; cross .o safe
+  std::string cacheDir = objcache::objCacheDir();
+  std::error_code ec;
+  if (useObjCache) std::filesystem::create_directories(cacheDir, ec);
+  struct UnitPlan {
+    int moduleId = -1;
+    std::uint64_t sigh = 0;
+    std::string key;
+    std::string cacheObj;
+    bool hit = false;
+  };
+  objcache::KeyContext keyCtx = objcache::makeKeyContext(m, td, optimizationLevel, entrySource);
+  std::vector<UnitPlan> plans;
+  for (int mid : order) {
+    UnitPlan up;
+    up.moduleId = mid;
+    up.sigh = keyCtx.sighById[mid];
+    std::set<int> deps;
+    if (mid == g.entry) {
+      for (const Module& mod : g.modules)
+        if (mod.id != mid) deps.insert(mod.id);
+    } else {
+      deps = objcache::transitiveImports(g, mid);
+      deps.erase(mid);
+    }
+    up.key = objcache::unitKeyWithCtx(m, keyCtx, testMode, testFilter, mid, deps);
+    up.cacheObj = objcache::unitCachePath(up.key);
+    if (useObjCache && std::filesystem::is_regular_file(up.cacheObj, ec))
+      up.hit = true;
+    plans.push_back(up);
+  }
+  std::vector<int> misses;
+  for (const auto& up : plans) if (!up.hit) misses.push_back(up.moduleId);
+  bool dbg = objcache::debugUnits();
+  if (dbg) {
+    for (const auto& up : plans) {
+      err << "unit " << up.moduleId << " " << g.at(up.moduleId).path
+          << " key=" << up.key << " " << (up.hit ? "hit" : "miss") << "\n";
+    }
+    err << "units: " << plans.size() << " total, " << misses.size() << " emitted\n";
+  }
+  AstraPlan azt;
+  if (!prepareAstraPlan(td.arch, td.os, optimizationLevel, err, azt)) return 1;
+  struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0);
+  auto ms_since = [&](struct timespec a){ struct timespec b; clock_gettime(CLOCK_MONOTONIC, &b); return (b.tv_sec-a.tv_sec)*1000 + (b.tv_nsec-a.tv_nsec)/1000000; };
+  bool dotiming = std::getenv("A_DEBUG_TIMING") != nullptr;
+  std::unordered_map<int, std::string> unitText;
+  if (!misses.empty()) {
+    std::vector<AsmUnit> emitted;
+    std::string emitErr;
+    bool emitOk;
+    if (td.useAsm) {
+      emitOk = emitAsmPerUnit(*m.graph, *m.sema, emitted, emitErr, testMode, testFilter, &misses);
+    } else {
+      // Native per-unit split (functions-only; top-levels in entry main).
+      emitOk = emitNativePerUnit(*m.graph, *m.sema, td.arch, td.os, emitted, emitErr,
+                                 testMode, testFilter, &misses);
+    }
+    if (!emitOk) {
+      err << "error: code generation failed: " << emitErr << "\n";
+      return 1;
+    }
+    for (auto& u : emitted) unitText[u.moduleId] = std::move(u.text);
+  }
+  if (dotiming) err << "timing emit ms=" << ms_since(ts0) << "\n";
+  // Assemble misses (parallel where possible). Large units are split into
+  // balanced chunks for intra-unit parallel assemble (see splitUnitText).
+  struct MissJob {
+    int moduleId = -1;
+    std::vector<std::string> chunkSrcs;
+    std::vector<std::string> chunkObjs;
+    std::string mergedObj;  // single .o for this unit after partial link
+    bool split = false;
+  };
+  std::vector<MissJob> missJobs;
+  std::vector<std::pair<std::string, std::string>> jobsList;  // chunk src->obj
+  std::vector<std::string> stagedSrcs;
+  std::vector<std::string> tempObjs;
+  std::unordered_map<int, std::string> objPath;
+  for (const auto& up : plans) {
+    if (up.hit) {
+      objPath[up.moduleId] = up.cacheObj;
+    } else {
+      auto it = unitText.find(up.moduleId);
+      if (it == unitText.end()) {
+        err << "error: missing unit emission for module " << up.moduleId << "\n";
+        return 1;
+      }
+      MissJob mj;
+      mj.moduleId = up.moduleId;
+      std::vector<std::string> chunks;
+      std::size_t nlines = 0;
+      {
+        // Count lines to decide splitting (threshold keeps setup cost low).
+        for (char c : it->second) if (c == '\n') ++nlines;
+        if (parallel > 1 && nlines > 8000) chunks = splitUnitText(it->second, std::min(parallel, 4));
+        else chunks.push_back(it->second);
+      }
+      mj.split = chunks.size() > 1;
+      for (auto& ch : chunks) {
+        std::string srcPath = stageSrc(ch, ".s", err);
+        if (srcPath.empty()) return 1;
+        stagedSrcs.push_back(srcPath);
+        std::string tmpObj;
+        if (useObjCache) {
+          tmpObj = cacheDir + "/tmp-" + std::to_string(::getpid()) + "-" + std::to_string(::rand()) + ".o";
+        } else {
+          tmpObj = tempPath("obj", "x.o");
+        }
+        jobsList.push_back({srcPath, tmpObj});
+        mj.chunkSrcs.push_back(srcPath);
+        mj.chunkObjs.push_back(tmpObj);
+      }
+      if (!mj.split) {
+        mj.mergedObj = mj.chunkObjs.front();
+        objPath[up.moduleId] = useObjCache ? up.cacheObj : mj.mergedObj;
+        if (!useObjCache) tempObjs.push_back(mj.mergedObj);
+        else tempObjs.push_back(mj.mergedObj);  // tmpObj renamed below
+      } else {
+        // Partial link chunks into one unit .o for cache / final link.
+        std::string merged = tempPath("obj", "x.o");
+        mj.mergedObj = merged;
+        objPath[up.moduleId] = useObjCache ? up.cacheObj : merged;
+        tempObjs.push_back(merged);
+      }
+      missJobs.push_back(std::move(mj));
+    }
+  }
+  // jobsList src->tmpObj ordering must match misses for rename below.
+  if (dotiming) err << "timing stagedsrc ms=" << ms_since(ts0) << "\n";
+  if (!jobsList.empty()) {
+    if (assembleAll(td.arch, td.os, azt.baseArgs, jobsList, parallel) != 0) {
+      err << "error: astra failed to assemble per-module units\n";
+      for (auto& s : stagedSrcs) std::filesystem::remove(s, ec);
+      // Remove partial tmp objs.
+      for (auto& o : tempObjs) std::filesystem::remove(o, ec);
+      return 1;
+    }
+  }
+  for (auto& s : stagedSrcs) std::filesystem::remove(s, ec);
+  for (auto& mj : missJobs) {
+    if (mj.split) {
+      // Partial-link chunks into one unit .o (relocatable).
+      std::vector<std::string> pargs = azt.baseArgs;
+      pargs.push_back("-r");
+      for (auto& co : mj.chunkObjs) pargs.push_back(co);
+      pargs.push_back("-o");
+      pargs.push_back(mj.mergedObj);
+      if (runAstra(td.arch, td.os, pargs) != 0) {
+        err << "error: astra failed to merge split unit " << mj.moduleId << "\n";
+        for (auto& o : mj.chunkObjs) std::filesystem::remove(o, ec);
+        return 1;
+      }
+      for (auto& co : mj.chunkObjs) std::filesystem::remove(co, ec);
+    }
+    if (useObjCache) {
+      const std::string& dest = mj.mergedObj;
+      int mid = mj.moduleId;
+      std::string finalObj;
+      for (const auto& u2 : plans) if (u2.moduleId == mid) finalObj = u2.cacheObj;
+      std::error_code rec;
+      std::filesystem::rename(dest, finalObj, rec);
+      if (rec) {
+        std::error_code cec;
+        std::filesystem::copy_file(dest, finalObj, std::filesystem::copy_options::overwrite_existing, cec);
+        std::filesystem::remove(dest, ec);
+      }
+      std::uint64_t sigh = 0;
+      for (const auto& u2 : plans) if (u2.moduleId == mid) sigh = u2.sigh;
+      std::ofstream sf(objcache::objCacheDir() + "/" + [&] {
+        for (const auto& u2 : plans) if (u2.moduleId == mid) return u2.key;
+        return std::string();
+      }() + ".sym", std::ios::binary | std::ios::trunc);
+      if (sf) sf << objcache::hex64(sigh) << "\n";
+    }
+  }
+  std::vector<std::string> objs;
+  objs.reserve(plans.size());
+  for (const auto& up : plans) objs.push_back(objPath[up.moduleId]);
+  if (dotiming) err << "timing assemble ms=" << ms_since(ts0) << "\n";
+  int rc = linkUnits(td.arch, td.os, azt, optimizationLevel, objs, outPath, err);
+  if (dotiming) err << "timing link ms=" << ms_since(ts0) << "\n";
+  for (auto& o : tempObjs) if (!useObjCache) std::filesystem::remove(o, ec);
+  return rc == 0 ? 0 : 1;
+}
+
 // Emits code for a checked program, compiles+links it with the target's
 // astra into runPath, and (for native targets) runs the binary.
 // `canExecute` is false for cross targets: the link still happens, but no
@@ -1239,7 +2180,7 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
                   const std::string* keepBin = nullptr,
                   const TargetDesc* td = nullptr,
                   const std::string* entrySource = nullptr,
-                  const std::string* testFilter = nullptr) {
+                  const std::string* testFilter = nullptr, int jobs = 0) {
   (void)in; (void)out;
   TargetDesc localTd;
   if (!td) {
@@ -1257,6 +2198,44 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
       if (hit != 127) return hit < 0 ? kCErr : hit;
       // Unusable stale entry: fall through and recompile.
     }
+  }
+  // Per-module split path (Phase 2 + 3): x86-64 SysV + native targets
+  // (functions-only split; top-levels stay in entry main). i8086
+  // (bare-metal flat image) stays single-unit. A_SPLIT_UNITS=0 forces
+  // the single-unit path everywhere.
+  if (objcache::splitUnitsEnabled() && td->arch != "i8086" && td->arch != "8086") {
+    std::string tmpBinS = tempPath("bin");
+    std::string runPathS = (keepBin && !keepBin->empty()) ? *keepBin : tmpBinS;
+    if (cache.active) {
+      std::error_code ec2;
+      std::filesystem::create_directories(run_cache::cacheDir(), ec2);
+      runPathS = run_cache::cacheDir() + "/tmp-" +
+                 std::to_string(::getpid()) + "-" + std::to_string(::rand());
+    }
+    int src2 = buildSplitUnits(m, *td, runPathS, err, optimizationLevel,
+                               testMode, testFilter, entrySource, jobs);
+    if (cache.active && src2 == 0) {
+      std::error_code rec2;
+      std::filesystem::rename(runPathS, cache.file, rec2);
+      if (!rec2) runPathS = cache.file;
+    }
+    if (src2 != 0) {
+      std::error_code ec2;
+      std::filesystem::remove(runPathS, ec2);
+      return kCErr;
+    }
+    std::error_code ec2;
+    if (!td->native) {
+      if (!keepBin) std::filesystem::remove(runPathS, ec2);
+      err << "note: built '" << runPathS << "' for " << td->arch << " (cannot execute on this host)\n";
+      return 0;
+    }
+    int rrc = runBinary(runPathS);
+    if (cache.active && runPathS == cache.file) {
+    } else if (!keepBin) {
+      std::filesystem::remove(runPathS, ec2);
+    }
+    return rrc < 0 ? kCErr : rrc;
   }
   std::string srcSource, srcError;
   const char* forced = std::getenv("A_CODEGEN");
@@ -1390,7 +2369,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
       if(sidecar) sidecar << diagCapture;
     }
     return compileAndRun(m,in,out,err,false,config.optimizationLevel,
-                       preBin.empty() ? nullptr : &preBin, &td, &source);
+                       preBin.empty() ? nullptr : &preBin, &td, &source, nullptr, config.jobs);
   }
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
@@ -1422,7 +2401,7 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kOk; }
   }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
-                       config.testFilter.empty()?nullptr:&config.testFilter);
+                       config.testFilter.empty()?nullptr:&config.testFilter, config.jobs);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
@@ -1431,6 +2410,10 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   // then astra links a native executable for the target arch.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
+  if (objcache::splitUnitsEnabled() && td.arch != "i8086" && td.arch != "8086") {
+    return buildSplitUnits(m, td, outputPath, err, config.optimizationLevel,
+                           false, nullptr, nullptr, config.jobs) == 0 ? kOk : kCErr;
+  }
   std::string srcSource, srcError;
   const char* forced = std::getenv("A_CODEGEN");
   if (forced && lowerStr(forced) == "c") {
@@ -1474,6 +2457,6 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source,nullptr,config.jobs);
 }
 }

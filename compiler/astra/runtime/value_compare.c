@@ -133,6 +133,31 @@ static int cmp_ordered(aval a, aval b, const char *op) {
         if (c) return c < 0 ? -1 : 1;
         return la < lb ? -1 : la > lb ? 1 : 0;
     }
+    /* Chars order like their single-codepoint strings. */
+    if (kind_of(a) == K_CHAR && kind_of(b) == K_CHAR) {
+        uint64_t la, lb;
+        const char *pa = str_data(a, &la), *pb = str_data(b, &lb);
+        size_t n = la < lb ? (size_t)la : (size_t)lb;
+        int c = n ? memcmp(pa, pb, n) : 0;
+        if (c) return c < 0 ? -1 : 1;
+        return la < lb ? -1 : la > lb ? 1 : 0;
+    }
+    /* Sequences compare lexicographically (element-wise, then by length). */
+    {
+        int kaa = kind_of(a), kbb = kind_of(b);
+        if ((kaa == K_LIST || kaa == K_TUPLE) &&
+            (kbb == K_LIST || kbb == K_TUPLE)) {
+            AArr *x = (AArr *)obj_of(a), *y = (AArr *)obj_of(b);
+            arr_ensure_aval(x);
+            arr_ensure_aval(y);
+            uint64_t n = x->h.len < y->h.len ? x->h.len : y->h.len;
+            for (uint64_t i = 0; i < n; ++i) {
+                int c = cmp_ordered(x->items[i], y->items[i], op);
+                if (c) return c;
+            }
+            return x->h.len < y->h.len ? -1 : x->h.len > y->h.len ? 1 : 0;
+        }
+    }
     if (kind_of(a) == K_BOOL && kind_of(b) == K_BOOL) {
         int x = a == A_TRUE, y = b == A_TRUE;
         return x < y ? -1 : x > y ? 1 : 0;

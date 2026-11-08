@@ -31,7 +31,7 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     TypePtr resolved = resolveType(type);
     if (resolved->kind == TypeKind::String || resolved->kind == TypeKind::Array ||
         resolved->kind == TypeKind::Map || resolved->kind == TypeKind::Set ||
-        resolved->kind == TypeKind::Bytes) {
+        resolved->kind == TypeKind::Bytes || resolved->kind == TypeKind::Tuple) {
       return typeInt(64, true);
     }
     if (resolved->kind == TypeKind::Var) {

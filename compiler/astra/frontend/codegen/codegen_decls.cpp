@@ -10,6 +10,7 @@
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
+#include <filesystem>
 #include <utility>
 #include <vector>
 
@@ -22,9 +23,78 @@
 
 namespace a::detail {
 
+std::string AsmEmitter::moduleTag(int moduleId) const {
+  auto it = moduleTags_.find(moduleId);
+  if (it != moduleTags_.end()) return it->second;
+  std::string path;
+  if (moduleId >= 0 && moduleId < (int)graph_.modules.size())
+    path = graph_.at(moduleId).path;
+  // Canonicalize weakly so `a ./x.a` and `a x.a` share a tag; fallback to
+  // the display path when canonicalization fails.
+  std::string canonical = path;
+  {
+    std::error_code ec;
+    auto c = std::filesystem::weakly_canonical(path, ec);
+    if (!ec) canonical = c.string();
+    if (canonical.empty()) canonical = path;
+  }
+  std::string tag = stableTag(canonical);
+  moduleTags_[moduleId] = tag;
+  return tag;
+}
+std::string AsmEmitter::modInitSym(int moduleId) {
+  return "__a_modinit_" + moduleTag(moduleId);
+}
+StructInfo* AsmEmitter::findStructByName(const std::string& name) const {
+  if (curModuleId_ >= 0) {
+    for (StructInfo* st : structList_)
+      if (st->name == name && st->moduleId == curModuleId_) return st;
+  }
+  for (StructInfo* st : structList_)
+    if (st->name == name) return st;
+  auto it = structs_.find(name);
+  return it == structs_.end() ? nullptr : it->second;
+}
+const EnumVariantInfo* AsmEmitter::findEnumVariant(
+    const std::string& enumName, const std::string& variant,
+    int preferModule) const {
+  int prefer = preferModule == -2 ? curModuleId_ : preferModule;
+  const EnumVariantInfo* fallback = nullptr;
+  for (const auto& kv : enums_) {
+    const EnumVariantInfo& ev = kv.second;
+    if (ev.enumName == enumName && ev.variantName == variant) {
+      if (ev.moduleId == prefer) return &ev;
+      if (!fallback) fallback = &ev;
+    }
+  }
+  return fallback;
+}
+const EnumVariantInfo* AsmEmitter::findEnumByShort(
+    const std::string& variant, int preferModule) const {
+  int prefer = preferModule == -2 ? curModuleId_ : preferModule;
+  const EnumVariantInfo* fallback = nullptr;
+  for (const auto& kv : enums_) {
+    const EnumVariantInfo& ev = kv.second;
+    if (ev.variantName == variant) {
+      if (ev.moduleId == prefer) return &ev;
+      if (!fallback) fallback = &ev;
+    }
+  }
+  return fallback;
+}
+
 // ---- registration (mirrors Emitter) --------------------------------------
 void AsmEmitter::collectGlobals() {
-    int fnId = 0, stId = 0;
+    std::unordered_map<std::string, int> seenSym;  // base -> next suffix
+    auto symWithSuffix = [&](const std::string& base) -> std::string {
+      int n = seenSym[base]++;
+      if (n == 0) return base;
+      return base + "_" + std::to_string(n);
+    };
+    // Precompute module tags once per collect so suffix order is stable.
+    for (const Module& mod : graph_.modules) {
+      if (mod.id >= 0) (void)moduleTag(mod.id);
+    }
     for (const Module& mod : graph_.modules) {
       if (!mod.program) continue;
       for (const StmtPtr& s : mod.program->statements) {
@@ -34,8 +104,13 @@ void AsmEmitter::collectGlobals() {
           info->decl = fn;
           info->name = fn->name;
           info->moduleId = mod.id;
-          info->cname = "__a_f" + std::to_string(fnId++);
-          info->globalVar = "__a_gf" + std::to_string(fnId);
+          {
+            std::string mtag = moduleTag(mod.id);
+            std::size_t arity = fn->comptimeParams.size() + fn->params.size();
+            std::string dh = stableTag(fn->name + "#" + std::to_string(arity));
+            info->cname = symWithSuffix("__a_f_" + mtag + "_" + dh);
+            info->globalVar = symWithSuffix("__a_gf_" + mtag + "_" + dh);
+          }
           for (const ComptimeParam& p : fn->comptimeParams) info->paramNames.push_back(p.name);
           for (const ParamDecl& p : fn->params) info->paramNames.push_back(p.name);
           info->variadic = !fn->params.empty() && fn->params.back().variadic;
@@ -47,8 +122,12 @@ void AsmEmitter::collectGlobals() {
           info->decl = st;
           info->name = st->name;
           info->moduleId = mod.id;
-          info->ctorCname = "__a_ctor" + std::to_string(stId);
-          info->globalVar = "__a_gs" + std::to_string(stId++);
+          {
+            std::string mtag = moduleTag(mod.id);
+            std::string sh = stableTag(st->name);
+            info->ctorCname = symWithSuffix("__a_ctor_" + mtag + "_" + sh);
+            info->globalVar = symWithSuffix("__a_gs_" + mtag + "_" + sh);
+          }
           for (const FieldDecl& f : st->fields) info->fieldNames.push_back(f.name);
           structs_[st->name] = info;
           structList_.push_back(info);
@@ -59,8 +138,15 @@ void AsmEmitter::collectGlobals() {
             mi->moduleId = mod.id;
             mi->isMethod = true;
             mi->structName = st->name;
-            mi->cname = "__a_m" + std::to_string(fnId++);
-            mi->globalVar = "__a_gf" + std::to_string(fnId);
+            {
+              std::string mtag = moduleTag(mod.id);
+              std::string sh = stableTag(st->name);
+              std::size_t arity = m->comptimeParams.size() + m->params.size();
+              std::string dh = stableTag(m->name + "#" + std::to_string(arity));
+              mi->cname = symWithSuffix("__a_m_" + mtag + "_" + sh + "_" + dh);
+              // Methods have no fnon table entry; still unique per struct.
+              mi->globalVar = symWithSuffix("__a_gf_" + mtag + "_" + sh + "_" + dh);
+            }
             for (const ComptimeParam& p : m->comptimeParams) mi->paramNames.push_back(p.name);
             for (const ParamDecl& p : m->params) mi->paramNames.push_back(p.name);
             mi->variadic = !m->params.empty() && m->params.back().variadic;
@@ -78,14 +164,21 @@ void AsmEmitter::collectGlobals() {
             ev.tag = tag++;
             ev.value = v.value ? evalConstIntA(v.value.get(), next) : next;
             next = ev.value + 1;
-            ev.globalVar = "__a_ev_" + e->name + "_" + v.name + "_" +
-                           (ev.value < 0 ? "m" : "") + std::to_string(ev.value < 0 ? -ev.value : ev.value);
+            ev.moduleId = mod.id;
+            ev.enumName = e->name;
+            ev.variantName = v.name;
+            {
+              std::string mtag = moduleTag(mod.id);
+              std::string eh = stableTag(e->name);
+              std::string vh = stableTag(v.name);
+              ev.globalVar = symWithSuffix("__a_ev_" + mtag + "_" + eh + "_" + vh);
+            }
             for (const FieldDecl& f : v.fields) ev.payloadFields.push_back(f.name);
-            enums_[e->name + "." + v.name] = ev;
+            enums_[std::to_string(mod.id) + ":" + e->name + "." + v.name] = ev;
           }
         } else if (s->kind == StmtKind::Let) {
           const LetStmt* let = static_cast<const LetStmt*>(s.get());
-          std::string cname = "__a_top_" + std::to_string(counter_++);
+          std::string cname = symWithSuffix("__a_top_" + moduleTag(mod.id) + "_" + stableTag(let->name));
           globals_.push_back(cname);
           topLevelGlobals_[std::to_string(mod.id) + ":" + let->name] = cname;
         } else if (s->kind == StmtKind::Assign) {
@@ -94,7 +187,7 @@ void AsmEmitter::collectGlobals() {
             const std::string& nm = static_cast<const IdentExpr*>(as->target.get())->name;
             std::string key = std::to_string(mod.id) + ":" + nm;
             if (!topLevelGlobals_.count(key)) {
-              std::string cname = "__a_top_" + std::to_string(counter_++);
+              std::string cname = symWithSuffix("__a_top_" + moduleTag(mod.id) + "_" + stableTag(nm));
               globals_.push_back(cname);
               topLevelGlobals_[key] = cname;
             }
@@ -114,10 +207,19 @@ void AsmEmitter::collectGlobals() {
       std::set<std::string> seenNames;
       std::string base = info->decl->baseClass;
       while (!base.empty() && seenNames.insert(base).second) {
-        auto bit = structs_.find(base);
-        if (bit == structs_.end() || !bit->second->decl) break;
-        chain.push_back(bit->second->decl);
-        base = bit->second->decl->baseClass;
+        StructInfo* baseInfo = nullptr;
+        for (StructInfo* cand : structList_)
+          if (cand->name == base && cand->moduleId == info->moduleId) {
+            baseInfo = cand; break;
+          }
+        if (!baseInfo) {
+          auto bit = structs_.find(base);
+          if (bit == structs_.end() || !bit->second->decl) break;
+          baseInfo = bit->second;
+        }
+        if (!baseInfo->decl) break;
+        chain.push_back(baseInfo->decl);
+        base = baseInfo->decl->baseClass;
       }
       if (chain.empty()) continue;
       std::vector<std::string> fields;
@@ -146,8 +248,9 @@ std::int64_t AsmEmitter::evalConstIntA(const Expr* e, std::int64_t fallback) {
       if (u->op == "-") return -evalConstIntA(u->operand.get(), 0);
     }
     if (e->kind == ExprKind::Ident) {
-      auto it = enums_.find(static_cast<const IdentExpr*>(e)->name);
-      if (it != enums_.end()) return it->second.value;
+      const std::string& nm = static_cast<const IdentExpr*>(e)->name;
+      if (const EnumVariantInfo* ev = findEnumByShort(nm))
+        return ev->value;
     }
     return fallback;
   }
@@ -203,8 +306,12 @@ void AsmEmitter::buildGlobalScope() {
       b.kind = BKind::EnumValue;
       b.sym = kv.second.globalVar;
       b.en = &kv.second;
-      b.aux = kv.first.substr(kv.first.find('.') + 1);
-      g[kv.first] = b;
+      b.aux = kv.second.variantName;
+      std::string qual = kv.second.enumName + "." + kv.second.variantName;
+      // Keep the enum-qualified key for compatibility, but do not clobber a
+      // binding for the same qualified name from a nearer module (first wins
+      // deterministically in load order).
+      if (!g.count(qual)) g[qual] = b;
       if (!g.count(b.aux)) g[b.aux] = b;
     }
     for (const Module& mod : graph_.modules) {
@@ -733,5 +840,280 @@ void AsmEmitter::emitVariantDict(const EnumVariantInfo& ev, const std::string& n
     call3slot("a_dict_set", dS, k2, v2);
     loadSlot(dS);
   }
+
+
+// ---- per-module init / main split (Phase 2) --------------------------------
+void AsmEmitter::emitModuleBss(int moduleId) {
+  // Top-level globals belonging to this module (map holds the live copy;
+  // duplicate `let` shadows are lost in the map but were unreferenced).
+  std::vector<std::string> tops;
+  for (const auto& kv : topLevelGlobals_) {
+    const std::string& key = kv.first;
+    auto colon = key.find(':');
+    if (colon == std::string::npos) continue;
+    std::string midStr = key.substr(0, colon);
+    if (midStr != std::to_string(moduleId)) continue;
+    tops.push_back(kv.second);
+  }
+  std::sort(tops.begin(), tops.end());
+  std::sort(tops.begin(), tops.end(), [](const std::string& a, const std::string& b) {
+    if (a.size() != b.size()) return a.size() < b.size();
+    return a < b;
+  });
+  // Deterministic: dedupe in case two names share one symbol.
+  tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
+  for (const std::string& g : tops)
+    bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+  for (FnInfo* f : fnList_)
+    if (!f->isMethod && f->moduleId == moduleId)
+      bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+  for (StructInfo* st : structList_)
+    if (st->moduleId == moduleId)
+      bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+  for (auto& kv : enums_)
+    if (!kv.second.algebraic && kv.second.moduleId == moduleId)
+      bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+}
+
+void AsmEmitter::drainLambdasFor(int moduleId) {
+  while (!failed_) {
+    int idx = -1;
+    for (int i = (int)lambdas_.size() - 1; i >= 0; --i) {
+      if (lambdas_[(std::size_t)i].moduleId == moduleId) { idx = i; break; }
+    }
+    if (idx < 0) break;
+    PendingLambda pl = std::move(lambdas_[(std::size_t)idx]);
+    lambdas_.erase(lambdas_.begin() + idx);
+    emitLambdaFn(pl);
+  }
+}
+
+void AsmEmitter::emitModuleInitBody(int moduleId) {
+  std::ostringstream saved;
+  saved.swap(text_);
+  slotCounter_ = 0;
+  scopes_.clear();
+  buildGlobalScope();
+  pushScope();
+  allocSlot();  // slot 0 reserved (mirrors emitMain scratch)
+  emitFramePush("<module>", moduleId, 0);
+  int savedModule = curModuleId_;
+  curModuleId_ = moduleId;
+  const Module* modPtr = nullptr;
+  if (moduleId >= 0 && moduleId < (int)graph_.modules.size())
+    modPtr = &graph_.at(moduleId);
+  bool isPreludeSkip = false;
+  if (modPtr && modPtr->id != graph_.entry && modPtr->name == "prelude")
+    isPreludeSkip = true;
+  if (modPtr && modPtr->program && !isPreludeSkip) {
+    const Module& mod = *modPtr;
+    // Per-module imports: same bindings emitMain used for top-level code.
+    for (const StmtPtr& s : mod.program->statements) {
+      if (s->kind == StmtKind::Import) {
+        const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+        if (im->pythonModuleImport) {
+          std::string alias = !im->alias.empty() ? im->alias
+                              : stemOf(im->pythonModule);
+          ABinding b;
+          b.kind = BKind::PyModule;
+          b.aux = im->pythonModule;
+          scopes_.back()[alias] = b;
+          continue;
+        }
+        std::string alias = !im->alias.empty() ? im->alias
+                            : !im->bareName.empty() ? im->bareName
+                            : stemOf(im->path);
+        if (im->moduleId >= 0) {
+          ABinding b;
+          b.kind = BKind::Module;
+          b.moduleId = im->moduleId;
+          scopes_.back()[alias] = b;
+        }
+      } else if (s->kind == StmtKind::FromImport) {
+        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        if (im->pythonModuleImport) {
+          for (const auto& item : im->items) {
+            ABinding b;
+            b.kind = BKind::PyFunc;
+            b.aux = im->pythonModule;
+            b.pyMember = item.name;
+            scopes_.back()[item.alias] = b;
+          }
+          continue;
+        }
+        if (im->moduleId >= 0) {
+          const Module& src = graph_.at(im->moduleId);
+          if (src.program) {
+            for (const StmtPtr& ss : src.program->statements) {
+              if (ss->kind == StmtKind::FnDecl) {
+                const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
+                for (FnInfo* fi : fnList_) {
+                  if (fi->decl == fd) {
+                    ABinding b;
+                    b.kind = BKind::FnValue;
+                    b.sym = fi->globalVar;
+                    b.fn = fi;
+                    scopes_.back()[fd->name] = b;
+                  }
+                }
+              } else if (ss->kind == StmtKind::StructDecl) {
+                const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
+                for (StructInfo* sti : structList_) {
+                  if (sti->decl == sd) {
+                    ABinding b;
+                    b.kind = BKind::StructCtor;
+                    b.sym = sti->globalVar;
+                    b.st = sti;
+                    scopes_.back()[sd->name] = b;
+                  }
+                }
+              }
+            }
+          }
+        } else if (im->nativeModule) {
+          bindNativeFromImport(im);
+        }
+      }
+    }
+    promoteNames_.clear();
+    specNames_.clear();
+    nameRanges_.clear();
+    emitBody(mod.program->statements, true);
+  }
+  curModuleId_ = savedModule;
+  emitFramePop();
+  emit("    xor %eax, %eax\n    leave\n    ret\n");
+  int frame = frameBytes();
+  std::ostringstream body;
+  body.swap(text_);
+  text_.swap(saved);
+  std::string sym = modInitSym(moduleId);
+  emit("    .text\n    .globl " + sym + "\n" + sym + ":\n");
+  emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
+  text_ << body.str();
+  scopes_.clear();
+}
+
+void AsmEmitter::emitMainShared() {
+  std::ostringstream saved;
+  saved.swap(text_);
+  slotCounter_ = 0;
+  scopes_.clear();
+  buildGlobalScope();
+  pushScope();
+  allocSlot();  // slot 0 reserved (unused scratch)
+  emit("    call a_runtime_init\n");
+  emitFramePush("<module>", graph_.entry, 0);
+  for (StructInfo* st : structList_) {
+    emit("    lea " + st->ctorCname + "(%rip), %rdi\n    mov $" + u64s(kNone) + ", %rsi\n");
+    std::string lbl = emitStrData(st->name, true);
+    emit("    lea " + lbl + "(%rip), %rdx\n");
+    std::string sig = st->name + "(";
+    for (std::size_t i = 0; i < st->fieldNames.size(); ++i) {
+      if (i) sig += ", ";
+      sig += st->fieldNames[i];
+    }
+    sig += ")";
+    std::string sl = emitStrData(sig, true);
+    std::string dl = emitStrData(st->decl ? st->decl->doc : "", true);
+    emit("    lea " + sl + "(%rip), %rcx\n    lea " + dl + "(%rip), %r8\n    call a_fnon_new_ex\n");
+    emit("    mov %rax, " + st->globalVar + "(%rip)\n");
+  }
+  for (FnInfo* f : fnList_) {
+    if (f->isMethod) continue;
+    emit("    lea " + f->cname + "(%rip), %rdi\n    mov $" + u64s(kNone) + ", %rsi\n");
+    std::string lbl = emitStrData(f->name, true);
+    emit("    lea " + lbl + "(%rip), %rdx\n");
+    std::string sl = emitStrData(fnSignatureText(f), true);
+    std::string dl = emitStrData(fnDocText(f), true);
+    emit("    lea " + sl + "(%rip), %rcx\n    lea " + dl + "(%rip), %r8\n    call a_fnon_new_ex\n");
+    emit("    mov %rax, " + f->globalVar + "(%rip)\n");
+  }
+  for (auto& kv : enums_) {
+    if (kv.second.algebraic) continue;
+    movImm((uint64_t)kv.second.value, "%rdi");
+    emit("    call a_i64n\n    mov %rax, " + kv.second.globalVar + "(%rip)\n");
+  }
+  if (testMode_) {
+    std::vector<FnInfo*> tests;
+    for (FnInfo* f : fnList_) {
+      if (!f->isMethod && f->moduleId == graph_.entry &&
+          f->name.rfind("test_", 0) == 0 &&
+          (testFilter_.empty() ||
+           f->name.find(testFilter_) != std::string::npos)) {
+        tests.push_back(f);
+      }
+    }
+    std::sort(tests.begin(), tests.end(),
+              [](const FnInfo* a, const FnInfo* b) { return a->name < b->name; });
+    std::vector<std::string> nameLbls;
+    for (FnInfo* f : tests) nameLbls.push_back(emitStrData(f->name, true));
+    rodata_ << "    .section .data\n    .align 8\n"
+               "    .globl __a_test_names\n__a_test_names:\n";
+    for (const std::string& lbl : nameLbls) rodata_ << "    .quad " << lbl << "\n";
+    rodata_ << "    .globl __a_test_fns\n__a_test_fns:\n";
+    for (FnInfo* f : tests) rodata_ << "    .quad " << f->cname << "\n";
+    emit("    mov $" + std::to_string(tests.size()) + ", %rdi\n");
+    emit("    lea __a_test_names(%rip), %rsi\n");
+    emit("    lea __a_test_fns(%rip), %rdx\n");
+    emit("    call a_test_main\n");
+    int testRc = allocSlot();
+    emit("    mov %rax, " + slotRef(testRc) + "\n");
+    emitFramePop();
+    loadSlot(testRc);
+    emit("    leave\n    ret\n");
+  } else {
+    std::vector<int> order = graph_.order;
+    if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
+    for (int mid : order) {
+      if (mid < 0 || failed_) continue;
+      if (mid >= (int)graph_.modules.size()) continue;
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) continue;
+      if (mod.id != graph_.entry && mod.name == "prelude") continue;
+      // Call __a_modinit_<mtag> (defined in that module's unit).
+      std::vector<int> noArgs;
+      emitDirectCall(modInitSym(mid).c_str(), noArgs);
+    }
+    for (FnInfo* f : fnList_) {
+      if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
+        std::vector<int> ps(f->paramNames.size(), -1);
+        emitDirectCall(f->cname.c_str(), ps);
+        break;
+      }
+    }
+    emitFramePop();
+    emit("    xor %eax, %eax\n    leave\n    ret\n");
+  }
+  int frame = frameBytes();
+  std::ostringstream body;
+  body.swap(text_);
+  text_.swap(saved);
+  emit("    .text\n    .globl main\nmain:\n");
+  emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
+  text_ << body.str();
+  scopes_.clear();
+}
+
+void AsmEmitter::emitUnit(int moduleId, std::string& out) {
+  text_ = std::ostringstream();
+  rodata_ = std::ostringstream();
+  bss_ = std::ostringstream();
+  labelCounter_ = 0;
+  dataCounter_ = 0;
+  lambdaSeq_.erase(moduleId);
+  for (StructInfo* st : structList_)
+    if (st->moduleId == moduleId) emitStructCtor(st);
+  for (FnInfo* f : fnList_) {
+    if (failed_) break;
+    if (f->moduleId == moduleId) emitFunction(f);
+  }
+  if (!failed_) emitModuleInitBody(moduleId);
+  if (!failed_ && moduleId == graph_.entry) emitMainShared();
+  if (!failed_) drainLambdasFor(moduleId);
+  if (failed_) return;
+  emitModuleBss(moduleId);
+  out = bss_.str() + rodata_.str() + text_.str();
+}
 
 }  // namespace a::detail
