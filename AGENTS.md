@@ -4,9 +4,9 @@ This repo contains the **A programming language** compiler/toolchain (`a`), LSP 
 
 ## Read first
 - [`README.md`](README.md) — overview, CLI quickstart, language/stdlib highlights.
-- `CONTRIBUTING.md` — layout, conventions, versioning, docs/stdlib/LSP expectations.
-- `docs/README.md` and `docs/standard-library/README.md` — language/spec and stdlib API reference (current implementation).
-- `examples/README.md` — runnable examples by category.
+- [`docs/README.md`](docs/README.md) — documentation index.
+- [`docs/wiki/stdlib.md`](docs/wiki/stdlib.md) and [`docs/wiki/builtins.md`](docs/wiki/builtins.md) — stdlib API and native builtin reference (current implementation).
+- `examples/` — runnable examples by category.
 
 ## Build and test
 ```sh
@@ -48,7 +48,7 @@ python3 websearchcli.py "<query>" [-n 1-20] [--type auto|neural|keyword] [--live
 - C++20 in `namespace a`; keep headers next to implementations; follow the existing stage/module structure. Keep warnings clean — CI treats warnings as errors.
 - Use Conventional-style commit subjects scoped by area when committing (e.g., `fix(sema): ...`, `feat(lsp): ...`). Keep PRs focused on one behavior.
 - **Version bumps:** update all version sources together when changing the project version (see CI check above).
-- **Stdlib/native member changes:** update `docs/standard-library/README.md`, the LSP builtin docs table (`builtin_docs.hpp` under compiler/name-resolution/tooling as used by the project), and add/adjust a runnable example or test coverage when appropriate.
+- **Stdlib/native member changes:** update `docs/wiki/stdlib.md` / `docs/wiki/builtins.md`, the LSP builtin docs table (`builtin_docs*.hpp` under `compiler/astra/frontend/name-resolution/`), and add/adjust a runnable example or test coverage when appropriate.
 - **Tooling/LSP behavior changes:** extend golden integration cases and/or `tools/lsp/smoke_test.py` as relevant.
 - `a build`/`a run`/`a test` lower A to x86-64 assembly and use the staged `astra` driver to produce and (for `run`/`test`) execute a native binary linked with the `compiler/astra/runtime/` modules (`a_runtime.c` + `rt_*.c`) (no `g++` build step). Python interop is discovered at runtime (not linked at build time); some stdlib modules behave differently across interpreter/native backends — validate with the right command path (`a run`, `a test`, `a check`, `a build`).
 
