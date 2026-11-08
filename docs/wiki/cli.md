@@ -62,11 +62,12 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
   `**`, and closure/call scaffolding. `print` writes to COM1 (0x3F8);
   remaining builtins (`a_getattr`/`a_method`/`a_slice`/f-string
   interpolation/`a_test_main`, …) are still stubs returning `none`.
-- Known gaps: **`for` loops hang** (iteration is implemented but does not
-  yet terminate correctly — see `a_iter_next`); methods/attribute access,
-  slicing, and f-string interpolation are stubbed. Straight-line code,
-  `while`/`if`, arithmetic, comparisons, strings, `len`, indexing, and
-  collections are reliable; `for`/method/lambda-heavy programs are not.
+- Known gaps: dict `d[k]` getitem, lambda/first-class-fn calls, list
+  `print` repr, tuple iteration (type-checker rejects), methods/attribute
+  access, slicing, and f-string interpolation are stubbed. Straight-line
+  code, `while`/`if`/`for`, arithmetic, comparisons, strings, `len`,
+  indexing, and collections are reliable; method/lambda/slice-heavy
+  programs are not.
 - Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
   wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
   `tests/integration/i8086_image.sh` is the automated harness. Manual run:
