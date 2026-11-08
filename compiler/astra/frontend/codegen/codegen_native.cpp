@@ -3311,6 +3311,309 @@ struct I386Target : NatTarget {
   void ret(std::string& o) const override { o += "    ret\n"; }
 };
 
+// --------------------------------------------------------------- ARM32 ----
+// ARMv7 AAPCS: same memory-backed pseudo-register model as i386, but call
+// args marshal into r0-r3 (8-byte args take even reg pairs) then stack.
+// aval returns arrive in r0:r1. Frame: push {fp,lr}; sub sp,#frame.
+// Layout identical to i386: +0 outgoing stack args, +128 ACC(unused),
+// +136 TMP0-3, +168 ARG staging G0-7, +232 emitter slots.
+struct Arm32Target : NatTarget {
+  static constexpr int kReserve = 232;
+  static constexpr int kOut = 0, kTmp = 136, kArg = 168;
+  mutable std::string lastA, lastB;
+  mutable int jcN_ = 0;
+  mutable std::set<int> usedArgs_;
+
+  static int offOf(const std::string& r) {
+    if (r == "@a") return kArg;
+    if (r.size() >= 3 && r[0] == '@' && r[1] == 't')
+      return kTmp + 8 * (r[2] - '0');
+    if (r.size() >= 3 && r[0] == '@' && r[1] == 'g')
+      return kArg + 8 * (r[2] - '0');
+    return -1;
+  }
+  static std::string ref(int off) { return "[sp, #" + std::to_string(off) + "]"; }
+  static std::string refAdd(int off, int add) {
+    return "[sp, #" + std::to_string(off + add) + "]";
+  }
+  static void imm32(std::string& o, uint32_t v, const char* r) {
+    o += "    movw " + std::string(r) + ", #" + std::to_string(v & 0xFFFF) + "\n";
+    o += "    movt " + std::string(r) + ", #" + std::to_string(v >> 16) + "\n";
+  }
+  static void ldr32(std::string& o, int off, const char* r) {
+    o += "    ldr " + std::string(r) + ", " + ref(off) + "\n";
+  }
+  static void str32(std::string& o, const char* r, int off) {
+    o += "    str " + std::string(r) + ", " + ref(off) + "\n";
+  }
+  int frameReserve() const override { return kReserve; }
+  void prologue(std::string& o, int frameBytes) const override {
+    o += "    push {fp, lr}\n";
+    imm32(o, (uint32_t)frameBytes, "r12");
+    o += "    sub sp, sp, r12\n";
+    // Incoming argv pointer (our single arg) arrives in r0.
+    str32(o, "r0", kArg);
+    o += "    mov r12, #0\n";
+    str32(o, "r12", kArg + 4);
+  }
+  void epilogue(std::string& o, int frameBytes) const override {
+    // aval return value -> r0:r1 (acc lives in @g0).
+    ldr32(o, kArg, "r0");
+    ldr32(o, kArg + 4, "r1");
+    imm32(o, (uint32_t)frameBytes, "r12");
+    o += "    add sp, sp, r12\n";
+    o += "    pop {fp, lr}\n";
+    o += "    bx lr\n";
+  }
+  std::string slotRef(int i) const override {
+    return "[sp, #" + std::to_string(kReserve + 8 * i) + "]";
+  }
+  std::string acc() const override { return "@g0"; }
+  int nArgRegs() const override { return 4; }
+  std::string argReg(int i) const override {
+    usedArgs_.insert(i);
+    return "@g" + std::to_string(i);
+  }
+  std::string tmpReg(int i) const override { return "@t" + std::to_string(i); }
+  void movImm(std::string& o, uint64_t v, const std::string& r) const override {
+    int off = offOf(r);
+    imm32(o, (uint32_t)(v & 0xFFFFFFFFu), "r12");
+    str32(o, "r12", off);
+    imm32(o, (uint32_t)(v >> 32), "r12");
+    str32(o, "r12", off + 4);
+  }
+  void movReg(std::string& o, const std::string& d, const std::string& s) const override {
+    int so = offOf(s), dfo = offOf(d);
+    ldr32(o, so, "r12"); str32(o, "r12", dfo);
+    ldr32(o, so + 4, "r12"); str32(o, "r12", dfo + 4);
+  }
+  void loadSlot(std::string& o, int slot, const std::string& r) const override {
+    int so = kReserve + 8 * slot, d = offOf(r);
+    ldr32(o, so, "r12"); str32(o, "r12", d);
+    ldr32(o, so + 4, "r12"); str32(o, "r12", d + 4);
+  }
+  void storeSlot(std::string& o, const std::string& r, int slot) const override {
+    int so = offOf(r), d = kReserve + 8 * slot;
+    ldr32(o, so, "r12"); str32(o, "r12", d);
+    ldr32(o, so + 4, "r12"); str32(o, "r12", d + 4);
+  }
+  void loadSlotAt(std::string& o, const std::string& baseReg,
+                  int64_t byteOff, const std::string& dstReg) const override {
+    int bo = offOf(baseReg), d = offOf(dstReg);
+    ldr32(o, bo, "r12");
+    std::string br = "r12";
+    if (byteOff == 0) {
+      o += "    ldr r3, [" + br + "]\n    str r3, " + ref(d) + "\n";
+      o += "    ldr r3, [" + br + ", #4]\n    str r3, " + refAdd(d, 4) + "\n";
+    } else {
+      std::string d1 = byteOff >= 0 ? "#" + std::to_string(byteOff)
+                                    : "-#" + std::to_string(-byteOff);
+      o += "    ldr r3, [" + br + ", " + d1 + "]\n    str r3, " + ref(d) + "\n";
+      int64_t o2 = byteOff + 4;
+      std::string d2 = o2 >= 0 ? "#" + std::to_string(o2) : "-#" + std::to_string(-o2);
+      o += "    ldr r3, [" + br + ", " + d2 + "]\n    str r3, " + refAdd(d, 4) + "\n";
+    }
+  }
+  void copySlot(std::string& o, int from, int to) const override {
+    int fo = kReserve + 8 * from, d = kReserve + 8 * to;
+    ldr32(o, fo, "r12"); str32(o, "r12", d);
+    ldr32(o, fo + 4, "r12"); str32(o, "r12", d + 4);
+  }
+  void leaSlot(std::string& o, int slot, const std::string& r) const override {
+    int d = offOf(r);
+    imm32(o, (uint32_t)(kReserve + 8 * slot), "r12");
+    o += "    add r12, sp, r12\n";
+    str32(o, "r12", d);
+    o += "    mov r12, #0\n";
+    str32(o, "r12", d + 4);
+  }
+  void leaSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movw r12, " + sym + "\n    movt r12, " + sym + "\n";
+    str32(o, "r12", d);
+    o += "    mov r12, #0\n";
+    str32(o, "r12", d + 4);
+  }
+  void loadSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movw r12, " + sym + "\n    movt r12, " + sym + "\n";
+    o += "    ldr r12, [r12]\n";
+    str32(o, "r12", d);
+    o += "    ldr r12, [r12, #4]\n";
+    str32(o, "r12", d + 4);
+  }
+  void storeSym(std::string& o, const std::string& sym, const std::string& r) const override {
+    int d = offOf(r);
+    o += "    movw r12, " + sym + "\n    movt r12, " + sym + "\n";
+    ldr32(o, d, "r3");
+    o += "    str r3, [r12]\n";
+    ldr32(o, d + 4, "r3");
+    o += "    str r3, [r12, #4]\n";
+  }
+  static const std::unordered_map<std::string, std::pair<std::vector<int>, bool>>& sigs() {
+    static const std::unordered_map<std::string, std::pair<std::vector<int>, bool>> m = {
+        {"a_add_slow",{{8,8},false}},{"a_sub_slow",{{8,8},false}},
+        {"a_mul_slow",{{8,8},false}},{"a_div_slow",{{8,8},false}},
+        {"a_mod_slow",{{8,8},false}},{"a_pow",{{8,8},false}},
+        {"a_eq_slow",{{8,8},false}},{"a_ne_slow",{{8,8},false}},
+        {"a_lt_slow",{{8,8},false}},{"a_le_slow",{{8,8},false}},
+        {"a_gt_slow",{{8,8},false}},{"a_ge_slow",{{8,8},false}},
+        {"a_band_slow",{{8,8},false}},{"a_bor_slow",{{8,8},false}},
+        {"a_bxor_slow",{{8,8},false}},{"a_shl_slow",{{8,8},false}},
+        {"a_shr_slow",{{8,8},false}},
+        {"a_not",{{8},false}},{"a_neg_slow",{{8},false}},{"a_bnot_slow",{{8},false}},
+        {"a_truthy_raw_slow",{{8},false}},
+        {"a_bi_call",{{8,8,4},false}},{"a_call",{{8,8,4},false}},
+        {"a_builtin",{{8},false}},
+        {"a_str_new",{{4,8},false}},{"a_char_new",{{4,8},false}},
+        {"a_str",{{8},false}},{"a_repr",{{8},false}},{"a_len",{{8},false}},
+        {"a_str_concat",{{8,8},false}},{"a_str_joinsep",{{8,8,4},false}},
+        {"a_list_new",{{8,4},false}},{"a_list_push",{{8,8},false}},
+        {"a_tuple_new",{{8,4},false}},
+        {"a_dict_new",{{},false}},{"a_dict_set",{{8,8,8},false}},
+        {"a_dict_get",{{8,8,8},false}},
+        {"a_set_new",{{},false}},{"a_set_add",{{8,8},false}},
+        {"a_range_new",{{8,8,8},false}},{"a_range_contains",{{8,8},false}},
+        {"a_getitem",{{8,8},false}},{"a_setitem",{{8,8,8},false}},
+        {"a_slice",{{8,8,8,8},false}},{"a_contains",{{8,8},false}},
+        {"a_in_range",{{8,8,8},false}},{"a_in_range_inclusive",{{8,8,8},false}},
+        {"a_iter_new",{{8},false}},{"a_iter_next",{{8,4},false}},
+        {"a_fnon_new",{{8,8,4},false}},
+        {"a_env_set",{{8,8,8},false}},{"a_env_get",{{8,8},false}},
+        {"a_closure_env_new",{{8},false}},
+        {"a_method",{{8,4,8,8,4},false}},{"a_getattr",{{8,4},false}},
+        {"a_setattr",{{8,4,8},false}},
+        {"a_unwrap",{{8},false}},{"a_some_new",{{8},false}},
+        {"a_try_result",{{8},false}},{"a_match_fail",{{8},false}},
+        {"a_is_propagate",{{8},true}},{"a_obj_is_instance",{{8,4},true}},
+        {"a_runtime_init",{{},false}},
+    };
+    return m;
+  }
+  void callSym(std::string& o, const std::string& sym) const override {
+    int n = usedArgs_.empty() ? 1 : *usedArgs_.rbegin() + 1;
+    auto it = sigs().find(sym);
+    std::vector<int> sizes = it != sigs().end() ? it->second.first
+                                              : std::vector<int>{4};
+    bool ret32 = it != sigs().end() && it->second.second;
+    // AAPCS: r0-r3 regs (8B args need even pairs), rest on stack at sp+0.
+    int nextReg = 0, stackOff = 0;
+    bool onStack = false;
+    for (int i = 0; i < n; ++i) {
+      int sz = i < (int)sizes.size() ? sizes[i] : 4;
+      int src = kArg + 8 * i;
+      int reg = -1;
+      if (!onStack) {
+        if (sz == 8) {
+          if (nextReg & 1) nextReg++;
+          if (nextReg <= 2) { reg = nextReg; nextReg += 2; }
+          else onStack = true;
+        } else {
+          if (nextReg <= 3) { reg = nextReg; nextReg += 1; }
+          else onStack = true;
+        }
+      }
+      if (reg >= 0) {
+        o += "    ldr r" + std::to_string(reg) + ", " + ref(src) + "\n";
+        if (sz == 8)
+          o += "    ldr r" + std::to_string(reg + 1) + ", " + refAdd(src, 4) + "\n";
+      } else {
+        if (sz == 8 && (stackOff & 7)) stackOff += 4;  // 8B stack args align
+        int dst = stackOff;
+        // r12 is the scratch — r0-r3 may already hold live arg values.
+        ldr32(o, src, "r12");
+        o += "    str r12, " + ref(dst) + "\n";
+        if (sz == 8) {
+          ldr32(o, src + 4, "r12");
+          o += "    str r12, " + refAdd(dst, 4) + "\n";
+        }
+        stackOff += sz;
+      }
+    }
+    usedArgs_.clear();
+    o += "    bl " + sym + "\n";
+    // aval return -> r0:r1 stored into @g0; ret32 callees: zero the high word.
+    str32(o, "r0", kArg);
+    if (ret32) {
+      o += "    mov r3, #0\n";
+      str32(o, "r3", kArg + 4);
+    } else {
+      str32(o, "r1", kArg + 4);
+    }
+  }
+  void jmp(std::string& o, const std::string& l) const override {
+    o += "    b " + l + "\n";
+  }
+  void jcc(std::string& o, const std::string& cc, const std::string& l) const override {
+    int ao = offOf(lastA), bo = offOf(lastB);
+    auto hi = [&]() {
+      ldr32(o, ao + 4, "r0"); ldr32(o, bo + 4, "r1");
+      o += "    cmp r0, r1\n";
+    };
+    auto lo = [&]() {
+      ldr32(o, ao, "r0"); ldr32(o, bo, "r1");
+      o += "    cmp r0, r1\n";
+    };
+    std::string sk = "__jc" + std::to_string(jcN_++);
+    // signed hi conds; unsigned lo conds (ARM: lo/ls/hi/hs).
+    if (cc == "eq") {
+      hi(); o += "    bne " + sk + "\n"; lo(); o += "    beq " + l + "\n" + sk + ":\n";
+    } else if (cc == "ne") {
+      hi(); o += "    bne " + l + "\n"; lo(); o += "    bne " + l + "\n";
+    } else if (cc == "lt") {
+      hi(); o += "    blt " + l + "\n    bgt " + sk + "\n"; lo();
+      o += "    blo " + l + "\n" + sk + ":\n";
+    } else if (cc == "le") {
+      hi(); o += "    blt " + l + "\n    bgt " + sk + "\n"; lo();
+      o += "    bls " + l + "\n" + sk + ":\n";
+    } else if (cc == "gt") {
+      hi(); o += "    bgt " + l + "\n    blt " + sk + "\n"; lo();
+      o += "    bhi " + l + "\n" + sk + ":\n";
+    } else {  // ge
+      hi(); o += "    bgt " + l + "\n    blt " + sk + "\n"; lo();
+      o += "    bhs " + l + "\n" + sk + ":\n";
+    }
+  }
+  void jz(std::string& o, const std::string& r, const std::string& l) const override {
+    int off = offOf(r);
+    std::string sk = "__jc" + std::to_string(jcN_++);
+    ldr32(o, off, "r0");
+    o += "    cmp r0, #0\n    bne " + sk + "\n";
+    ldr32(o, off + 4, "r1");
+    o += "    cmp r1, #0\n    beq " + l + "\n" + sk + ":\n";
+  }
+  void jnz(std::string& o, const std::string& r, const std::string& l) const override {
+    int off = offOf(r);
+    ldr32(o, off, "r0");
+    o += "    cmp r0, #0\n    bne " + l + "\n";
+    ldr32(o, off + 4, "r1");
+    o += "    cmp r1, #0\n    bne " + l + "\n";
+  }
+  void cmpRegs(std::string& o, const std::string& a, const std::string& b) const override {
+    (void)o;
+    lastA = a;
+    lastB = b;
+  }
+  void addImm(std::string& o, const std::string& r, int64_t v) const override {
+    int off = offOf(r);
+    imm32(o, (uint32_t)(v & 0xFFFFFFFFu), "r3");
+    ldr32(o, off, "r12");
+    o += "    adds r12, r12, r3\n";
+    str32(o, "r12", off);
+    imm32(o, (uint32_t)((uint64_t)v >> 32), "r3");
+    ldr32(o, off + 4, "r12");
+    o += "    adc r12, r12, r3\n";
+    str32(o, "r12", off + 4);
+  }
+  void zeroReg(std::string& o, const std::string& r) const override {
+    int off = offOf(r);
+    o += "    mov r12, #0\n";
+    str32(o, "r12", off);
+    str32(o, "r12", off + 4);
+  }
+  void ret(std::string& o) const override { o += "    bx lr\n"; }
+};
+
 }  // namespace
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
@@ -3337,6 +3640,22 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
       return false;
     }
     I386Target t;
+    NativeEmitter e(graph, sema, t, testMode);
+    return e.run(out, error);
+  }
+  if (arch == "arm" || arch == "arm32") {
+    // ARM32 native emission is opt-in until complex-case coverage is
+    // verified; emitC remains the default for this target.
+    const char* cg = std::getenv("A_CODEGEN");
+    if (!cg || std::string(cg) != "native") {
+      error = "native backend: arm32 requires A_CODEGEN=native";
+      return false;
+    }
+    if (testMode) {
+      error = "native backend: arm32 test mode unsupported";
+      return false;
+    }
+    Arm32Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
   }
