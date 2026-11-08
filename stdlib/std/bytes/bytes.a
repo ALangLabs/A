@@ -71,13 +71,37 @@ ord(c) -> code point of a char or 1-character string, None otherwise.
 Equivalent of Python `ord()`.
 """
 fn ord(c) -> i64?:
-    b = binary.encode(c)
-    if len(b) < 2 or b[0] != 13:
+    b = core.bytes_utf8_encode(c)
+    n = len(b)
+    if n == 0:
         return None
-    r = _varint_decode(b, 1)
-    if r.pos < 0:
+    b0 = b[0]
+    cp = 0
+    need = 1
+    if b0 < 128:
+        cp = b0
+    elif b0 >= 192 and b0 < 224:
+        need = 2
+        cp = b0 - 192
+    elif b0 >= 224 and b0 < 240:
+        need = 3
+        cp = b0 - 224
+    elif b0 >= 240 and b0 < 248:
+        need = 4
+        cp = b0 - 240
+    else:
         return None
-    return Some(r.value)
+    # ord() is defined for exactly one code point
+    if n != need:
+        return None
+    i = 1
+    while i < need:
+        bi = b[i]
+        if bi < 128 or bi >= 192:
+            return None
+        cp = cp * 64 + (bi - 128)
+        i = i + 1
+    return Some(cp)
 
 """_utf8_len(cp) -> number of UTF-8 bytes for a code point."""
 fn _utf8_len(cp: i64):
