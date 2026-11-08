@@ -2992,6 +2992,16 @@ class NativeEmitter {
         if (x.callee->kind == ExprKind::Ident) {
           const std::string& nm =
               static_cast<const IdentExpr*>(x.callee.get())->name;
+          // Sema-resolved call to a runtime builtin: use the builtin id,
+          // never the ambiguous cross-module bare-name binding table.
+          if (x.calleeIsBuiltin) {
+            int bid = builtinRuntimeId(x.calleeBuiltin.empty() ? nm
+                                                                 : x.calleeBuiltin);
+            if (bid >= 0) {
+              emitBiCall(bid, args);
+              return;
+            }
+          }
           ABinding* b = lookup(nm);
           if (b && b->kind == BKind::PyFunc) {
             emitPyCall(b->aux, b->pyMember, x);

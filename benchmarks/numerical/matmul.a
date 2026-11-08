@@ -1,0 +1,14 @@
+# Native blocked matmul (64x64x64) — the linalg matmul builtin with fma
+# hot loops and cache tiling vs pure-A nested loops.
+fn main():
+    n = 64
+    a = []
+    for i in 0..n * n:
+        a.append(1.5)
+    b = []
+    for i in 0..n * n:
+        b.append(2.5)
+    r = matmul(a, b, n, n, n)
+    print(r[0])
+
+main()

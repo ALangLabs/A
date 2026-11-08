@@ -9,6 +9,7 @@ other languages.
 - `benchmarks/collections/pipeline.a` — collection pipeline workload.
 - `benchmarks/memory/strings.a` — string/memory workload.
 - `benchmarks/numerical/sqrt.a` — floating-point workload.
+- `benchmarks/numerical/matmul.a` — native blocked `matmul` workload (64x64x64).
 - `benchmarks/equivalents/` — same workloads in Python (`sum.py`,
   `pipeline.py`, `sqrt.py`, `strings.py`) and C++ (`bench.cpp`) for comparison.
 

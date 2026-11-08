@@ -978,7 +978,18 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
           return;
         }
       }
-      ABinding* b = lookup(id.name);
+      // Sema-resolved RHS to a runtime builtin (e.g. bare linalg names, or a
+    // native-module from-import): dispatch on the builtin id directly, not
+    // the ambiguous cross-module bare-name table.
+    if (call.calleeIsBuiltin) {
+      int bid = builtinRuntimeId(call.calleeBuiltin.empty() ? id.name
+                                                             : call.calleeBuiltin);
+      if (bid >= 0) {
+        emitBiCall(bid, call);
+        return;
+      }
+    }
+    ABinding* b = lookup(id.name);
       if (b) {
         if (b->kind == BKind::PyFunc) {
           emitPyCall(b->aux, b->pyMember, call);

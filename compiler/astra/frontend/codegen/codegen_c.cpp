@@ -1733,7 +1733,20 @@ class Emitter {
     const Expr* callee = call.callee.get();
     if (callee->kind == ExprKind::Ident) {
       const IdentExpr& id = static_cast<const IdentExpr&>(*callee);
-      const Binding* b = lookup(id.name);
+      // Sema-resolved call to a runtime builtin (bare linalg names, native
+    // from-imports): use the builtin id, never the ambiguous cross-module
+    // bare-name binding table.
+    if (call.calleeIsBuiltin) {
+      int bid = builtinRuntimeId(call.calleeBuiltin.empty() ? id.name
+                                                             : call.calleeBuiltin);
+      if (bid >= 0) {
+        auto args = positionalArgs(call, out);
+        std::string arr = buildArgv(args, false);
+        return "a_bi_call(" + std::to_string(bid) + ", " +
+               std::to_string(args.size()) + ", " + arr + ")";
+      }
+    }
+    const Binding* b = lookup(id.name);
       if (b) {
         if (b->kind == BKind::FnValue && b->fn) {
           auto args = orderArgs(call, b->fn->paramNames, out, b->fn->variadic ? (int)b->fn->paramNames.size()-1 : -1);

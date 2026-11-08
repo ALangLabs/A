@@ -29,9 +29,9 @@ k = 256
 n = 256
 x = []
 y = []
-for i in 0..(m * k):
+for i in 0..m * k:
     x.append(1.0)
-for i in 0..(k * n):
+for i in 0..k * n:
     y.append(2.0)
 t0 = time.now()
 r = matmul(x, y, m, k, n)

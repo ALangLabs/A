@@ -90,6 +90,17 @@ struct CallExpr : Expr {
 
   // Set by Sema when the callee is a builtin that no local binding shadows.
   BuiltinId builtinId = BuiltinId::None;
+
+  // Set by Sema when the callee resolved to a runtime builtin (either by its
+  // bare name or a native-module from-import). Codegen must dispatch on it
+  // directly instead of the ambiguous bare-name binding table, where an
+  // unrelated module's function with the same name wins (e.g. a bare
+  // `matmul(...)` call while `kernels` is imported).
+  // `calleeBuiltin` holds the builtin name the runtime id is resolved from
+  // (the from-import's native name, e.g. "unsafe_set" for an aliased
+  // `from std:unsafe import set`).
+  mutable bool calleeIsBuiltin = false;
+  mutable std::string calleeBuiltin;
 };
 
 // `ic(...)` argument classification, shared by Sema (labels) and the

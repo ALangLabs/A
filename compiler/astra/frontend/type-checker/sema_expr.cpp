@@ -442,6 +442,8 @@ TypePtr Sema::inferCall(CallExpr& expr) {
         return checkFunctionCall(sigIt->second, expr);
       }
       if (binding.kind == FromBinding::Kind::Function && binding.native) {
+        expr.calleeIsBuiltin = true;
+        expr.calleeBuiltin = binding.nativeName;
         return checkBuiltinCall(binding.nativeName, expr);
       }
       if (!binding.type) {
@@ -475,6 +477,8 @@ TypePtr Sema::inferCall(CallExpr& expr) {
     }
     if (isKnownBuiltin(name)) {
       expr.builtinId = builtinIdForName(name);
+      expr.calleeIsBuiltin = true;
+      expr.calleeBuiltin = name;
       return checkBuiltinCall(name, expr);
     }
     if (isBuiltinConstant(name) || name == "None") {
