@@ -5,7 +5,7 @@
       "fn main():",
       "\t$0"
     ],
-    "description": "Program entry point"
+    "description": "Program entry point (runs automatically after imports)"
   },
   "Function": {
     "prefix": "fn",
@@ -23,6 +23,22 @@
     ],
     "description": "Function with an annotated return type"
   },
+  "Generic function": {
+    "prefix": "fngen",
+    "body": [
+      "fn ${1:name}[${2:T}](${3:x}: ${2:T}):",
+      "\treturn ${3:x}$0"
+    ],
+    "description": "Generic function with a type parameter"
+  },
+  "Function with where clause": {
+    "prefix": "fnwhere",
+    "body": [
+      "fn ${1:name}(${2:a}: ${3:Type}, ${4:b}: ${3:Type}) -> ${5:bool} where ${6:Trait}:",
+      "\treturn ${7:expr}$0"
+    ],
+    "description": "Trait-constrained function (where clause)"
+  },
   "Lambda": {
     "prefix": "lambda",
     "body": "${1:name} = fn(${2:args}) => ${3:expr}$0",
@@ -36,6 +52,25 @@
     ],
     "description": "Class declaration"
   },
+  "Class with fields and method": {
+    "prefix": "cls",
+    "body": [
+      "class ${1:Name}:",
+      "\t${2:field}: ${3:i64}",
+      "",
+      "\tfn ${4:method}(self) -> ${5:i64}:",
+      "\t\treturn self.${2:field}$0"
+    ],
+    "description": "Class with a typed field and a method"
+  },
+  "Class inheritance": {
+    "prefix": "classinh",
+    "body": [
+      "class ${1:Name}(${2:Base}):",
+      "\t$0"
+    ],
+    "description": "Class deriving from a base class"
+  },
   "Enum": {
     "prefix": "enum",
     "body": [
@@ -45,13 +80,42 @@
     ],
     "description": "Enum declaration"
   },
+  "Enum with values": {
+    "prefix": "enumval",
+    "body": [
+      "enum ${1:Name}:",
+      "\t${2:First}",
+      "\t${3:Second} = ${4:5}",
+      "\t${5:Third}",
+      "\t$0"
+    ],
+    "description": "Enum with explicit integer values (later variants auto-increment)"
+  },
   "Trait": {
     "prefix": "trait",
     "body": [
       "trait ${1:Name}:",
+      "\tfn ${2:method}(self):",
+      "\t\t$0"
+    ],
+    "description": "Trait declaration with a required method"
+  },
+  "Trait inheritance": {
+    "prefix": "traitinh",
+    "body": [
+      "trait ${1:Name}(${2:Base}):",
       "\t$0"
     ],
-    "description": "Trait declaration"
+    "description": "Trait extending another trait"
+  },
+  "Impl block": {
+    "prefix": "impl",
+    "body": [
+      "impl ${1:Trait} for ${2:Type}:",
+      "\t${3:pass}",
+      "$0"
+    ],
+    "description": "Implement a trait for a type"
   },
   "Type alias": {
     "prefix": "type",
@@ -60,13 +124,38 @@
   },
   "Import module": {
     "prefix": "import",
-    "body": "import ${1:math}$0",
-    "description": "Import an A module"
+    "body": "import ${1|math,io,fs,json,core,prelude,unsafe,time|}$0",
+    "description": "Import a native or bare stdlib module"
+  },
+  "Import stdlib module": {
+    "prefix": "imstd",
+    "body": "import std:${1|math,core,prelude,io,fs,json,time,random,enum,string,textwrap,statistics,copy,http,net,re,os,path,datetime|}$0",
+    "description": "Import an std: package (binds the last path segment, e.g. std:math -> math.*)"
+  },
+  "Import Python module": {
+    "prefix": "impy",
+    "body": "import python:${1|json,numpy,torch,os,sys|}$0",
+    "description": "Import a Python module through libpython interop"
   },
   "Import from file": {
     "prefix": "from",
     "body": "from \"${1:lib/module.a}\" import ${2:name}$0",
     "description": "Import names from a quoted module path"
+  },
+  "Import file with alias": {
+    "prefix": "importas",
+    "body": "import \"${1:lib/module.a}\" as ${2:alias}$0",
+    "description": "Import a quoted module path under an alias"
+  },
+  "From stdlib import": {
+    "prefix": "fromstd",
+    "body": "from std:${1|math,core,prelude,enum,http|} import ${2:name}$0",
+    "description": "Import selected names from an std: package"
+  },
+  "From Python import": {
+    "prefix": "frompy",
+    "body": "from python:${1|json,numpy|} import ${2:name}$0",
+    "description": "Import selected names from a Python module"
   },
   "Print": {
     "prefix": "print",
@@ -91,13 +180,33 @@
     ],
     "description": "Conditional with fallback"
   },
+  "If elif else": {
+    "prefix": "ifel",
+    "body": [
+      "if ${1:condition}:",
+      "\t$2",
+      "elif ${3:other}:",
+      "\t$4",
+      "else:",
+      "\t$0"
+    ],
+    "description": "Multi-branch conditional"
+  },
   "For": {
     "prefix": "for",
     "body": [
       "for ${1:item} in ${2:items}:",
       "\t$0"
     ],
-    "description": "Iterate over a range or collection"
+    "description": "Iterate over a range, list, string, map or set"
+  },
+  "For range": {
+    "prefix": "forr",
+    "body": [
+      "for ${1:i} in ${2:0}..${3:10}:",
+      "\t$0"
+    ],
+    "description": "Iterate over a numeric range (0..10, or 0..10..2 stepped)"
   },
   "While": {
     "prefix": "while",
@@ -107,6 +216,23 @@
     ],
     "description": "While loop"
   },
+  "Do while": {
+    "prefix": "dow",
+    "body": [
+      "do:",
+      "\t$1",
+      "while ${2:condition}$0"
+    ],
+    "description": "Do-while loop (body runs first; no colon after while)"
+  },
+  "Loop": {
+    "prefix": "loop",
+    "body": [
+      "loop:",
+      "\t$0"
+    ],
+    "description": "Infinite loop (use break/continue)"
+  },
   "Match": {
     "prefix": "match",
     "body": [
@@ -114,17 +240,46 @@
       "\t${2:pattern} => ${3:result}",
       "\t_ => $0"
     ],
-    "description": "Pattern match"
+    "description": "Pattern match expression"
+  },
+  "Match with guard": {
+    "prefix": "matchg",
+    "body": [
+      "match ${1:value}:",
+      "\t${2:pattern} if ${3:condition} => ${4:result}",
+      "\t_ => $0"
+    ],
+    "description": "Match arm with a guard condition"
   },
   "List comprehension": {
     "prefix": "compre",
     "body": "${1:name} = [${2:expr} for ${3:item} in ${4:items}]$0",
     "description": "List comprehension"
   },
+  "Filtered comprehension": {
+    "prefix": "compf",
+    "body": "${1:name} = [${2:item} for ${3:item} in ${4:items} if ${5:condition}]$0",
+    "description": "List comprehension with a filter"
+  },
   "Defer": {
     "prefix": "defer",
     "body": "defer ${1:cleanup}$0",
-    "description": "Run a statement when the block ends"
+    "description": "Run a statement when the block exits (LIFO)"
+  },
+  "Return": {
+    "prefix": "ret",
+    "body": "return ${1:value}$0",
+    "description": "Return a value"
+  },
+  "Break continue": {
+    "prefix": "brk",
+    "body": "${1|break,continue|}$0",
+    "description": "break or continue"
+  },
+  "Pass": {
+    "prefix": "pass",
+    "body": "pass$0",
+    "description": "Empty statement / trait-impl placeholder"
   },
   "Test function": {
     "prefix": "test",
@@ -132,42 +287,106 @@
       "fn test_${1:name}():",
       "\tassert(${2:condition})$0"
     ],
-    "description": "Test run by 'a test'"
+    "description": "Test run by 'a test' (every fn test_* runs)"
+  },
+  "Test with assert_eq": {
+    "prefix": "testeq",
+    "body": [
+      "fn test_${1:name}():",
+      "\tassert_eq(${2:actual}, ${3:expected})$0"
+    ],
+    "description": "Test using assert_eq"
   },
   "Assert": {
     "prefix": "assert",
     "body": "assert(${1:condition})$0",
     "description": "Assertion"
   },
+  "Assert equal": {
+    "prefix": "asserteq",
+    "body": "assert_eq(${1:actual}, ${2:expected})$0",
+    "description": "Assert two values are equal"
+  },
+  "Panic": {
+    "prefix": "panic",
+    "body": "core.panic(\"${1:message}\")$0",
+    "description": "Abort with a message (A has no exceptions; needs import std:core or core)"
+  },
+  "Typed binding": {
+    "prefix": "typed",
+    "body": "${1:name}: ${2:i64} = ${3:value}$0",
+    "description": "Type-annotated binding"
+  },
+  "Destructuring": {
+    "prefix": "unpack",
+    "body": "${1:a}, ${2:b} = ${3:pair}$0",
+    "description": "Tuple/array destructuring assignment ('_' discards)"
+  },
+  "Optional unwrap": {
+    "prefix": "opt",
+    "body": "${1:maybe} ?? ${2:default}$0",
+    "description": "Coalesce an optional (a ?? b)"
+  },
+  "Try operator": {
+    "prefix": "tryop",
+    "body": "${1:expr}?$0",
+    "description": "Try operator: propagate an error/None to the caller"
+  },
+  "Ternary": {
+    "prefix": "tern",
+    "body": "${1:cond} ? ${2:then} : ${3:else}$0",
+    "description": "Conditional expression"
+  },
+  "String interpolation": {
+    "prefix": "interp",
+    "body": "\"${1:text} {${2:expr}}$0\"",
+    "description": "String with {expr} interpolation"
+  },
+  "Docstring": {
+    "prefix": "doc",
+    "body": [
+      "\"\"\"${1:Summary.}",
+      "",
+      "${2:Details.}",
+      "\"\"\"",
+      "$0"
+    ],
+    "description": "Triple-quoted docstring (top of a body)"
+  },
   "Import string": {
     "prefix": "imstring",
-    "body": "import string$0",
+    "body": "import std:string$0",
     "description": "Import A stdlib string module"
   },
   "Import textwrap": {
     "prefix": "imtextwrap",
-    "body": "import textwrap$0",
+    "body": "import std:textwrap$0",
     "description": "Import A stdlib textwrap module"
   },
   "Import statistics": {
     "prefix": "imstats",
-    "body": "import statistics$0",
+    "body": "import std:statistics$0",
     "description": "Import A stdlib statistics module"
   },
   "Import copy": {
     "prefix": "imcopy",
-    "body": "import copy$0",
+    "body": "import std:copy$0",
     "description": "Import A stdlib copy module"
   },
   "Import json": {
     "prefix": "imjson",
-    "body": "import json$0",
+    "body": "import std:json$0",
     "description": "Import A stdlib json module"
   },
   "Import fs": {
     "prefix": "imfs",
-    "body": "import fs$0",
+    "body": "import std:fs$0",
     "description": "Import A stdlib fs module"
+  },
+  "Import prelude": {
+    "prefix": "imprelude",
+    "body": "import std:prelude$0",
+    "description": "Import prelude helpers (Ok/Err/is_ok/unwrap/...)"
   },
   "capwords": {
     "prefix": "capwords",
@@ -187,35 +406,24 @@
   "json parse": {
     "prefix": "jparse",
     "body": "json.parse(${1:text})$0",
-    "description": "Parse JSON text"
+    "description": "Parse JSON text (A std.json)"
   },
   "json stringify": {
     "prefix": "jstringify",
     "body": "json.stringify(${1:value})$0",
-    "description": "Serialize value to JSON"
+    "description": "Serialize value to JSON (A std.json)"
   },
   "deepcopy": {
     "prefix": "deepcopy",
     "body": "copy.deepcopy(${1:value})$0",
-    "description": "Deep copy a value"
+    "description": "Deep copy a value (A std.copy)"
   },
-  "Try-like guard comment": {
+  "Guard comment": {
     "prefix": "guard",
     "body": [
-      "# A ports often use core.panic/assert for invalid input instead of Python exceptions.",
+      "# A has no exceptions: invalid input is a runtime error via core.panic/assert.",
       "core.assert(${1:condition}, \"${2:message}\")$0"
     ],
     "description": "A-style guard/assert pattern"
-  },
-  "Docstring": {
-    "prefix": "doc",
-    "body": [
-      "\"\"\"${1:Summary.}",
-      "",
-      "${2:Details.}",
-      "\"\"\"",
-      "$0"
-    ],
-    "description": "Triple-quoted docstring"
   }
 }

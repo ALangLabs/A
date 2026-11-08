@@ -308,6 +308,16 @@
           "minimum": 0,
           "scope": "resource",
           "description": "Parallel type-checking jobs. 0 means all cores (async parallel checking, same diagnostics as serial). 1 is serial. Passed as --jobs to 'a check' and via A_JOBS to a-lsp."
+        },
+        "a.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Run / Run Tests code lenses above A files (and above each fn test_*). The lenses invoke the a.run and a.test commands."
+        },
+        "a.tasks.autoGenerate": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a workspace folder contains .a files but no .vscode/tasks.json, generate one with A: Run/Build/Test/Check/Format tasks (the contributed 'a' task type)."
         }
       }
     },
@@ -434,6 +444,27 @@
       {
         "id": "static",
         "description": "Static"
+      }
+    ],
+    "semanticTokenScopes": [
+      {
+        "language": "a",
+        "scopes": {
+          "namespace": "entity.name.namespace",
+          "type": "entity.name.type",
+          "class": "entity.name.type.class",
+          "enum": "entity.name.type.enum",
+          "function": "entity.name.function",
+          "method": "entity.name.function.member",
+          "parameter": "variable.parameter",
+          "variable": "variable",
+          "property": "variable.other.property",
+          "keyword": "keyword",
+          "comment": "comment",
+          "string": "string",
+          "number": "constant.numeric",
+          "operator": "keyword.operator"
+        }
       }
     ],
     "configurationDefaults": {
