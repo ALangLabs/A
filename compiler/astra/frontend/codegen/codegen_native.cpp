@@ -232,6 +232,7 @@ int builtinRuntimeId(const std::string& name) {
       {"json_set", 186}, {"json_delete", 187},
       {"struct_name", 188}, {"struct_methods", 189},
       {"fn_signature", 190}, {"fn_doc", 191},
+      {"file_size", 192},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -1171,14 +1172,21 @@ class NativeEmitter {
       b.st = st;
       if (!g.count(st->name)) g[st->name] = b;
     }
-    for (auto& kv : enums_) {
-      ABinding b;
-      b.kind = BKind::EnumValue;
-      b.sym = kv.second.globalVar;
-      b.en = &kv.second;
-      g[kv.first] = b;
-      std::string shortName = kv.first.substr(kv.first.find('.') + 1);
-      if (!g.count(shortName)) g[shortName] = b;
+    {
+      std::vector<std::string> _ekeys;
+      _ekeys.reserve(enums_.size());
+      for (auto& _e : enums_) _ekeys.push_back(_e.first);
+      std::sort(_ekeys.begin(), _ekeys.end());
+      for (const auto& _ek : _ekeys) {
+        auto& kv = *enums_.find(_ek);
+        ABinding b;
+        b.kind = BKind::EnumValue;
+        b.sym = kv.second.globalVar;
+        b.en = &kv.second;
+        g[kv.first] = b;
+        std::string shortName = kv.first.substr(kv.first.find('.') + 1);
+        if (!g.count(shortName)) g[shortName] = b;
+      }
     }
     for (const char* nm : {"math", "io", "fs", "strings", "collections", "core",
                            "time", "json", "binary", "testing", "log", "metrics",
@@ -1461,7 +1469,7 @@ class NativeEmitter {
     pushScope();
     allocSlot();  // slot 0 scratch
     callSym("a_runtime_init");
-    // fn/struct globals = a_fnon_new(entry_addr, A_NONE, name)
+    // fn/struct/enum globals = a_fnon_new(entry_addr, A_NONE, name)
     for (StructInfo* st : structList_) {
       std::string lbl = "__na_sn_" + st->name;
       leaSym(st->ctorCname, A(0));
@@ -1485,10 +1493,17 @@ class NativeEmitter {
       for (unsigned char c : f->name) rodata_ << (int)c << ",";
       rodata_ << "0\n";
     }
-    for (auto& kv : enums_) {
-      if (kv.second.algebraic) continue;
-      movImm(mkintA((int64_t)kv.second.value), acc());
-      storeSym(kv.second.globalVar, acc());
+    {
+      std::vector<std::string> _ekeys;
+      _ekeys.reserve(enums_.size());
+      for (auto& _e : enums_) _ekeys.push_back(_e.first);
+      std::sort(_ekeys.begin(), _ekeys.end());
+      for (const auto& _ek : _ekeys) {
+        auto& kv = *enums_.find(_ek);
+        if (kv.second.algebraic) continue;
+        movImm(mkintA((int64_t)kv.second.value), acc());
+        storeSym(kv.second.globalVar, acc());
+      }
     }
 
     retLabel_ = newLabel("ret");
@@ -1573,10 +1588,17 @@ class NativeEmitter {
       bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n"
            << st->globalVar << ":\n    .space 8\n";
     }
-    for (auto& kv : enums_) {
-      if (!kv.second.algebraic)
-        bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
-             << kv.second.globalVar << ":\n    .space 8\n";
+    {
+      std::vector<std::string> _ekeys;
+      _ekeys.reserve(enums_.size());
+      for (auto& _e : enums_) _ekeys.push_back(_e.first);
+      std::sort(_ekeys.begin(), _ekeys.end());
+      for (const auto& _ek : _ekeys) {
+        auto& kv = *enums_.find(_ek);
+        if (!kv.second.algebraic)
+          bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
+               << kv.second.globalVar << ":\n    .space 8\n";
+      }
     }
     scopes_.clear();
     scopeDeclOrder_.clear();
@@ -2917,13 +2939,14 @@ struct Riscv64Target : NatTarget {
   mutable int cpoolN_ = 0;
   int frameReserve() const override { return 8; }  // ra saved inside frame
   std::string extraRodata() const override { return cpool_.str(); }
+  static int alignFrame(int n) { return n < 16 ? 16 : (n + 15) & ~15; }
   void prologue(std::string& o, int frameBytes) const override {
-    if (frameBytes < 16) frameBytes = 16;
+    frameBytes = alignFrame(frameBytes);
     o += "    addi sp, sp, -" + std::to_string(frameBytes) + "\n";
     o += "    sd ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
   }
   void epilogue(std::string& o, int frameBytes) const override {
-    if (frameBytes < 16) frameBytes = 16;
+    frameBytes = alignFrame(frameBytes);
     o += "    ld ra, " + std::to_string(frameBytes - 8) + "(sp)\n";
     o += "    addi sp, sp, " + std::to_string(frameBytes) + "\n";
     o += "    ret\n";
@@ -3042,12 +3065,24 @@ struct Riscv64Target : NatTarget {
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
                 const std::string& arch, std::string& out,
                 std::string& error, bool testMode) {
+  if (const char* forced = std::getenv("A_CODEGEN");
+      forced && std::string(forced) == "c") {
+    error = "native backend: disabled by A_CODEGEN=c";
+    return false;
+  }
   if (arch == "arm64" || arch == "aarch64") {
     Arm64Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
   }
   if (arch == "riscv64" || arch == "riscv64gc") {
+    // Opt-in while riscv64 native emission is being stabilized.
+    const char* f = std::getenv("A_CODEGEN");
+    if (!(f && std::string(f) == "native") &&
+        !std::getenv("A_NATIVE_RISCV64")) {
+      error = "native backend: riscv64 opt-in (set A_CODEGEN=native)";
+      return false;
+    }
     Riscv64Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);

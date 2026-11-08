@@ -475,9 +475,10 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   std::ofstream f(p, std::ios::binary | std::ios::trunc);
   if (!f) { err << "error: cannot write temp source '" << p << "'\n"; return ""; }
   f << source;
+  f.flush();
   if (const char* dbg = std::getenv("A_DEBUG_SRC"); dbg && *dbg) {
-    std::error_code ec;
-    std::filesystem::copy_file(p, dbg, std::filesystem::copy_options::overwrite_existing, ec);
+    std::ofstream df(dbg, std::ios::binary | std::ios::trunc);
+    if (df) df << source;
   }
   return p;
 }
@@ -560,11 +561,40 @@ int astraBuild(const std::string& arch, const std::string& srcPath, const std::s
           << "'; set A_SYSROOT or A_SYSROOT_" << arch << " to a cross toolchain root\n";
     }
   }
+  // Lazily build a per-arch libaruntime.a: the first cross build compiles
+  // each runtime .c once into runtimeDir/rt_obj/*.o and archives them, so
+  // subsequent builds link the archive instead of recompiling ~40 C files
+  // per program. The archive is keyed by arch via runtimeDir (astralib-<arch>).
+  const std::string rtArchive = runtimeDir + "/libaruntime.a";
+  if (optimizationLevel == 2 && !hasFile(rtArchive)) {
+    std::error_code ec;
+    const std::string objDir = runtimeDir + "/rt_obj";
+    std::filesystem::create_directories(objDir, ec);
+    std::vector<std::string> cargs = args;  // optFlag -I -B -I/-L prefix
+    std::vector<std::string> robjs;
+    bool ok = true;
+    for (const std::string& src : rtSrcs) {
+      std::string obj = objDir + "/" +
+          std::filesystem::path(src).stem().string() + ".o";
+      if (!hasFile(obj)) {
+        std::vector<std::string> ca = cargs;
+        ca.push_back("-c"); ca.push_back(src); ca.push_back("-o"); ca.push_back(obj);
+        if (runAstra(arch, ca) != 0) { ok = false; break; }
+      }
+      robjs.push_back(obj);
+    }
+    if (ok && !robjs.empty()) {
+      std::vector<std::string> aa = {"-ar", "rcs", rtArchive};
+      aa.insert(aa.end(), robjs.begin(), robjs.end());
+      ok = runAstra(arch, aa) == 0 && hasFile(rtArchive);
+    }
+    if (!ok) err << "note: could not prebuild libaruntime.a for '" << arch
+                 << "'; falling back to per-program runtime compile\n";
+  }
   args.push_back(srcPath);
-  // The staged libaruntime.a is built once by cmake (O2); linking it avoids
+  // The staged libaruntime.a is built once (O2); linking it avoids
   // recompiling every runtime module for each program. Non-default opt levels
   // and targets without the archive keep the compile-sources path.
-  const std::string rtArchive = runtimeDir + "/libaruntime.a";
   if (optimizationLevel == 2 && std::filesystem::exists(rtArchive)) {
     args.push_back(rtArchive);
   } else {
@@ -592,6 +622,7 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   }
   std::string srcSource, srcError;
   bool emitted = false;
+  std::string srcPath;
   const char* forced = std::getenv("A_CODEGEN");
   bool preferC = forced && lowerStr(forced) == "c";
   bool preferAsm = forced && lowerStr(forced) == "asm";
@@ -599,12 +630,12 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
     // Preferred path: x86-64 assembly (fast, no C intermediate).
     if (emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)) {
       emitted = true;
+      srcPath = stageSrc(srcSource, ".s", err);
     } else if (!preferAsm) {
       // Fall through to the portable C emitter for anything the asm
       // backend does not cover.
     }
   }
-  std::string srcPath;
   if (!emitted) {
     // Native per-arch asm emitters (A -> .s -> machine code, no C step).
     // emitNative covers a growing subset; emitC remains the fallback.

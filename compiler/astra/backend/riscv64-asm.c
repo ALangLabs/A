@@ -209,10 +209,11 @@ static void parse_operand(ASTRAState *s1, Operand *op)
         if ((int) op->e.v >= -0x1000 && (int) op->e.v < 0x1000)
             op->type = OP_IM12S;
     } else if (op->e.sym) {
-        /* Symbol address: emit auipc/addi (or auipc/lw for extern GOT) pair.
-           Local/defined symbols use PCREL relocs; extern symbols use GOT. */
+        /* Symbol address: PCREL for locals/static, GOT for pure externs.
+           (parse_operand is also used in contexts assuming auipc+{lw,addi}
+           pairs; the original code only handled EXTERN|STATIC.) */
         label.type.t = VT_VOID | VT_STATIC;
-        if (op->e.sym->type.t & VT_EXTERN)
+        if ((op->e.sym->type.t & (VT_EXTERN | VT_STATIC)) == VT_EXTERN)
             greloca(cur_text_section, op->e.sym, ind, R_RISCV_GOT_HI20, 0);
         else
             greloca(cur_text_section, op->e.sym, ind, R_RISCV_PCREL_HI20, 0);
@@ -613,12 +614,28 @@ static void asm_binary_opcode(ASTRAState* s1, int token)
         /* lw rd, rd, 0 */
         asm_emit_i(token, 3 | (2 << 12), ops, ops, ops + 1);
         return;
-    case TOK_ASM_lla:
+    case TOK_ASM_lla: {
         /* auipc rd, 0 */
+        unsigned long auipc_off = ind;
         asm_emit_u(token, 3 | (5 << 2), ops, ops + 1);
+        /* lla is local-linkage: the auipc must use PCREL_HI20 even when the
+           symbol has extern binding (parse emitted GOT_HI20 for those). */
+        Section *sr = cur_text_section->reloc;
+        if (sr) {
+            ElfW_Rel *rels = (ElfW_Rel *)sr->data;
+            unsigned n = (unsigned)(sr->data_offset / sizeof(ElfW_Rel));
+            for (unsigned i = 0; i < n; ++i) {
+                if (rels[i].r_offset == auipc_off &&
+                    (unsigned)(rels[i].r_info & 0xffffffff) == R_RISCV_GOT_HI20) {
+                    rels[i].r_info = ELFW(R_INFO)(ELFW(R_SYM)(rels[i].r_info),
+                                                  R_RISCV_PCREL_HI20);
+                }
+            }
+        }
         /* addi rd, rd, 0 */
         asm_emit_i(token, 3 | (4 << 2), ops, ops, ops + 1);
         return;
+    }
     case TOK_ASM_li:
         if(ops[1].type != OP_IM32 && ops[1].type != OP_IM12S){
             astra_error("'%s': Expected first source operand that is an immediate value between 0 and 0xFFFFFFFFFFFFFFFF", get_tok_str(token, NULL));
