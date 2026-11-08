@@ -23,6 +23,12 @@ a_runtime_init:
     cmpl %edi, %esi
     jb .Lbss_zero
 .Lrt_bss_done:
+    # The bss sweep above can cover the .data tail on some link layouts,
+    # wiping heap_cur/heap_end to 0 (which makes every .Lalloc fail and
+    # return NULL -> A_NONE). Re-arm the bump allocator unconditionally;
+    # init runs once before any allocation.
+    movl $0x80000, heap_cur
+    movl $0x8F000, heap_end
     popl %ebp
     ret
 
@@ -807,8 +813,21 @@ a_bi_call:
 .Lb_cstr:                    # ebx = obj ptr; AObj{type,len,cap}+data@16
     movl %ebx, %edi           # edi = obj base (edi was masked tag, free)
     movl (%edi), %eax
-    cmpl $1, %eax             # T_STR only for now
-    jne .Lb_q
+    cmpl $1, %eax             # T_STR
+    je .Lb_cs_str
+    cmpl $12, %eax            # T_CHAR
+    je .Lb_cs_str
+    # other heap object -> repr via .Lb_paval(&argv[i])
+    pushl %ecx
+    movl 24(%ebp), %esi       # argv base
+    movl %ecx, %edx
+    shll $3, %edx
+    addl %edx, %esi           # &argv[i]
+    call .Lb_paval
+    popl %ecx
+    incl %ecx
+    jmp .Lb_loop
+.Lb_cs_str:
     movl 4(%edi), %ebx        # len
     movl %edi, %esi
     addl $16, %esi            # data ptr (avoid lea: addr32 prefix quirks)
@@ -1103,10 +1122,188 @@ a_bi_call:
     popl %edx
     ret
 
+# .Lb_paval: esi -> aval (8 bytes); prints repr (subset). Recursive for
+# collections. clobbers eax,ebx,ecx,edx,esi,edi; preserves ebp.
+.Lb_paval:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] aval ptr
+    movl (%esi), %eax           # lo
+    movl 4(%esi), %edx          # hi
+    movl %edx, %ecx
+    andl $0xFFFF0000, %ecx
+    cmpl $0xFFFF0000, %ecx
+    jne .Lpv_q                  # untagged (double) -> '?'
+    testl $1, %eax
+    jnz .Lpv_int
+    cmpl $2, %eax
+    je .Lpv_none
+    cmpl $4, %eax
+    je .Lpv_false
+    cmpl $6, %eax
+    je .Lpv_true
+    testl $0xF, %eax
+    jnz .Lpv_q
+    testl %eax, %eax
+    jz .Lpv_q
+    # heap object: type@0
+    movl %eax, %ebx
+    movl (%ebx), %ecx
+    cmpl $1, %ecx               # T_STR
+    je .Lpv_str
+    cmpl $12, %ecx              # T_CHAR
+    je .Lpv_str
+    cmpl $2, %ecx               # T_LIST
+    je .Lpv_arr
+    cmpl $3, %ecx               # T_TUPLE
+    je .Lpv_arr
+    cmpl $5, %ecx               # T_SET
+    je .Lpv_set
+    cmpl $4, %ecx               # T_DICT
+    je .Lpv_dict
+    jmp .Lpv_q
+.Lpv_int:
+    movl -4(%ebp), %esi
+    call .Lb_printint
+    jmp .Lpv_out
+.Lpv_none:
+    movl $str_none, %esi
+    movl $4, %ebx
+    call .Lb_printn
+    jmp .Lpv_out
+.Lpv_false:
+    movl $str_false, %esi
+    movl $5, %ebx
+    call .Lb_printn
+    jmp .Lpv_out
+.Lpv_true:
+    movl $str_true, %esi
+    movl $4, %ebx
+    call .Lb_printn
+    jmp .Lpv_out
+.Lpv_str:                      # ebx = obj; print "..." quoted
+    movb $'"', %al
+    call .Lputc
+    movl 4(%ebx), %ebx          # len (bytes)
+    movl -4(%ebp), %eax
+    movl (%eax), %esi           # obj ptr
+    addl $16, %esi              # data
+    call .Lb_printn
+    movb $'"', %al
+    call .Lputc
+    jmp .Lpv_out
+.Lpv_arr:                      # ebx = T_LIST/T_TUPLE; "[a, b]"
+    pushl %ebx                  # [ebp-8] obj
+    pushl $0                    # [ebp-12] i
+    movb $'[', %al
+    call .Lputc
+.Lpva_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lpva_close
+    testl %eax, %eax
+    jz .Lpva_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lb_printn
+.Lpva_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx         # items base
+    movl -12(%ebp), %eax
+    shll $3, %eax
+    addl %eax, %ecx             # &items[i] aval
+    movl %ecx, %esi
+    call .Lb_paval
+    incl -12(%ebp)
+    jmp .Lpva_loop
+.Lpva_close:
+    movb $']', %al
+    call .Lputc
+    jmp .Lpv_out
+.Lpv_set:                      # ebx = T_SET; "{a, b}"
+    pushl %ebx
+    pushl $0
+    movb $'{', %al
+    call .Lputc
+.Lpvs_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lpvs_close
+    testl %eax, %eax
+    jz .Lpvs_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lb_printn
+.Lpvs_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx
+    movl -12(%ebp), %eax
+    shll $3, %eax
+    addl %eax, %ecx
+    movl %ecx, %esi
+    call .Lb_paval
+    incl -12(%ebp)
+    jmp .Lpvs_loop
+.Lpvs_close:
+    movb $'}', %al
+    call .Lputc
+    jmp .Lpv_out
+.Lpv_dict:                     # ebx = T_DICT; "{k: v}"
+    pushl %ebx                  # [ebp-8] obj
+    pushl $0                    # [ebp-12] i
+    movb $'{', %al
+    call .Lputc
+.Lpvd_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lpvd_close
+    testl %eax, %eax
+    jz .Lpvd_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lb_printn
+.Lpvd_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx         # pairs base
+    movl -12(%ebp), %eax
+    shll $4, %eax
+    addl %eax, %ecx             # &pair[i] (k aval @0, v aval @8)
+    movl %ecx, %esi
+    call .Lb_paval
+    movl $str_colon, %esi
+    movl $2, %ebx
+    call .Lb_printn
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx
+    movl -12(%ebp), %eax
+    shll $4, %eax
+    addl $8, %eax
+    addl %eax, %ecx             # &pair[i].v
+    movl %ecx, %esi
+    call .Lb_paval
+    incl -12(%ebp)
+    jmp .Lpvd_loop
+.Lpvd_close:
+    movb $'}', %al
+    call .Lputc
+    jmp .Lpv_out
+.Lpv_q:
+    movb $'?', %al
+    call .Lputc
+.Lpv_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
     .section .rodata
 str_none:  .ascii "none"
 str_false: .ascii "false"
 str_true:  .ascii "true"
+str_comma: .ascii ", "
+str_colon: .ascii ": "
 
     .section .data
     .globl serial_init
@@ -2174,6 +2371,11 @@ a_getitem:
     call .Lobjptr
     testl %esi, %esi
     jz .Lgi_none
+    movl %esi, %ebx             # obj
+    # T_DICT keys are arbitrary avals (not positional ints): dispatch
+    # before the tagged-int index check below.
+    cmpl $4, (%ebx)
+    je .Lgi_dict
     # idx tagged int?
     movl 20(%ebp), %eax
     andl $0xFFFF0000, %eax
@@ -2182,7 +2384,6 @@ a_getitem:
     movl 16(%ebp), %eax
     testl $1, %eax
     jz .Lgi_none
-    movl %esi, %ebx             # obj
     movl 16(%ebp), %esi
     movl 20(%ebp), %edi
     call .Lunbox               # esi=i_lo edi=i_hi
