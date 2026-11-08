@@ -112,10 +112,18 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
   const char* hostEnv = std::getenv("A_TARGET");
   if (s.empty() && hostEnv && *hostEnv) s = hostEnv;
   s = lowerStr(s);
-  for (char& c : s) if (c == '_') c = '-';
   if (s.empty() || s == "native" || s == "host") s = hostArch();
+  for (char& c : s) if (c == '_') c = '-';
+  // "x86-64" contains a '-' that would tokenize as "x86","64" and
+  // misresolve to i386; peel the arch token off first so trailing
+  // os/env tokens still classify normally.
+  std::string arch;
+  if (s == "x86-64" || s.rfind("x86-64-", 0) == 0) {
+    arch = "x86_64";
+    s = s.size() == 6 ? "" : s.substr(7);
+  }
   // Tokenize on '-' and classify.
-  std::string arch, osTok;
+  std::string osTok;
   std::istringstream ts(s);
   std::string tok;
   while (std::getline(ts, tok, '-')) {
