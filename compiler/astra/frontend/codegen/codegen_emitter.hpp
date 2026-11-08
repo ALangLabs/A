@@ -172,6 +172,9 @@ class AsmEmitter {
   std::vector<int> loopDeferDepth_;
   bool inFunction_ = false;
   int curModuleId_ = -1;
+  // Body of the function currently being emitted (null for entry-stmt
+  // emission); strength reduction scans pre-loop writes through it.
+  const std::vector<StmtPtr>* curFnBody_ = nullptr;
   bool testMode_ = false;
 
   // Small-function inlining state. Generic inlining reuses the normal aval
@@ -609,6 +612,16 @@ class AsmEmitter {
   // speculative one (specRaw); the demoted branch goes through
   // a_add_slow so a live aval accumulator sees the same value either way.
     bool tryEmitForAccum(const ForStmt& st, int curS, int endS, int stepS);
+
+  // Upper bound on the accumulator's value at the start of the loop:
+  // union of the ranges of every `=`-style write to it that textually
+  // precedes the loop in the current function body. Returns false when
+  // the value cannot be bounded that way (compound writes to the name,
+  // destructuring, or no writes at all). Used by tryEmitForAccum, where
+  // fn-wide nameRanges_ (union over the whole function) is useless for
+  // accumulators: the fixpoint there widens them to unknown.
+    bool accEntryRange(const std::string& accName, const ForStmt& st,
+                       ARange& out) const;
 
     void emitFor(const ForStmt& st);
 

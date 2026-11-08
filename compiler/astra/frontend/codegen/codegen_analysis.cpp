@@ -840,6 +840,101 @@ ARange AsmEmitter::exprRangeFlat(const Expr* e) const {
 // point, so "union range <op> value range fits int64" proves the update
 // can never produce the double aval that overflow yields — the same
 // contract rawSafeExpr's arithFits gate relies on.
+// Upper bound on the accumulator's value at the start of the loop:
+// union of the ranges of every `=`-write to it that textually precedes
+// the loop in the current function body (see tryEmitForAccum).
+bool AsmEmitter::accEntryRange(const std::string& accName, const ForStmt& st,
+                               ARange& out) const {
+  if (!curFnBody_) return false;
+  auto unknownLookup = [](const std::string&) { return ARange{}; };
+  bool poisoned = false;
+  bool found = false;
+  // Walks `stmts` in order collecting the union of ranges of `=`-writes to
+  // accName. Stops (without descending) at the target loop itself; leaves
+  // `poisoned` set when the entry value cannot be bounded.
+  std::function<void(const std::vector<StmtPtr>&)> walkList =
+      [&](const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& sp : stmts) {
+      if (poisoned) return;
+      const Stmt* s = sp.get();
+      if (s == static_cast<const Stmt*>(&st)) return;  // target: stop
+      if (!s) continue;
+      switch (s->kind) {
+        case StmtKind::Let: {
+          const LetStmt& ls = static_cast<const LetStmt&>(*s);
+          if (ls.name == accName) {
+            ARange r = ls.init ? exprRangeIn(ls.init.get(), unknownLookup)
+                               : ARange{};
+            if (!r.known) { poisoned = true; return; }
+            rngJoin(out, r);
+            found = true;
+          }
+          break;
+        }
+        case StmtKind::Assign: {
+          const AssignStmt& as = static_cast<const AssignStmt&>(*s);
+          const Expr* te = as.target.get();
+          if (te && te->kind == ExprKind::Ident &&
+              static_cast<const IdentExpr*>(te)->name == accName) {
+            if (as.op != "=") { poisoned = true; return; }
+            ARange r = as.value ? exprRangeIn(as.value.get(), unknownLookup)
+                                : ARange{};
+            if (!r.known) { poisoned = true; return; }
+            rngJoin(out, r);
+            found = true;
+          }
+          break;
+        }
+        case StmtKind::Expr: {
+          const Expr* ex = static_cast<const ExprStmt&>(*s).expr.get();
+          if (ex && ex->kind == ExprKind::Unary) {
+            const UnaryExpr* ue = static_cast<const UnaryExpr*>(ex);
+            if ((ue->op == "++" || ue->op == "--") && ue->operand &&
+                ue->operand->kind == ExprKind::Ident &&
+                static_cast<const IdentExpr*>(ue->operand.get())->name ==
+                    accName)
+              poisoned = true;
+          }
+          break;
+        }
+        case StmtKind::Destructure: {
+          for (const std::string& n :
+               static_cast<const DestructureStmt&>(*s).names)
+            if (n == accName) poisoned = true;
+          break;
+        }
+        case StmtKind::If: {
+          const IfStmt& is = static_cast<const IfStmt&>(*s);
+          for (const IfStmt::Branch& br : is.branches) {
+            if (poisoned) return;
+            walkList(br.body);
+          }
+          walkList(is.elseBody);
+          break;
+        }
+        case StmtKind::While:
+          walkList(static_cast<const WhileStmt&>(*s).body);
+          break;
+        case StmtKind::DoWhile:
+          walkList(static_cast<const DoWhileStmt&>(*s).body);
+          break;
+        case StmtKind::For:
+          walkList(static_cast<const ForStmt&>(*s).body);
+          break;
+        case StmtKind::Loop:
+          walkList(static_cast<const LoopStmt&>(*s).body);
+          break;
+        default:
+          break;  // Defer bodies run at block exit, after this loop
+      }
+    }
+  };
+  walkList(*curFnBody_);
+  if (!found || poisoned) return false;
+  return out.known;
+}
+
+
 bool AsmEmitter::nameRangeKnown(const std::string& nm, ARange& out) const {
     auto it = nameRanges_.find(nm);
     if (it == nameRanges_.end() || !it->second.known) return false;

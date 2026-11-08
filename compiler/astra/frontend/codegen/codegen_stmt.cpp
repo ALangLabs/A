@@ -355,7 +355,7 @@ void AsmEmitter::emitRangeIncr(int curS, int endS, int stepS) {
 // neither i nor xs). The runtime helper reproduces a_setitem's
 // normalize_index panics element-by-element.
 bool AsmEmitter::tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS) {
-    if (st.body.size() != 1) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: body size %zu\n", st.body.size()); return false; }
+    if (st.body.size() != 1) return false;
     const Stmt* bs = st.body[0].get();
     if (!bs || bs->kind != StmtKind::Assign) return false;
     const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
@@ -389,7 +389,6 @@ bool AsmEmitter::tryEmitForFill(const ForStmt& st, int curS, int endS, int stepS
   }
 
 bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int stepS) {
-    if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: ENTER\n");
     // Only the counted-range fast path has curS/endS/stepS as int64s.
     const Expr* loE = nullptr;
     const Expr* hiE = nullptr;
@@ -406,16 +405,14 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
       loE = be.lhs.get();
       hiE = be.rhs.get();
     }
-    if (!loE || !hiE) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: no lo/hi\n"); return false; }
+    if (!loE || !hiE) return false;
     // Step must be exactly 1 (defaulted or literal): the general stepped
     // series has harsher range bookkeeping that is not worth the risk.
     if (stE && !(stE->kind == ExprKind::IntLit &&
-                 static_cast<const IntLitExpr*>(stE)->value == 1)) {
-      if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: step not 1 (kind %d)\n", (int)stE->kind);
+                 static_cast<const IntLitExpr*>(stE)->value == 1))
       return false;
-    }
     (void)stepS;
-    if (st.body.size() != 1) { if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: body size %zu\n", st.body.size()); return false; }
+    if (st.body.size() != 1) return false;
     const Stmt* bs = st.body[0].get();
     if (!bs || bs->kind != StmtKind::Assign) return false;
     const AssignStmt& as = static_cast<const AssignStmt&>(*bs);
@@ -437,7 +434,6 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
         return false;
       v = bb.rhs.get();
     } else if (as.op != "+=") {
-      if (getenv("A_DEBUG_ACCUM")) fprintf(stderr, "accum: op %s not +=\n", as.op.c_str());
       return false;
     }
     // Term: the loop variable, optionally times a non-negative constant.
@@ -477,22 +473,12 @@ bool AsmEmitter::tryEmitForAccum(const ForStmt& st, int curS, int endS, int step
 #endif
     ARange lr = exprRangeFlat(loE), hr = exprRangeFlat(hiE);
     ARange accR;
-    {
-      auto it = nameRanges_.find(accName);
-      fprintf(stderr, "accum: nameRanges_ has %d entries:", (int)nameRanges_.size());
-      for (auto& kv : nameRanges_) fprintf(stderr, " <%s%s>", kv.first.c_str(), kv.second.known ? "!" : "?");
-      fprintf(stderr, "; total: %s\n",
-              it == nameRanges_.end() ? "<absent>" : (it->second.known ? "known" : "unknown"));
-    }
-    if (getenv("A_DEBUG_ACCUM")) {
-      fprintf(stderr, "accum: lr known=%d [%lld,%lld] hr known=%d [%lld,%lld] accRanges=%d\n",
-              (int)lr.known, (long long)lr.lo, (long long)lr.hi,
-              (int)hr.known, (long long)hr.lo, (long long)hr.hi,
-              (int)nameRangeKnown(accName, accR));
-      if (nameRangeKnown(accName, accR))
-        fprintf(stderr, "accum: accR [%lld,%lld]\n", (long long)accR.lo, (long long)accR.hi);
-    }
-    if (!lr.known || !hr.known || !nameRangeKnown(accName, accR)) return false;
+    // The accumulator's entry value is bounded by scanning the writes
+    // that precede this loop (fn-wide nameRanges_ widens accumulators
+    // away — the dataflow's widening poisons monotone growth).
+    if (!lr.known || !hr.known || !accEntryRange(accName, st, accR) ||
+        !accR.known)
+      return false;
     if (lr.lo < 0) return false;  // terms must be non-negative
     // Iteration count and (first+last) are both non-negative. Bound the
     // runtime intermediates: the product N*(L+H-1) must fit int64, and so

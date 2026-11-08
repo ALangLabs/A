@@ -466,7 +466,11 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     specNames_.clear();
     nameRanges_.clear();
     computePromoteSet(f->decl);
+    // Strength reduction scans pre-loop writes via the current body.
+    const std::vector<StmtPtr>* savedBody = curFnBody_;
+    curFnBody_ = f->decl ? &f->decl->body : nullptr;
     emitBody(f->decl->body);
+    curFnBody_ = savedBody;
     promoteNames_ = std::move(savedPromote);
     specNames_ = std::move(savedSpec);
     nameRanges_ = std::move(savedRanges);
