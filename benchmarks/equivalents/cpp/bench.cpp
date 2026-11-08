@@ -1,7 +1,7 @@
 // C++ equivalents of the A benchmark suite.
 //
 // Build:  g++ -O2 -std=c++20 bench.cpp -o bench-cpp
-// Usage:  ./bench-cpp <arithmetic|collections|memory|numerical> <reps>
+// Usage:  ./bench-cpp <arithmetic|collections|memory|numerical|matmul> <reps>
 //
 // The workload bounds are volatile so the optimizer cannot constant-fold the
 // whole benchmark away; the result is printed and stored in a volatile sink.
@@ -54,15 +54,36 @@ double numerical(int n) {
     return acc;
 }
 
+double matmul(int n) {
+    std::vector<double> a((size_t)n * n), b((size_t)n * n), c((size_t)n * n, 0.0);
+    std::fill(a.begin(), a.end(), 1.5);
+    std::fill(b.begin(), b.end(), 2.5);
+    const int TILE = 32;
+    for (int i = 0; i < n; ++i) {
+        double* orow = c.data() + (size_t)i * n;
+        const double* arow = a.data() + (size_t)i * n;
+        for (int jj = 0; jj < n; jj += TILE) {
+            int jend = jj + TILE < n ? jj + TILE : n;
+            for (int t = 0; t < n; ++t) {
+                double av = arow[t];
+                const double* brow = b.data() + (size_t)t * n;
+                for (int j = jj; j < jend; ++j)
+                    orow[j] = std::fma(av, brow[j], orow[j]);
+            }
+        }
+    }
+    return c[0];
+}
+
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::fprintf(stderr, "usage: bench-cpp <arithmetic|collections|memory|numerical> <reps>\n");
+        std::fprintf(stderr, "usage: bench-cpp <arithmetic|collections|memory|numerical|matmul> <reps>\n");
         return 64;
     }
     std::string which = argv[1];
     int reps = std::atoi(argv[2]);
 
-    volatile int an = 200000, cn = 5000, mr = 500, mi = 200, nn = 50000;
+    volatile int an = 200000, cn = 5000, mr = 500, mi = 200, nn = 50000, mn = 64;
     auto t0 = std::chrono::steady_clock::now();
     if (which == "arithmetic") {
         long long v = 0;
@@ -84,6 +105,11 @@ int main(int argc, char** argv) {
         for (int r = 0; r < reps; ++r) v = numerical(nn);
         g_sink = static_cast<long long>(v);
         std::printf("%.1f\n", std::round(v));
+    } else if (which == "matmul") {
+        double v = 0;
+        for (int r = 0; r < reps; ++r) v = matmul(mn);
+        g_sink = static_cast<long long>(v);
+        std::printf("%.1f\n", v);
     } else {
         return 64;
     }
