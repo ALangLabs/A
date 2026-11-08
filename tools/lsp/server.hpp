@@ -135,6 +135,10 @@ class LanguageServer {
   void references(const Value& id, const Value* params);
   Value documentSymbolFromStatement(const Compilation& compilation, const std::string& text,
                                     const a::Stmt& statement);
+  void outlineBlockSymbols(const Compilation& compilation, const std::string& text,
+                           const std::vector<a::StmtPtr>& body, Value& out);
+  void outlineStmtSymbol(const Compilation& compilation, const std::string& text,
+                         const a::Stmt& stmt, Value& out);
   void documentSymbols(const Value& id, const Value* params);
   void workspaceSymbols(const Value& id, const Value* params);
   void completion(const Value& id, const Value* params);

@@ -23,7 +23,7 @@ void LanguageServer::codeLens(const Value& id, const Value* params) {
     const std::vector<Token>& tokens = compilation.tokensByModule[moduleId];
     for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
       const Token& token = tokens[static_cast<std::size_t>(i)];
-      if (token.kind != Tok::Ident) continue;
+      if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) continue;
       ResolvedSymbol resolved = a::lsp::resolveToken(compilation, file, tokens, i);
       if (!resolved.valid()) continue;
       const std::string key = canonicalPath(resolved.file->path) + "|" +

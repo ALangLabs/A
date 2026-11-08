@@ -76,7 +76,7 @@ void LanguageServer::completion(const Value& id, const Value* params) {
       }
     }
 
-    if (baseToken.kind == Tok::Ident) {
+    if (baseToken.kind == Tok::Ident || baseToken.kind == Tok::KwSelf) {
       const std::string moduleName = nativeModuleForAlias(*file, baseToken.lexeme);
       if (!moduleName.empty()) {
         for (const a::lsp::MemberInfo& member : a::lsp::nativeModuleMembers(moduleName)) {
@@ -259,6 +259,7 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
 
   // Callee: `name(`, `module.member(`, or `receiver.method(`.
   std::string label;
+  std::string documentation;  // markdown for SignatureInformation.documentation
   const Token& callee = (*tokens)[static_cast<std::size_t>(openIndex - 1)];
   if (callee.kind != Tok::Ident) return replyNull(id);
   const bool qualified = openIndex >= 3 &&
@@ -279,7 +280,15 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
     const std::string* builtinName = a::nativeFunction(moduleAlias, callee.lexeme);
     if (!builtinName) builtinName = a::nativeConstant(moduleAlias, callee.lexeme);
     if (builtinName) {
-      if (const a::BuiltinDoc* doc = a::findBuiltinDoc(*builtinName)) label = doc->signature;
+      if (const a::BuiltinDoc* doc = a::findBuiltinDoc(*builtinName)) {
+        label = doc->signature;
+        documentation = doc->documentation ? doc->documentation : "";
+        if (doc->example && *doc->example) {
+          documentation += "\n\n**Example:**\n\n```\n";
+          documentation += doc->example;
+          documentation += "\n```";
+        }
+      }
     }
   }
   if (label.empty()) {
@@ -313,7 +322,7 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
         }
         typeName = isMap ? "map" : "set";
       }
-    } else if (baseToken.kind == Tok::Ident) {
+    } else if (baseToken.kind == Tok::Ident || baseToken.kind == Tok::KwSelf) {
       ResolvedSymbol resolved =
           a::lsp::resolveToken(compilation, *file, *tokens, openIndex - 3);
       if (resolved.valid()) typeName = resolved.symbol->typeName;
@@ -322,13 +331,21 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
     if (table) {
       if (const a::MethodSig* method = findMethodSig(*table, callee.lexeme)) {
         label = method->signature;
+        documentation = method->documentation ? method->documentation : "";
+        if (method->example && *method->example) {
+          documentation += "\n\n**Example:**\n\n```\n";
+          documentation += method->example;
+          documentation += "\n```";
+        }
       }
     }
   }
-  if (label.empty() && baseToken.kind == Tok::Ident) {
+  if (label.empty() && (baseToken.kind == Tok::Ident || baseToken.kind == Tok::KwSelf)) {
     ResolvedSymbol resolved = a::lsp::resolveToken(compilation, *file, *tokens, openIndex - 1);
     if (resolved.valid() && !resolved.symbol->detail.empty()) {
       label = resolved.symbol->detail;
+      documentation =
+          docCommentText(compilation, *resolved.file, resolved.symbol->span);
     }
   }
   if (label.empty() && qualifiedOnDot && baseToken.kind == Tok::Ident) {
@@ -341,7 +358,15 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
     }
   }
   if (label.empty() && !qualifiedOnDot) {
-    if (const a::BuiltinDoc* doc = a::findBuiltinDoc(callee.lexeme)) label = doc->signature;
+    if (const a::BuiltinDoc* doc = a::findBuiltinDoc(callee.lexeme)) {
+      label = doc->signature;
+      documentation = doc->documentation ? doc->documentation : "";
+      if (doc->example && *doc->example) {
+        documentation += "\n\n**Example:**\n\n```\n";
+        documentation += doc->example;
+        documentation += "\n```";
+      }
+    }
   }
   if (label.empty()) return replyNull(id);
 
@@ -396,6 +421,12 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
 
   Value signature = Value::object();
   signature["label"] = label;
+  if (!documentation.empty()) {
+    Value doc = Value::object();
+    doc["kind"] = "markdown";
+    doc["value"] = documentation;
+    signature["documentation"] = std::move(doc);
+  }
   Value parameterValues = Value::array();
   for (const std::string& parameter : parameters) {
     Value entry = Value::object();

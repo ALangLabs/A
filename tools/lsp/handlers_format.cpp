@@ -74,6 +74,49 @@ void LanguageServer::foldingRanges(const Value& id, const Value* params) {
     addRange(starts.back(), lastCodeLine);
     starts.pop_back();
   }
+
+  // Multi-line string literals fold as regions too.
+  for (const Token& token : *tokens) {
+    if ((token.kind == Tok::String || token.kind == Tok::Char) &&
+        token.span.endLine > token.span.line) {
+      addRange(token.span.line, token.span.endLine);
+    }
+  }
+
+  // Runs of consecutive whole-line comments (doc blocks, section headers)
+  // fold as "comment" ranges, like Pyright's comment folding.
+  if (const std::vector<a::Comment>* comments =
+          document->compilation->commentsForModule(
+              document->compilation->graph.entry >= 0
+                  ? document->compilation->graph.entry
+                  : 0)) {
+    int runStart = -1;
+    int runEnd = -1;
+    auto flushComments = [&]() {
+      if (runStart >= 0 && runEnd > runStart) {
+        Value range = Value::object();
+        range["startLine"] = runStart - 1;
+        range["endLine"] = runEnd - 1;
+        range["kind"] = "comment";
+        result.push(std::move(range));
+      }
+      runStart = runEnd = -1;
+    };
+    for (const a::Comment& comment : *comments) {
+      if (comment.trailing) continue;  // only whole-line comment runs fold
+      if (runStart < 0) {
+        runStart = comment.span.line;
+        runEnd = comment.span.line;
+      } else if (comment.span.line == runEnd + 1) {
+        runEnd = comment.span.line;
+      } else {
+        flushComments();
+        runStart = comment.span.line;
+        runEnd = comment.span.line;
+      }
+    }
+    flushComments();
+  }
   reply(id, std::move(result));
 }
 

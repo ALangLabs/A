@@ -100,6 +100,23 @@ void LanguageServer::hover(const Value& id, const Value* params) {
                               "Native standard-library module."));
       return;
     }
+    // Whole-module import alias (`import utils` / `import utils as u`):
+    // hovering the alias describes the module like Pyright's import hover.
+    for (const a::lsp::ImportDef& import : file->imports) {
+      if (!import.wholeModule || import.alias != token->lexeme) continue;
+      std::string markdown = "```a\nimport " + import.alias;
+      if (!import.modulePath.empty() && import.modulePath != import.alias) {
+        markdown += "  // " + import.modulePath;
+      }
+      markdown += "\n```";
+      Value contents = Value::object();
+      contents["kind"] = "markdown";
+      contents["value"] = markdown;
+      Value result = Value::object();
+      result["contents"] = std::move(contents);
+      reply(id, std::move(result));
+      return;
+    }
     if (const a::BuiltinDoc* doc = a::findBuiltinDoc(token->lexeme)) {
       reply(id, hoverMarkdown(doc->signature, doc->documentation,
                               doc->example ? doc->example : "",
@@ -148,6 +165,11 @@ Value LanguageServer::documentSymbolFromStatement(const Compilation& compilation
         child["kind"] = static_cast<int>(SymbolKind::Method);
         child["range"] = symbolRange(text, method->span);
         child["selectionRange"] = symbolRange(text, method->nameSpan);
+        Value methodChildren = Value::array();
+        outlineBlockSymbols(compilation, text, method->body, methodChildren);
+        if (!methodChildren.asArray().empty()) {
+          child["children"] = std::move(methodChildren);
+        }
         children.push(std::move(child));
       }
       symbol["children"] = std::move(children);
@@ -228,6 +250,66 @@ Value LanguageServer::documentSymbolFromStatement(const Compilation& compilation
   (void)compilation;
 }
 
+// Emits an outline symbol for every declaration-bearing statement in `body`,
+// recursing into function/method bodies and nested blocks so the outline is
+// hierarchical like Pyright's (locals and nested functions appear as
+// children of their enclosing function).
+void LanguageServer::outlineBlockSymbols(const Compilation& compilation, const std::string& text,
+                                         const std::vector<a::StmtPtr>& body, Value& out) {
+  for (const auto& statement : body) {
+    if (statement) outlineStmtSymbol(compilation, text, *statement, out);
+  }
+}
+
+void LanguageServer::outlineStmtSymbol(const Compilation& compilation, const std::string& text,
+                                       const a::Stmt& stmt, Value& out) {
+  Value symbol = documentSymbolFromStatement(compilation, text, stmt);
+  if (stmt.kind == a::StmtKind::FnDecl) {
+    const auto& fn = static_cast<const a::FnDecl&>(stmt);
+    Value children = Value::array();
+    outlineBlockSymbols(compilation, text, fn.body, children);
+    if (!children.asArray().empty() && !symbol.isNull()) {
+      symbol["children"] = std::move(children);
+    }
+  }
+  if (!symbol.isNull()) {
+    out.push(std::move(symbol));
+    return;
+  }
+  // Compound statements produce no symbol themselves; their inner
+  // declarations surface as siblings at this level.
+  auto sub = [&](const std::vector<a::StmtPtr>& body) {
+    outlineBlockSymbols(compilation, text, body, out);
+  };
+  switch (stmt.kind) {
+    case a::StmtKind::If: {
+      const auto& ifStmt = static_cast<const a::IfStmt&>(stmt);
+      for (const auto& branch : ifStmt.branches) sub(branch.body);
+      sub(ifStmt.elseBody);
+      return;
+    }
+    case a::StmtKind::While:
+      sub(static_cast<const a::WhileStmt&>(stmt).body);
+      return;
+    case a::StmtKind::DoWhile:
+      sub(static_cast<const a::DoWhileStmt&>(stmt).body);
+      return;
+    case a::StmtKind::For:
+      sub(static_cast<const a::ForStmt&>(stmt).body);
+      return;
+    case a::StmtKind::Loop:
+      sub(static_cast<const a::LoopStmt&>(stmt).body);
+      return;
+    case a::StmtKind::Defer:
+      if (static_cast<const a::DeferStmt&>(stmt).body) {
+        outlineStmtSymbol(compilation, text, *static_cast<const a::DeferStmt&>(stmt).body, out);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
 void LanguageServer::documentSymbols(const Value& id, const Value* params) {
   Document* document = documentFrom(params);
   if (!document || !document->compilation) return replyNull(id);
@@ -240,11 +322,7 @@ void LanguageServer::documentSymbols(const Value& id, const Value* params) {
   if (!module.program) return replyNull(id);
 
   Value result = Value::array();
-  for (const auto& statement : module.program->statements) {
-    if (!statement) continue;
-    Value symbol = documentSymbolFromStatement(compilation, document->text, *statement);
-    if (!symbol.isNull()) result.push(std::move(symbol));
-  }
+  outlineBlockSymbols(compilation, document->text, module.program->statements, result);
   reply(id, std::move(result));
 }
 
@@ -257,28 +335,79 @@ void LanguageServer::workspaceSymbols(const Value& id, const Value* params) {
   std::string lowered = query;
   for (char& c : lowered) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
 
-  Value result = Value::array();
+  struct Hit {
+    int score = 2;
+    std::string name;
+    SymbolKind kind = SymbolKind::Variable;
+    std::string container;
+    Value location;
+  };
+  std::vector<Hit> hits;
   std::unordered_set<std::string> seen;
   for (const auto& entry : documents_) {
     const Document& document = entry.second;
     if (!document.compilation) continue;
     const FileIndex* file = document.compilation->entryIndex();
     if (!file) continue;
+    // Container name for member symbols: the type/enum whose memberScope
+    // owns them.
+    auto containerFor = [&](const SymbolDef& sym) -> std::string {
+      for (const SymbolDef& owner : file->symbols) {
+        if (owner.memberScope >= 0 && owner.memberScope == sym.scope) return owner.name;
+      }
+      // Impl-block members live in a scope tagged with the target type.
+      if (sym.scope >= 0 &&
+          sym.scope < static_cast<int>(file->scopes.size()) &&
+          !file->scopes[static_cast<std::size_t>(sym.scope)].implTarget.empty()) {
+        return file->scopes[static_cast<std::size_t>(sym.scope)].implTarget;
+      }
+      return {};
+    };
     for (const SymbolDef& symbol : file->symbols) {
-      if (!symbol.topLevel) continue;
+      // Top-level declarations plus type/enum members (fields, methods,
+      // variants); skip locals, params, and loop variables.
+      const bool member = symbol.memberScope >= 0 ||
+                          symbol.kind == SymbolKind::Method ||
+                          symbol.kind == SymbolKind::EnumMember ||
+                          symbol.kind == SymbolKind::Field;
+      if (!symbol.topLevel && !member) continue;
+      if (symbol.kind == SymbolKind::Variable && !symbol.topLevel) continue;
       std::string nameLower = symbol.name;
       for (char& c : nameLower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-      if (!lowered.empty() && nameLower.find(lowered) == std::string::npos) continue;
+      int score = 2;
+      if (lowered.empty()) {
+        score = 0;
+      } else if (nameLower == lowered) {
+        score = 0;
+      } else if (nameLower.rfind(lowered, 0) == 0) {
+        score = 1;
+      } else if (nameLower.find(lowered) == std::string::npos) {
+        continue;
+      }
       std::string key = file->path + ":" + std::to_string(symbol.span.line) + ":" +
                         std::to_string(symbol.span.col);
       if (!seen.insert(key).second) continue;
-      Value item = Value::object();
-      item["name"] = symbol.name;
-      item["kind"] = static_cast<int>(symbol.kind);
-      item["location"] =
-          locationValue(*document.compilation, file->path, symbol.span);
-      result.push(std::move(item));
+      Hit hit;
+      hit.score = score;
+      hit.name = symbol.name;
+      hit.kind = symbol.kind;
+      hit.container = containerFor(symbol);
+      hit.location = locationValue(*document.compilation, file->path, symbol.span);
+      hits.push_back(std::move(hit));
     }
+  }
+  std::stable_sort(hits.begin(), hits.end(), [](const Hit& a, const Hit& b) {
+    if (a.score != b.score) return a.score < b.score;
+    return a.name < b.name;
+  });
+  Value result = Value::array();
+  for (const Hit& hit : hits) {
+    Value item = Value::object();
+    item["name"] = hit.name;
+    item["kind"] = static_cast<int>(hit.kind);
+    if (!hit.container.empty()) item["containerName"] = hit.container;
+    item["location"] = hit.location;
+    result.push(std::move(item));
   }
   reply(id, std::move(result));
 }

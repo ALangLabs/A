@@ -427,8 +427,7 @@ void LanguageServer::typeHierarchyRelated(const Value& id, const Value* params, 
         continue;  // never report the type as its own subtype
       }
       for (const std::string& parent : pair.second.parents) {
-        if (pair.second.name == self->second.name ||
-            simpleName(parent) == simpleName(self->second.name) ||
+        if (simpleName(parent) == simpleName(self->second.name) ||
             parent == self->second.name) {
           result.push(typeItemForDecl(*pair.first, pair.second));
           break;

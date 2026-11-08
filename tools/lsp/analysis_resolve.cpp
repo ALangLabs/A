@@ -8,15 +8,46 @@ const SymbolDef* findTopLevel(const FileIndex& file, const std::string& name) {
   return nullptr;
 }
 
+// Symbols living in scopes tagged `implTarget == typeName` (impl blocks).
+inline const SymbolDef* findImplMember(const FileIndex& index, const std::string& typeName,
+                                       const std::string& member) {
+  const std::string leaf = lastSegment(typeName);
+  for (std::size_t scopeIdx = 0; scopeIdx < index.scopes.size(); ++scopeIdx) {
+    const ScopeInfo& scope = index.scopes[scopeIdx];
+    if (scope.implTarget.empty() || lastSegment(scope.implTarget) != leaf) continue;
+    for (const SymbolDef& symbol : index.symbols) {
+      if (symbol.scope == static_cast<int>(scopeIdx) && symbol.name == member) {
+        return &symbol;
+      }
+    }
+  }
+  return nullptr;
+}
+
+inline void collectImplMembers(const FileIndex& index, const std::string& typeName,
+                               std::vector<const SymbolDef*>& out) {
+  const std::string leaf = lastSegment(typeName);
+  for (std::size_t scopeIdx = 0; scopeIdx < index.scopes.size(); ++scopeIdx) {
+    const ScopeInfo& scope = index.scopes[scopeIdx];
+    if (scope.implTarget.empty() || lastSegment(scope.implTarget) != leaf) continue;
+    for (const SymbolDef& symbol : index.symbols) {
+      if (symbol.scope == static_cast<int>(scopeIdx)) out.push_back(&symbol);
+    }
+  }
+}
+
 const SymbolDef* findStructMember(const Compilation& compilation, const FileIndex& file,
                                   const std::string& typeName, const std::string& member) {
   auto lookup = [&](const FileIndex& index) -> const SymbolDef* {
     const SymbolDef* typeSymbol = findTopLevel(index, lastSegment(typeName));
-    if (!typeSymbol || typeSymbol->memberScope < 0) return nullptr;
-    for (const SymbolDef& symbol : index.symbols) {
-      if (symbol.scope == typeSymbol->memberScope && symbol.name == member) return &symbol;
+    if (typeSymbol && typeSymbol->memberScope >= 0) {
+      for (const SymbolDef& symbol : index.symbols) {
+        if (symbol.scope == typeSymbol->memberScope && symbol.name == member) return &symbol;
+      }
     }
-    return nullptr;
+    // `impl Target { ... }` blocks index their methods under a scope tagged
+    // with the implemented type rather than the type's own memberScope.
+    return findImplMember(index, typeName, member);
   };
 
   if (const SymbolDef* symbol = lookup(file)) return symbol;
@@ -30,10 +61,12 @@ std::vector<const SymbolDef*> structMembers(const Compilation& compilation,
                                             const FileIndex& file, const std::string& typeName) {
   auto collect = [&](const FileIndex& index, std::vector<const SymbolDef*>& out) {
     const SymbolDef* typeSymbol = findTopLevel(index, lastSegment(typeName));
-    if (!typeSymbol || typeSymbol->memberScope < 0) return;
-    for (const SymbolDef& symbol : index.symbols) {
-      if (symbol.scope == typeSymbol->memberScope) out.push_back(&symbol);
+    if (typeSymbol && typeSymbol->memberScope >= 0) {
+      for (const SymbolDef& symbol : index.symbols) {
+        if (symbol.scope == typeSymbol->memberScope) out.push_back(&symbol);
+      }
     }
+    collectImplMembers(index, typeName, out);
   };
 
   std::vector<const SymbolDef*> members;
@@ -50,7 +83,9 @@ ResolvedSymbol resolveToken(const Compilation& compilation, const FileIndex& fil
                             const std::vector<Token>& tokens, int tokenIndex) {
   if (tokenIndex < 0 || static_cast<std::size_t>(tokenIndex) >= tokens.size()) return {};
   const Token& token = tokens[static_cast<std::size_t>(tokenIndex)];
-  if (token.kind != Tok::Ident) return {};
+  // `self` lexes as KwSelf but is semantically the method's receiver
+  // parameter; treat it as an identifier so it resolves to its SymbolDef.
+  if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) return {};
 
   if (tokenIndex >= 2) {
     const Tok previous = tokens[static_cast<std::size_t>(tokenIndex - 1)].kind;
@@ -70,7 +105,7 @@ ResolvedSymbol resolveAt(const Compilation& compilation, const FileIndex& file,
                          const std::vector<Token>& tokens, int line, int byteColumn) {
   for (std::size_t i = 0; i < tokens.size(); ++i) {
     const Token& token = tokens[i];
-    if (token.kind != Tok::Ident) continue;
+    if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) continue;
     if (token.span.line != line) continue;
     if (byteColumn < token.span.col || byteColumn > token.span.endCol) continue;
     return resolveToken(compilation, file, tokens, static_cast<int>(i));

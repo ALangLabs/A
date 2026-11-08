@@ -40,19 +40,25 @@ void LanguageServer::semanticTokens(const Value& id, const Value* params, bool r
   // Precompute definition spans for classification.
   std::unordered_set<long long> defKeys;
   auto keyOf = [](Span s) { return (long long)s.fileId * 100000000 + (long long)s.line * 10000 + s.col; };
+  // Symbol kind (+ parameter flag) -> semantic token type index.
+  auto tokenTypeFor = [](const SymbolDef& sym) -> int {
+    if (sym.parameter) return 6;
+    switch (sym.kind) {
+      case SymbolKind::Struct: case SymbolKind::Class: return 2;
+      case SymbolKind::Enum: case SymbolKind::EnumMember: return 3;
+      case SymbolKind::Function: return 4;
+      case SymbolKind::Method: return 5;
+      case SymbolKind::Field: case SymbolKind::Property: return 8;
+      case SymbolKind::Module: case SymbolKind::Namespace: case SymbolKind::Package: return 0;
+      default: return 7;
+    }
+  };
   for (const SymbolDef& sym : file->symbols) {
-    int t = 7;
-    if (sym.kind == SymbolKind::Struct || sym.kind == SymbolKind::Class) t = 2;
-    else if (sym.kind == SymbolKind::Enum) t = 3;
-    else if (sym.kind == SymbolKind::Function) t = 4;
-    else if (sym.kind == SymbolKind::Method) t = 5;
-    else if (sym.kind == SymbolKind::Field || sym.kind == SymbolKind::Property) t = 8;
-    else if (sym.kind == SymbolKind::Module) t = 0;
-    else if (sym.kind == SymbolKind::Constant) t = 7;
     defKeys.insert(keyOf(sym.span));
-    pushLex(sym.span, t, 1);  // declaration modifier
+    pushLex(sym.span, tokenTypeFor(sym), 1);  // declaration modifier
   }
-  for (const Token& tok : *tokens) {
+  for (std::size_t ti = 0; ti < tokens->size(); ++ti) {
+    const Token& tok = (*tokens)[ti];
     if (tok.kind == Tok::Eof) continue;
     if (defKeys.count(keyOf(tok.span))) continue;
     int t = -1;
@@ -70,27 +76,44 @@ void LanguageServer::semanticTokens(const Value& id, const Value* params, bool r
     if (t >= 0) { pushLex(tok.span, t); continue; }
     // Keywords are lexed as Idents with keyword lexemes in A.
     bool isKw = false;
-    for (const char* kw : kKeywords) if (tok.lexeme == kw) { isKw = true; break; }
+    for (const char* kw : kKeywords) if (tok.lexeme == kw && tok.kind != Tok::KwSelf) { isKw = true; break; }
     if (isKw) { pushLex(tok.span, 9); continue; }
-    if (tok.kind == Tok::Ident) {
+    if (tok.kind == Tok::Ident || tok.kind == Tok::KwSelf) {
       // Type name? builtin type names classify as `type`.
       if (a::builtinTypeByName(tok.lexeme)) { pushLex(tok.span, 1); continue; }
       if (a::findBuiltinDoc(tok.lexeme)) { pushLex(tok.span, 4); continue; }
       ResolvedSymbol r = a::lsp::resolveToken(compilation, *file, *tokens,
-          (int)(&tok - &(*tokens)[0]));
+          (int)ti);
       if (r.valid()) {
-        int tt = 7;
-        switch (r.symbol->kind) {
-          case SymbolKind::Struct: case SymbolKind::Class: tt = 2; break;
-          case SymbolKind::Enum: tt = 3; break;
-          case SymbolKind::Function: tt = 4; break;
-          case SymbolKind::Method: case SymbolKind::Field: case SymbolKind::Property: tt = 8; break;
-          case SymbolKind::Module: tt = 0; break;
-          default: tt = 7; break;
-        }
-        pushLex(tok.span, tt);
+        pushLex(tok.span, tokenTypeFor(*r.symbol));
+        continue;
       }
+      // Unresolved identifiers still deserve a token: member names after
+      // '.'/'?.' color as property (or method when called), whole-module
+      // import aliases as namespace, everything else as variable.
+      bool afterDot = ti >= 1 &&
+          ((*tokens)[ti - 1].kind == Tok::Dot ||
+           (*tokens)[ti - 1].kind == Tok::QuestionDot);
+      if (afterDot) {
+        bool called = ti + 1 < tokens->size() &&
+            (*tokens)[ti + 1].kind == Tok::LParen;
+        pushLex(tok.span, called ? 5 : 8);
+        continue;
+      }
+      bool moduleAlias = false;
+      for (const ImportDef& imp : file->imports) {
+        if (imp.wholeModule && imp.alias == tok.lexeme) { moduleAlias = true; break; }
+      }
+      pushLex(tok.span, moduleAlias ? 0 : 7);
+      continue;
     }
+    // Remaining punctuation/operators (parens, brackets, arrows, assign
+    // ops, bitwise ops, ...): color as operator. Skip layout tokens.
+    if (tok.kind == Tok::Newline || tok.kind == Tok::Indent ||
+        tok.kind == Tok::Dedent) {
+      continue;
+    }
+    pushLex(tok.span, 13);
   }
   // Comments get type 10.
   if (const std::vector<a::Comment>* comments = compilation.commentsForModule(
@@ -175,6 +198,11 @@ void LanguageServer::inlayHints(const Value& id, const Value* params) {
     if (names.empty()) continue;
     const std::string* moduleText = compilation.textForModule(site.moduleId);
     const std::string& source = moduleText ? *moduleText : document->text;
+    const std::vector<Token>* moduleTokens =
+        site.moduleId >= 0 &&
+                static_cast<std::size_t>(site.moduleId) < compilation.tokensByModule.size()
+            ? &compilation.tokensByModule[static_cast<std::size_t>(site.moduleId)]
+            : nullptr;
     const std::size_t argCount =
         std::min(names.size(), site.positionalArgSpans.size());
     for (std::size_t i = 0; i < argCount; ++i) {
@@ -182,6 +210,21 @@ void LanguageServer::inlayHints(const Value& id, const Value* params) {
       if (name.empty() || name == "_" || name == "self") continue;
       const Span& argSpan = site.positionalArgSpans[i];
       if (!argSpan.valid()) continue;
+      // Pylance-style: no hint when the argument is already a bare
+      // identifier with the same name as the parameter.
+      bool redundant = false;
+      if (moduleTokens) {
+        for (const Token& argTok : *moduleTokens) {
+          if (argTok.kind != Tok::Ident) continue;
+          if (argTok.span.line != argSpan.line || argTok.span.col != argSpan.col ||
+              argTok.span.endCol != argSpan.endCol) {
+            continue;
+          }
+          redundant = argTok.lexeme == name;
+          break;
+        }
+      }
+      if (redundant) continue;
       Value hint = Value::object();
       Value pos = Value::object();
       pos["line"] = argSpan.line - 1;

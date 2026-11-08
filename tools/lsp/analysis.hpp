@@ -79,6 +79,10 @@ struct ScopeInfo {
   int parent = -1;
   int depth = 0;
   Span span;
+  // For scopes opened by `impl Target for ...`/trait impls: the implemented
+  // type name, so member lookup can find impl methods through the type's
+  // memberScope chain. Empty for ordinary scopes.
+  std::string implTarget;
 };
 
 struct SymbolDef {
@@ -90,6 +94,7 @@ struct SymbolDef {
   int scope = 0;
   bool hoisted = false;
   bool topLevel = false;
+  bool parameter = false;   // fn/method/lambda parameter (semantic token `parameter`)
   int memberScope = -1;  // struct fields, methods, and enum variants
 };
 

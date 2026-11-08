@@ -65,7 +65,7 @@ std::vector<std::pair<std::string, Span>> LanguageServer::collectReferences(
     const std::vector<Token>& tokens = compilation.tokensByModule[moduleId];
     for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
       const Token& token = tokens[static_cast<std::size_t>(i)];
-      if (token.kind != Tok::Ident) continue;
+      if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) continue;
       ResolvedSymbol resolved = a::lsp::resolveToken(compilation, file, tokens, i);
       if (!resolved.valid()) continue;
       if (resolved.symbol->span.line != target.symbol->span.line) continue;
@@ -326,7 +326,7 @@ void LanguageServer::references(const Value& id, const Value* params) {
     const std::vector<Token>& tokens = compilation.tokensByModule[moduleId];
     for (int i = 0; i < static_cast<int>(tokens.size()); ++i) {
       const Token& token = tokens[static_cast<std::size_t>(i)];
-      if (token.kind != Tok::Ident) continue;
+      if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) continue;
       if (!includeDeclaration && token.span.line == target.symbol->span.line &&
           token.span.col == target.symbol->span.col &&
           token.span.endCol == target.symbol->span.endCol) {
@@ -399,6 +399,13 @@ void LanguageServer::prepareRename(const Value& id, const Value* params) {
   int byteColumn = utf16ToByteColumn(lineText(document->text, line + 1), character) + 1;
   ResolvedSymbol target = a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
   if (!target.valid()) return replyNull(id);
+  // prepareRename reports the range under the cursor (the occurrence being
+  // renamed), not the declaration site — they differ when renaming a use.
+  const Token* token = tokenAt(*tokens, line + 1, byteColumn);
+  if (token && (token->kind == Tok::Ident || token->kind == Tok::KwSelf)) {
+    reply(id, rangeValue(document->text, token->span));
+    return;
+  }
   reply(id, rangeValue(document->text, target.symbol->span));
 }
 
@@ -421,7 +428,7 @@ void LanguageServer::documentHighlights(const Value& id, const Value* params) {
   Value highlights = Value::array();
   for (int i = 0; i < static_cast<int>(tokens->size()); ++i) {
     const Token& token = (*tokens)[static_cast<std::size_t>(i)];
-    if (token.kind != Tok::Ident) continue;
+    if (token.kind != Tok::Ident && token.kind != Tok::KwSelf) continue;
     ResolvedSymbol resolved = a::lsp::resolveToken(compilation, *file, *tokens, i);
     if (!resolved.valid()) continue;
     if (resolved.symbol->span.line != target.symbol->span.line) continue;

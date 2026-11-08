@@ -6,19 +6,19 @@ class IndexBuilder {
   IndexBuilder(FileIndex& file, int moduleId) : file_(file), moduleId_(moduleId) {}
 
   void build(Program& program) {
-    file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan});
+    file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan, {}});
     walkBlock(program.statements, 0);
   }
 
  private:
-  int addScope(Span span, int parent) {
+  int addScope(Span span, int parent, std::string implTarget = {}) {
     int depth = parent >= 0 ? file_.scopes[static_cast<std::size_t>(parent)].depth + 1 : 0;
-    file_.scopes.push_back(ScopeInfo{parent, depth, span});
+    file_.scopes.push_back(ScopeInfo{parent, depth, span, std::move(implTarget)});
     return static_cast<int>(file_.scopes.size()) - 1;
   }
 
   int addSymbol(const std::string& name, Span span, SymbolKind kind, std::string detail,
-                std::string typeName, int scope, bool hoisted) {
+                std::string typeName, int scope, bool hoisted, bool parameter = false) {
     if (name.empty()) return -1;
     SymbolDef symbol;
     symbol.name = name;
@@ -29,8 +29,22 @@ class IndexBuilder {
     symbol.scope = scope;
     symbol.hoisted = hoisted;
     symbol.topLevel = scope == 0;
+    symbol.parameter = parameter;
     file_.symbols.push_back(std::move(symbol));
     return static_cast<int>(file_.symbols.size()) - 1;
+  }
+
+  // Registers a function's parameters in `fnScope`. `selfType`, when
+  // non-empty, is stamped onto the `self` parameter so `self.field` and
+  // `self.method()` resolve to the enclosing type's members.
+  void addParams(const FnDecl& fn, int fnScope, const std::string& selfType) {
+    for (const auto& param : fn.params) {
+      std::string type = param.type ? typeExprText(param.type.get()) : std::string();
+      if (param.name == "self" && type.empty() && !selfType.empty()) type = selfType;
+      addSymbol(param.name, param.span, SymbolKind::Variable,
+                varDetail(param.name, type, false, false), type, fnScope, true,
+                /*parameter=*/true);
+    }
   }
 
   bool visibleInScopeChain(int scope, const std::string& name) const {
@@ -147,11 +161,7 @@ class IndexBuilder {
         addSymbol(fn.name, fn.nameSpan, SymbolKind::Function, signatureText(fn), {}, scope, true);
         Span bodySpan = blockSpan(fn.body, stmt.span);
         int fnScope = addScope(bodySpan, scope);
-        for (const auto& param : fn.params) {
-          std::string type = param.type ? typeExprText(param.type.get()) : std::string();
-          addSymbol(param.name, param.span, SymbolKind::Variable,
-                    varDetail(param.name, type, false, false), type, fnScope, true);
-        }
+        addParams(fn, fnScope, {});
         walkBlock(fn.body, fnScope);
         return;
       }
@@ -175,11 +185,7 @@ class IndexBuilder {
                     {}, memberScope, true);
           Span bodySpan = blockSpan(method->body, method->span);
           int fnScope = addScope(bodySpan, memberScope);
-          for (const auto& param : method->params) {
-            std::string type = param.type ? typeExprText(param.type.get()) : std::string();
-            addSymbol(param.name, param.span, SymbolKind::Variable,
-                      varDetail(param.name, type, false, false), type, fnScope, true);
-          }
+          addParams(*method, fnScope, decl.name);
           walkBlock(method->body, fnScope);
         }
         return;
@@ -213,6 +219,19 @@ class IndexBuilder {
         addSymbol(impl.targetName, impl.targetSpan, SymbolKind::Enum,
                   "impl " + impl.traitName + " for " + impl.targetName, impl.traitName,
                   scope, true);
+        // Index impl methods like struct methods, but tag the member scope
+        // with the implemented type so `x.method()` resolves through
+        // findStructMember's impl-scope fallback.
+        int memberScope = addScope(stmt.span, scope, impl.targetName);
+        for (auto& method : impl.methods) {
+          if (!method) continue;
+          addSymbol(method->name, method->nameSpan, SymbolKind::Method, signatureText(*method),
+                    {}, memberScope, true);
+          Span bodySpan = blockSpan(method->body, method->span);
+          int fnScope = addScope(bodySpan, memberScope);
+          addParams(*method, fnScope, impl.targetName);
+          walkBlock(method->body, fnScope);
+        }
         return;
       }
       case StmtKind::TypeAlias: {
@@ -324,7 +343,8 @@ class IndexBuilder {
         for (const auto& param : lambda.params) {
           std::string type = param.type ? typeExprText(param.type.get()) : std::string();
           addSymbol(param.name, param.span, SymbolKind::Variable,
-                    varDetail(param.name, type, false, false), type, lambdaScope, true);
+                    varDetail(param.name, type, false, false), type, lambdaScope, true,
+                    /*parameter=*/true);
         }
         walkExpr(lambda.body.get(), lambdaScope);
         return;

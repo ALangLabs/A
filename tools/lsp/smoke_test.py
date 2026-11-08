@@ -63,6 +63,15 @@ fn wrapper() -> i32:
     # docs: https://a-lang.dev
     return add(1, 2)
 
+fn scale(factor: i32, offset: i32) -> i32:
+    return factor * 2 + offset
+
+fn apply() -> i32:
+    factor = 3
+    offset = 1
+    squared = point.length_squared()
+    return scale(factor, offset) + squared
+
 class Base:
     v: i32
 
@@ -412,6 +421,10 @@ def main() -> int:
             fail(f"signature help after the comma in add(...): {signature}")
         if "fn add(a: i32, b: i32)" not in signature["signatures"][0]["label"]:
             fail(f"signature help did not use the declared signature: {signature}")
+        # SignatureInformation.documentation carries the builtin's docs.
+        sig_doc = signature["signatures"][0].get("documentation")
+        if not sig_doc or not sig_doc.get("value"):
+            fail(f"signature help missing documentation: {signature}")
 
         # prepareRename / declaration at the call site (before any edit shifts it).
         prep = client.request(
@@ -420,6 +433,10 @@ def main() -> int:
         )["result"]
         if not prep or "start" not in prep:
             fail(f"prepareRename unexpected: {prep}")
+        # prepareRename must return the range under the cursor (this use of
+        # `add`), not the declaration site on `expected_line`.
+        if prep["start"]["line"] != call_line:
+            fail(f"prepareRename returned declaration range: {prep}")
 
         decl = client.request(
             "textDocument/declaration",
@@ -463,6 +480,30 @@ def main() -> int:
         if len(tokens) == 0 or len(tokens) % 5 != 0:
             fail(f"semantic tokens malformed: {tokens[:20]}")
 
+        # Decode the delta stream and check token types: 5 = method (the
+        # `length_squared` declaration), 6 = parameter (`a`/`b`/`self`),
+        # 8 = property/field, 0 = namespace (the `json` import alias).
+        def decode_semantic(data):
+            line = col = 0
+            out = []
+            for i in range(0, len(data), 5):
+                dl, dc, length, ttype, mods = data[i : i + 5]
+                line += dl
+                col = col + dc if dl == 0 else dc
+                out.append((line, col, length, ttype, mods))
+            return out
+
+        decoded = decode_semantic(tokens)
+        types = {entry[3] for entry in decoded}
+        if 6 not in types:
+            fail(f"semantic tokens missing parameter type: {sorted(types)}")
+        if 5 not in types:
+            fail(f"semantic tokens missing method type: {sorted(types)}")
+        # `self` inside length_squared resolves to the Point parameter and
+        # `self.x`/`self.y` classify as property (8).
+        if 8 not in types:
+            fail(f"semantic tokens missing property type: {sorted(types)}")
+
         hints = client.request(
             "textDocument/inlayHint",
             {
@@ -483,8 +524,17 @@ def main() -> int:
                 "positions": [{"line": call_line, "character": call_column}],
             },
         )["result"]
-        if not sel or "ranges" not in sel[0]:
+        # Spec shape: SelectionRange {range, parent?} — a linked chain from
+        # the token outward, not a {ranges: [...]} wrapper.
+        if not sel or "range" not in sel[0] or "parent" not in sel[0]:
             fail(f"selectionRange unexpected: {sel}")
+        chain = []
+        node = sel[0]
+        while node:
+            chain.append(node["range"])
+            node = node.get("parent")
+        if len(chain) < 2:
+            fail(f"selectionRange chain too short: {sel}")
 
         actions = client.request(
             "textDocument/codeAction",
@@ -613,6 +663,135 @@ def main() -> int:
         param_labels = {hint["label"] for hint in hints if hint.get("kind") == 2}
         if not {"a: ", "b: "}.issubset(param_labels):
             fail(f"inlay hints missing parameter names: {param_labels}")
+        # Pylance-style suppression: `scale(factor, offset)` passes bare
+        # identifiers already named like the parameters, so no hints.
+        if "factor: " in param_labels or "offset: " in param_labels:
+            fail(f"inlay hints not suppressed for same-named args: {param_labels}")
+
+        # `self.` member completion inside a method resolves the enclosing
+        # type's fields and methods.
+        self_line, self_col = position_of("self.x")
+        items = client.request(
+            "textDocument/completion",
+            {"textDocument": {"uri": uri}, "position": {"line": self_line, "character": self_col + 5}},
+        )["result"]["items"]
+        labels = {item["label"] for item in items}
+        if not {"x", "y", "length_squared"}.issubset(labels):
+            fail(f"self. completion missing Point members: {sorted(labels)[:20]}")
+
+        # Hover on a whole-module import alias describes the module.
+        import_line, import_col = position_of("import json")
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": uri}, "position": {"line": import_line, "character": import_col + 8}},
+        )["result"]
+        if not hover or "import json" not in hover["contents"]["value"]:
+            fail(f"hover on import alias unexpected: {hover}")
+
+        # documentSymbol is hierarchical: `apply` nests its locals, and the
+        # Point class nests its method.
+        symbols = client.request(
+            "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
+        )["result"]
+
+        def find_symbol(nodes, name):
+            for node in nodes:
+                if node["name"] == name:
+                    return node
+                found = find_symbol(node.get("children", []), name)
+                if found:
+                    return found
+            return None
+
+        apply_sym = find_symbol(symbols, "apply")
+        apply_children = {c["name"] for c in apply_sym.get("children", [])} if apply_sym else set()
+        if not {"factor", "offset"}.issubset(apply_children):
+            fail(f"documentSymbol missing apply() locals: {sorted(apply_children)}")
+        point_sym = find_symbol(symbols, "Point")
+        point_children = {c["name"] for c in point_sym.get("children", [])} if point_sym else set()
+        if "length_squared" not in point_children:
+            fail(f"documentSymbol missing Point method: {sorted(point_children)}")
+
+        # Code actions on a second document with real diagnostics: W0001
+        # (unused let) and W0002 (statement after return).
+        bad_path = Path(directory) / "bad.a"
+        bad_uri = bad_path.as_uri()
+        bad_source = (
+            "fn broken() -> i32:\n"
+            "    unused_local = 2\n"
+            "    return 1\n"
+            "    dead_local = 3\n"
+        )
+        bad_path.write_text(bad_source, encoding="utf-8")
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": bad_uri,
+                    "languageId": "a",
+                    "version": 1,
+                    "text": bad_source,
+                }
+            },
+        )
+        # The worker publishes one notification per open document; drain
+        # them and confirm bad.a's warnings arrived.
+        bad_diags = None
+        for _ in range(2):
+            note = client.wait_notification("textDocument/publishDiagnostics")
+            if note["params"]["uri"] == bad_uri:
+                bad_diags = note["params"]["diagnostics"]
+        codes = {d.get("code") for d in (bad_diags or [])}
+        if not {"W0001", "W0002"}.issubset(codes):
+            fail(f"bad.a diagnostics missing W0001/W0002: {bad_diags}")
+
+        dead_line = 3  # 0-based line of `let dead_local = 3`
+        actions = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": bad_uri},
+                "range": {
+                    "start": {"line": dead_line, "character": 4},
+                    "end": {"line": dead_line, "character": 10},
+                },
+                "context": {},
+            },
+        )["result"]
+        titles = {a["title"] for a in actions}
+        if "Remove unreachable statement" not in titles:
+            fail(f"codeAction missing remove-unreachable quickfix: {titles}")
+        unused_line = 1  # 0-based line of `let unused_local = 2`
+        actions = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": bad_uri},
+                "range": {
+                    "start": {"line": unused_line, "character": 8},
+                    "end": {"line": unused_line, "character": 20},
+                },
+                "context": {},
+            },
+        )["result"]
+        titles = {a["title"] for a in actions}
+        if not any(t.startswith("Prefix with '_'") for t in titles):
+            fail(f"codeAction missing unused-variable quickfix: {titles}")
+        fix_all = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": bad_uri},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 0},
+                },
+                "context": {"only": ["source.fixAll"]},
+            },
+        )["result"]
+        fix_actions = [a for a in fix_all if a.get("kind") == "source.fixAll.a"]
+        if not fix_actions:
+            fail(f"codeAction missing source.fixAll action: {fix_all}")
+        fix_edits = fix_actions[0]["edit"]["changes"][bad_uri]
+        if not any(e["newText"].startswith("_") for e in fix_edits):
+            fail(f"source.fixAll edits unexpected: {fix_edits}")
 
         # Async checking: didChange only enqueues (200ms debounce); a later
         # publishDiagnostics proves the worker ran without blocking requests.
@@ -646,7 +825,9 @@ def main() -> int:
             "incremental sync, async checking (debounced, latest-wins), semantic "
             "tokens, inlay hints, prepareRename, declaration, selectionRange, "
             "code actions, call/type hierarchy, code lens, range formatting, "
-            "pull diagnostics, moniker, document links, param hints"
+            "pull diagnostics, moniker, document links, param hints, "
+            "semantic token types, self completion, import hover, "
+            "hierarchical symbols, code-action quickfixes and fixAll"
         )
 
     return 0
