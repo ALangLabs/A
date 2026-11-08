@@ -334,13 +334,12 @@ class NativeEmitter {
       : graph_(graph), sema_(sema), t_(target), testMode_(testMode) {}
 
   bool isStdlibModule(int moduleId) const {
-    if (moduleId < 0) return false;
-    const Module& mod = graph_.at(moduleId);
-    // Prelude bodies are emitted for real — stubbing them broke every
-    // prelude-level helper (ic, join helpers, etc.) on native targets.
-    if (mod.name == "prelude") return false;
-    return mod.path.find("stdlib/") != std::string::npos ||
-           mod.path.find("/stdlib/") != std::string::npos;
+    // Stdlib/prelude bodies are emitted for real: stubbing them to A_NONE
+    // produced silently wrong values (e.g. stdlib/std/simd). If a stdlib
+    // body hits an unsupported construct, emitNative fails and the pipeline
+    // falls back to emitC — always correct, never a silent None.
+    (void)moduleId;
+    return false;
   }
 
   bool run(std::string& out, std::string& error) {
