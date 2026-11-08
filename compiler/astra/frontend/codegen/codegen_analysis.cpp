@@ -1841,6 +1841,14 @@ void AsmEmitter::promoteCoverExpr(const Expr* e, AsmEmitter::PromoteScan& ps) {
       }
       case ExprKind::Call: {
         const CallExpr& c = static_cast<const CallExpr&>(*e);
+        // f64(x) with a raw int argument is emitted fully raw
+        // (tryEmitFloatInt: cvtsi2sd straight from the raw slot), so the
+        // argument read stays inside a raw region — same as the raw-inline
+        // function-call case below. All other calls are aval positions.
+        if (c.builtinId == BuiltinId::F64 && c.args.size() == 1 &&
+            exprIsInt(c.args[0].value.get()) &&
+            rawSafeExpr(c.args[0].value.get()))
+          return;
         promoteCoverExpr(c.callee.get(), ps);
         FnInfo* f = rawCallTarget(c);
         bool argsRaw = f != nullptr;

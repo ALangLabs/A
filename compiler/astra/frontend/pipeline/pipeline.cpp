@@ -24,6 +24,7 @@
 #include "diagnostics/diagnostics.hpp"
 #include "codegen/codegen.hpp"
 #include "ir/ir.hpp"
+#include "driver/version.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "optimization/optimizer.hpp"
 #include "ownership/ownership.hpp"
@@ -425,6 +426,133 @@ std::string tempPath(const char* tag,const std::string& name=""){
   return base;
 }
 
+// ------------------------------------------------------- run binary cache
+// `a run`/`a test`/REPL recompile the same source (via astra) on every
+// invocation, costing ~20ms even for a noop program, while the cached two-
+// phase-free binary execs in ~2ms like a native binary. The cache is
+// content-addressed: every module source, the runtime files, the astra
+// binary, target, opt level, codegen-forcing env vars and the toolchain
+// version feed one FNV-1a key, so any edit invalidates. Disable with
+// A_NO_CACHE=1; override the directory with A_CACHE_DIR.
+
+// Forward declaration for findRuntime (defined below); run_cache::plan
+// needs the resolved astra/runtime paths.
+bool findRuntime(const std::string& arch, std::string& astraBin, std::string& runtimeC,
+                 std::string& runtimeDir);
+
+namespace run_cache {
+
+inline std::uint64_t mixBytes(std::uint64_t h, const std::string& s) {
+  h ^= static_cast<std::uint64_t>(s.size());
+  h *= 1099511628211ULL;
+  for (unsigned char c : s) { h ^= c; h *= 1099511628211ULL; }
+  return h;
+}
+
+inline std::uint64_t mixInt(std::uint64_t h, std::uint64_t v) {
+  for (int i = 0; i < 8; ++i) { h ^= (v >> (8 * i)) & 0xff; h *= 1099511628211ULL; }
+  return h;
+}
+
+inline bool readFileText(const std::string& p, std::string& out) {
+  std::ifstream f(p, std::ios::binary);
+  if (!f) return false;
+  std::ostringstream b;
+  b << f.rdbuf();
+  if (f.bad()) return false;
+  out = b.str();
+  return true;
+}
+
+inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
+  std::error_code ec;
+  auto st = std::filesystem::status(p, ec);
+  if (!std::filesystem::exists(st)) return mixBytes(h, "<missing>:" + p);
+  std::uint64_t sz = static_cast<std::uint64_t>(std::filesystem::file_size(p, ec));
+  std::uint64_t mt = static_cast<std::uint64_t>(
+      std::filesystem::last_write_time(p, ec).time_since_epoch().count());
+  h = mixBytes(h, p);
+  h = mixInt(h, sz);
+  return mixInt(h, mt);
+}
+
+struct Plan {
+  bool active = false;
+  std::string file;  // final cache file path
+};
+
+inline std::string cacheDir() {
+  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return d;
+#ifdef _WIN32
+  char tmp[MAX_PATH];
+  DWORD n = GetTempPathA(MAX_PATH, tmp);
+  return std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "a_cache_run";
+#else
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
+    return std::string(x) + "/a/run";
+  if (const char* home = std::getenv("HOME"); home && *home)
+    return std::string(home) + "/.cache/a/run";
+  return "/tmp/a_cache_run";
+#endif
+}
+
+inline bool disabled() {
+  const char* v = std::getenv("A_NO_CACHE");
+  return v && *v && lowerStr(v) != "0";
+}
+
+// Computes the content-addressed cache path, or leaves Plan inactive when
+// caching does not apply (cross target, disabled, unreadable module).
+// Callers check CT via std::filesystem::exists on Plan::file; on a miss
+// they compile to a temp name in the cache dir and rename over `file`.
+inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
+                 int optimizationLevel, const std::string* entrySource) {
+  Plan p;
+  if (!td.native || disabled()) return p;
+  std::string astraBin, runtimeC, runtimeDir;
+  if (!findRuntime(td.arch, astraBin, runtimeC, runtimeDir)) return p;
+  std::uint64_t h = 1469598103934665603ULL;
+  h = mixBytes(h, kVersion);
+  h = mixBytes(h, td.arch);
+  h = mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
+  h = mixInt(h, testMode ? 1 : 0);
+  const char* codegen = std::getenv("A_CODEGEN");
+  h = mixBytes(h, codegen ? codegen : "");
+  const char* rcc = std::getenv("A_RUNTIME_CC");
+  h = mixBytes(h, rcc ? rcc : "");
+  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
+  h = mixBytes(h, rcflags ? rcflags : "");
+  h = mixFileStat(h, astraBin);
+  // Library dir that astra links against, when staged.
+  for (const std::string& cand : {runtimeDir + "/libastra1.a",
+                                  runtimeDir + "/lib/libastra1.a"}) {
+    if (std::filesystem::exists(cand)) { h = mixFileStat(h, cand); break; }
+  }
+  h = mixBytes(h, runtimeDir);
+  // Module sources: entry first-class (inline "<repl>"/"-c" sources come
+  // from entrySource), every other module must read from disk.
+  const ModuleGraph& g = *m.graph;
+  for (const Module& mod : g.modules) {
+    h = mixBytes(h, mod.path);
+    std::string text;
+    if (!readFileText(mod.path, text)) {
+      if (mod.id == g.entry && entrySource) {
+        text = *entrySource;
+      } else {
+        return Plan{};
+      }
+    }
+    h = mixBytes(h, text);
+  }
+  char hex[17];
+  std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+  p.active = true;
+  p.file = cacheDir() + "/" + hex;
+  return p;
+}
+
+}  // namespace run_cache
+
 // Locates the A runtime C source (compiler/astra/runtime/a_runtime.c) that
 // is compiled/linked with the emitted source. Candidates: $A_RUNTIME_C, next
 // to the astra binary (staged astralib-<arch> copy), the source tree
@@ -753,12 +881,24 @@ int astraBuild(const std::string& arch, const std::string& srcPath, const std::s
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
                   bool testMode = false, int optimizationLevel = 2,
                   const std::string* keepBin = nullptr,
-                  const TargetDesc* td = nullptr) {
+                  const TargetDesc* td = nullptr,
+                  const std::string* entrySource = nullptr) {
   (void)in; (void)out;
   TargetDesc localTd;
   if (!td) {
     if (!resolveTarget("", localTd, err)) return kCErr;
     td = &localTd;
+  }
+  // Run cache: a hit skips emit+astra entirely (~2ms exec vs ~25ms build).
+  run_cache::Plan cache;
+  if ((!keepBin || keepBin->empty()) && td->native) {
+    cache = run_cache::plan(m, *td, testMode, optimizationLevel, entrySource);
+    std::error_code ec;
+    if (cache.active && std::filesystem::exists(cache.file, ec)) {
+      int hit = runBinary(cache.file);
+      if (hit != 127) return hit < 0 ? kCErr : hit;
+      // Unusable stale entry: fall through and recompile.
+    }
   }
   std::string srcSource, srcError;
   bool emitted = false;
@@ -805,7 +945,20 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   if (srcPath.empty()) return kCErr;
   std::string tmpBin = tempPath("bin");
   std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
+  // On a cache miss compile to a temp name in the cache dir so the rename
+  // below is atomic and same-filesystem.
+  if (cache.active) {
+    std::error_code ec;
+    std::filesystem::create_directories(run_cache::cacheDir(), ec);
+    runPath = run_cache::cacheDir() + "/tmp-" +
+              std::to_string(::getpid()) + "-" + std::to_string(::rand());
+  }
   int rc = astraBuild(td->arch, srcPath, runPath, err, optimizationLevel);
+  if (cache.active && rc == 0) {
+    std::error_code ec;
+    std::filesystem::rename(runPath, cache.file, ec);
+    if (!ec) runPath = cache.file;
+  }
   std::error_code ec;
   std::filesystem::remove(srcPath, ec);
   if (rc != 0) { std::filesystem::remove(runPath, ec); return kCErr; }
@@ -824,7 +977,12 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
     return 0;
   }
   rc = runBinary(runPath);
-  if (!keepBin) std::filesystem::remove(runPath, ec);
+  // Delete only temp artifacts; a filled cache entry must stay.
+  if (cache.active && runPath == cache.file) {
+    // keep
+  } else if (!keepBin) {
+    std::filesystem::remove(runPath, ec);
+  }
   return rc < 0 ? kCErr : rc;
 }
 }
@@ -845,16 +1003,17 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native && !(td.arch=="i8086" && hostOs()=="linux")){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
+  std::string srcCopy = src;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,out,err); if(!m.ok) return kCErr;
   // `a test`: discover and run top-level `fn test_*()` functions.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td);
+  return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
@@ -914,6 +1073,6 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source);
 }
 }

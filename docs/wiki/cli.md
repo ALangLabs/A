@@ -76,7 +76,19 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
 
 Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
 `A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm`/`c` to
-force an emitter), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`.
+force an emitter), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`,
+`A_NO_CACHE` (disable the run cache), `A_CACHE_DIR` (run cache directory,
+default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`).
+
+## Run cache
+
+`a run`, `a test`, and the REPL reuse a content-addressed compiled
+binary across invocations. The key hashes every module source, the
+runtime files, the astra binary, target/opt level, codegen-forcing
+environment, and toolchain version, so any edit invalidates the entry;
+repeat runs cost ~2 ms (exec) instead of ~20 ms (compile). Set
+`A_NO_CACHE=1` to always recompile. Covered by
+`tests/integration/cache_test.sh` (the `run-cache` CTest entry).
 
 ## Editor support
 
