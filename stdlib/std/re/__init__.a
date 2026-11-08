@@ -1,0 +1,981 @@
+# std.re — regular expressions (Python `re` subset, pure A).
+#
+# A small backtracking regex engine. Supported syntax:
+#
+#   literals, '.', '^', '$', '*', '+', '?', '{m}', '{m,}', '{m,n}',
+#   groups '(...)' and '(?:...)', alternation '|', character classes
+#   '[...]' / '[^...]' with ranges and escapes, anchors '\\A' '\\Z' '\\z'
+#   '\\b' '\\B', and the class escapes '\\d' '\\D' '\\w' '\\W' '\\s' '\\S'.
+#
+#   import std:re
+#   m = re.search("a(b*)c", "xxabbc")   # Match or None
+#   re.match_at("a(b*)c", "abbc")          # anchored match (re.match)
+#   m.group(0)  # "abbc",  m.group(1)  # "bb"
+#   re.findall("\\d+", "a1b22")         # ["1", "22"]
+#   re.sub("(\\w+)@(\\w+)", "\\2@\\1", "a@b")
+#   re.split(",", "a,b,,c")
+#
+#   p = re.compile("colou?r")          # reuse via Pattern methods
+#   p.match_at("my colour")
+#
+# Deviations from Python (documented):
+#   * ASCII-only classes: \\w is [0-9A-Za-z_], \\d is [0-9], \\s is
+#     [\\t\\n\\v\\f\\r ]. Python's Unicode-aware classes are not ported.
+#   * No flags (no (?i), no re.I/M/S/X), no lookaround, no backreferences
+#     in the PATTERN (\\1 inside the pattern panics), no lazy quantifiers
+#     (*?, +?), no possessive quantifiers, no named groups (?P<..>).
+#   * \\b and \\B ARE supported as zero-width word-boundary assertions;
+#     \\A \\Z \\z are anchors. Other letter escapes panic ("bad escape").
+#   * No inline flag groups '(?i)' etc — unsupported group extensions panic.
+#   * sub() replacement supports \\1..\\9, \\g<N>, \\\\, \\n \\t \\r; other
+#     backslash escapes substitute the escaped char literally (Python
+#     raises re.error for bad escapes).
+#   * findall with >= 2 groups returns an array of arrays (Python tuples).
+#   * Matching is backtracking and can be exponential on adversarial
+#     patterns (e.g. '(a*)*$'); there is no match-time limit.
+#   * Module-level convenience functions (re.search etc.) compile the
+#     pattern on every call — use re.compile() and the Pattern methods
+#     for repeated matching.
+#   * Panics (core.panic) replace Python's re.error for malformed
+#     patterns; a non-match is None, never an exception.
+import std:core
+import std:bytes
+
+# ---------------------------------------------------------------------------
+# Pattern AST nodes (arrays built with append; element 0 is the kind tag):
+#   ["lit", ch]              literal char
+#   ["dot"]                  any char except '\n'
+#   ["class", neg, ranges]   ranges = flat [lo,hi,...] codepoints
+#   ["group", idx, alts]     idx = capture index (0 = non-capturing);
+#                            alts = array of seqs (each seq = array of nodes)
+#   ["quant", atom, min, max]  max = -1 means unbounded
+#   ["bol"] ["eol"] ["wb"] ["nwb"]   zero-width assertions
+# A pattern is an array of alternatives (seqs).
+# ---------------------------------------------------------------------------
+
+fn _n_lit(ch):
+    n = []
+    n.append("lit")
+    n.append(ch)
+    return n
+
+fn _n_dot():
+    n = []
+    n.append("dot")
+    return n
+
+fn _n_class(neg, ranges):
+    n = []
+    n.append("class")
+    n.append(neg)
+    n.append(ranges)
+    return n
+
+fn _n_group(idx, alts):
+    n = []
+    n.append("group")
+    n.append(idx)
+    n.append(alts)
+    return n
+
+fn _n_quant(atom, mn, mx):
+    n = []
+    n.append("quant")
+    n.append(atom)
+    n.append(mn)
+    n.append(mx)
+    return n
+
+fn _n_anchor(kind):
+    n = []
+    n.append(kind)
+    return n
+
+# -- parser ------------------------------------------------------------------
+
+class _Parser:
+    src
+    pos
+    ngroups
+
+    fn _peek(self):
+        if self.pos >= len(self.src):
+            return ""
+        return str(self.src[self.pos])
+
+    fn _peek2(self):
+        if self.pos + 1 >= len(self.src):
+            return ""
+        return str(self.src[self.pos + 1])
+
+    fn _take(self):
+        c = self._peek()
+        if c != "":
+            self.pos = self.pos + 1
+        return c
+
+    fn _digits(self):
+        v = 0
+        n = 0
+        while true:
+            c = self._peek()
+            if c < "0" or c > "9":
+                break
+            v = v * 10 + (bytes.ord(c) ?? 0) - 48
+            n = n + 1
+            self._take()
+        if n == 0:
+            return -1
+        return v
+
+    fn _alt(self):
+        # alternation: seq ('|' seq)*  -> array of seqs
+        alts = []
+        alts.append(self._seq())
+        while self._peek() == "|":
+            self._take()
+            alts.append(self._seq())
+        return alts
+
+    fn _seq(self):
+        nodes = []
+        while true:
+            c = self._peek()
+            if c == "" or c == "|" or c == ")":
+                break
+            atom = self._atom()
+            q = self._peek()
+            if q == "*" or q == "+" or q == "?":
+                if atom[0] == "bol" or atom[0] == "eol" or atom[0] == "wb" or atom[0] == "nwb":
+                    core.panic("re: nothing to repeat '" + q + "'")
+                self._take()
+                if q == "*":
+                    nodes.append(_n_quant(atom, 0, -1))
+                elif q == "+":
+                    nodes.append(_n_quant(atom, 1, -1))
+                else:
+                    nodes.append(_n_quant(atom, 0, 1))
+            elif q == "\{":
+                save = self.pos
+                self._take()
+                c2 = self._peek()
+                if c2 >= "0" and c2 <= "9":
+                    if atom[0] == "bol" or atom[0] == "eol" or atom[0] == "wb" or atom[0] == "nwb":
+                        core.panic("re: nothing to repeat '\{'")
+                    nodes.append(self._brace(atom))
+                else:
+                    # '{' does not start a valid repeat -> literal char
+                    self.pos = save
+                    nodes.append(atom)
+            else:
+                nodes.append(atom)
+        return nodes
+
+    fn _brace(self, atom):
+        # pos is just after '{'; expects m, m,, m,n} forms
+        mn = self._digits()
+        if mn < 0:
+            core.panic("re: bad repeat count")
+        mx = mn
+        if self._peek() == ",":
+            self._take()
+            mxv = self._digits()
+            if mxv < 0:
+                mx = -1
+            else:
+                mx = mxv
+        if self._take() != "}":
+            core.panic("re: unterminated repeat")
+        if mx >= 0 and mx < mn:
+            core.panic("re: min repeat greater than max repeat")
+        return _n_quant(atom, mn, mx)
+
+    fn _atom(self):
+        c = self._take()
+        if c == "":
+            core.panic("re: unexpected end of pattern")
+        if c == "(":
+            return self._group()
+        if c == "[":
+            return self._class()
+        if c == ".":
+            return _n_dot()
+        if c == "^":
+            return _n_anchor("bol")
+        if c == "$":
+            return _n_anchor("eol")
+        if c == "\\":
+            return self._escape()
+        if c == "*" or c == "+" or c == "?" or c == ")" or c == "|":
+            core.panic("re: nothing to repeat '" + c + "'")
+        return _n_lit(c)
+
+    fn _group(self):
+        # '(' already consumed
+        idx = 0
+        if self._peek() == "?":
+            self._take()
+            c2 = self._take()
+            if c2 == ":":
+                idx = 0
+            else:
+                core.panic("re: unsupported group extension '(?" + c2 + "...)'")
+        else:
+            self.ngroups = self.ngroups + 1
+            idx = self.ngroups
+        alts = self._alt()
+        if self._take() != ")":
+            core.panic("re: missing ')'")
+        return _n_group(idx, alts)
+
+    # -- escapes ---------------------------------------------------------------
+
+    fn _is_ascii_letter(self, e):
+        cp = bytes.ord(e) ?? 0
+        if cp >= 65 and cp <= 90:
+            return true
+        if cp >= 97 and cp <= 122:
+            return true
+        return false
+
+    fn _escape(self):
+        # outside a character class
+        e = self._take()
+        if e == "":
+            core.panic("re: trailing backslash in pattern")
+        if e == "d":
+            return _n_class(false, [48, 57])
+        if e == "D":
+            return _n_class(true, [48, 57])
+        if e == "w":
+            return _n_class(false, [48, 57, 65, 90, 95, 95, 97, 122])
+        if e == "W":
+            return _n_class(true, [48, 57, 65, 90, 95, 95, 97, 122])
+        if e == "s":
+            return _n_class(false, [9, 13, 32, 32])
+        if e == "S":
+            return _n_class(true, [9, 13, 32, 32])
+        if e == "b":
+            return _n_anchor("wb")
+        if e == "B":
+            return _n_anchor("nwb")
+        if e == "A":
+            return _n_anchor("bol")
+        if e == "Z" or e == "z":
+            return _n_anchor("eol")
+        if e == "n":
+            return _n_lit("\n")
+        if e == "t":
+            return _n_lit("\t")
+        if e == "r":
+            return _n_lit("\r")
+        if e == "f":
+            return _n_lit(bytes.chr(12) ?? " ")
+        if e == "v":
+            return _n_lit(bytes.chr(11) ?? " ")
+        if e == "a":
+            return _n_lit(bytes.chr(7) ?? " ")
+        if e == "0":
+            return _n_lit(bytes.chr(0) ?? " ")
+        cp_e = bytes.ord(e) ?? 0
+        if cp_e >= 49 and cp_e <= 57:
+            core.panic("re: backreferences in patterns are not supported")
+        if self._is_ascii_letter(e):
+            core.panic("re: bad escape \\" + e)
+        return _n_lit(e)
+
+    # -- character classes -----------------------------------------------------
+
+    fn _class_item(self):
+        # returns ["cp", codepoint] or ["set", flat_ranges]
+        c = self._take()
+        if c == "":
+            core.panic("re: unterminated character class")
+        if c == "\\":
+            e = self._take()
+            if e == "":
+                core.panic("re: trailing backslash in class")
+            if e == "d":
+                return _ci_set([48, 57])
+            if e == "D":
+                return _ci_set(_comp([48, 57]))
+            if e == "w":
+                return _ci_set([48, 57, 65, 90, 95, 95, 97, 122])
+            if e == "W":
+                return _ci_set(_comp([48, 57, 65, 90, 95, 95, 97, 122]))
+            if e == "s":
+                return _ci_set([9, 13, 32, 32])
+            if e == "S":
+                return _ci_set(_comp([9, 13, 32, 32]))
+            if e == "n":
+                return _ci_cp(10)
+            if e == "t":
+                return _ci_cp(9)
+            if e == "r":
+                return _ci_cp(13)
+            if e == "f":
+                return _ci_cp(12)
+            if e == "v":
+                return _ci_cp(11)
+            if e == "a":
+                return _ci_cp(7)
+            if e == "b":
+                return _ci_cp(8)
+            if e == "0":
+                return _ci_cp(0)
+            if self._is_ascii_letter(e):
+                core.panic("re: bad escape \\" + e + " in class")
+            return _ci_cp(bytes.ord(e) ?? 0)
+        cp = bytes.ord(c) ?? -1
+        if cp < 0:
+            core.panic("re: invalid character in class")
+        return _ci_cp(cp)
+
+    fn _class(self):
+        # '[' already consumed
+        neg = false
+        if self._peek() == "^":
+            self._take()
+            neg = true
+        ranges = []
+        first = true
+        while true:
+            c = self._peek()
+            if c == "":
+                core.panic("re: unterminated character class")
+            if c == "]" and not first:
+                self._take()
+                break
+            first = false
+            item = self._class_item()
+            # possible range: single cp followed by '-' and a non-']' char
+            if item[0] == "cp" and self._peek() == "-" and self._peek2() != "]" and self._peek2() != "":
+                self._take()
+                item2 = self._class_item()
+                if item2[0] != "cp":
+                    core.panic("re: bad character range")
+                lo = item[1]
+                hi = item2[1]
+                if hi < lo:
+                    core.panic("re: bad character range")
+                ranges.append(lo)
+                ranges.append(hi)
+            elif item[0] == "cp":
+                ranges.append(item[1])
+                ranges.append(item[1])
+            else:
+                rs = item[1]
+                i = 0
+                while i < len(rs):
+                    ranges.append(rs[i])
+                    i = i + 1
+        return _n_class(neg, ranges)
+
+# module-level helpers for class items (defined outside the class so they
+# can be shared; they take no parser state)
+fn _ci_cp(cp):
+    n = []
+    n.append("cp")
+    n.append(cp)
+    return n
+
+fn _ci_set(ranges):
+    n = []
+    n.append("set")
+    n.append(ranges)
+    return n
+
+fn _comp(ranges):
+    # complement of a sorted disjoint flat [lo,hi,...] range list over
+    # Unicode scalar values [0, 1114111]
+    out = []
+    next_lo = 0
+    i = 0
+    while i < len(ranges):
+        lo = ranges[i]
+        hi = ranges[i + 1]
+        if lo > next_lo:
+            out.append(next_lo)
+            out.append(lo - 1)
+        next_lo = hi + 1
+        i = i + 2
+    if next_lo <= 1114111:
+        out.append(next_lo)
+        out.append(1114111)
+    return out
+
+# ---------------------------------------------------------------------------
+# Matcher. States are [pos, groups] where groups is a flat array
+# [s0,e0,s1,e1,...] of char spans (-1 = group did not participate).
+# ---------------------------------------------------------------------------
+
+# State representation: a flat [i64] array
+#   [pos, s0, e0, s1, e1, ...]
+# where pos is the current char offset and (sN, eN) is the span of capture
+# group N (group 0 = whole match); -1 means "did not participate". Length is
+# 1 + 2*(ngroups+1). States are immutable: every update goes through copy().
+
+fn _new_state(pos, ng):
+    st = [pos]
+    i = 0
+    n = (ng + 1) * 2
+    while i < n:
+        st.append(-1)
+        i = i + 1
+    return st
+
+fn _is_word_cp(cp):
+    if cp >= 48 and cp <= 57:
+        return true
+    if cp >= 65 and cp <= 90:
+        return true
+    if cp == 95:
+        return true
+    if cp >= 97 and cp <= 122:
+        return true
+    return false
+
+fn _class_has(node, cp):
+    ranges = node[2]
+    found = false
+    i = 0
+    while i < len(ranges):
+        if cp >= ranges[i] and cp <= ranges[i + 1]:
+            found = true
+        i = i + 2
+    if node[1]:
+        return not found
+    return found
+
+fn _node_all(text, node, st):
+    # all states this single node can produce at st[0], preference order
+    kind = node[0]
+    pos = st[0]
+    out = []
+    if kind == "lit":
+        if pos < len(text) and str(text[pos]) == node[1]:
+            ns = st.copy()
+            ns[0] = pos + 1
+            out.append(ns)
+        return out
+    if kind == "dot":
+        if pos < len(text) and str(text[pos]) != "\n":
+            ns = st.copy()
+            ns[0] = pos + 1
+            out.append(ns)
+        return out
+    if kind == "class":
+        if pos < len(text):
+            cp = bytes.ord(text[pos]) ?? -1
+            if cp >= 0 and _class_has(node, cp):
+                ns = st.copy()
+                ns[0] = pos + 1
+                out.append(ns)
+        return out
+    if kind == "bol":
+        if pos == 0:
+            out.append(st)
+        return out
+    if kind == "eol":
+        n = len(text)
+        if pos == n or (pos == n - 1 and str(text[pos]) == "\n"):
+            out.append(st)
+        return out
+    if kind == "wb" or kind == "nwb":
+        before = false
+        after = false
+        if pos > 0:
+            before = _is_word_cp(bytes.ord(text[pos - 1]) ?? -1)
+        if pos < len(text):
+            after = _is_word_cp(bytes.ord(text[pos]) ?? -1)
+        ok = false
+        if kind == "wb":
+            if before != after:
+                ok = true
+        else:
+            if before == after:
+                ok = true
+        if ok:
+            out.append(st)
+        return out
+    if kind == "group":
+        idx = node[1]
+        alts = node[2]
+        i = 0
+        while i < len(alts):
+            g2 = st.copy()
+            if idx > 0:
+                g2[1 + idx * 2] = pos
+            inner = _all(text, alts[i], 0, g2)
+            j = 0
+            while j < len(inner):
+                stt = inner[j]
+                if idx > 0:
+                    g3 = stt.copy()
+                    g3[2 + idx * 2] = stt[0]
+                    out.append(g3)
+                else:
+                    out.append(stt)
+                j = j + 1
+            i = i + 1
+        return out
+    if kind == "quant":
+        return _rep_all(text, node[1], st, node[2], node[3])
+    return out
+
+fn _rep_all(text, atom, st, mn, mx):
+    # all states after between mn..mx repetitions of atom, most-greedy first
+    pos = st[0]
+    out = []
+    if mn > 0:
+        nmax = mx
+        if nmax >= 0:
+            nmax = mx - 1
+        opts = _node_all(text, atom, st)
+        i = 0
+        while i < len(opts):
+            o = opts[i]
+            sub = _rep_all(text, atom, o, mn - 1, nmax)
+            j = 0
+            while j < len(sub):
+                out.append(sub[j])
+                j = j + 1
+            i = i + 1
+        return out
+    # mn == 0: prefer more repetitions (deeper first), the stop state last
+    if mx != 0:
+        nmax = mx
+        if nmax > 0:
+            nmax = mx - 1
+        opts = _node_all(text, atom, st)
+        i = 0
+        while i < len(opts):
+            o = opts[i]
+            # skip empty-width repetitions: they cannot extend the match
+            # and would recurse forever on unbounded quantifiers
+            if o[0] != pos:
+                sub = _rep_all(text, atom, o, 0, nmax)
+                j = 0
+                while j < len(sub):
+                    out.append(sub[j])
+                    j = j + 1
+            i = i + 1
+    out.append(st)
+    return out
+
+fn _all(text, nodes, i, st):
+    # all states matching nodes[i..] — used for group alternatives
+    out = []
+    if i >= len(nodes):
+        out.append(st)
+        return out
+    opts = _node_all(text, nodes[i], st)
+    j = 0
+    while j < len(opts):
+        o = opts[j]
+        rest = _all(text, nodes, i + 1, o)
+        k = 0
+        while k < len(rest):
+            out.append(rest[k])
+            k = k + 1
+        j = j + 1
+    return out
+
+fn _first_seq(text, nodes, i, st) -> [i64]:
+    # first (preferred) complete match of nodes[i..], or []
+    if i >= len(nodes):
+        return st
+    opts = _node_all(text, nodes[i], st)
+    j = 0
+    while j < len(opts):
+        o = opts[j]
+        r = _first_seq(text, nodes, i + 1, o)
+        if len(r) > 0:
+            return r
+        j = j + 1
+    return []
+
+fn _first_from(text, pat, pos) -> [i64]:
+    # first match anchored exactly at pos, trying alternatives in order
+    i = 0
+    while i < len(pat.alts):
+        st = _new_state(pos, pat.ngroups)
+        r = _first_seq(text, pat.alts[i], 0, st)
+        if len(r) > 0:
+            return r
+        i = i + 1
+    return []
+
+fn _anchored_state(text, pat, pos) -> [i64]:
+    r = _first_from(text, pat, pos)
+    if len(r) == 0:
+        return []
+    # record group 0 = whole match
+    r[1] = pos
+    r[2] = r[0]
+    return r
+
+fn _search_state(text, pat, start) -> [i64]:
+    i = start
+    n = len(text)
+    while i <= n:
+        st = _anchored_state(text, pat, i)
+        if len(st) > 0:
+            return st
+        i = i + 1
+    return []
+
+# ---------------------------------------------------------------------------
+# Match object
+# ---------------------------------------------------------------------------
+
+class Match:
+    text
+    spans      # flat [s0,e0,s1,e1,...]; -1 = group did not participate
+    ngroups
+    startpos
+
+    fn _span(self, n):
+        if n < 0 or n > self.ngroups:
+            core.panic("re: no such group")
+        s = self.spans[1 + n * 2]
+        e = self.spans[2 + n * 2]
+        if s < 0:
+            return [-1, -1]
+        return [s, e]
+
+    """group(self, n = 0) -> matched text of group n (0 = whole match),
+    or None when the group did not participate."""
+    fn group(self, n = 0) -> String?:
+        sp = self._span(n)
+        if sp[0] < 0:
+            return None
+        return str(self.text[sp[0]..sp[1]])
+
+    """groups(self) -> array of groups 1..ngroups (None for non-participating)."""
+    fn groups(self):
+        out = []
+        i = 1
+        while i <= self.ngroups:
+            sp = self._span(i)
+            if sp[0] < 0:
+                out.append(None)
+            else:
+                out.append(str(self.text[sp[0]..sp[1]]))
+            i = i + 1
+        return out
+
+    """start(self, n = 0) -> char offset where group n begins (-1 if unset)."""
+    fn start(self, n = 0):
+        return self._span(n)[0]
+
+    """end(self, n = 0) -> char offset where group n ends (-1 if unset)."""
+    fn end(self, n = 0):
+        return self._span(n)[1]
+
+    """span(self, n = 0) -> [start, end] char offsets of group n."""
+    fn span(self, n = 0):
+        return self._span(n)
+
+    """__str__ -> the whole matched text."""
+    fn __str__(self):
+        g = self.group(0)
+        if g == None:
+            return ""
+        return g
+
+fn _to_match(text, pat, st) -> Match:
+    return Match(text, st, pat.ngroups, st[1])
+
+# ---------------------------------------------------------------------------
+# Pattern object (returned by compile)
+# ---------------------------------------------------------------------------
+
+class Pattern:
+    src
+    alts
+    ngroups
+
+    """match_at(self, text, start = 0) -> Match anchored at `start`, or None.
+    (Named match_at because `match` is a reserved keyword in A.)"""
+    fn match_at(self, text, start = 0) -> Match?:
+        t = str(text)
+        st = _anchored_state(t, self, start)
+        if len(st) == 0:
+            return None
+        return _to_match(t, self, st)
+
+    """search(self, text, start = 0) -> leftmost Match at/after `start`."""
+    fn search(self, text, start = 0) -> Match?:
+        t = str(text)
+        st = _search_state(t, self, start)
+        if len(st) == 0:
+            return None
+        return _to_match(t, self, st)
+
+    """fullmatch(self, text) -> Match spanning the entire string, or None."""
+    fn fullmatch(self, text) -> Match?:
+        t = str(text)
+        st = _anchored_state(t, self, 0)
+        if len(st) == 0:
+            return None
+        if st[0] != len(t):
+            return None
+        return _to_match(t, self, st)
+
+    """findall(self, text) -> array of matches; with groups, array of
+    group strings (1 group) or array of group-arrays (>= 2 groups)."""
+    fn findall(self, text):
+        t = str(text)
+        n = len(t)
+        out = []
+        pos = 0
+        while pos <= n:
+            st = _search_state(t, self, pos)
+            if len(st) == 0:
+                break
+            m = _to_match(t, self, st)
+            if self.ngroups == 0:
+                g0 = m.group(0)
+                if g0 == None:
+                    out.append("")
+                else:
+                    out.append(g0)
+            elif self.ngroups == 1:
+                g1 = m.group(1)
+                if g1 == None:
+                    out.append("")
+                else:
+                    out.append(g1)
+            else:
+                out.append(m.groups())
+            e = m.end(0)
+            s = m.start(0)
+            if e == s:
+                pos = e + 1
+            else:
+                pos = e
+        return out
+
+    """finditer(self, text) -> array of Match objects, left to right."""
+    fn finditer(self, text):
+        t = str(text)
+        n = len(t)
+        out = []
+        pos = 0
+        while pos <= n:
+            st = _search_state(t, self, pos)
+            if len(st) == 0:
+                break
+            m = _to_match(t, self, st)
+            out.append(m)
+            e = m.end(0)
+            s = m.start(0)
+            if e == s:
+                pos = e + 1
+            else:
+                pos = e
+        return out
+
+    """count(self, text) -> number of non-overlapping matches."""
+    fn count(self, text):
+        return len(self.findall(text))
+
+    """sub(self, repl, text, count = -1) -> text with matches replaced."""
+    fn sub(self, repl, text, count = -1):
+        t = str(text)
+        n = len(t)
+        r = str(repl)
+        out = ""
+        pos = 0
+        made = 0
+        while pos <= n:
+            if count >= 0 and made >= count:
+                break
+            st = _search_state(t, self, pos)
+            if len(st) == 0:
+                break
+            m = _to_match(t, self, st)
+            ms = m.start(0)
+            me = m.end(0)
+            out = out + t[pos..ms] + _repl_expand(r, m)
+            made = made + 1
+            if me == ms:
+                # empty match: emit the char at me verbatim and skip it
+                if me < n:
+                    out = out + str(t[me])
+                pos = me + 1
+            else:
+                pos = me
+        out = out + t[pos..]
+        return out
+
+    """split(self, text, maxsplit = -1) -> array of pieces; captured
+    groups are interleaved as extra elements (None when not participating)."""
+    fn split(self, text, maxsplit = -1):
+        t = str(text)
+        n = len(t)
+        parts = []
+        last = 0
+        searchpos = 0
+        made = 0
+        while searchpos <= n:
+            if maxsplit >= 0 and made >= maxsplit:
+                break
+            st = _search_state(t, self, searchpos)
+            if len(st) == 0:
+                break
+            m = _to_match(t, self, st)
+            ms = m.start(0)
+            me = m.end(0)
+            parts.append(t[last..ms])
+            i = 1
+            while i <= self.ngroups:
+                gv = m.group(i)
+                if gv == None:
+                    parts.append(None)
+                else:
+                    parts.append(gv)
+                i = i + 1
+            made = made + 1
+            if me == ms:
+                # empty match: next text piece starts at me (the char there
+                # is kept), but the next search begins one char later
+                last = me
+                searchpos = me + 1
+            else:
+                last = me
+                searchpos = me
+        parts.append(t[last..])
+        return parts
+
+# ---------------------------------------------------------------------------
+# replacement-template expansion for sub()
+# ---------------------------------------------------------------------------
+
+fn _repl_expand(r, m):
+    out = ""
+    i = 0
+    n = len(r)
+    while i < n:
+        c = str(r[i])
+        if c != "\\":
+            out = out + c
+            i = i + 1
+            continue
+        i = i + 1
+        if i >= n:
+            out = out + "\\"
+            break
+        d = str(r[i])
+        i = i + 1
+        cp = bytes.ord(d) ?? 0
+        if cp >= 48 and cp <= 57:
+            gidx = cp - 48
+            gv = m.group(gidx)
+            if gv != None:
+                out = out + gv
+        elif d == "g":
+            # \g<N>
+            if i < n and str(r[i]) == "<":
+                i = i + 1
+                v = 0
+                nd = 0
+                while i < n:
+                    dc = str(r[i])
+                    dcp = bytes.ord(dc) ?? 0
+                    if dcp < 48 or dcp > 57:
+                        break
+                    v = v * 10 + dcp - 48
+                    nd = nd + 1
+                    i = i + 1
+                if i < n and str(r[i]) == ">" and nd > 0:
+                    i = i + 1
+                    gv = m.group(v)
+                    if gv != None:
+                        out = out + gv
+                else:
+                    core.panic("re: bad group reference in replacement")
+            else:
+                core.panic("re: bad group reference in replacement")
+        elif d == "\\":
+            out = out + "\\"
+        elif d == "n":
+            out = out + "\n"
+        elif d == "t":
+            out = out + "\t"
+        elif d == "r":
+            out = out + "\r"
+        else:
+            # deviation: unknown escapes substitute the char literally
+            out = out + d
+    return out
+
+# ---------------------------------------------------------------------------
+# public API
+# ---------------------------------------------------------------------------
+
+"""compile(pattern) -> Pattern. Panics on malformed patterns."""
+fn compile(pattern):
+    src = str(pattern)
+    p = _Parser(src, 0, 0)
+    alts = p._alt()
+    if p.pos < len(p.src):
+        core.panic("re: unexpected '" + str(p.src[p.pos]) + "' in pattern")
+    return Pattern(src, alts, p.ngroups)
+
+"""escape(s) -> s with all non-alphanumeric chars backslash-escaped."""
+fn escape(s):
+    src = str(s)
+    out = ""
+    i = 0
+    while i < len(src):
+        c = str(src[i])
+        cp = bytes.ord(c) ?? 0
+        alpha = false
+        if cp >= 48 and cp <= 57:
+            alpha = true
+        if cp >= 65 and cp <= 90:
+            alpha = true
+        if cp == 95:
+            alpha = true
+        if cp >= 97 and cp <= 122:
+            alpha = true
+        if alpha:
+            out = out + c
+        else:
+            out = out + "\\" + c
+        i = i + 1
+    return out
+
+"""search(pattern, text, start = 0) -> leftmost Match or None."""
+fn search(pattern, text, start = 0) -> Match?:
+    return compile(pattern).search(text, start)
+
+"""match_at(pattern, text, start = 0) -> Match anchored at `start` or None."""
+fn match_at(pattern, text, start = 0) -> Match?:
+    return compile(pattern).match_at(text, start)
+
+"""fullmatch(pattern, text) -> Match spanning all of text or None."""
+fn fullmatch(pattern, text) -> Match?:
+    return compile(pattern).fullmatch(text)
+
+"""findall(pattern, text) -> array of matches (see Pattern.findall)."""
+fn findall(pattern, text):
+    return compile(pattern).findall(text)
+
+"""finditer(pattern, text) -> array of Match objects."""
+fn finditer(pattern, text):
+    return compile(pattern).finditer(text)
+
+"""count(pattern, text) -> number of non-overlapping matches."""
+fn count(pattern, text):
+    return compile(pattern).count(text)
+
+"""sub(pattern, repl, text, count = -1) -> substituted string."""
+fn sub(pattern, repl, text, count = -1):
+    return compile(pattern).sub(repl, text, count)
+
+"""split(pattern, text, maxsplit = -1) -> array of pieces."""
+fn split(pattern, text, maxsplit = -1):
+    return compile(pattern).split(text, maxsplit)

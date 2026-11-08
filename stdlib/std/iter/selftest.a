@@ -1,0 +1,91 @@
+# std.iter selftest — itertools-style helpers (eager array versions).
+# Run: ./build/a test stdlib/std/iter/selftest.a
+import std:iter
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn _dbl(x):
+    return x * 2
+
+fn _is_even(x):
+    return x % 2 == 0
+
+fn test_chain_product():
+    assert_eq(iter.chain([[1, 2], [3], [4, 5]]), [1, 2, 3, 4, 5])
+    assert_eq(iter.chain([]), [])
+    assert_eq(iter.chain([[1], []]), [1])
+    p = iter.product([[1, 2], [3, 4]])
+    assert_eq(len(p), 4)
+    assert_eq(p[0], [1, 3])
+    assert_eq(p[3], [2, 4])
+    ps = iter.product([["a", "b"], ["x"]])
+    assert_eq(len(ps), 2)
+    assert_eq(ps[1][0], "b")
+    assert_eq(iter.product([]), [[]])
+    assert_eq(iter.product([[1], []]), [])
+
+fn test_permutations_combinations():
+    pm = iter.permutations([1, 2, 3])
+    assert_eq(len(pm), 6)
+    assert_eq(pm[0], [1, 2, 3])
+    assert_eq(pm[5], [3, 2, 1])
+    pm2 = iter.permutations([1, 2, 3], 2)
+    assert_eq(len(pm2), 6)
+    assert_eq(pm2[0], [1, 2])
+    assert_eq(iter.permutations([1, 2], 3), [])
+    assert_eq(iter.permutations([1, 2], 0), [[]])
+    cb = iter.combinations([1, 2, 3, 4], 2)
+    assert_eq(len(cb), 6)
+    assert_eq(cb[0], [1, 2])
+    assert_eq(cb[5], [3, 4])
+    assert_eq(iter.combinations([1, 2, 3]), [[1, 2, 3]])
+    assert_eq(iter.combinations([1, 2], 3), [])
+    cr = iter.combinations_with_replacement([1, 2], 2)
+    assert_eq(len(cr), 3)
+    assert_eq(cr[0], [1, 1])
+    assert_eq(cr[2], [2, 2])
+    assert_eq(iter.combinations_with_replacement([1], 3), [[1, 1, 1]])
+
+fn test_groupby():
+    g = iter.groupby([1, 1, 2, 2, 2, 1])
+    assert_eq(len(g), 3)
+    assert_eq(g[0][0], 1)
+    assert_eq(g[0][1], [1, 1])
+    assert_eq(g[1][0], 2)
+    assert_eq(g[1][1], [2, 2, 2])
+    assert_eq(g[2][0], 1)
+    assert_eq(g[2][1], [1])
+    assert_eq(iter.groupby([]), [])
+    gs = iter.groupby(["a", "b", "b", "a"])
+    assert_eq(len(gs), 3)
+    assert_eq(gs[1][1], ["b", "b"])
+    # key function variant: group by parity
+    gk = iter.groupby_key([1, 3, 2, 4, 5], _is_even)
+    assert_eq(len(gk), 3)
+    assert_eq(gk[0][0], false)
+    assert_eq(gk[0][1], [1, 3])
+    assert_eq(gk[1][0], true)
+    assert_eq(gk[1][1], [2, 4])
+    assert_eq(gk[2][0], false)
+    assert_eq(gk[2][1], [5])
+
+fn test_accumulate_takewhile():
+    acc = iter.accumulate([1, 2, 3, 4], _dbl)
+    # f(acc, x) = acc*2 ignoring x -> powers of two
+    assert_eq(acc, [1, 2, 4, 8])
+    assert_eq(iter.accumulate([], _dbl), [])
+    assert_eq(iter.takewhile(_is_even, [2, 4, 5, 6]), [2, 4])
+    assert_eq(iter.takewhile(_is_even, [1, 2]), [])
+    assert_eq(iter.dropwhile(_is_even, [2, 4, 5, 6]), [5, 6])
+    assert_eq(iter.dropwhile(_is_even, [2, 4]), [])
+    assert_eq(iter.pairwise([1, 2, 3]), [[1, 2], [2, 3]])
+    assert_eq(iter.pairwise([1]), [])
+    assert_eq(iter.batched([1, 2, 3, 4, 5], 2), [[1, 2], [3, 4], [5]])
+    assert_eq(iter.batched([], 3), [])
+    assert_eq(iter.islice([1, 2, 3, 4, 5], 1, 4), [2, 3, 4])
+    assert_eq(iter.islice([1, 2, 3, 4, 5], 0, -1, 2), [1, 3, 5])
+    assert_eq(iter.islice([1, 2, 3], 5), [])
