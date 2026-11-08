@@ -1686,22 +1686,22 @@ aval bi_py_buffer_info(uint64_t n, aval *argv) {
 
 aval bi_py_call(uint64_t n, aval *argv) {
     (void)n; (void)argv;
-    panicf("python interop is not supported on this platform");
+    panicf("python interop is unavailable on Windows (libpython loading is not ported)");
     return A_NONE;
 }
 
 aval bi_py_buffer(uint64_t n, aval *argv) {
     (void)n; (void)argv;
-    panicf("python interop is not supported on this platform");
+    panicf("python interop is unavailable on Windows (libpython loading is not ported)");
     return A_NONE;
 }
 
 static aval py_unsupported(void) {
-    panicf("python interop is not supported on this platform");
+    panicf("python interop is unavailable on Windows (libpython loading is not ported)");
     return A_NONE;
 }
 static aval py_unsupported_err(void) {
-    const char *msg = "python interop is not supported on this platform";
+    const char *msg = "python interop is unavailable on Windows (libpython loading is not ported)";
     return mkobj(result_new(0, 0, a_str_new(msg, strlen(msg))));
 }
 

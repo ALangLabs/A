@@ -104,10 +104,19 @@ aval bi_file_size(uint64_t n, aval *argv) {
 
 aval bi_file_exists(uint64_t n, aval *argv) {
     want_args("file_exists", n, 1, 1);
-    FILE *f = fopen(path_arg(argv[0], "path"), "rb");
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    FILE *f = fopen(path, "rb");
     if (!f) return A_FALSE;
     fclose(f);
     return A_TRUE;
+#else
+    /* fopen() fails on directories under the Windows CRT, so probe with
+       GetFileAttributesA instead — matching POSIX semantics where any
+       existing path (file or directory) counts. */
+    return GetFileAttributesA(path) != A_WIN_INVALID_FILE_ATTRIBUTES
+               ? A_TRUE : A_FALSE;
+#endif
 }
 
 static int str_ptr_cmp(const void *a, const void *b) {
@@ -122,17 +131,40 @@ static int str_ptr_cmp(const void *a, const void *b) {
 
 aval bi_list_dir(uint64_t n, aval *argv) {
     want_args("list_dir", n, 1, 1);
-#if !defined(_WIN32)
     const char *path = path_arg(argv[0], "path");
+    AVec out = { NULL, 0, 0 };
+#if !defined(_WIN32)
     DIR *d = opendir(path);
     if (!d) panicf("cannot open directory '%s'", path);
-    AVec out = { NULL, 0, 0 };
     struct dirent *de;
     while ((de = readdir(d)) != NULL) {
         if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
         avec_push(&out, a_str_new(de->d_name, strlen(de->d_name)));
     }
     closedir(d);
+#else
+    /* FindFirstFileA("dir\*") enumerates every entry except "." and
+       "..", matching the POSIX listing. Both '/' and '\' are accepted
+       as separators by the Win32 file APIs. */
+    size_t plen = strlen(path);
+    if (plen == 0) panicf("cannot open directory '%s'", path);
+    int need_sep = plen > 0 && path[plen - 1] != '/' && path[plen - 1] != '\\';
+    char *pat = (char *)xmalloc(plen + (size_t)need_sep + 2);
+    memcpy(pat, path, plen);
+    size_t off = plen;
+    if (need_sep) pat[off++] = '\\';
+    pat[off] = '*';
+    pat[off + 1] = '\0';
+    AWinFindData fd;
+    void *h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == A_WIN_INVALID_HANDLE) panicf("cannot open directory '%s'", path);
+    for (;;) {
+        avec_push(&out, a_str_new(fd.cFileName, strlen(fd.cFileName)));
+        if (!FindNextFileA(h, &fd)) break;
+    }
+    FindClose(h);
+#endif
     /* insertion sort using the same comparator as qsort would need context; simple shell sort */
     for (size_t gap = out.len / 2; gap > 0; gap /= 2) {
         for (size_t i = gap; i < out.len; ++i) {
@@ -148,16 +180,19 @@ aval bi_list_dir(uint64_t n, aval *argv) {
     aval r = list_from_vec(out.p, out.len, 0);
     free(out.p);
     return r;
-#else
-    (void)argv;
-    panicf("list_dir is not supported on this platform");
-    return A_NONE;
-#endif
 }
 
 aval bi_remove_file(uint64_t n, aval *argv) {
     want_args("remove_file", n, 1, 1);
-    if (remove(path_arg(argv[0], "path")) != 0) panicf("cannot remove file '%s'", path_arg(argv[0], "path"));
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    if (remove(path) != 0) panicf("cannot remove file '%s'", path);
+#else
+    /* POSIX remove() unlinks files and removes empty directories; the
+       CRT remove() on Windows only handles files. */
+    if (DeleteFileA(path) == 0 && RemoveDirectoryA(path) == 0)
+        panicf("cannot remove file '%s'", path);
+#endif
     return A_NONE;
 }
 
@@ -185,8 +220,37 @@ aval bi_create_dir(uint64_t n, aval *argv) {
     free(tmp);
     return A_NONE;
 #else
-    (void)argv;
-    panicf("create_dir is not supported on this platform");
+    /* Win32 equivalent of the POSIX parents-first mkdir above: normalize
+       '/' to '\', pre-create each ancestor (failures are ignored — the
+       final CreateDirectoryA reports the real error), then create the
+       leaf. A bare drive prefix like "C:" is skipped: "C:\" already
+       exists and CreateDirectoryA on it is meaningless. */
+    const char *path = path_arg(argv[0], "path");
+    char *tmp = xstrdup(path);
+    size_t len = strlen(tmp);
+    for (size_t i = 0; i < len; ++i)
+        if (tmp[i] == '/') tmp[i] = '\\';
+    for (size_t i = 1; i < len; ++i) {
+        if (tmp[i] == '\\' && !(i == 2 && tmp[1] == ':')) {
+            tmp[i] = '\0';
+            CreateDirectoryA(tmp, NULL);
+            tmp[i] = '\\';
+        }
+    }
+    if (!CreateDirectoryA(tmp, NULL)) {
+        unsigned long e = GetLastError();
+        if (e == A_WIN_ERROR_ALREADY_EXISTS || e == A_WIN_ERROR_FILE_EXISTS) {
+            unsigned long attr = GetFileAttributesA(tmp);
+            if (attr != A_WIN_INVALID_FILE_ATTRIBUTES &&
+                (attr & A_WIN_FILE_ATTRIBUTE_DIRECTORY)) {
+                free(tmp);
+                return A_NONE;
+            }
+        }
+        free(tmp);
+        panicf("cannot create directory '%s'", path);
+    }
+    free(tmp);
     return A_NONE;
 #endif
 }
@@ -215,8 +279,49 @@ static int remove_tree(const char *path) {
     }
     return remove(path);
 #else
-    (void)path;
-    return -1;
+    /* Win32 recursive delete. Reparse points (symlinks, junctions) are
+       removed as links, never followed — the same policy the POSIX path
+       gets from lstat()+!S_ISLNK. */
+    unsigned long attr = GetFileAttributesA(path);
+    if (attr == A_WIN_INVALID_FILE_ATTRIBUTES) return -1;
+    if (!(attr & A_WIN_FILE_ATTRIBUTE_DIRECTORY) ||
+        (attr & A_WIN_FILE_ATTRIBUTE_REPARSE_POINT)) {
+        /* File (or link): DeleteFileA covers files and file symlinks;
+           RemoveDirectoryA covers directory symlinks and junctions. */
+        if (DeleteFileA(path)) return 0;
+        return RemoveDirectoryA(path) ? 0 : -1;
+    }
+    /* Real directory: enumerate children with FindFirstFileA and recurse.
+       Trailing separators are tolerated when joining child paths. */
+    size_t plen = strlen(path);
+    int need_sep = plen > 0 && path[plen - 1] != '/' && path[plen - 1] != '\\';
+    char *pat = (char *)xmalloc(plen + (size_t)need_sep + 2);
+    memcpy(pat, path, plen);
+    size_t off = plen;
+    if (need_sep) pat[off++] = '\\';
+    pat[off] = '*';
+    pat[off + 1] = '\0';
+    AWinFindData fd;
+    void *h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == A_WIN_INVALID_HANDLE) return -1;
+    int ok = 1;
+    for (;;) {
+        size_t nlen = strlen(fd.cFileName);
+        size_t need = plen + (size_t)need_sep + nlen + 2;
+        char *child = (char *)xmalloc(need);
+        memcpy(child, path, plen);
+        size_t coff = plen;
+        if (need_sep) child[coff++] = '\\';
+        memcpy(child + coff, fd.cFileName, nlen);
+        child[coff + nlen] = '\0';
+        if (remove_tree(child) != 0) { ok = 0; free(child); break; }
+        free(child);
+        if (!FindNextFileA(h, &fd)) break;
+    }
+    FindClose(h);
+    if (!ok) return -1;
+    return RemoveDirectoryA(path) ? 0 : -1;
 #endif
 }
 
@@ -242,8 +347,10 @@ aval bi_current_dir(uint64_t n, aval *argv) {
     if (!getcwd(buf, sizeof(buf))) panicf("cannot get current directory");
     return a_str_new(buf, strlen(buf));
 #else
-    panicf("current_dir is not supported on this platform");
-    return A_NONE;
+    char buf[4096];
+    if (!GetCurrentDirectoryA(sizeof(buf), buf))
+        panicf("cannot get current directory");
+    return a_str_new(buf, strlen(buf));
 #endif
 }
 
