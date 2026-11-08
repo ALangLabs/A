@@ -250,6 +250,7 @@ void AsmEmitter::emitStmt(const Stmt* s, bool topLevel) {
       }
       case StmtKind::While: {
         const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        if (tryEmitWhileFloat(st)) return;
         std::string loopL = newLabel("while");
         std::string endL = newLabel("wend");
         const bool xmmOk =
@@ -595,7 +596,7 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     const std::string& accName =
         static_cast<const IdentExpr*>(as.target.get())->name;
     if (accName == st.var) return false;
-    if (!exprIsFloat(as.value.get())) return false;
+    if (!floatXmmOk(as.value.get())) return false;
     ABinding* acc = lookup(accName);
     if (!acc || acc->kind != BKind::Local || acc->rawInt || acc->specRaw ||
         acc->dropFn)
@@ -630,26 +631,34 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         if (kv.second == x) return false;
       return true;
     };
+    // Residency: reuse an outer registration when present; otherwise seed
+    // the register from the slot BEFORE publishing residency (a resident
+    // loadSlot would read the not-yet-initialized xmm).
     int accReg = -1;
-    for (int x = 3; x <= 15; ++x)
-      if (xmmFree(x)) { accReg = x; break; }
-    if (accReg < 0) { loopXmmExit(xmmMark); return false; }
+    bool accResident = false;
+    {
+      auto ait = loopXmm_.find(acc->slot);
+      if (ait != loopXmm_.end()) {
+        accReg = ait->second;
+        accResident = true;
+      }
+    }
+    if (!accResident) {
+      for (int x = 3; x <= 15; ++x)
+        if (xmmFree(x)) { accReg = x; break; }
+      if (accReg < 0) { loopXmmExit(xmmMark); return false; }
+    }
     const std::string xr = "%xmm" + std::to_string(accReg);
-    // Join the residency set so call-flush/reload and the exit flush both
-    // maintain the accumulator automatically thereafter.
-    loopXmm_[acc->slot] = accReg;
-    loopXmmAdded_.push_back(acc->slot);
-    // Preheader: `acc` must hold an untagged double. For an int entry,
-    // one a_add_slow(acc, 0.0) promotes it exactly like the first loop
-    // iteration would (and panics with the exact runtime message for
-    // non-numeric values); the accumulator is then a double forever.
     std::string trampL = newLabel("fatramp"), loopL = newLabel("for"),
                 contL = newLabel("forc"), endL = newLabel("fend"),
                 bodyL = newLabel("forb"), doneL = newLabel("fadone"),
-                nanL = newLabel("fanil");
-    loadSlot(acc->slot, "%rcx");
-    emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + trampL + "\n");
-    emit(std::string("    movq %rcx, ") + xr + "\n");
+                nanL = newLabel("fanil"), proceedL = newLabel("faproc");
+    if (!accResident) {
+      loadSlot(acc->slot);  // slot still authoritative: memory read
+      emit(std::string("    movq %rax, ") + xr + "\n");
+      loopXmm_[acc->slot] = accReg;
+      loopXmmAdded_.push_back(acc->slot);
+    }
     // Hoisted loop bound: `end` never changes inside the loop; cache it
     // in %r11 (reloaded after calls by emit()). Emitted on BOTH entry
     // arms (the trampoline call clobbers %r11, so it is re-loaded there).
@@ -660,16 +669,55 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       endHoistSlot_ = endS;
     }
     if (gprCtr) emit("    mov " + slotRef(curS) + ", %r10\n");
+    // Peek at the loop head once: an empty range must leave `acc`
+    // bit-identical, so the promote below only runs when the body will
+    // execute at least once (the body is exactly `acc += v`, which makes
+    // acc a double anyway — promotion is then unobservable).
+    {
+      const Expr* stE = nullptr;
+      if (iter && iter->kind == ExprKind::Range)
+        stE = static_cast<const RangeExpr&>(*iter).step.get();
+      int64_t nec = 0;
+      if (stE == nullptr)
+        nec = 1;
+      else if (stE->kind == ExprKind::IntLit) {
+        int64_t v = static_cast<const IntLitExpr*>(stE)->value;
+        if (v == 1 || v == -1) nec = v;
+      }
+      const std::string curLoad =
+          gprCtr ? "    mov %r10, %rax\n"
+                 : "    mov " + slotRef(curS) + ", %rax\n";
+      const std::string endCmp =
+          hoistEnd ? "    cmp %r11, %rax\n"
+                   : "    mov " + slotRef(endS) +
+                         ", %rcx\n    cmp %rcx, %rax\n";
+      if (nec == 1) {
+        emit(curLoad + endCmp + "    jge " + endL + "\n");
+      } else if (nec == -1) {
+        emit(curLoad + endCmp + "    jle " + endL + "\n");
+      } else {
+        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
+             ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
+        emit("    test %rdx, %rdx\n    jns " + proceedL + "_p\n");
+        emit("    cmp %rcx, %rax\n    jg " + proceedL + "\n    jmp " + endL + "\n");
+        emitLabel(proceedL + "_p");
+        emit("    cmp %rcx, %rax\n    jl " + proceedL + "\n    jmp " + endL + "\n");
+      }
+    }
+    emitLabel(proceedL);
+    // Preheader: `acc` must hold an untagged double. For an int entry,
+    // one a_add_slow(acc, 0.0) promotes it exactly like the first loop
+    // iteration would (and panics with the exact runtime message for
+    // non-numeric values); the accumulator is then a double forever.
+    loadSlot(acc->slot, "%rcx");  // resident: movq xmm -> rcx (aval bits)
+    emit("    mov %rcx, %rdx\n    shr $48, %rdx\n    cmp $0xFFFF, %edx\n"
+         "    je " + trampL + "\n");
     emit("    jmp " + loopL + "\n");
     emitLabel(trampL);
-    // acc is NOT currently a double: promote via the runtime add exactly
-    // once, then it is a double for the remainder of the loop.
     loadSlot(acc->slot, "%rdi");
     movImm(0, "%rsi");  // aval 0.0
     emit("    call a_add_slow\n");
-    storeRax(acc->slot);
-    loadSlot(acc->slot, "%rcx");
-    emit(std::string("    movq %rcx, ") + xr + "\n");
+    storeRax(acc->slot);  // resident: movq rax -> xmm
     if (hoistEnd) emit("    mov " + slotRef(endS) + ", %r11\n");
     if (gprCtr) {
       // The trampoline call clobbers %r10: reload and publish the
@@ -677,6 +725,7 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       emit("    mov " + slotRef(curS) + ", %r10\n");
       curGprSlot_ = curS;
     }
+    emit("    jmp " + loopL + "\n");
     // Fused sqrt(f64(x)) detection (shared by the scalar + unrolled loops).
     const Expr* val = as.value.get();
     bool fused = false;
@@ -852,9 +901,11 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     if (fused) {
       emitFusedElt(0);
     } else {
-      int rs = evalSlot(as.value.get());
       rawInvAll();  // direct movsd traffic below bypasses the reg cache
-      emit("    movsd " + slotRef(rs) + ", %xmm0\n");
+      if (!emitFloatXmm(as.value.get(), "%xmm0")) {
+        int rs = evalSlot(as.value.get());
+        emit("    movsd " + slotRef(rs) + ", %xmm0\n");
+      }
       emit(std::string("    addsd %xmm0, ") + xr + "\n");
       emit("    ucomisd " + xr + ", " + xr + "\n");
       emit("    jp " + nanL + "\n");
@@ -883,6 +934,185 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       curGprSlot_ = -1;
     }
     loopXmmExit(xmmMark);  // flushes the resident accumulator to its slot
+    return true;
+  }
+
+// `acc += v` for a tryEmitWhileFloat resident accumulator: v lands in
+// xmm0 as raw double bits (emitFloatXmm, or the aval fallback), one
+// addsd into the resident register, NaN canonicalized exactly like the
+// aval add path (ucomisd+jp -> kCanonNaN).
+void AsmEmitter::emitWhileFloatAdd(ABinding* b, const Expr* v) {
+    auto it = loopXmm_.find(b->slot);
+    if (it == loopXmm_.end()) {
+      fail("float accumulator lost xmm residency");
+      return;
+    }
+    const std::string xr = "%xmm" + std::to_string(it->second);
+    if (!emitFloatXmm(v, "%xmm0")) {
+      int vs = evalSlot(v);
+      emit("    movsd " + slotRef(vs) + ", %xmm0\n");
+    }
+    emit("    addsd %xmm0, " + xr + "\n");
+    std::string nanL = newLabel("whnan"), doneL = newLabel("whdone");
+    emit("    ucomisd " + xr + ", " + xr + "\n    jp " + nanL +
+         "\n    jmp " + doneL + "\n");
+    emitLabel(nanL);
+    movImm(kCanonNaN);
+    emit("    movq %rax, " + xr + "\n");
+    emitLabel(doneL);
+  }
+
+// `while cond: <stmts>` where top-level `acc += <float>` assigns keep a
+// plain float local in an XMM register for the whole loop. The loop is
+// rotated (cond -> promote -> body -> cond) so the int->double promote
+// only runs when the body executes at least once; zero-iteration whiles
+// leave every accumulator bit-identical. Every write to an accumulator
+// name must be one of the candidate += stmts — proven via
+// collectStmtWrites on all other statements and scanExprPure write
+// collection on conditions/candidate values — so the resident register
+// always holds double bits when addsd runs.
+bool AsmEmitter::tryEmitWhileFloat(const WhileStmt& st) {
+    struct WFc {
+      ABinding* b;
+      const Expr* v;
+    };
+    std::vector<WFc> cands;
+    std::unordered_map<std::string, ABinding*> accByName;
+    std::unordered_set<std::string> accNames;
+    auto isCandAssign = [&](const Stmt* s, const AssignStmt** out) {
+      if (!s || s->kind != StmtKind::Assign) return false;
+      const AssignStmt& as = static_cast<const AssignStmt&>(*s);
+      if (as.op != "+=" || !as.target || !as.value ||
+          as.target->kind != ExprKind::Ident ||
+          !floatXmmOk(as.value.get()))
+        return false;
+      const std::string& nm =
+          static_cast<const IdentExpr*>(as.target.get())->name;
+      auto it = accByName.find(nm);
+      if (it != accByName.end()) {
+        *out = &as;
+        return true;
+      }
+      ABinding* b = lookup(nm);
+      if (!b || b->kind != BKind::Local || b->slot < 0 || b->rawInt ||
+          b->specRaw || b->dropFn)
+        return false;
+      accByName[nm] = b;
+      accNames.insert(nm);
+      *out = &as;
+      return true;
+    };
+    // Pass 1: collect candidates (a name is only registered once its
+    // binding proves eligible, so ineligible += stays generic).
+    for (const StmtPtr& sp : st.body) {
+      const AssignStmt* as = nullptr;
+      if (isCandAssign(sp.get(), &as)) cands.push_back({accByName[
+          static_cast<const IdentExpr*>(as->target.get())->name],
+          as->value.get()});
+    }
+    if (accNames.empty()) return false;
+    // Pass 2: no other statement may write an accumulator, no condition
+    // may ++/-- one, and candidate values must be write-free.
+    std::unordered_set<std::string> writes;
+    for (const StmtPtr& sp : st.body) {
+      const Stmt* s = sp.get();
+      const AssignStmt* as = nullptr;
+      if (isCandAssign(s, &as)) {
+        // Expr-level local writes are only ++/--: promoteMarkExpr
+        // collects every such target (ps.noSpec unconditionally,
+        // ps.bad for the unproven ones) plus lambda-captured names.
+        PromoteScan mps;
+        promoteMarkExpr(as->value.get(), mps);
+        for (const std::string& nm : accNames)
+          if (mps.bad.count(nm) || mps.noSpec.count(nm)) return false;
+        continue;
+      }
+      if (!collectStmtWrites(s, &writes)) return false;
+    }
+    for (const std::string& w : writes)
+      if (accNames.count(w)) return false;
+    if (st.cond) {
+      PromoteScan cps;
+      promoteMarkExpr(st.cond.get(), cps);
+      for (const std::string& nm : accNames)
+        if (cps.bad.count(nm) || cps.noSpec.count(nm)) return false;
+    }
+    // One free XMM register per accumulator (xmm0/xmm1 stay scratch).
+    const int xmmMark = loopXmmEnter();
+    auto xmmFree = [&](int x) {
+      for (const auto& kv : loopXmm_)
+        if (kv.second == x) return false;
+      return true;
+    };
+    std::vector<std::pair<ABinding*, int>> accRegs;
+    for (auto& kv : accByName) {
+      ABinding* b = kv.second;
+      auto ait = loopXmm_.find(b->slot);
+      if (ait != loopXmm_.end()) {
+        accRegs.push_back({b, ait->second});
+        continue;
+      }
+      int reg = -1;
+      for (int x = 3; x <= 15; ++x)
+        if (xmmFree(x)) { reg = x; break; }
+      if (reg < 0) {
+        loopXmmExit(xmmMark);
+        return false;
+      }
+      // Seed the register BEFORE publishing residency so the first read
+      // comes from the authoritative slot, not an uninitialized xmm.
+      loadSlot(b->slot);
+      emit(std::string("    movq %rax, %xmm") + std::to_string(reg) + "\n");
+      loopXmm_[b->slot] = reg;
+      loopXmmAdded_.push_back(b->slot);
+      accRegs.push_back({b, reg});
+    }
+    // Rotated loop: cond -> promote -> body -> cond. `continue` targets
+    // the bottom condition; `break`/defer handling mirrors emitWhile.
+    std::string endL = newLabel("wwend"), bodyL = newLabel("wwbody"),
+                contL = newLabel("wwcont");
+    condJump(st.cond.get(), endL, false);
+    for (auto& ar : accRegs) {
+      ABinding* b = ar.first;
+      const std::string trampL = newLabel("wwtramp");
+      loadSlot(b->slot, "%rcx");  // resident: movq xmm -> rcx (aval bits)
+      emit("    mov %rcx, %rdx\n    shr $48, %rdx\n    cmp $0xFFFF, %edx\n"
+           "    je " + trampL + "\n");
+      emit("    jmp " + bodyL + "\n");
+      emitLabel(trampL);
+      loadSlot(b->slot, "%rdi");
+      movImm(0, "%rsi");  // aval 0.0
+      emit("    call a_add_slow\n");
+      storeRax(b->slot);  // resident: movq rax -> xmm
+      emit("    jmp " + bodyL + "\n");
+    }
+    emitLabel(bodyL);
+    loopBreak_.push_back(endL);
+    loopCont_.push_back(contL);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    pushScope();
+    int deferBase = (int)deferStack_.size();
+    deferStack_.emplace_back();
+    for (const StmtPtr& sp : st.body) {
+      if (failed_) break;
+      const AssignStmt* as = nullptr;
+      if (isCandAssign(sp.get(), &as)) {
+        emitWhileFloatAdd(accByName[
+            static_cast<const IdentExpr*>(as->target.get())->name],
+            as->value.get());
+      } else {
+        emitStmt(sp.get());
+      }
+    }
+    emitDeferredDownTo(deferBase);
+    popScope();
+    loopDeferDepth_.pop_back();
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    emitLabel(contL);
+    condJump(st.cond.get(), bodyL, true);
+    emitLabel(endL);
+    loopXmmExit(xmmMark);
     return true;
   }
 

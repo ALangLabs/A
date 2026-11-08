@@ -476,6 +476,21 @@ class AsmEmitter {
   // i.e. NaN — 2 instructions to detect, matching a_double_canon exactly).
     void emitXmm0ToAval(int scratch, const std::string& doneL);
 
+  // Call-free float expr -> `dst` xmm register holding raw IEEE-754
+  // bits (the same trust in statically-float types as the FP fast
+  // paths). Restricted grammar: float/int literals, float-typed local
+  // idents, f64(int) of a pure raw-safe int expr, and +,-,* of the
+  // same. Uses only xmm0/xmm1 as scratch and never emits calls, so
+  // loop-resident xmm values stay valid throughout; anything else
+  // returns false for the caller's aval fallback.
+    bool emitFloatXmm(const Expr* e, const char* dst);
+
+  // Structural mirror of emitFloatXmm's accepted grammar (float-typed
+  // leaves, f64(int), and +,-,* trees of the same). Used to detect
+  // float-accumulation candidates whose inferred type sema does not
+  // mark Float (e.g. `f64(i) * 0.5`).
+    bool floatXmmOk(const Expr* e);
+
   // Double*double arithmetic with inline SSE2: both operands must be
   // untagged doubles (checked via emitDoublePairCheck), then addsd/subsd/
   // mulsd/divsd compute the IEEE result. Division by zero (either sign of
@@ -667,6 +682,19 @@ class AsmEmitter {
   // (non-raw, non-speculative) Local accumulator and a statically-float
   // addend.
     bool tryEmitForFloatAccum(const ForStmt& st, int curS, int endS, int stepS);
+
+  // `while cond: ... acc += <float expr> ...` with the accumulator(s)
+  // held in XMM registers for the whole loop (seeded from the slot
+  // before residency is published, promoted via one a_add_slow only on
+  // the path where the body actually runs). The loop is rotated so the
+  // condition is checked before the promote block: a zero-iteration
+  // while leaves the accumulator bit-identical.
+    bool tryEmitWhileFloat(const WhileStmt& st);
+
+  // One `acc += v` inside tryEmitWhileFloat: v -> xmm0 (raw double
+  // bits), addsd into the resident register, NaN canonicalized exactly
+  // like the aval add path.
+    void emitWhileFloatAdd(ABinding* b, const Expr* v);
 
   // Upper bound on the accumulator's value at the start of the loop:
   // union of the ranges of every `=`-style write to it that textually

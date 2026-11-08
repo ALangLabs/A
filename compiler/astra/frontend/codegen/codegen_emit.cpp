@@ -529,6 +529,134 @@ void AsmEmitter::emitXmm0ToAval(int scratch, const std::string& doneL) {
     emit("    jmp " + doneL + "\n");
   }
 
+// Structural mirror of emitFloatXmm's grammar — see the header.
+bool AsmEmitter::floatXmmOk(const Expr* e) {
+    if (!e || failed_) return false;
+    switch (e->kind) {
+      case ExprKind::FloatLit:
+        return true;
+      case ExprKind::IntLit:
+        return exprIsFloat(e);
+      case ExprKind::Ident: {
+        if (!exprIsFloat(e)) return false;
+        const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+        ABinding* b = lookup(nm);
+        if (!b) return false;
+        return b->kind == BKind::Local || b->kind == BKind::Param ||
+               b->kind == BKind::Global || b->kind == BKind::FnValue ||
+               b->kind == BKind::StructCtor;
+      }
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        if (c.builtinId != BuiltinId::F64 || c.args.size() != 1 ||
+            !c.args[0].name.empty())
+          return false;
+        const Expr* arg = c.args[0].value.get();
+        // emitRawExpr may call (a_env_get/a_int_full/...) for exotic
+        // bindings; emitFloatXmm spills xmm0/xmm1 around it, so any
+        // raw-safe int operand is safe here.
+        return arg && exprIsInt(arg) && rawSafeExpr(arg);
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        if (b.op != "+" && b.op != "-" && b.op != "*") return false;
+        return floatXmmOk(b.lhs.get()) && floatXmmOk(b.rhs.get());
+      }
+      default:
+        return false;
+    }
+  }
+
+// Call-free float expr -> `dst` xmm register holding raw IEEE-754 bits.
+// Restricted grammar (see header): only xmm0/xmm1 are used as scratch
+// and no instruction sequence here can emit a call, so values already
+// sitting in those registers (or in loop-resident xmm2+) survive.
+bool AsmEmitter::emitFloatXmm(const Expr* e, const char* dst) {
+    if (!floatXmmOk(e)) return false;
+    const std::string d = dst;
+    if (e->kind == ExprKind::FloatLit) {
+      movImm(dblBits(static_cast<const FloatLitExpr&>(*e).value));
+      emit("    movq %rax, " + d + "\n");
+      return true;
+    }
+    if (e->kind == ExprKind::IntLit) {
+      // Float-typed int literal: convert like f64(i) would.
+      movImm((uint64_t)static_cast<const IntLitExpr&>(*e).value);
+      emit("    cvtsi2sd %rax, " + d + "\n");
+      return true;
+    }
+    if (e->kind == ExprKind::Ident) {
+      const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+      ABinding* b = lookup(nm);
+      if (!b) return false;
+      if (b->kind == BKind::Local || b->kind == BKind::Param) {
+        if (b->slot < 0) return false;
+        loadSlot(b->slot);  // rax = aval bits (xmm-forwarded if resident)
+      } else if (b->kind == BKind::Global || b->kind == BKind::FnValue ||
+                 b->kind == BKind::StructCtor) {
+        emit("    mov " + b->sym + "(%rip), %rax\n");
+      } else {
+        return false;  // Capture/Builtin/Module reads can call
+      }
+      emit("    movq %rax, " + d + "\n");
+      return true;
+    }
+    if (e->kind == ExprKind::Call) {
+      const CallExpr& c = static_cast<const CallExpr&>(*e);
+      const Expr* arg = c.args[0].value.get();
+      // emitRawExpr only calls for non-rawInt idents (unbox/boxing/
+      // builtin reads); when every referenced name is a raw slot the
+      // conversion is call-free and no spill is needed. Otherwise spill
+      // both scratch registers around it (calls clobber xmm0/xmm1) and
+      // restore the non-dst one afterwards.
+      const char* other = d == "%xmm0" ? "%xmm1" : "%xmm0";
+      bool mayCall = false;
+      std::set<std::string> names;
+      collectIdents(arg, names);
+      for (const std::string& nm : names) {
+        if (rawVars_.count(nm)) continue;
+        ABinding* ib = lookup(nm);
+        if (!ib || !ib->rawInt) { mayCall = true; break; }
+      }
+      int t0 = -1, t1 = -1;
+      if (mayCall) {
+        t0 = allocSlot(); t1 = allocSlot();
+        emit("    movsd %xmm0, " + slotRef(t0) + "\n    movsd %xmm1, " +
+             slotRef(t1) + "\n");
+      }
+      int s = allocSlot();
+      emitRawExpr(arg, s);
+      loadSlot(s, "%rax");
+      emit("    cvtsi2sd %rax, " + d + "\n");
+      if (mayCall)
+        emit("    movsd " +
+             slotRef(other == std::string("%xmm1") ? t1 : t0) + ", " +
+             other + "\n");
+      return true;
+    }
+    if (e->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+      if (b.op != "+" && b.op != "-" && b.op != "*") return false;
+      const char* other = d == "%xmm0" ? "%xmm1" : "%xmm0";
+      if (b.op == "-") {
+        // dst = lhs - rhs: lhs -> dst, rhs -> other.
+        if (!emitFloatXmm(b.lhs.get(), dst) ||
+            !emitFloatXmm(b.rhs.get(), other))
+          return false;
+        emit("    subsd " + std::string(other) + ", " + d + "\n");
+      } else {
+        // dst = rhs (+/*) lhs: commutative, either order is exact.
+        if (!emitFloatXmm(b.lhs.get(), other) ||
+            !emitFloatXmm(b.rhs.get(), dst))
+          return false;
+        emit(std::string("    ") + (b.op == "+" ? "addsd" : "mulsd") + " " +
+             other + ", " + d + "\n");
+      }
+      return true;
+    }
+    return false;
+  }
+
 // Double*double arithmetic with inline SSE2: both operands must be
 // untagged doubles (checked via emitDoublePairCheck), then addsd/subsd/
 // mulsd/divsd compute the IEEE result. Division by zero (either sign of

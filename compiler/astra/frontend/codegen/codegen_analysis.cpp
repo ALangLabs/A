@@ -701,18 +701,24 @@ bool AsmEmitter::emitRawModConst(const BinaryExpr& b, int ls, int rs, int out) {
         UINT64_MAX / (uint64_t)d + (((uint64_t)d & ((uint64_t)d - 1)) == 0 ? 1 : 0);
     std::string doneL = newLabel("rmmc");
     loadSlot(ls, "%rax");
+    // Save x in %r8 before mul rewrites %rax:%rdx: the remainder then
+    // computes x - q*C without reloading the operand slot or dropping
+    // every other register-cache claim (rawInvAll + reload used to cost
+    // a memory round-trip per '%' in raw loops).
+    emit("    mov %rax, %r8\n");
+    if (rawRegOn()) rawDropReg(kRR8);
     movImm(magic, "%rdx");
     emit("    mul %rdx\n"
          "    mov %rdx, %rcx\n"
          "    imul $" + std::to_string(d) + ", %rcx\n");
-    rawInvAll();  // mul rewrote %rax:%rdx outside the reg cache's model
-    loadSlot(ls, "%r8");
-    emit("    sub %rcx, %r8\n"
-         "    cmp $" + std::to_string(d) + ", %r8\n"
+    rawDropReg(kRRax);   // mul rewrote %rax:%rdx outside the reg cache's
+    rawDropReg(kRRcx);   // model; %rcx now holds q*C
+    emit("    mov %r8, %rax\n    sub %rcx, %rax\n"
+         "    cmp $" + std::to_string(d) + ", %rax\n"
          "    jl " + doneL + "\n"
-         "    sub $" + std::to_string(d) + ", %r8\n");
+         "    sub $" + std::to_string(d) + ", %rax\n");
     emitLabel(doneL);
-    emit("    mov %r8, %rax\n");
+    rawDropReg(kRRax);
     storeRax(out);
     return true;
   }
