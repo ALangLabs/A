@@ -177,6 +177,8 @@ ST_FUNC void gen_le32 (int i)
 
 ST_FUNC void gen_expr32(ExprValue *pe)
 {
+    if (pe->sym)
+        greloc(cur_text_section, pe->sym, ind, R_ARM_ABS32);
     gen_le32(pe->v);
 }
 
