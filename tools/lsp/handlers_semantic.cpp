@@ -1,3 +1,6 @@
+#include <set>
+#include <tuple>
+
 #include "handlers_common.hpp"
 
 // Semantic tokens: delta-encode [type, modifiers] per token, per the
@@ -37,14 +40,16 @@ void LanguageServer::semanticTokens(const Value& id, const Value* params, bool r
     if (len <= 0) len = 1;
     lexemes.push_back({span.line - 1, startChar, len, type, mod});
   };
-  // Precompute definition spans for classification.
-  std::unordered_set<long long> defKeys;
-  auto keyOf = [](Span s) { return (long long)s.fileId * 100000000 + (long long)s.line * 10000 + s.col; };
+  // Precompute definition spans for classification. Keyed by
+  // (fileId, line, col) so arbitrarily large files cannot collide.
+  std::set<std::tuple<int, int, int>> defKeys;
+  auto keyOf = [](Span s) { return std::make_tuple(s.fileId, s.line, s.col); };
   // Symbol kind (+ parameter flag) -> semantic token type index.
   auto tokenTypeFor = [](const SymbolDef& sym) -> int {
     if (sym.parameter) return 6;
     switch (sym.kind) {
-      case SymbolKind::Struct: case SymbolKind::Class: return 2;
+      case SymbolKind::Struct: case SymbolKind::Class:
+      case SymbolKind::Interface: return 2;
       case SymbolKind::Enum: case SymbolKind::EnumMember: return 3;
       case SymbolKind::Function: return 4;
       case SymbolKind::Method: return 5;

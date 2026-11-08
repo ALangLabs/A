@@ -6,14 +6,16 @@ class IndexBuilder {
   IndexBuilder(FileIndex& file, int moduleId) : file_(file), moduleId_(moduleId) {}
 
   void build(Program& program) {
-    file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan, {}});
+    file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan, {}, {}});
     walkBlock(program.statements, 0);
   }
 
  private:
-  int addScope(Span span, int parent, std::string implTarget = {}) {
+  int addScope(Span span, int parent, std::string implTarget = {},
+               std::string implTrait = {}) {
     int depth = parent >= 0 ? file_.scopes[static_cast<std::size_t>(parent)].depth + 1 : 0;
-    file_.scopes.push_back(ScopeInfo{parent, depth, span, std::move(implTarget)});
+    file_.scopes.push_back(
+        ScopeInfo{parent, depth, span, std::move(implTarget), std::move(implTrait)});
     return static_cast<int>(file_.scopes.size()) - 1;
   }
 
@@ -158,9 +160,16 @@ class IndexBuilder {
       }
       case StmtKind::FnDecl: {
         auto& fn = static_cast<FnDecl&>(stmt);
-        addSymbol(fn.name, fn.nameSpan, SymbolKind::Function, signatureText(fn), {}, scope, true);
+        int fnIndex =
+            addSymbol(fn.name, fn.nameSpan, SymbolKind::Function, signatureText(fn), {},
+                      scope, true);
         Span bodySpan = blockSpan(fn.body, stmt.span);
         int fnScope = addScope(bodySpan, scope);
+        // memberScope doubles as the callable's body scope so workspace
+        // symbols can name the enclosing function for locals.
+        if (fnIndex >= 0) {
+          file_.symbols[static_cast<std::size_t>(fnIndex)].memberScope = fnScope;
+        }
         addParams(fn, fnScope, {});
         walkBlock(fn.body, fnScope);
         return;
@@ -181,10 +190,14 @@ class IndexBuilder {
         }
         for (auto& method : decl.methods) {
           if (!method) continue;
-          addSymbol(method->name, method->nameSpan, SymbolKind::Method, signatureText(*method),
-                    {}, memberScope, true);
+          int methodIndex =
+              addSymbol(method->name, method->nameSpan, SymbolKind::Method,
+                        signatureText(*method), {}, memberScope, true);
           Span bodySpan = blockSpan(method->body, method->span);
           int fnScope = addScope(bodySpan, memberScope);
+          if (methodIndex >= 0) {
+            file_.symbols[static_cast<std::size_t>(methodIndex)].memberScope = fnScope;
+          }
           addParams(*method, fnScope, decl.name);
           walkBlock(method->body, fnScope);
         }
@@ -207,28 +220,41 @@ class IndexBuilder {
       }
       case StmtKind::TraitDecl: {
         auto& traitDecl = static_cast<TraitDecl&>(stmt);
-        addSymbol(traitDecl.name, traitDecl.nameSpan, SymbolKind::Enum, "trait " + traitDecl.name, traitDecl.name, scope, true);
+        int traitIndex =
+            addSymbol(traitDecl.name, traitDecl.nameSpan, SymbolKind::Interface,
+                      "trait " + traitDecl.name, traitDecl.name, scope, true);
+        // Trait signatures live in their own member scope so they do not
+        // resolve as top-level names.
+        int traitScope = addScope(stmt.span, scope);
+        if (traitIndex >= 0) {
+          file_.symbols[static_cast<std::size_t>(traitIndex)].memberScope = traitScope;
+        }
         for (const auto& sig : traitDecl.methods) {
           addSymbol(sig.name, sig.span, SymbolKind::Method,
-                    traitDecl.name + "." + sig.name, sig.name, scope, true);
+                    traitDecl.name + "." + sig.name, sig.name, traitScope, true);
         }
         return;
       }
       case StmtKind::ImplDecl: {
         auto& impl = static_cast<ImplDecl&>(stmt);
-        addSymbol(impl.targetName, impl.targetSpan, SymbolKind::Enum,
+        addSymbol(impl.targetName, impl.targetSpan, SymbolKind::Interface,
                   "impl " + impl.traitName + " for " + impl.targetName, impl.traitName,
                   scope, true);
         // Index impl methods like struct methods, but tag the member scope
         // with the implemented type so `x.method()` resolves through
-        // findStructMember's impl-scope fallback.
-        int memberScope = addScope(stmt.span, scope, impl.targetName);
+        // findStructMember's impl-scope fallback, and with the trait so
+        // hover can report the conformance.
+        int memberScope = addScope(stmt.span, scope, impl.targetName, impl.traitName);
         for (auto& method : impl.methods) {
           if (!method) continue;
-          addSymbol(method->name, method->nameSpan, SymbolKind::Method, signatureText(*method),
-                    {}, memberScope, true);
+          int methodIndex =
+              addSymbol(method->name, method->nameSpan, SymbolKind::Method,
+                        signatureText(*method), {}, memberScope, true);
           Span bodySpan = blockSpan(method->body, method->span);
           int fnScope = addScope(bodySpan, memberScope);
+          if (methodIndex >= 0) {
+            file_.symbols[static_cast<std::size_t>(methodIndex)].memberScope = fnScope;
+          }
           addParams(*method, fnScope, impl.targetName);
           walkBlock(method->body, fnScope);
         }
@@ -386,6 +412,81 @@ class IndexBuilder {
   int moduleId_ = -1;
 };
 
+namespace {
+
+// `impl Trait for Type` conformance: marks the target type's own methods
+// whose names match the trait's signatures (impl bodies are usually `pass`),
+// plus any methods written inside the impl block, so hover can report
+// "implements Trait". Runs after every module is indexed because the trait
+// and the type may live in different files.
+void linkTraitImpls(Compilation& compilation) {
+  struct ImplRef {
+    std::string trait;
+    std::string target;
+  };
+  std::vector<std::pair<std::string, std::vector<std::string>>> traitSigs;
+  std::vector<ImplRef> impls;
+  for (const Module& module : compilation.graph.modules) {
+    if (!module.program) continue;
+    for (const auto& statement : module.program->statements) {
+      if (!statement) continue;
+      if (statement->kind == StmtKind::TraitDecl) {
+        const auto& decl = static_cast<const TraitDecl&>(*statement);
+        std::vector<std::string> names;
+        for (const auto& sig : decl.methods) names.push_back(sig.name);
+        traitSigs.emplace_back(lastSegment(decl.name), std::move(names));
+      } else if (statement->kind == StmtKind::ImplDecl) {
+        const auto& decl = static_cast<const ImplDecl&>(*statement);
+        impls.push_back(ImplRef{decl.traitName, lastSegment(decl.targetName)});
+      }
+    }
+  }
+  if (impls.empty()) return;
+  auto sigNamesFor = [&](const std::string& trait) -> const std::vector<std::string>* {
+    const std::string leaf = lastSegment(trait);
+    for (const auto& entry : traitSigs) {
+      if (entry.first == leaf) return &entry.second;
+    }
+    return nullptr;
+  };
+  for (const ImplRef& impl : impls) {
+    const std::vector<std::string>* sigNames = sigNamesFor(impl.trait);
+    for (FileIndex& file : compilation.indexes) {
+      // Methods written inside the `impl Trait for Type` body itself.
+      for (std::size_t scopeIdx = 0; scopeIdx < file.scopes.size(); ++scopeIdx) {
+        const ScopeInfo& scope = file.scopes[scopeIdx];
+        if (scope.implTrait != impl.trait ||
+            lastSegment(scope.implTarget) != impl.target) {
+          continue;
+        }
+        for (SymbolDef& symbol : file.symbols) {
+          if (symbol.scope == static_cast<int>(scopeIdx)) {
+            symbol.implementedTrait = impl.trait;
+          }
+        }
+      }
+      if (!sigNames) continue;
+      // The target type's own methods that satisfy the trait signatures.
+      const SymbolDef* typeSymbol = findTopLevel(file, impl.target);
+      if (!typeSymbol || typeSymbol->memberScope < 0) continue;
+      for (SymbolDef& symbol : file.symbols) {
+        if (symbol.scope != typeSymbol->memberScope ||
+            symbol.kind != SymbolKind::Method) {
+          continue;
+        }
+        for (const std::string& name : *sigNames) {
+          if (symbol.name == name) {
+            symbol.implementedTrait = impl.trait;
+            break;
+          }
+        }
+      }
+    }
+  }
+}
+
+}  // namespace
+
 std::unique_ptr<Compilation> analyzeDocument(const std::string& path, const std::string& text,
                                              const std::vector<std::string>& modulePaths,
                                              const std::string& stdlibRoot) {
@@ -422,6 +523,8 @@ std::unique_ptr<Compilation> analyzeDocument(const std::string& path, const std:
     IndexBuilder builder(index, module.id);
     if (module.program) builder.build(*module.program);
   }
+
+  linkTraitImpls(*compilation);
 
   if (!compilation->sink.hasErrors()) {
     Sema sema(compilation->graph, compilation->sink);

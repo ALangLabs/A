@@ -77,6 +77,13 @@ class Base:
 
 class Child(Base):
     w: i32
+
+fn loops() -> i32:
+    acc = 0
+    for i in 0..3:
+        acc += i
+    doubled = [n * 2 for n in 0..3]
+    return acc + doubled[0]
 '''
 
 
@@ -168,7 +175,7 @@ def main() -> int:
         uri = path.as_uri()
 
         client = Client(server)
-        client.request(
+        init = client.request(
             "initialize",
             {
                 "rootUri": Path(directory).as_uri(),
@@ -712,6 +719,48 @@ def main() -> int:
         if "length_squared" not in point_children:
             fail(f"documentSymbol missing Point method: {sorted(point_children)}")
 
+        # Organize-imports is advertised as a code action kind.
+        kinds = init["result"]["capabilities"]["codeActionProvider"]["codeActionKinds"]
+        if "source.organizeImports" not in kinds:
+            fail(f"codeActionKinds missing source.organizeImports: {kinds}")
+
+        # for-loop and comprehension variables appear as locals: `i` scopes
+        # its body, `n` is a child of the `doubled` binding.
+        loops_sym = find_symbol(symbols, "loops")
+        loops_children = {c["name"] for c in loops_sym.get("children", [])} if loops_sym else set()
+        if not {"acc", "i", "doubled"}.issubset(loops_children):
+            fail(f"documentSymbol missing loops() locals: {sorted(loops_children)}")
+        doubled_sym = find_symbol(symbols, "doubled")
+        doubled_children = {c["name"] for c in doubled_sym.get("children", [])} if doubled_sym else set()
+        if "n" not in doubled_children:
+            fail(f"documentSymbol missing comprehension var n: {sorted(doubled_children)}")
+        i_sym = find_symbol(symbols, "i")
+        i_children = {c["name"] for c in i_sym.get("children", [])} if i_sym else set()
+        if "acc" not in i_children:
+            fail(f"documentSymbol for-var i missing body symbols: {sorted(i_children)}")
+
+        # workspaceSymbol includes locals with their enclosing function as
+        # containerName.
+        ws = client.request(
+            "workspace/symbol", {"query": "doubled"}
+        )["result"]
+        doubled_hits = [h for h in ws if h["name"] == "doubled"]
+        if not doubled_hits or doubled_hits[0].get("containerName") != "loops":
+            fail(f"workspaceSymbol missing local doubled/loops: {ws}")
+
+        # documentHighlight kinds: `acc` is written (`=`, `+=`) and read.
+        acc_line, acc_col = position_of("acc = 0")
+        hl = client.request(
+            "textDocument/documentHighlight",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": acc_line, "character": acc_col},
+            },
+        )["result"]
+        kinds = {h.get("kind") for h in hl}
+        if kinds != {2, 3}:
+            fail(f"documentHighlight kinds for acc unexpected: {hl}")
+
         # Code actions on a second document with real diagnostics: W0001
         # (unused let) and W0002 (statement after return).
         bad_path = Path(directory) / "bad.a"
@@ -793,6 +842,113 @@ def main() -> int:
         if not any(e["newText"].startswith("_") for e in fix_edits):
             fail(f"source.fixAll edits unexpected: {fix_edits}")
 
+        # Trait/impl: documentSymbol shows the impl block, and hover on the
+        # conforming method reports the trait it implements.
+        trait_path = Path(directory) / "trait.a"
+        trait_uri = trait_path.as_uri()
+        trait_source = (
+            "trait Named:\n"
+            "    fn label(self) -> str\n"
+            "\n"
+            "class Item:\n"
+            "    fn label(self) -> str:\n"
+            "        return \"item\"\n"
+            "\n"
+            "impl Named for Item:\n"
+            "    pass\n"
+        )
+        trait_path.write_text(trait_source, encoding="utf-8")
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": trait_uri,
+                    "languageId": "a",
+                    "version": 1,
+                    "text": trait_source,
+                }
+            },
+        )
+        trait_diags = None
+        for _ in range(3):
+            note = client.wait_notification("textDocument/publishDiagnostics")
+            if note["params"]["uri"] == trait_uri:
+                trait_diags = note["params"]["diagnostics"]
+                break
+        trait_symbols = client.request(
+            "textDocument/documentSymbol", {"textDocument": {"uri": trait_uri}}
+        )["result"]
+        trait_names = {s["name"] for s in trait_symbols}
+        if "impl Named for Item" not in trait_names:
+            fail(f"documentSymbol missing impl block: {trait_names}")
+        trait_lines = trait_source.splitlines()
+        method_line = next(
+            i for i, text in enumerate(trait_lines)
+            if "fn label" in text and i > next(j for j, t in enumerate(trait_lines) if t.startswith("class Item"))
+        )
+        method_col = trait_lines[method_line].index("label")
+        hover = client.request(
+            "textDocument/hover",
+            {"textDocument": {"uri": trait_uri}, "position": {"line": method_line, "character": method_col}},
+        )["result"]
+        if not hover or "implements Named" not in hover["contents"]["value"]:
+            fail(f"hover on impl method missing trait note: {hover}")
+
+        # Organize imports: sorts a contiguous run (quoted, std:, from),
+        # dedupes exact repeats, and collapses the removed line.
+        (Path(directory) / "a.a").write_text("fn ax() -> i32:\n    return 1\n", encoding="utf-8")
+        (Path(directory) / "b.a").write_text("fn bx() -> i32:\n    return 2\n", encoding="utf-8")
+        imp_path = Path(directory) / "imp.a"
+        imp_uri = imp_path.as_uri()
+        imp_source = (
+            "import std:json\n"
+            "import \"b.a\"\n"
+            "import std:core\n"
+            "from \"a.a\" import ax\n"
+            "import \"a.a\"\n"
+            "import std:json\n"
+        )
+        imp_path.write_text(imp_source, encoding="utf-8")
+        client.notify(
+            "textDocument/didOpen",
+            {
+                "textDocument": {
+                    "uri": imp_uri,
+                    "languageId": "a",
+                    "version": 1,
+                    "text": imp_source,
+                }
+            },
+        )
+        for _ in range(4):
+            note = client.wait_notification("textDocument/publishDiagnostics")
+            if note["params"]["uri"] == imp_uri:
+                break
+        actions = client.request(
+            "textDocument/codeAction",
+            {
+                "textDocument": {"uri": imp_uri},
+                "range": {
+                    "start": {"line": 0, "character": 0},
+                    "end": {"line": 0, "character": 0},
+                },
+                "context": {"only": ["source.organizeImports"]},
+            },
+        )["result"]
+        organize = [a for a in actions if a.get("kind") == "source.organizeImports"]
+        if not organize:
+            fail(f"codeAction missing organizeImports: {actions}")
+        expected_imports = (
+            "from \"a.a\" import ax\n"
+            "import \"a.a\"\n"
+            "import \"b.a\"\n"
+            "import std:core\n"
+            "import std:json\n"
+        )
+        edits = organize[0]["edit"]["changes"][imp_uri]
+        if len(edits) != 1 or edits[0]["newText"] != expected_imports:
+            fail(f"organizeImports edit unexpected: {edits}")
+
         # Async checking: didChange only enqueues (200ms debounce); a later
         # publishDiagnostics proves the worker ran without blocking requests.
         # Two rapid edits must coalesce (latest wins) instead of checking twice.
@@ -827,7 +983,9 @@ def main() -> int:
             "code actions, call/type hierarchy, code lens, range formatting, "
             "pull diagnostics, moniker, document links, param hints, "
             "semantic token types, self completion, import hover, "
-            "hierarchical symbols, code-action quickfixes and fixAll"
+            "hierarchical symbols, code-action quickfixes and fixAll, "
+            "organizeImports, read/write highlights, loop/comprehension "
+            "locals, workspace-symbol containers, trait impl hover"
         )
 
     return 0

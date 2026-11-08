@@ -79,10 +79,12 @@ struct ScopeInfo {
   int parent = -1;
   int depth = 0;
   Span span;
-  // For scopes opened by `impl Target for ...`/trait impls: the implemented
-  // type name, so member lookup can find impl methods through the type's
-  // memberScope chain. Empty for ordinary scopes.
+  // For scopes opened by `impl Trait for Type`: the implemented type name,
+  // so member lookup can find impl methods through the type's memberScope
+  // chain, and the trait name for trait-impl hover hints. Empty for
+  // ordinary scopes.
   std::string implTarget;
+  std::string implTrait;
 };
 
 struct SymbolDef {
@@ -95,7 +97,8 @@ struct SymbolDef {
   bool hoisted = false;
   bool topLevel = false;
   bool parameter = false;   // fn/method/lambda parameter (semantic token `parameter`)
-  int memberScope = -1;  // struct fields, methods, and enum variants
+  int memberScope = -1;  // type member scope, or a callable's body scope
+  std::string implementedTrait;  // trait this method implements, when known
 };
 
 // `alias` refers either to a whole module or to one name imported with

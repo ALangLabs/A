@@ -42,6 +42,137 @@ using a::lsp::ResolvedSymbol;
 using a::lsp::SymbolDef;
 using a::lsp::SymbolKind;
 
+namespace {
+
+// Spans of identifiers written by the entry module's statements:
+// assignment targets (including the receiver root of `x.f =` / `x[i] =`),
+// destructuring names, `let` bindings, and `for` variables. Keyed by
+// (line << 32) | col — collision-free for any realistic file.
+using WriteSet = std::unordered_set<long long>;
+inline long long writeKey(int line, int col) {
+  return (static_cast<long long>(line) << 32) | static_cast<unsigned int>(col);
+}
+inline void markWrite(WriteSet& out, const Span& span) {
+  if (span.valid()) out.insert(writeKey(span.line, span.col));
+}
+
+// Marks the root identifier of an assignment target chain: `x` in `x = `,
+// `x.f = `, `x.f.g = `, and `x[i] = ` is the value being mutated.
+void markAssignTarget(const a::Expr* expr, WriteSet& out) {
+  if (!expr) return;
+  switch (expr->kind) {
+    case a::ExprKind::Ident:
+      markWrite(out, expr->span);
+      return;
+    case a::ExprKind::Field:
+      markAssignTarget(static_cast<const a::FieldExpr&>(*expr).object.get(), out);
+      return;
+    case a::ExprKind::SafeNav:
+      markAssignTarget(static_cast<const a::SafeNavExpr&>(*expr).object.get(), out);
+      return;
+    case a::ExprKind::Index:
+      markAssignTarget(static_cast<const a::IndexExpr&>(*expr).object.get(), out);
+      return;
+    default:
+      return;
+  }
+}
+
+void collectWriteSpans(const a::Stmt& stmt, WriteSet& out) {
+  auto block = [&](const std::vector<a::StmtPtr>& body) {
+    for (const auto& child : body) {
+      if (child) collectWriteSpans(*child, out);
+    }
+  };
+  switch (stmt.kind) {
+    case a::StmtKind::Let:
+      markWrite(out, static_cast<const a::LetStmt&>(stmt).nameSpan);
+      break;
+    case a::StmtKind::Assign:
+      markAssignTarget(static_cast<const a::AssignStmt&>(stmt).target.get(), out);
+      break;
+    case a::StmtKind::Destructure:
+      for (const Span& span : static_cast<const a::DestructureStmt&>(stmt).nameSpans) {
+        markWrite(out, span);
+      }
+      break;
+    case a::StmtKind::For:
+      markWrite(out, static_cast<const a::ForStmt&>(stmt).varSpan);
+      break;
+    default:
+      break;
+  }
+  switch (stmt.kind) {
+    case a::StmtKind::Defer:
+      if (static_cast<const a::DeferStmt&>(stmt).body) {
+        collectWriteSpans(*static_cast<const a::DeferStmt&>(stmt).body, out);
+      }
+      return;
+    case a::StmtKind::If: {
+      const auto& ifStmt = static_cast<const a::IfStmt&>(stmt);
+      for (const auto& branch : ifStmt.branches) block(branch.body);
+      block(ifStmt.elseBody);
+      return;
+    }
+    case a::StmtKind::While:
+      block(static_cast<const a::WhileStmt&>(stmt).body);
+      return;
+    case a::StmtKind::DoWhile:
+      block(static_cast<const a::DoWhileStmt&>(stmt).body);
+      return;
+    case a::StmtKind::For:
+      block(static_cast<const a::ForStmt&>(stmt).body);
+      return;
+    case a::StmtKind::Loop:
+      block(static_cast<const a::LoopStmt&>(stmt).body);
+      return;
+    case a::StmtKind::FnDecl:
+      block(static_cast<const a::FnDecl&>(stmt).body);
+      return;
+    case a::StmtKind::StructDecl:
+      for (const auto& method : static_cast<const a::StructDecl&>(stmt).methods) {
+        if (method) collectWriteSpans(*method, out);
+      }
+      return;
+    case a::StmtKind::ImplDecl:
+      for (const auto& method : static_cast<const a::ImplDecl&>(stmt).methods) {
+        if (method) collectWriteSpans(*method, out);
+      }
+      return;
+    default:
+      return;
+  }
+}
+
+// In-place mutators from method_signatures.hpp: `xs.append(v)` writes `xs`.
+bool isMutatingCall(const std::string& typeName, const std::string& method) {
+  static const char* const kArray[] = {"append", "extend",  "insert", "remove_at",
+                                       "pop",    "remove",  "clear",  "sort",
+                                       "reverse"};
+  static const char* const kMap[] = {"pop", "update", "clear"};
+  static const char* const kSet[] = {"add", "remove", "discard", "clear"};
+  const char* const* methods = nullptr;
+  std::size_t count = 0;
+  if (typeName == "array") {
+    methods = kArray;
+    count = sizeof(kArray) / sizeof(kArray[0]);
+  } else if (typeName == "map") {
+    methods = kMap;
+    count = sizeof(kMap) / sizeof(kMap[0]);
+  } else if (typeName == "set") {
+    methods = kSet;
+    count = sizeof(kSet) / sizeof(kSet[0]);
+  } else {
+    return false;
+  }
+  for (std::size_t i = 0; i < count; ++i) {
+    if (method == methods[i]) return true;
+  }
+  return false;
+}
+
+}  // namespace
+
 bool LanguageServer::validIdentifier(const std::string& name) {
   if (name.empty()) return false;
   if (!(std::isalpha(static_cast<unsigned char>(name[0])) || name[0] == '_')) return false;
@@ -425,6 +556,20 @@ void LanguageServer::documentHighlights(const Value& id, const Value* params) {
       a::lsp::resolveAt(compilation, *file, *tokens, line + 1, byteColumn);
   if (!target.valid()) return replyNull(id);
 
+  // Write spans from the entry module's AST: assignment targets, binding
+  // introductions, and for-loop variables.
+  WriteSet writes;
+  const int entryModule = compilation.graph.entry >= 0 ? compilation.graph.entry : 0;
+  if (entryModule >= 0 &&
+      static_cast<std::size_t>(entryModule) < compilation.graph.modules.size() &&
+      compilation.graph.modules[static_cast<std::size_t>(entryModule)].program) {
+    for (const auto& statement :
+         compilation.graph.modules[static_cast<std::size_t>(entryModule)]
+             .program->statements) {
+      if (statement) collectWriteSpans(*statement, writes);
+    }
+  }
+
   Value highlights = Value::array();
   for (int i = 0; i < static_cast<int>(tokens->size()); ++i) {
     const Token& token = (*tokens)[static_cast<std::size_t>(i)];
@@ -434,9 +579,23 @@ void LanguageServer::documentHighlights(const Value& id, const Value* params) {
     if (resolved.symbol->span.line != target.symbol->span.line) continue;
     if (resolved.symbol->span.col != target.symbol->span.col) continue;
     if (canonicalPath(resolved.file->path) != canonicalPath(target.file->path)) continue;
+    // DocumentHighlightKind: 1 = Text, 2 = Read, 3 = Write. Writes are
+    // assignment/binding targets and receivers of in-place mutating calls
+    // (`xs.append(v)`); everything else reads.
+    bool write = writes.count(writeKey(token.span.line, token.span.col)) != 0;
+    if (!write && resolved.symbol && i + 3 < static_cast<int>(tokens->size())) {
+      const Token& dot = (*tokens)[static_cast<std::size_t>(i + 1)];
+      const Token& method = (*tokens)[static_cast<std::size_t>(i + 2)];
+      const Token& paren = (*tokens)[static_cast<std::size_t>(i + 3)];
+      if ((dot.kind == Tok::Dot || dot.kind == Tok::QuestionDot) &&
+          method.kind == Tok::Ident && paren.kind == Tok::LParen &&
+          isMutatingCall(resolved.symbol->typeName, method.lexeme)) {
+        write = true;
+      }
+    }
     Value highlight = Value::object();
     highlight["range"] = rangeValue(document->text, token.span);
-    highlight["kind"] = 1;  // Text
+    highlight["kind"] = write ? 3 : 2;
     highlights.push(std::move(highlight));
   }
   reply(id, std::move(highlights));

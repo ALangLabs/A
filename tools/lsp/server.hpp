@@ -139,6 +139,8 @@ class LanguageServer {
                            const std::vector<a::StmtPtr>& body, Value& out);
   void outlineStmtSymbol(const Compilation& compilation, const std::string& text,
                          const a::Stmt& stmt, Value& out);
+  void outlineExprSymbols(const Compilation& compilation, const std::string& text,
+                          const a::Expr* expr, Value& out);
   void documentSymbols(const Value& id, const Value* params);
   void workspaceSymbols(const Value& id, const Value* params);
   void completion(const Value& id, const Value* params);

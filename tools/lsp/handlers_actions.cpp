@@ -29,6 +29,11 @@ void LanguageServer::codeActions(const Value& id, const Value* params) {
     for (auto& r : requestedKinds) if (r == "source.fixAll" || r == "source.fixAll.a" || r == k) return true;
     return false;
   };
+  auto wantSource = [&](const std::string& k) {
+    if (requestedKinds.empty()) return true;
+    for (auto& r : requestedKinds) if (r == k || r == "source") return true;
+    return false;
+  };
   const FileIndex* file = compilation.entryIndex();
   const std::vector<Token>* tokens = compilation.entryTokens();
   auto pushEditAction = [&](const std::string& title, const std::string& kind,
@@ -118,6 +123,162 @@ void LanguageServer::codeActions(const Value& id, const Value* params) {
     }
     if (!edits.empty()) {
       pushEditAction("Prefix all unused variables with '_'", "source.fixAll.a", edits);
+    }
+  }
+  // Organize imports: sort and dedupe inside contiguous top-level runs of
+  // import/from-import lines. Comment and blank lines inside a run stay in
+  // place (an attached comment may end up above a different import — the
+  // documented conservative limitation), and nothing is reordered across
+  // real code.
+  if (wantSource("source.organizeImports") && file) {
+    const int entry = compilation.graph.entry >= 0 ? compilation.graph.entry : 0;
+    const a::Module* module =
+        entry >= 0 && static_cast<std::size_t>(entry) < compilation.graph.modules.size()
+            ? &compilation.graph.modules[static_cast<std::size_t>(entry)]
+            : nullptr;
+    if (module && module->program) {
+      // 1-based line -> sort key, for single-line top-level import stmts.
+      std::unordered_map<int, std::string> importKeys;
+      auto moduleKey = [](bool quoted, const std::string& path,
+                          bool isStd, const std::string& stdMod, bool isPy,
+                          const std::string& pyMod, const std::string& bare,
+                          int& rank) {
+        if (quoted) {
+          rank = 0;
+          return "\"" + path + "\"";
+        }
+        if (isStd) {
+          rank = 1;
+          return "std:" + stdMod;
+        }
+        if (isPy) {
+          rank = 2;
+          return "python:" + pyMod;
+        }
+        rank = 3;
+        return bare;
+      };
+      for (const auto& statement : module->program->statements) {
+        if (!statement) continue;
+        if (statement->kind == a::StmtKind::Import) {
+          const auto& imp = static_cast<const a::ImportStmt&>(*statement);
+          if (imp.span.line != imp.span.endLine) continue;
+          int rank = 3;
+          std::string mod = moduleKey(!imp.path.empty(), imp.path, imp.stdModuleImport,
+                                      imp.stdModule, imp.pythonModuleImport,
+                                      imp.pythonModule, imp.bareName, rank);
+          std::string key = std::to_string(rank) + "i" + mod;
+          if (!imp.alias.empty()) key += " as " + imp.alias;
+          importKeys[imp.span.line] = std::move(key);
+        } else if (statement->kind == a::StmtKind::FromImport) {
+          const auto& imp = static_cast<const a::FromImportStmt&>(*statement);
+          if (imp.span.line != imp.span.endLine) continue;
+          int rank = 3;
+          std::string mod = moduleKey(!imp.path.empty(), imp.path, imp.stdModuleImport,
+                                      imp.stdModule, imp.pythonModuleImport,
+                                      imp.pythonModule, imp.bareName, rank);
+          std::string key = std::to_string(rank) + "f" + mod + " import ";
+          for (std::size_t i = 0; i < imp.items.size(); ++i) {
+            if (i) key += ",";
+            key += imp.items[i].name;
+            if (imp.items[i].alias != imp.items[i].name) {
+              key += " as " + imp.items[i].alias;
+            }
+          }
+          importKeys[imp.span.line] = std::move(key);
+        }
+      }
+      if (importKeys.size() >= 2) {
+        std::vector<std::string> lines = splitLinesKeep(document->text);
+        auto content = [](std::string& line) {
+          if (!line.empty() && line.back() == '\n') line.pop_back();
+          if (!line.empty() && line.back() == '\r') line.pop_back();
+          return line;
+        };
+        auto isPassive = [&](int lineNo) {
+          const std::string trimmed = trimLine(content(lines[static_cast<std::size_t>(lineNo - 1)]));
+          return trimmed.empty() || trimmed.front() == '#';
+        };
+        // Maximal runs of import/passive lines containing >= 2 imports.
+        for (std::size_t s = 0; s < lines.size();) {
+          if (!importKeys.count(static_cast<int>(s) + 1) && !isPassive(static_cast<int>(s) + 1)) {
+            ++s;
+            continue;
+          }
+          std::size_t e = s;
+          int importCount = 0;
+          while (e < lines.size() &&
+                 (importKeys.count(static_cast<int>(e) + 1) ||
+                  isPassive(static_cast<int>(e) + 1))) {
+            if (importKeys.count(static_cast<int>(e) + 1)) ++importCount;
+            ++e;
+          }
+          // `e` is exclusive; the run is [s, e).
+          if (importCount >= 2) {
+            // Surviving import lines (exact-text dedupe keeps the first
+            // occurrence), each tagged with its sort key and original line.
+            struct Entry {
+              int line;
+              std::string key;
+              std::string text;
+            };
+            std::vector<Entry> entries;
+            std::unordered_set<std::string> seenTexts;
+            for (std::size_t i = s; i < e; ++i) {
+              const int lineNo = static_cast<int>(i) + 1;
+              auto it = importKeys.find(lineNo);
+              if (it == importKeys.end()) continue;
+              const std::string text = trimLine(content(lines[i]));
+              if (!seenTexts.insert(text).second) continue;  // exact duplicate
+              entries.push_back(Entry{lineNo, it->second, text});
+            }
+            std::stable_sort(entries.begin(), entries.end(),
+                             [](const Entry& a, const Entry& b) { return a.key < b.key; });
+            std::unordered_map<int, std::string> lineToText;
+            std::vector<int> sortedLines;
+            for (const auto& entry : entries) {
+              lineToText[entry.line] = entry.text;
+              sortedLines.push_back(entry.line);
+            }
+            // Rebuild the run: passive lines keep their position; import
+            // lines are filled from the sorted list, and surplus positions
+            // (removed duplicates) collapse away.
+            std::vector<std::string> rebuilt;
+            std::size_t cursor = 0;
+            for (std::size_t i = s; i < e; ++i) {
+              const int lineNo = static_cast<int>(i) + 1;
+              if (importKeys.count(lineNo)) {
+                if (cursor < sortedLines.size()) {
+                  rebuilt.push_back(lineToText[sortedLines[cursor++]]);
+                }
+              } else {
+                rebuilt.push_back(content(lines[i]));
+              }
+            }
+            const std::string oldText = [&] {
+              std::string joined;
+              for (std::size_t i = s; i < e; ++i) {
+                if (i > s) joined += "\n";
+                joined += content(lines[i]);
+              }
+              return joined;
+            }();
+            std::string newText;
+            for (std::size_t i = 0; i < rebuilt.size(); ++i) {
+              if (i) newText += "\n";
+              newText += rebuilt[i];
+            }
+            if (newText != oldText) {
+              const std::string& lastLine = content(lines[e - 1]);
+              Span span{static_cast<int>(s) + 1, 1, static_cast<int>(e),
+                        static_cast<int>(lastLine.size()) + 1, 0};
+              pushEditAction("Organize imports", "source.organizeImports",
+                             {{span, newText}});
+            }
+          }
+          s = e;
+        }
+      }
     }
   }
   reply(id, std::move(actions));

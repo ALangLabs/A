@@ -355,6 +355,7 @@ void LanguageServer::handleInitialize(const Value& id, const Value* params) {
   actionKinds.push("quickfix");
   actionKinds.push("refactor");
   actionKinds.push("source.fixAll");
+  actionKinds.push("source.organizeImports");
   codeAction["codeActionKinds"] = std::move(actionKinds);
   capabilities["codeActionProvider"] = std::move(codeAction);
   Value callHierarchy = Value::object();
