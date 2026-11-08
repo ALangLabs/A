@@ -1,7 +1,8 @@
-# std.http selftest — pure-function coverage for urls.a / client.a helpers.
+# std.http selftest — urls.a / client.a helpers plus the net socket layer.
 # Run: ./build/a test stdlib/std/http/selftest.a
 from "urls.a" import UrlParts, urlsplit, urlunsplit
 from "client.a" import _headers_map, _parse_hex, _dechunk, _is_redirect_status
+import std:net
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -91,3 +92,27 @@ fn test_is_redirect_status():
     assert_eq(_is_redirect_status(304), false)
     assert_eq(_is_redirect_status(200), false)
     assert_eq(_is_redirect_status(404), false)
+
+fn test_udp_roundtrip():
+    u = net.udp_socket()
+    assert(u > 0)
+    net.udp_bind(u, "127.0.0.1", 0)
+    port = net.local_port(u)
+    assert(port > 0)
+    assert_eq(net.udp_send(u, "127.0.0.1", port, "ping"), 4)
+    net.set_timeout(u, 1000)
+    (data, host, peer) = net.udp_recv(u, 64)
+    assert_eq(data, "ping")
+    assert_eq(host, "127.0.0.1")
+    assert_eq(peer, port)
+    assert_eq(net.recv_status(u), 0)
+    net.close(u)
+
+fn test_tcp_listen_nonblocking():
+    l = net.tcp_listen("127.0.0.1", 0)
+    assert(l > 0)
+    assert(net.local_port(l) > 0)
+    net.set_nonblocking(l, true)
+    assert_eq(net.accept(l), -1)          # nothing pending on a fresh listener
+    assert_eq(len(net.poll([l], 0)), 0)   # ...and nothing readable
+    net.close(l)

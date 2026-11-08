@@ -14,15 +14,27 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     return typeArray(typeString());
   }
 
-  if (name == "net_tcp_listen" || name == "net_tcp_connect" || name == "net_tls_connect") {
-    if (call.args.size() != 2) {
+  if (name == "net_tcp_listen" || name == "net_tcp_connect" ||
+      name == "net_tls_connect" || name == "net_tls_wrap") {
+    const bool wrap = name == "net_tls_wrap";
+    const std::size_t high = name == "net_tcp_listen" ? 2 : 3;
+    if (call.args.size() < 2 || call.args.size() > high) {
       builtinArityError(name, call, 2);
       inferCallArgTypes(call);
       return typeInt(64, true);
     }
-    checkArgAgainst(*call.args[0].value, typeString(), "as the host name");
-    requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
-                   "The port number");
+    if (wrap) {
+      requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                     "The socket handle");
+      checkArgAgainst(*call.args[1].value, typeString(), "as the host name");
+    } else {
+      checkArgAgainst(*call.args[0].value, typeString(), "as the host name");
+      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                     "The port number");
+    }
+    if (call.args.size() == 3) {
+      checkArgAgainst(*call.args[2].value, typeBool(), "as the verify flag");
+    }
     return typeInt(64, true);
   }
 
@@ -141,6 +153,47 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
                    "The maximum byte count");
     return typeTuple({typeString(), typeString(), typeInt(64, true)});
+  }
+
+  if (name == "net_send_bytes") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeInt(64, true);
+    }
+    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                   "The socket handle");
+    checkArgAgainst(*call.args[1].value, typeArray(typeInt(64, true)),
+                    "as the bytes to send");
+    return typeInt(64, true);
+  }
+
+  if (name == "net_recv_bytes" || name == "net_inflate_bytes") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeArray(typeInt(64, true));
+    }
+    if (name == "net_recv_bytes") {
+      requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                     "The socket handle");
+      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                     "The maximum byte count");
+    } else {
+      checkArgAgainst(*call.args[0].value, typeArray(typeInt(64, true)),
+                      "as the compressed bytes");
+      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                     "The zlib windowBits");
+    }
+    return typeArray(typeInt(64, true));
+  }
+
+  if (name == "net_inflate_available") {
+    if (!call.args.empty()) {
+      builtinArityError(name, call, 0);
+      inferCallArgTypes(call);
+    }
+    return typeBool();
   }
 
   if (name == "net_tls_available") {

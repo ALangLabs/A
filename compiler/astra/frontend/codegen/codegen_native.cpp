@@ -29,6 +29,7 @@
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
+#include "type-checker/method_signatures.hpp"
 #include "type-checker/types.hpp"
 
 namespace a {
@@ -250,6 +251,9 @@ int builtinRuntimeId(const std::string& name) {
       {"net_set_nonblocking", 208}, {"net_poll", 209},
       {"net_udp_socket", 210}, {"net_udp_bind", 211},
       {"net_udp_send", 212}, {"net_udp_recv", 213},
+      {"net_send_bytes", 214}, {"net_recv_bytes", 215},
+      {"net_tls_wrap", 216}, {"net_inflate_bytes", 217},
+      {"net_inflate_available", 218},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -3011,7 +3015,7 @@ class NativeEmitter {
                                   ot->kind != TypeKind::Var;
             FnInfo* candidate = nullptr;
             int candidates = 0;
-            if (!isRuntimeValue) {
+            if (!isRuntimeValue && !isBuiltinValueMethod(fx.field)) {
               for (StructInfo* st : structList_) {
                 auto mit = st->methods.find(fx.field);
                 if (mit != st->methods.end()) {
@@ -4021,7 +4025,6 @@ void gcAsmFunctions(std::string& src) {
     if (!dropLine[i]) { out += lines[i]; out += '\n'; }
   src.swap(out);
 }
-
 }  // namespace
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,

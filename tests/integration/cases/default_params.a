@@ -25,3 +25,10 @@ class C:
 c = C()
 print(c.m(1))
 print(c.m(1, 5))
+
+# A dict/list method on a defaulted (untyped) parameter must dispatch on the
+# runtime value, not bind to a same-named struct method from another module.
+fn pick(m = None, xs = None):
+    return m.get("k") + xs[0]
+
+print(pick({"k": 40}, [2]))

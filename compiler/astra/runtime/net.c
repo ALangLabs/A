@@ -253,6 +253,8 @@ static int (*p_net_SSL_CTX_set_default_verify_paths)(NET_SSL_CTX *);
 static long (*p_net_SSL_ctrl)(NET_SSL *, int, long, void *);
 static int (*p_net_SSL_set1_host)(NET_SSL *, const char *);
 static long (*p_net_SSL_get_verify_result)(NET_SSL *);
+static void (*p_net_SSL_set_verify)(NET_SSL *, int, net_ssl_verify_cb);
+static int (*p_net_SSL_CTX_load_verify_locations)(NET_SSL_CTX *, const char *, const char *);
 static NET_SSL_CTX *g_net_ssl_ctx = NULL;
 static int g_net_ssl_tried = 0;
 
@@ -299,6 +301,9 @@ static int net_tls_probe(void) {
     net_ssl_sym(h, "SSL_set1_host", (void **)&p_net_SSL_set1_host);
     net_ssl_sym(h, "SSL_get_verify_result",
                 (void **)&p_net_SSL_get_verify_result);
+    net_ssl_sym(h, "SSL_set_verify", (void **)&p_net_SSL_set_verify);
+    net_ssl_sym(h, "SSL_CTX_load_verify_locations",
+                (void **)&p_net_SSL_CTX_load_verify_locations);
     g_net_ssl_ctx = p_net_SSL_CTX_new(p_net_TLS_client_method());
     if (!g_net_ssl_ctx) return 0;
     /* The ctx does not disable verification, so enable peer-cert checking:
@@ -306,6 +311,10 @@ static int net_tls_probe(void) {
        SSL_get_verify_result would be no-ops. */
     if (p_net_SSL_CTX_set_default_verify_paths)
         p_net_SSL_CTX_set_default_verify_paths(g_net_ssl_ctx);
+    /* A_TLS_CA_FILE adds a private CA bundle on top of the system roots. */
+    const char *cafile = getenv("A_TLS_CA_FILE");
+    if (cafile && *cafile && p_net_SSL_CTX_load_verify_locations)
+        p_net_SSL_CTX_load_verify_locations(g_net_ssl_ctx, cafile, NULL);
     if (p_net_SSL_CTX_set_verify)
         p_net_SSL_CTX_set_verify(g_net_ssl_ctx, NET_SSL_VERIFY_PEER, NULL);
     return 1;
@@ -324,27 +333,39 @@ static void net_ssl_free(void *ssl) {
     p_net_SSL_free((NET_SSL *)ssl);
 }
 
+/* Handshake TLS over an already-connected fd. Returns the SSL* or NULL. */
+static NET_SSL *net_tls_handshake(int fd, const char *host, int verify) {
+    NET_SSL *ssl = p_net_SSL_new(g_net_ssl_ctx);
+    if (!ssl) return NULL;
+    /* SNI + expected peer hostname for cert verification. Virtual-hosted
+       servers abort the handshake when SNI is missing. */
+    if (p_net_SSL_ctrl)
+        p_net_SSL_ctrl(ssl, NET_SSL_CTRL_SET_TLSEXT_HOSTNAME,
+                       NET_TLSEXT_NAMETYPE_host_name, (void *)host);
+    if (verify) {
+        if (p_net_SSL_set1_host) p_net_SSL_set1_host(ssl, host);
+    } else if (p_net_SSL_set_verify) {
+        p_net_SSL_set_verify(ssl, 0, NULL);
+    }
+    if (p_net_SSL_set_fd(ssl, fd) != 1 || p_net_SSL_connect(ssl) != 1 ||
+        (verify && p_net_SSL_get_verify_result &&
+         p_net_SSL_get_verify_result(ssl) != 0)) {
+        p_net_SSL_free(ssl);
+        return NULL;
+    }
+    return ssl;
+}
+
 aval bi_net_tls_connect(uint64_t n, aval *argv) {
-    want_args("net.tls_connect", n, 2, 2);
+    want_args("net.tls_connect", n, 2, 3);
     char host[256], port[16];
     net_host_port(argv[0], argv[1], host, sizeof host, port, sizeof port);
+    int verify = n == 3 ? truthy(argv[2]) : 1;
     if (!net_tls_probe()) return mkint_full(-1);
     int fd = net_tcp_connect_fd(host, port);
     if (fd < 0) return mkint_full(-1);
-    NET_SSL *ssl = p_net_SSL_new(g_net_ssl_ctx);
-    if (ssl) {
-        /* SNI + expected peer hostname for cert verification. Virtual-hosted
-           servers abort the handshake when SNI is missing. */
-        if (p_net_SSL_ctrl)
-            p_net_SSL_ctrl(ssl, NET_SSL_CTRL_SET_TLSEXT_HOSTNAME,
-                           NET_TLSEXT_NAMETYPE_host_name, host);
-        if (p_net_SSL_set1_host)
-            p_net_SSL_set1_host(ssl, host);
-    }
-    if (!ssl || p_net_SSL_set_fd(ssl, fd) != 1 || p_net_SSL_connect(ssl) != 1 ||
-        (p_net_SSL_get_verify_result &&
-         p_net_SSL_get_verify_result(ssl) != 0)) {
-        if (ssl) p_net_SSL_free(ssl);
+    NET_SSL *ssl = net_tls_handshake(fd, host, verify);
+    if (!ssl) {
         close(fd);
         return mkint_full(-1);
     }
@@ -356,6 +377,25 @@ aval bi_net_tls_connect(uint64_t n, aval *argv) {
     }
     g_socks[h - 1].ssl = ssl;
     return mkint_full(h);
+}
+
+/* TLS over an existing connection (HTTP CONNECT tunnels, STARTTLS). */
+aval bi_net_tls_wrap(uint64_t n, aval *argv) {
+    want_args("net.tls_wrap", n, 2, 3);
+    NetSock *s = net_sock_get(argv[0], "net.tls_wrap");
+    uint64_t hl;
+    const char *h = str_data(argv[1], &hl);
+    char host[256];
+    if (hl >= sizeof host) panicf("net.tls_wrap: host too long");
+    memcpy(host, h, hl);
+    host[hl] = '\0';
+    int verify = n == 3 ? truthy(argv[2]) : 1;
+    if (!net_tls_probe()) return mkint_full(-1);
+    if (s->ssl) { p_net_SSL_free(s->ssl); s->ssl = NULL; }
+    NET_SSL *ssl = net_tls_handshake(s->fd, host, verify);
+    if (!ssl) return mkint_full(-1);
+    s->ssl = ssl;
+    return argv[0];
 }
 
 
@@ -533,4 +573,166 @@ aval bi_net_udp_recv(uint64_t n, aval *argv) {
     }
     free(buf);
     return list_from_vec(items, 3, 1);
+}
+
+/* ------------------------------------------------------------------ */
+/* net: byte-array I/O and zlib decompression                          */
+/* ------------------------------------------------------------------ */
+
+/* Reads a [i64] byte list into a malloc'd buffer (values clamped to 0..255). */
+static char *net_bytes_in(aval v, uint64_t *len) {
+    aval tmp = collect_iterable(v);
+    AArr *a = (AArr *)obj_of(tmp);
+    char *buf = (char *)xmalloc(a->h.len ? a->h.len : 1);
+    for (uint64_t i = 0; i < a->h.len; ++i) {
+        int64_t b = expect_int64(arr_elem(a, i), "byte");
+        buf[i] = (char)(unsigned char)(b & 0xff);
+    }
+    *len = a->h.len;
+    return buf;
+}
+
+static aval net_bytes_out(const char *buf, uint64_t len) {
+    aval *items = (aval *)xmalloc((len ? len : 1) * sizeof(aval));
+    for (uint64_t i = 0; i < len; ++i)
+        items[i] = mkint_full((unsigned char)buf[i]);
+    aval out = list_from_vec(items, len, 0);
+    free(items);
+    return out;
+}
+
+aval bi_net_send_bytes(uint64_t n, aval *argv) {
+    want_args("net.send_bytes", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.send_bytes");
+    uint64_t len;
+    char *data = net_bytes_in(argv[1], &len);
+    size_t off = 0;
+    while (off < len) {
+        ssize_t w = s->ssl ? net_ssl_write(s->ssl, data + off, (int)(len - off))
+                           : send(s->fd, data + off, len - off, MSG_NOSIGNAL);
+        if (w <= 0) break;
+        off += (size_t)w;
+    }
+    free(data);
+    return mkint_full((int64_t)off);
+}
+
+aval bi_net_recv_bytes(uint64_t n, aval *argv) {
+    want_args("net.recv_bytes", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.recv_bytes");
+    int64_t maxb = expect_int64(argv[1], "net.recv_bytes maxBytes");
+    if (maxb <= 0) maxb = 1;
+    if (maxb > (1 << 20)) maxb = 1 << 20;
+    char *buf = (char *)xmalloc((size_t)maxb);
+    ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf, (int)maxb)
+                       : recv(s->fd, buf, (size_t)maxb, 0);
+    if (r > 0) {
+        s->recv_status = NET_RX_OK;
+    } else if (r == 0) {
+        s->recv_status = NET_RX_EOF;
+    } else {
+        s->recv_status = (errno == EAGAIN || errno == EWOULDBLOCK)
+                             ? NET_RX_TIMEOUT : NET_RX_ERR;
+    }
+    aval out = r > 0 ? net_bytes_out(buf, (uint64_t)r) : net_bytes_out("", 0);
+    free(buf);
+    return out;
+}
+
+/* zlib via dlopen: gzip/deflate bodies without a link-time dependency. */
+typedef struct {
+    const unsigned char *next_in;
+    unsigned avail_in;
+    unsigned long total_in;
+    unsigned char *next_out;
+    unsigned avail_out;
+    unsigned long total_out;
+    const char *msg;
+    void *state;
+    void *(*zalloc)(void *, unsigned, unsigned);
+    void (*zfree)(void *, void *);
+    void *opaque;
+    int data_type;
+    unsigned long adler;
+    unsigned long reserved;
+} NetZStream;
+
+static int (*p_net_inflateInit2_)(NetZStream *, int, const char *, int);
+static int (*p_net_inflate)(NetZStream *, int);
+static int (*p_net_inflateEnd)(NetZStream *);
+static const char *(*p_net_zlibVersion)(void);
+static int g_net_zlib_tried = 0;
+static int g_net_zlib_ok = 0;
+
+#define NET_ZLIB_ZEQ 0
+#define NET_ZLIB_ZSTREAM_END 1
+#define NET_ZLIB_ZBUF_ERROR (-5)
+
+static void net_zlib_probe(void) {
+    if (g_net_zlib_tried) return;
+    g_net_zlib_tried = 1;
+    const char *names[] = {"libz.so.1", "libz.so", "libz.dylib", NULL};
+    void *h = NULL;
+    for (int i = 0; names[i]; i++) {
+        h = dlopen(names[i], RTLD_NOW | RTLD_LOCAL);
+        if (h) break;
+    }
+    if (!h) return;
+    if (!net_ssl_sym(h, "inflateInit2_", (void **)&p_net_inflateInit2_) ||
+        !net_ssl_sym(h, "inflate", (void **)&p_net_inflate) ||
+        !net_ssl_sym(h, "inflateEnd", (void **)&p_net_inflateEnd) ||
+        !net_ssl_sym(h, "zlibVersion", (void **)&p_net_zlibVersion))
+        return;
+    g_net_zlib_ok = 1;
+}
+
+aval bi_net_inflate_available(uint64_t n, aval *argv) {
+    want_args("net.inflate_available", n, 0, 0);
+    net_zlib_probe();
+    return g_net_zlib_ok ? A_TRUE : A_FALSE;
+}
+
+aval bi_net_inflate_bytes(uint64_t n, aval *argv) {
+    want_args("net.inflate_bytes", n, 2, 2);
+    net_zlib_probe();
+    if (!g_net_zlib_ok) panicf("net.inflate_bytes: zlib not available");
+    int wbits = (int)expect_int64(argv[1], "net.inflate_bytes windowBits");
+    uint64_t len;
+    char *src = net_bytes_in(argv[0], &len);
+    uint64_t cap = len * 4 > 4096 ? len * 4 : 4096;
+    char *out = (char *)xmalloc(cap);
+    uint64_t got = 0;
+    NetZStream zs;
+    memset(&zs, 0, sizeof zs);
+    if (p_net_inflateInit2_(&zs, wbits, p_net_zlibVersion(), (int)sizeof zs) != NET_ZLIB_ZEQ) {
+        free(src);
+        free(out);
+        panicf("net.inflate_bytes: inflateInit2 failed");
+    }
+    zs.next_in = (const unsigned char *)src;
+    zs.avail_in = (unsigned)len;
+    int rc = NET_ZLIB_ZEQ;
+    for (;;) {
+        zs.next_out = (unsigned char *)out + got;
+        zs.avail_out = (unsigned)(cap - got);
+        rc = p_net_inflate(&zs, NET_ZLIB_ZEQ);
+        got = cap - zs.avail_out;
+        if (rc == NET_ZLIB_ZSTREAM_END) break;
+        if (rc != NET_ZLIB_ZEQ) break;
+        if (zs.avail_out == 0) {
+            cap = cap * 2;
+            out = (char *)xrealloc(out, cap);
+            continue;
+        }
+        if (zs.avail_in == 0) break; /* truncated stream */
+    }
+    p_net_inflateEnd(&zs);
+    free(src);
+    if (rc != NET_ZLIB_ZSTREAM_END) {
+        free(out);
+        panicf("net.inflate_bytes: corrupt or truncated compressed data");
+    }
+    aval result = net_bytes_out(out, got);
+    free(out);
+    return result;
 }

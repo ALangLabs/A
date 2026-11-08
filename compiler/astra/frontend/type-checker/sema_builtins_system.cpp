@@ -96,7 +96,12 @@ TypePtr Sema::checkBuiltinSystem(const std::string& name, CallExpr& call) {
     return typeArray(typeInt(64, true));
   }
 
-  if (name == "terminal_home" || name == "env_get") {
+  if (name == "terminal_home") {
+    if (!call.args.empty()) inferCallArgTypes(call);
+    return typeString();
+  }
+
+  if (name == "env_get") {
     if (!call.args.empty()) inferCallArgTypes(call);
     return typeString();
   }

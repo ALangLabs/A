@@ -1,29 +1,38 @@
 # std.http.client — HTTP/1.1 client (Python http.client / requests-lite).
 #
 # Built on the native `net` module: net.tcp_connect / net.tls_connect /
-# net.send / net.recv / net.close / net.set_timeout.
+# net.tls_wrap / net.send / net.send_bytes / net.recv / net.recv_bytes /
+# net.close / net.set_timeout / net.inflate_bytes.
 #
 #   conn = http_connection("example.com")        # or https_connection(...)
-#   conn.request("GET", "/path", headers={"X": "y"})
-#   resp = conn.getresponse()                      # -> Response
-#   resp.status, resp.reason, resp.headers, resp.body
+#   conn.request("GET", "/path", None, {"X": "y"})
+#   resp = conn.getresponse()                    # -> Response
+#   resp.status, resp.reason, resp.headers, resp.body, resp.body_bytes
 #
-#   resp = get("http://example.com/")              # one-shot helpers
-#   resp = post(url, data="...", json={...})
+#   resp = get("http://example.com/")            # one-shot helpers
+#   resp = post(url, "body", {"k": "v"})         # data, then a json value
 #
-# shortcut: bodies are A strings (UTF-8); binary payloads are not supported.
+# A has no keyword arguments: the optional parameters below are positional.
+# Bodies are read as raw bytes; `body` is the UTF-8 decode (empty when the
+# payload is binary) and `body_bytes` is always the exact payload.
+# Content-Encoding: gzip/deflate is decoded transparently when zlib is
+# available. Proxies come from http_proxy/https_proxy/no_proxy (or uppercase):
+# https requests tunnel through CONNECT and then start TLS.
 # shortcut: recv() returns "" on EOF *and* on timeout — bodies delimited by
 #   connection close rely on the server closing promptly.
 import std:net
 import std:core
+import std:env
 from std:json import parse as parse_json, stringify as stringify_json
-from "urls.a" import urlsplit, urlunsplit, UrlParts
+from std:bytes import b2s, utf8_decode
+from "urls.a" import urlsplit, urlunsplit, UrlParts, _default_port
 
 class Response:
     status: i64
     reason: String
     headers: {String: String}
     body: String
+    body_bytes: [i64]
     url: String
     encoding: String
     is_ok: bool
@@ -69,10 +78,7 @@ fn _parse_hex(s: String):
         val = val * 16 + d
     return val
 
-"""
-_dechunk(s) -> String decoding a complete chunked transfer body (pure).
-Chunk data may itself contain "\r\n", so this walks by byte offsets.
-"""
+"""_dechunk(s) -> String decoding a complete chunked transfer body (pure)."""
 fn _dechunk(s: String):
     body = ""
     pos = 0
@@ -91,101 +97,234 @@ fn _dechunk(s: String):
         pos = pos + size + 2
     return body
 
+"""_b_find_from(buf, pat, start) -> i64 index of pat in buf, -1 when absent."""
+fn _b_find_from(buf: [i64], pat: [i64], start: i64):
+    n = len(buf)
+    m = len(pat)
+    if m == 0 or start < 0 or start > n:
+        return -1
+    i = start
+    while i + m <= n:
+        j = 0
+        ok = true
+        while j < m:
+            if buf[i + j] != pat[j]:
+                ok = false
+                break
+            j = j + 1
+        if ok:
+            return i
+        i = i + 1
+    return -1
+
+"""_b_slice(buf, lo, hi) -> [i64] clamped copy of buf[lo:hi]."""
+fn _b_slice(buf: [i64], lo: i64, hi: i64):
+    a = lo
+    b = hi
+    if a < 0:
+        a = 0
+    if b > len(buf):
+        b = len(buf)
+    if b < a:
+        b = a
+    return buf[a..b]
+
+"""_dechunk_bytes(s) -> [i64] decoding a complete chunked body by byte offset."""
+fn _dechunk_bytes(s: [i64]):
+    body = []
+    pos = 0
+    n = len(s)
+    while pos < n:
+        e = _b_find_from(s, [13, 10], pos)
+        if e < 0:
+            break
+        size = _parse_hex(b2s(_b_slice(s, pos, e)))
+        pos = e + 2
+        if size <= 0:
+            break
+        if pos + size > n:
+            size = n - pos
+        body.extend(_b_slice(s, pos, pos + size))
+        pos = pos + size + 2
+    return body
+
 """_is_redirect_status(status) -> bool (requests REDIRECT_STATI)."""
 fn _is_redirect_status(status: i64):
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308
 
-"""
-_read_n(conn, n) -> String reading exactly n bytes via the recv buffer.
-"""
-fn _read_n(conn, n: i64):
-    out = ""
-    while len(conn._buf) < n:
-        chunk = net.recv(conn.sock, 65536)
-        if chunk == "":
+"""_fill_until(conn, pat) -> index of pat in the buffer, reading until found."""
+fn _fill_until(conn, pat: [i64]):
+    i = _b_find_from(conn._buf, pat, 0)
+    while i < 0:
+        chunk = net.recv_bytes(conn.sock, 65536)
+        if len(chunk) == 0:
             break
-        conn._buf = conn._buf + chunk
+        conn._buf.extend(chunk)
+        i = _b_find_from(conn._buf, pat, 0)
+    return i
+
+"""_read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer."""
+fn _read_n(conn, n: i64):
+    while len(conn._buf) < n:
+        chunk = net.recv_bytes(conn.sock, 65536)
+        if len(chunk) == 0:
+            break
+        conn._buf.extend(chunk)
     take = n
     if take > len(conn._buf):
         take = len(conn._buf)
-    out = conn._buf[0..take]
-    conn._buf = conn._buf[take..]
+    out = _b_slice(conn._buf, 0, take)
+    conn._buf = _b_slice(conn._buf, take, len(conn._buf))
     return out
 
-"""_read_line(conn) -> String up to and including "\r\n" ("" on EOF)."""
+"""_read_line(conn) -> [i64] up to and including CRLF ([] on EOF)."""
 fn _read_line(conn):
-    while conn._buf.find("\r\n") < 0:
-        chunk = net.recv(conn.sock, 65536)
-        if chunk == "":
-            break
-        conn._buf = conn._buf + chunk
-    i = conn._buf.find("\r\n")
+    i = _fill_until(conn, [13, 10])
     if i < 0:
         out = conn._buf
-        conn._buf = ""
+        conn._buf = []
         return out
-    out = conn._buf[0..i + 2]
-    conn._buf = conn._buf[i + 2..]
+    out = _b_slice(conn._buf, 0, i + 2)
+    conn._buf = _b_slice(conn._buf, i + 2, len(conn._buf))
     return out
 
-"""_read_headers(conn) -> ([String] raw lines, first line excluded? no: all)."""
+"""_read_headers(conn) -> [String] status line + header lines (ASCII)."""
 fn _read_headers(conn):
-    while conn._buf.find("\r\n\r\n") < 0:
-        chunk = net.recv(conn.sock, 65536)
-        if chunk == "":
-            break
-        conn._buf = conn._buf + chunk
-    i = conn._buf.find("\r\n\r\n")
-    raw = ""
+    i = _fill_until(conn, [13, 10, 13, 10])
+    raw = []
     if i < 0:
         # EOF before header terminator: treat everything as headers
         raw = conn._buf
-        conn._buf = ""
+        conn._buf = []
     else:
-        raw = conn._buf[0..i + 4]
-        conn._buf = conn._buf[i + 4..]
-    lines = raw.split("\r\n")
-    # drop trailing empty strings
-    while len(lines) > 0 and lines[len(lines) - 1] == "":
-        lines.pop()
+        raw = _b_slice(conn._buf, 0, i + 4)
+        conn._buf = _b_slice(conn._buf, i + 4, len(conn._buf))
+    lines = []
+    pos = 0
+    while pos < len(raw):
+        e = _b_find_from(raw, [13, 10], pos)
+        if e < 0:
+            lines.append(b2s(_b_slice(raw, pos, len(raw))))
+            break
+        if e == pos:
+            break
+        lines.append(b2s(_b_slice(raw, pos, e)))
+        pos = e + 2
     return lines
 
-"""_read_body(conn, headers) -> String body per framing rules."""
-fn _read_body(conn, headers):
+"""_read_body_bytes(conn, headers) -> [i64] body per framing rules."""
+fn _read_body_bytes(conn, headers):
     te = headers.get("transfer-encoding")
     if te != None and te.lower().contains("chunked"):
         # RFC 7230: chunked beats content-length when both are present
-        raw = ""
+        raw = []
         while true:
             size_line = _read_line(conn)
-            if size_line == "":
+            if len(size_line) == 0:
                 break
-            raw = raw + size_line
-            size = _parse_hex(size_line)
+            raw.extend(size_line)
+            size = _parse_hex(b2s(size_line))
             if size <= 0:
                 # consume trailers until blank line
                 while true:
                     t = _read_line(conn)
-                    if t == "" or t == "\r\n":
+                    if len(t) == 0 or b2s(t) == "\r\n":
                         break
                 break
-            raw = raw + _read_n(conn, size)
-            raw = raw + _read_line(conn)  # trailing CRLF after chunk data
-        return _dechunk(raw)
+            raw.extend(_read_n(conn, size))
+            raw.extend(_read_line(conn))  # trailing CRLF after chunk data
+        return _dechunk_bytes(raw)
     cl = headers.get("content-length")
     if cl != None:
         n = int(cl)
         if n < 0:
             n = 0
         return _read_n(conn, n)
-    # read until close
-    body = ""
+    # read until close; bytes already buffered belong to the body too
+    body = conn._buf
+    conn._buf = []
     while true:
-        chunk = net.recv(conn.sock, 65536)
-        if chunk == "":
+        chunk = net.recv_bytes(conn.sock, 65536)
+        if len(chunk) == 0:
             break
-        body = body + chunk
+        body.extend(chunk)
     return body
+
+"""_env_str(name) -> String ("" when unset; env.get returns "")."""
+fn _env_str(name: String):
+    return env.get(name)
+
+"""_no_proxy(host) -> bool from no_proxy / NO_PROXY suffix rules."""
+fn _no_proxy(host: String):
+    np = _env_str("no_proxy")
+    if np == "":
+        np = _env_str("NO_PROXY")
+    if np == "":
+        return false
+    h = host.lower()
+    for item in np.split(","):
+        d = item.strip().lower()
+        if d == "":
+            continue
+        if d == "*":
+            return true
+        if d.startswith("."):
+            d = d[1..]
+        if h == d:
+            return true
+        if len(h) > len(d) and h[len(h) - len(d)..] == d and h[len(h) - len(d) - 1] == '.':
+            return true
+    return false
+
+"""_proxy_for(scheme, host) -> (host, port) of the proxy, or ("", 0)."""
+fn _proxy_for(scheme: String, host: String):
+    if _no_proxy(host):
+        return ("", 0)
+    raw = ""
+    if scheme == "https":
+        raw = _env_str("https_proxy")
+        if raw == "":
+            raw = _env_str("HTTPS_PROXY")
+    if raw == "":
+        raw = _env_str("http_proxy")
+        if raw == "":
+            raw = _env_str("HTTP_PROXY")
+    if raw == "":
+        return ("", 0)
+    if not raw.contains("://"):
+        raw = "http://" + raw
+    p = urlsplit(raw)
+    if p == None:
+        return ("", 0)
+    q = p!
+    return (q.host, q.port)
+
+"""_read_connect_reply(sock) -> status of a proxy CONNECT reply."""
+fn _read_connect_reply(sock):
+    buf = []
+    while true:
+        chunk = net.recv_bytes(sock, 65536)
+        if len(chunk) == 0:
+            break
+        buf.extend(chunk)
+        if _b_find_from(buf, [13, 10, 13, 10], 0) >= 0:
+            break
+    lines = []
+    pos = 0
+    while pos < len(buf):
+        e = _b_find_from(buf, [13, 10], pos)
+        if e < 0:
+            break
+        if e == pos:
+            break
+        lines.append(b2s(_b_slice(buf, pos, e)))
+        pos = e + 2
+    if len(lines) == 0:
+        return 0
+    parts = lines[0].split(" ", 2)
+    if len(parts) < 2:
+        return 0
+    return int(parts[1])
 
 class HTTPConnection:
     host: String
@@ -194,8 +333,10 @@ class HTTPConnection:
     tls: bool
     sock: i64
     connected: bool
-    _buf: String        # read buffer (private by convention)
+    _buf: [i64]         # read buffer (private by convention)
     _method: String     # last request method (HEAD responses carry no body)
+    proxy: String       # "host:port" of the proxy in use, "" = direct
+    verify: bool        # check the peer certificate and host name
 
     fn _fail(self, msg):
         core.panic("http: " + msg)
@@ -206,9 +347,30 @@ class HTTPConnection:
         if self.tls:
             if not net.tls_available():
                 self._fail("TLS not available (libssl not found)")
-            self.sock = net.tls_connect(self.host, self.port)
+            if self.proxy != "":
+                (ph, pp) = _split_hostport(self.proxy)
+                tunnel = net.tcp_connect(ph, pp)
+                if tunnel < 0:
+                    self._fail("proxy connect failed: {self.proxy}")
+                if self.timeout > 0:
+                    net.set_timeout(tunnel, self.timeout)
+                authority = self.host + ":" + str(self.port)
+                req = "CONNECT " + authority + " HTTP/1.1\r\n"
+                req = req + "Host: " + authority + "\r\n\r\n"
+                net.send(tunnel, req)
+                code = _read_connect_reply(tunnel)
+                if code != 200:
+                    net.close(tunnel)
+                    self._fail("proxy CONNECT refused ({code}) for {authority}")
+                self.sock = net.tls_wrap(tunnel, self.host, self.verify)
+            else:
+                self.sock = net.tls_connect(self.host, self.port, self.verify)
         else:
-            self.sock = net.tcp_connect(self.host, self.port)
+            if self.proxy != "":
+                (ph, pp) = _split_hostport(self.proxy)
+                self.sock = net.tcp_connect(ph, pp)
+            else:
+                self.sock = net.tcp_connect(self.host, self.port)
         if self.sock < 0:
             self._fail("connect failed: {self.host}:{self.port}")
         if self.timeout > 0:
@@ -221,30 +383,44 @@ class HTTPConnection:
             net.close(self.sock)
             self.connected = false
 
-    # Send an HTTP request; body is a String or None.
-    fn request(self, method: String, path: String, body = None, headers = None):
+    # Send an HTTP request; body is a String, body_bytes an [i64] payload.
+    # path is the origin-form target unless this is a plain-HTTP proxy hop,
+    # in which case the caller passes the absolute URI.
+    fn request(self, method: String, path: String, body = None, headers = None,
+               body_bytes = None):
         self.connect()
         self._method = method.upper()
         h = ""
+        has_cl = false
         if headers != None:
             for kv in headers.items():
                 h = h + kv[0] + ": " + kv[1] + "\r\n"
-        has_body = body != None and body != ""
-        need_cl = has_body
-        if headers != None:
-            if headers.get("content-length") != None or headers.get("Content-Length") != None:
-                need_cl = false
-        if has_body and need_cl:
-            h = h + "Content-Length: " + str(len(body ?? "")) + "\r\n"
+                if kv[0].lower() == "content-length":
+                    has_cl = true
+        has_body = (body != None and body != "") or (body_bytes != None and len(body_bytes) > 0)
+        host = self.host
+        if self.port > 0 and self.port != _default_port(_scheme_of(self)):
+            host = host + ":" + str(self.port)
         req = method + " " + path + " HTTP/1.1\r\n"
-        req = req + "Host: " + self.host + "\r\n"
+        req = req + "Host: " + host + "\r\n"
         req = req + "User-Agent: a-http/0.1\r\n"
         req = req + "Accept: */*\r\n"
+        if net.inflate_available():
+            req = req + "Accept-Encoding: gzip, deflate\r\n"
         req = req + "Connection: close\r\n"
         req = req + h
+        if has_body and not has_cl:
+            n = 0
+            if body_bytes != None:
+                n = len(body_bytes)
+            else:
+                n = len(body ?? "")
+            req = req + "Content-Length: " + str(n) + "\r\n"
         req = req + "\r\n"
         net.send(self.sock, req)
-        if has_body:
+        if body_bytes != None and len(body_bytes) > 0:
+            net.send_bytes(self.sock, body_bytes)
+        elif has_body:
             net.send(self.sock, body)
         return self
 
@@ -262,46 +438,80 @@ class HTTPConnection:
         if len(parts) >= 3:
             reason = parts[2]
         hdrs = _headers_map(lines[1..])
-        body = ""
+        body_bytes = []
         if self._method != "HEAD" and status != 204 and status != 304 and status >= 200:
-            body = _read_body(self, hdrs)
+            body_bytes = _read_body_bytes(self, hdrs)
         self.close()
+        ce = hdrs.get("content-encoding", "").lower()
+        if len(body_bytes) > 0 and net.inflate_available():
+            if ce.contains("gzip") or ce.contains("deflate"):
+                body_bytes = net.inflate_bytes(body_bytes, 47)
+        decoded = utf8_decode(body_bytes)
+        body = ""
+        if decoded != None:
+            body = decoded!
         enc = hdrs.get("content-type", "")
         encoding = "utf-8"
         if enc.contains("charset="):
             i = enc.find("charset=")
             encoding = enc[i + 8..].split(";")[0].strip()
-        return Response(status, reason, hdrs, body, "", encoding, status >= 200 and status < 400)
+        return Response(status, reason, hdrs, body, body_bytes, "",
+                        encoding, status >= 200 and status < 400)
+
+"""_scheme_of(conn) -> String; the scheme a connection speaks."""
+fn _scheme_of(conn):
+    if conn.tls:
+        return "https"
+    return "http"
+
+"""_split_hostport(s) -> (host, port) splitting "host:port" on the last ':'."""
+fn _split_hostport(s: String):
+    i = s.rfind(":")
+    if i < 0:
+        return (s, 80)
+    return (s[0..i], int(s[i + 1..]))
 
 """http_connection(host, port=80, timeout=0) -> HTTPConnection"""
 fn http_connection(host: String, port = 80, timeout = 0):
-    return HTTPConnection(host, port, timeout, false, -1, false, "", "")
+    (proxy_host, proxy_port) = _proxy_for("http", host)
+    proxy = ""
+    if proxy_host != "":
+        proxy = proxy_host + ":" + str(proxy_port)
+    return HTTPConnection(host, port, timeout, false, -1, false, [], "", proxy, true)
 
-"""https_connection(host, port=443, timeout=0) -> HTTPConnection"""
-fn https_connection(host: String, port = 443, timeout = 0):
-    return HTTPConnection(host, port, timeout, true, -1, false, "", "")
+"""https_connection(host, port=443, timeout=0, verify=true) -> HTTPConnection"""
+fn https_connection(host: String, port = 443, timeout = 0, verify = true):
+    (proxy_host, proxy_port) = _proxy_for("https", host)
+    proxy = ""
+    if proxy_host != "":
+        proxy = proxy_host + ":" + str(proxy_port)
+    return HTTPConnection(host, port, timeout, true, -1, false, [], "", proxy, verify)
 
-"""_conn_for(url, timeout) -> (HTTPConnection, UrlParts) or panics."""
-fn _conn_for(url: String, timeout: i64):
+"""_conn_for(url, timeout, verify) -> (HTTPConnection, UrlParts) or panics."""
+fn _conn_for(url: String, timeout: i64, verify = true):
     parts = urlsplit(url)
     if parts == None:
         core.panic("http: bad url '{url}'")
     p = parts!
     if p.scheme == "https":
-        return (https_connection(p.host, p.port, timeout), p)
+        return (https_connection(p.host, p.port, timeout, verify), p)
     return (http_connection(p.host, p.port, timeout), p)
 
 """
 request(method, url, body=None, headers=None, params=None, timeout=0,
-        allow_redirects=true, max_redirects=10) -> Response
+        allow_redirects=true, max_redirects=10, verify=true,
+        body_bytes=None) -> Response
 One-shot request following redirects. params is a {String: String} map
-appended as a query string (not percent-encoded — shortcut).
+appended as a query string (not percent-encoded — shortcut). verify=false
+accepts self-signed certificates (requests verify=False).
 """
 fn request(method: String, url: String, body = None, headers = None,
-           params = None, timeout = 0, allow_redirects = true, max_redirects = 10):
+           params = None, timeout = 0, allow_redirects = true, max_redirects = 10,
+           verify = true, body_bytes = None):
     u = url
     m = method.upper()
     b = body
+    bb = body_bytes
     redirects = 0
     while true:
         if params != None and len(params) > 0:
@@ -312,11 +522,17 @@ fn request(method: String, url: String, body = None, headers = None,
                 u = u + sep + kv[0] + "=" + kv[1]
                 sep = "&"
             params = None
-        (conn, parts) = _conn_for(u, timeout)
+        (conn, parts) = _conn_for(u, timeout, verify)
         qpath = parts.path
         if parts.query != "":
             qpath = parts.path + "?" + parts.query
-        conn.request(m, qpath, b, headers)
+        if conn.proxy != "" and not conn.tls:
+            # plain-HTTP proxying uses the absolute request target
+            absolute = parts.scheme + "://" + parts.host
+            if parts.port > 0 and parts.port != _default_port(parts.scheme):
+                absolute = absolute + ":" + str(parts.port)
+            qpath = absolute + qpath
+        conn.request(m, qpath, b, headers, bb)
         resp = conn.getresponse()
         resp.url = u
         is_redirect = _is_redirect_status(resp.status)
@@ -329,8 +545,9 @@ fn request(method: String, url: String, body = None, headers = None,
                 if to_get:
                     m = "GET"
                     b = None
+                    bb = None
                 base = parts.scheme + "://" + parts.host
-                if parts.port > 0 and parts.port != _default_port_for(parts.scheme):
+                if parts.port > 0 and parts.port != _default_port(parts.scheme):
                     base = base + ":" + str(parts.port)
                 if loc.startswith("//"):
                     u = parts.scheme + ":" + loc
@@ -343,24 +560,16 @@ fn request(method: String, url: String, body = None, headers = None,
                 continue
         return resp
     # unreachable: while true always returns or continues
-    return Response(0, "", {}, "", "", "utf-8", false)
+    return Response(0, "", {}, "", [], "", "utf-8", false)
 
-"""_default_port_for(scheme) -> i64 local helper (mirrors urls._default_port)."""
-fn _default_port_for(scheme: String):
-    if scheme == "https":
-        return 443
-    if scheme == "http":
-        return 80
-    return 0
-
-"""get(url, **kwargs) -> Response"""
+"""get(url[, headers[, params[, timeout[, allow_redirects[, verify]]]]]) -> Response"""
 fn get(url: String, headers = None, params = None, timeout = 0,
-        allow_redirects = true):
-    return request("GET", url, None, headers, params, timeout, allow_redirects)
+        allow_redirects = true, verify = true):
+    return request("GET", url, None, headers, params, timeout, allow_redirects, 10, verify)
 
-"""post(url, data=None, json=None, **kwargs) -> Response"""
+"""post(url[, data[, json[, headers[, params[, timeout[, verify]]]]]]) -> Response"""
 fn post(url: String, data = None, json = None, headers = None,
-         params = None, timeout = 0):
+         params = None, timeout = 0, verify = true):
     b = data
     h = headers
     if json != None:
@@ -368,18 +577,19 @@ fn post(url: String, data = None, json = None, headers = None,
         if h == None:
             h = {}
         h["Content-Type"] = "application/json"
-    return request("POST", url, b, h, params, timeout)
+    return request("POST", url, b, h, params, timeout, true, 10, verify)
 
 """delete/put/patch/head helpers."""
-fn delete(url: String, headers = None, params = None, timeout = 0):
-    return request("DELETE", url, None, headers, params, timeout)
+fn delete(url: String, headers = None, params = None, timeout = 0, verify = true):
+    return request("DELETE", url, None, headers, params, timeout, true, 10, verify)
 
-fn put(url: String, data = None, headers = None, params = None, timeout = 0):
-    return request("PUT", url, data, headers, params, timeout)
+fn put(url: String, data = None, headers = None, params = None, timeout = 0,
+        verify = true):
+    return request("PUT", url, data, headers, params, timeout, true, 10, verify)
 
-fn patch(url: String, data = None, headers = None, params = None, timeout = 0):
-    return request("PATCH", url, data, headers, params, timeout)
+fn patch(url: String, data = None, headers = None, params = None, timeout = 0,
+        verify = true):
+    return request("PATCH", url, data, headers, params, timeout, true, 10, verify)
 
-fn head(url: String, headers = None, params = None, timeout = 0):
-    return request("HEAD", url, None, headers, params, timeout)
-
+fn head(url: String, headers = None, params = None, timeout = 0, verify = true):
+    return request("HEAD", url, None, headers, params, timeout, true, 10, verify)

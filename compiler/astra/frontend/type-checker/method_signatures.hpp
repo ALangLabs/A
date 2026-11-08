@@ -121,6 +121,16 @@ inline const std::vector<MethodSig>& stringMethods() {
   return methods;
 }
 
+// True for a method name the runtime implements for strings/arrays/maps/sets.
+// A call on an untyped receiver must reach these through a_method() dispatch,
+// not bind to a same-named struct method.
+inline bool isBuiltinValueMethod(const std::string& name) {
+  for (const auto* methods : {&arrayMethods(), &mapMethods(), &setMethods(), &stringMethods()})
+    for (const auto& method : *methods)
+      if (name == method.name) return true;
+  return false;
+}
+
 // Renders the sentence used by the type checker, e.g.
 // "Available array methods: append(v), extend(xs), ... ."
 inline std::string availableMethodsHelp(const char* kind, const std::vector<MethodSig>& methods) {

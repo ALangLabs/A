@@ -17,6 +17,7 @@
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
+#include "type-checker/method_signatures.hpp"
 #include "type-checker/types.hpp"
 
 namespace a::detail {
@@ -1096,7 +1097,7 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
         bool isRuntimeValue = ot && ot->kind != TypeKind::Struct &&
                               ot->kind != TypeKind::Error && ot->kind != TypeKind::Var;
         int candidates = 0;
-        if (!isRuntimeValue) {
+        if (!isRuntimeValue && !isBuiltinValueMethod(f.field)) {
           for (StructInfo* st : structList_) {
             if (st->methods.count(f.field)) {
               method = st->methods[f.field];
