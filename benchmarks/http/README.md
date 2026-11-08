@@ -1,9 +1,11 @@
 # HTTP client benchmark: A vs Python vs C++
 
 Compares `std:http` (A) against Python's `http.client` and a raw-socket C++11
-client on the **same workload**: *N* sequential `GET`s, one fresh TCP
-connection per request, headers parsed, `Content-Length` body read into memory,
-body length accumulated.
+client on the **same workload**: *N* sequential `GET`s to one host, headers
+parsed, `Content-Length` body read into memory, body length accumulated. A and
+the benchmarked Python/C++ clients keep the connection open unless the column
+says otherwise, so the table shows both a per-request-connect and a keep-alive
+column where it matters.
 
 ```sh
 cmake --build build -j            # build/a must exist
@@ -19,34 +21,39 @@ of `--reps` runs.
 
 | payload | n   | client           | total ms | ms/req | MB/s |
 |---------|-----|------------------|---------:|-------:|-----:|
-| 2 B     | 300 | A `std:http`     |    320   |  1.067 |  –   |
-| 2 B     | 300 | Python           |    234   |  0.780 |  –   |
-| 2 B     | 300 | C++ raw sockets  |    136   |  0.453 |  –   |
-| 16 KiB  | 200 | A `std:http`     |    183   |  0.915 | 17.9 |
-| 16 KiB  | 200 | Python           |    137   |  0.685 | 23.9 |
-| 16 KiB  | 200 | C++ raw sockets  |     90   |  0.450 | 36.4 |
-| 1 MiB   |  20 | A `std:http`     |     54   |  2.700 |  388 |
-| 1 MiB   |  20 | Python           |     29   |  1.450 |  723 |
-| 1 MiB   |  20 | C++ raw sockets  |     26   |  1.300 |  807 |
-| 1 MiB   |  20 | Python keep-alive|     15   |  0.750 | 1398 |
-| 1 MiB   |  20 | C++ keep-alive   |     10   |  0.500 | 2097 |
-| 10 MiB  |   5 | A `std:http`     |     86   | 17.200 |  610 |
-| 10 MiB  |   5 | Python           |    129   | 25.800 |  406 |
-| 10 MiB  |   5 | C++ raw sockets  |     34   |  6.800 | 1542 |
-| 10 MiB  |   5 | Python keep-alive|    127   | 25.400 |  413 |
-| 10 MiB  |   5 | C++ keep-alive   |     24   |  4.800 | 2185 |
+| 2 B     | 300 | A `std:http`     |    103   |  0.343 |  –   |
+| 2 B     | 300 | Python           |    193   |  0.643 |  –   |
+| 2 B     | 300 | C++ raw sockets  |    126   |  0.420 |  –   |
+| 16 KiB  | 200 | A `std:http`     |     75   |  0.375 | 43.7 |
+| 16 KiB  | 200 | Python           |    129   |  0.645 | 25.4 |
+| 16 KiB  | 200 | C++ raw sockets  |     85   |  0.425 | 38.6 |
+| 1 MiB   |  20 | A `std:http`     |     35   |  1.750 |  599 |
+| 1 MiB   |  20 | Python           |     25   |  1.250 |  839 |
+| 1 MiB   |  20 | C++ raw sockets  |     22   |  1.100 |  953 |
+| 1 MiB   |  20 | Python keep-alive|     12   |  0.600 | 1748 |
+| 1 MiB   |  20 | C++ keep-alive   |      9   |  0.450 | 2330 |
+| 10 MiB  |   5 | A `std:http`     |     75   | 15.000 |  699 |
+| 10 MiB  |   5 | Python           |    120   | 24.000 |  437 |
+| 10 MiB  |   5 | C++ raw sockets  |     35   |  7.000 | 1498 |
+| 10 MiB  |   5 | Python keep-alive|    115   | 23.000 |  456 |
+| 10 MiB  |   5 | C++ keep-alive   |     25   |  5.000 | 2097 |
 
 Numbers move ±2x with machine load (the box is shared); the ratios are stable.
 
-Keep-alive is only measured for bulk payloads: with tiny replies Python's
-`http.server` stalls 40 ms per request on persistent connections (delayed ACK),
-which would measure the fixture rather than the client. A has no connection
-pooling yet, so it has no keep-alive row.
+A reuses connections by default, so its rows are keep-alive rows; the
+`keep-alive` rows for Python and C++ exist because those clients are
+close-per-request unless told otherwise. Keep-alive is only measured for bulk
+payloads on the *other* clients for a fixture reason: against a server with
+Nagle enabled (Python's plain `http.server` defaults) a reused connection
+stalls ~40 ms per request on a delayed ACK. `srv.py` here sets
+`disable_nagle_algorithm`, and the client sets `TCP_NODELAY` on every connect,
+so both ends of this benchmark are free of that trap.
 
 ## What the numbers say
 
-**Small requests: 1.4x Python, 2.4x raw C++.** Per-request cost is dominated by
-the connect, the header parse and the server, not by A's body handling.
+**Small requests: 1.9x faster than Python and 1.2x faster than raw C++ sockets**
+(no HTTP library, no parsing). With the connect amortized, what is left is the
+header parse plus one `recv` per reply.
 
 **Bulk bodies: 2-2.5x off raw C++, and faster than Python on 10 MiB**
 (610 vs 406 MB/s; Python is 723 MB/s on 1 MiB where its per-request overhead is
@@ -92,20 +99,22 @@ benchmark moved with it:
 
 | payload | A before `Bytes` | A after |
 |---|---:|---:|
-| 1 MiB | 388 MB/s | 322-390 MB/s (same text path; the binary path 83 -> 1000 MB/s) |
-| 10 MiB | 610 MB/s | 583-620 MB/s |
+| 1 MiB | 599 MB/s | 599-620 MB/s (binary path 83 -> 1000 MB/s) |
+| 10 MiB | 699 MB/s | 583-699 MB/s |
 | 1 MiB binary body | 200 MB/s | 200 MB/s end-to-end, 5 ms/req |
 
-Bulk bodies were already dominated by the connect (A has no keep-alive pool);
-the win shows on binary payloads, which used to cost 8x the memory and are now
-straight `recv()` into the destination buffer.
+Per-request connect and teardown used to dominate every row; the keep-alive
+pool removed it, which is most of the 1 MiB jump (388 -> 599 MB/s) and the
+small-request drop (1.07 -> 0.34 ms/req).
 
 ## If A needs to close the rest
 
 1. ~~A `bytes` value type backed by `char*`/`(ptr,len)`~~ — done: `Bytes` is a
    first-class type (see above).
-2. **Connection pooling** (`Connection: keep-alive` reuse) — worth 1.4-2.2 GB/s
-   for the other two clients on 1 MiB bodies; A currently connects per request.
+2. ~~Connection pooling (`Connection: keep-alive` reuse)~~ — done: idle
+   sockets live in a small pool keyed by scheme/host/port/proxy/verify and are
+   reused only when the peer has not spoken since the last response finished
+   and the body was exactly delimited.
 3. **Value unboxing / type specialization in the compiler.** Measured on this
    box: `while` loop summing 5M ints A 48 ms vs C 10 ms (4.8x), recursive
    `fib(27)` A 18 ms vs C 1.1 ms (16x), a direct function call 17 ns vs ~3 ns.

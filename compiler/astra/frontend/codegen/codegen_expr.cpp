@@ -760,23 +760,34 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
     // (NaN -> 0x7FF8000000000000). Result aval is the raw bits in %rax.
     if ((op == "+" || op == "-" || op == "*") &&
         exprIsFloat(x.lhs.get()) && exprIsFloat(x.rhs.get())) {
+      // Keep the register cache live across the operands: a nested float
+      // binary ("x * k + c") then hands its result to the parent through
+      // %rax instead of bouncing it through a spill slot, which is what
+      // dominates the cost of a loop-carried float chain. Claims are
+      // dropped before each operand because the generic emitter does not
+      // track them.
+      ++rawRegDepth_;
+      rawInvAll();
       int ls = evalSlot(x.lhs.get());
-      int rs = evalSlot(x.rhs.get());
       loadSlot(ls);
       emit("    movq %rax, %xmm0\n");
+      rawInvAll();
+      int rs = evalSlot(x.rhs.get());
       loadSlot(rs);
       emit("    movq %rax, %xmm1\n");
       emit(std::string("    ") +
            (op == "+" ? "addsd %xmm1, %xmm0\n" :
             op == "-" ? "subsd %xmm1, %xmm0\n" : "mulsd %xmm1, %xmm0\n"));
-      std::string doneL = newLabel("fpc"), nanL = newLabel("fpnan");
-      emit("    ucomisd %xmm0, %xmm0\n");
-      emit("    jp " + nanL + "\n");
       emit("    movq %xmm0, %rax\n");
-      emit("    jmp " + doneL + "\n");
-      emitLabel(nanL);
+      // NaN canonicalization: ucomisd sets PF iff unordered, so the branch is
+      // never taken for ordinary results and costs no extra dependency.
+      std::string doneL = newLabel("fpc");
+      emit("    ucomisd %xmm0, %xmm0\n    jnp " + doneL + "\n");
+      rawDropReg(kRRax);
       emit("    mov $0x7ff8000000000000, %rax\n");
       emitLabel(doneL);
+      --rawRegDepth_;
+      rawInvAll();
       return;
     }
     int ls = evalSlot(x.lhs.get());

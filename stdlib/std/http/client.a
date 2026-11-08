@@ -302,6 +302,7 @@ fn _read_chunked(conn) -> Bytes:
 fn _read_to_close(conn) -> Bytes:
     pre = conn._buf
     conn._buf = []
+    conn._eof = true
     return net.recv_buf_all(conn.sock, pre)
 
 """_short_read(conn, got, want) -> fail; a body shorter than its framing says."""
@@ -344,6 +345,7 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
     if want_bytes:
         return BodyParts("", _read_to_close(conn))
     # close-delimited: read straight into a flat buffer until EOF
+    conn._eof = true
     pre = conn._buf
     conn._buf = []
     (text, raw) = net.recv_body_all(conn.sock, pre)
@@ -439,6 +441,9 @@ class HTTPConnection:
     proxy: String  # "host:port" of the proxy in use, "" = direct
     verify: bool  # check the peer certificate and host name
     _fetch_bytes: bool  # keep .body_bytes even when the payload is text
+    keep_alive: bool  # ask for a persistent connection (pooled reuse)
+    _reusable: bool  # last response left the connection idle and intact
+    _eof: bool  # the last body was delimited by the peer closing
 
     fn _fail(self, msg):
         core.panic("http: " + msg)
@@ -502,6 +507,8 @@ class HTTPConnection:
         self.connect()
         self._method = method.upper()
         self._fetch_bytes = fetch_bytes
+        self._reusable = false
+        self._eof = false
         h = ""
         has_cl = false
         if headers != None:
@@ -519,7 +526,11 @@ class HTTPConnection:
         req = req + "Accept: */*\r\n"
         if net.inflate_available():
             req = req + "Accept-Encoding: gzip, deflate\r\n"
-        req = req + "Connection: close\r\n"
+        if self.keep_alive:
+            req = req + "Connection: keep-alive\r\n"
+
+        else:
+            req = req + "Connection: close\r\n"
         req = req + h
         if has_body and not has_cl:
             n = 0
@@ -562,7 +573,15 @@ class HTTPConnection:
         parts = BodyParts("", Bytes(0))
         if self._method != "HEAD" and status != 204 and status != 304 and status >= 200:
             parts = _read_body(self, hdrs, self._fetch_bytes)
-        self.close()
+        # Keep the socket only when the framing closed exactly at the end of
+        # the body: a close-delimited body means the peer is gone, and an
+        # explicit `Connection: close` must be honoured.
+        conn_hdr = hdrs.get("connection", "").lower()
+        self._reusable = self.keep_alive and not self._eof and len(self._buf) == 0
+        if conn_hdr.contains("close"):
+            self._reusable = false
+        if not self._reusable:
+            self.close()
         body_bytes = parts.bytes
         ce = hdrs.get("content-encoding", "").lower()
         if len(body_bytes) > 0 and net.inflate_available():
@@ -607,7 +626,22 @@ fn http_connection(host: String, port = 80, timeout = 0):
     proxy = ""
     if proxy_host != "":
         proxy = proxy_host + ":" + str(proxy_port)
-    return HTTPConnection(host, port, timeout, false, -1, false, [], "", proxy, true, false)
+    return HTTPConnection(
+        host,
+        port,
+        timeout,
+        false,
+        -1,
+        false,
+        [],
+        "",
+        proxy,
+        true,
+        false,
+        true,
+        false,
+        false,
+    )
 
 """https_connection(host, port=443, timeout=0, verify=true) -> HTTPConnection"""
 fn https_connection(host: String, port = 443, timeout = 0, verify = true):
@@ -615,7 +649,22 @@ fn https_connection(host: String, port = 443, timeout = 0, verify = true):
     proxy = ""
     if proxy_host != "":
         proxy = proxy_host + ":" + str(proxy_port)
-    return HTTPConnection(host, port, timeout, true, -1, false, [], "", proxy, verify, false)
+    return HTTPConnection(
+        host,
+        port,
+        timeout,
+        true,
+        -1,
+        false,
+        [],
+        "",
+        proxy,
+        verify,
+        false,
+        true,
+        false,
+        false,
+    )
 
 """_conn_for(url, timeout, verify) -> (HTTPConnection, UrlParts) or panics."""
 fn _conn_for(url: String, timeout: i64, verify = true):
@@ -626,6 +675,70 @@ fn _conn_for(url: String, timeout: i64, verify = true):
     if p.scheme == "https":
         return (https_connection(p.host, p.port, timeout, verify), p)
     return (http_connection(p.host, p.port, timeout), p)
+
+# --- keep-alive connection pool -------------------------------------------
+# Idle persistent connections keyed by "scheme://host:port#proxy#verify". A
+# pooled socket is handed out only when the peer has said nothing since the
+# last response finished (a zero-timeout net.poll stays empty); a server that
+# closed the idle connection shows up as readable EOF and the socket is
+# dropped instead. That is the whole safety story: reuse never has to guess
+# whether a socket is still alive.
+_POOL_MAX = 8
+_pool_keys: [String] = []
+_pool_conns: [HTTPConnection] = []
+
+"""_pool_key(scheme, host, port, proxy, verify) -> String pool identity."""
+fn _pool_key(scheme: String, host: String, port: i64, proxy: String, verify: bool) -> String:
+    v = "0"
+    if verify:
+        v = "1"
+    return scheme + "://" + host + ":" + str(port) + "#" + proxy + "#" + v
+
+"""_pool_index(key) -> i64 slot of a parked connection, -1 when absent."""
+fn _pool_index(key: String) -> i64:
+    i = 0
+    while i < len(_pool_keys):
+        if _pool_keys[i] == key:
+            return i
+        i = i + 1
+    return -1
+
+"""_pool_take(key) -> HTTPConnection? reusing a still-idle parked socket."""
+fn _pool_take(key: String):
+    i = _pool_index(key)
+    if i < 0:
+        return None
+    c = _pool_conns.pop(i)
+    _pool_keys.pop(i)
+    if c.connected and len(net.poll([c.sock], 0)) == 0:
+        return c
+    c.close()
+    return None
+
+"""_pool_put(key, conn) -> park an idle connection (closes it otherwise)."""
+fn _pool_put(key: String, conn):
+    i = _pool_index(key)
+    if not conn._reusable or not conn.connected:
+        conn.close()
+
+    else:
+        if i >= 0:
+            _pool_conns[i] = conn
+
+        else:
+            if len(_pool_conns) >= _POOL_MAX:
+                old = _pool_conns.pop(0)
+                _pool_keys.pop(0)
+                old.close()
+            _pool_keys.append(key)
+            _pool_conns.append(conn)
+
+"""_pool_close_all() -> close every parked connection (tests, shutdown)."""
+fn _pool_close_all():
+    while len(_pool_conns) > 0:
+        c = _pool_conns.pop(0)
+        _pool_keys.pop(0)
+        c.close()
 
 """
 request(method, url, body=None, headers=None, params=None, timeout=0,
@@ -651,6 +764,13 @@ fn request(method: String, url: String, body = None, headers = None, params = No
             u = u + sep + urlencode(params)
             params = None
         (conn, parts) = _conn_for(u, timeout, verify)
+        key = _pool_key(parts.scheme, parts.host, parts.port, conn.proxy, verify)
+        reused = _pool_take(key)
+        if reused != None:
+            conn = reused
+            conn.timeout = timeout
+            if timeout > 0:
+                net.set_timeout(conn.sock, timeout)
         qpath = parts.path
         if parts.query != "":
             qpath = parts.path + "?" + parts.query
@@ -686,7 +806,9 @@ fn request(method: String, url: String, body = None, headers = None, params = No
 
                 else:
                     u = base + "/" + loc
+                _pool_put(key, conn)
                 continue
+        _pool_put(key, conn)
         return resp
     # unreachable: while true always returns or continues
     return Response(0, "", {}, "", Bytes(0), "", "utf-8", false)

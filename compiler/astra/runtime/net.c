@@ -23,6 +23,7 @@ typedef unsigned long nfds_t;
 static int net_err_wouldblock(void) { return WSAGetLastError() == WSAEWOULDBLOCK; }
 static int net_err_intr(void) { return WSAGetLastError() == WSAEINTR; }
 #else
+#include <netinet/tcp.h> /* TCP_NODELAY: keep-alive wants no Nagle delay */
 typedef int net_fd_t;
 typedef ssize_t net_ssize_t;
 #define net_close close
@@ -191,7 +192,17 @@ static net_fd_t net_tcp_connect_fd(const char *host, const char *port) {
     for (ai = res; ai; ai = ai->ai_next) {
         net_fd_t s = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
         if (s < 0) continue;
-        if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) { fd = s; break; }
+        if (connect(s, ai->ai_addr, (int)ai->ai_addrlen) == 0) {
+            /* Nagle would stall a persistent connection: with keep-alive the
+               peer holds its ACK for the next request on an idle socket, and
+               a delayed ACK landing between two writes costs ~40 ms per
+               request. Small request/response pairs want no coalescing. */
+            int one = 1;
+            setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&one,
+                       (socklen_t)sizeof one);
+            fd = s;
+            break;
+        }
         net_close(s);
     }
     freeaddrinfo(res);

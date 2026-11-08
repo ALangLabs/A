@@ -1,7 +1,7 @@
 # std.http selftest — urls.a / client.a helpers plus the net socket layer.
 # Run: ./build/a test stdlib/std/http/selftest.a
 from "urls.a" import UrlParts, urlsplit, urlunsplit, quote, urlencode
-from "client.a" import _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport
+from "client.a" import _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport, _pool_key, get
 import std:net
 
 fn assert_eq(a, b):
@@ -233,3 +233,10 @@ fn test_inflate_gzip():
         out = net.inflate_bytes(gz, 47)
         assert_eq(len(out), 15)
         assert_eq(out[0], 104)
+
+fn test_pool_key_identity():
+    assert_eq(_pool_key("http", "example.com", 80, "", true), "http://example.com:80##1")
+    assert_eq(
+        _pool_key("https", "example.com", 443, "proxy:8080", false),
+        "https://example.com:443#proxy:8080#0",
+    )
