@@ -500,7 +500,7 @@ void AsmEmitter::emitXmm0ToAval(int scratch, const std::string& doneL) {
 // slow path (fmod/pow semantics and mixed-type promotion live there).
 void AsmEmitter::emitDoubleArith(const std::string& op, int ls, int rs,
                        const std::string& slowL, const std::string& doneL,
-                       const std::string& divzL) {
+                       const std::string& divzL, bool skipPairCheck) {
     static const std::unordered_map<std::string, const char*> kSse = {
         {"+", "addsd"}, {"-", "subsd"}, {"*", "mulsd"}, {"/", "divsd"}};
     auto it = kSse.find(op);
@@ -509,7 +509,7 @@ void AsmEmitter::emitDoubleArith(const std::string& op, int ls, int rs,
       return;
     }
     rawInvAll();  // direct slotRef/slot traffic below bypasses the reg cache
-    emitDoublePairCheck(ls, rs, slowL);
+    if (!skipPairCheck) emitDoublePairCheck(ls, rs, slowL);
     if (op == "/") {
       // x + x == 0 (mod 2^64) iff x is +0.0 or -0.0; C `b == 0.0` is true
       // for both zero signs, matching the runtime panic condition.
@@ -593,6 +593,24 @@ void AsmEmitter::emitArith(const std::string& op, int ls, int rs) {
     std::string divzL, modzL;
     if (op == "/") divzL = newLabel("divz");
     if (op == "%") modzL = newLabel("modz");
+    // FP fast lane: when both operands are doubles, go straight to the
+    // SSE path instead of paying both emitUnboxInt dances first. Mixed
+    // int/double (and everything else) still falls through to the int
+    // path and then the runtime slow path — identical semantics either
+    // way, just without the two rejected unbox sequences on every op.
+    if (isArith) {
+      std::string dblL = newLabel("dgate"), pastL = newLabel("pastdgate");
+      for (int s : {ls, rs}) {
+        loadSlot(s, "%rcx");
+        emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " +
+             pastL + "\n");
+      }
+      emit("    jmp " + dblL + "\n");
+      emitLabel(dblL);
+      emitDoubleArith(op, ls, rs, slowL, doneL, divzL,
+                      /*skipPairCheck=*/true);
+      emitLabel(pastL);
+    }
     movImm(kTagInt, "%rdx");
     loadSlot(ls, "%rdi");
     emitUnboxInt("%r8", otherL);

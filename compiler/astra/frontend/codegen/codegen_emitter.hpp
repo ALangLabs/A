@@ -453,9 +453,11 @@ class AsmEmitter {
   // zero) jumps to the shared divzL panic block — identical to the
   // a_div/a_div_slow check `b == 0.0`. % / ** / mixed types stay on the
   // slow path (fmod/pow semantics and mixed-type promotion live there).
+  // skipPairCheck skips the operand re-check when the caller has already
+  // proven both operands are doubles (emitArith's dbl-first gate).
     void emitDoubleArith(const std::string& op, int ls, int rs,
                        const std::string& slowL, const std::string& doneL,
-                       const std::string& divzL);
+                       const std::string& divzL, bool skipPairCheck = false);
 
   // Double*double comparisons with inline ucomisd. ucomisd sets
   // CF/ZF/PF with PF=1 on unordered (NaN) operands; the cc sequences below

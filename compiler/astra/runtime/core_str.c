@@ -101,10 +101,24 @@ int u8_len(unsigned char c) {
     if ((c & 0xF8) == 0xF0) return 4;
     return 1;
 }
+/* Word-at-a-time helper: 1 when all eight bytes are ASCII (no high bits). */
+static int ascii_word(const char *p) {
+    uint64_t w;
+    memcpy(&w, p, sizeof w);
+    return !(w & 0x8080808080808080ull);
+}
+
 uint64_t u8_count(const char *p, uint64_t n) {
     uint64_t c = 0;
     uint64_t i = 0;
     while (i < n) {
+        /* ASCII fast path: text is almost always ASCII, and this loop runs for
+           every find/contains/slice index conversion. */
+        if (i + 8 <= n && ascii_word(p + i)) {
+            i += 8;
+            c += 8;
+            continue;
+        }
         int l = u8_len((unsigned char)p[i]);
         if (i + (uint64_t)l > n) l = 1;
         i += (uint64_t)l;
@@ -139,11 +153,18 @@ const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
         return h + *pos;
     }
     if (from > hn || nn > hn - from) return NULL;
-    for (size_t i = from; i + nn <= hn; ++i) {
-        if (memcmp(h + i, n, nn) == 0) {
-            *pos = i;
-            return h + i;
+    /* memchr for the first byte (SIMD in libc) instead of memcmp at every
+       offset: a 200 KB contains() miss cost 2 ms with the naive loop. */
+    size_t i = from;
+    while (i + nn <= hn) {
+        const void *hit = memchr(h + i, n[0], hn - nn - i + 1);
+        if (!hit) return NULL;
+        size_t cand = (size_t)((const char *)hit - h);
+        if (memcmp(h + cand, n, nn) == 0) {
+            *pos = cand;
+            return h + cand;
         }
+        i = cand + 1;
     }
     return NULL;
 }
@@ -165,7 +186,8 @@ int64_t str_find(aval hay, aval needle, int64_t start, int reverse) {
         return (int64_t)u8_count(h, pos);
     }
     for (int64_t i = (int64_t)hn - (int64_t)nn; i >= (int64_t)st_byte; --i) {
-        if (memcmp(h + i, n, (size_t)nn) == 0) return (int64_t)u8_count(h, (uint64_t)i);
+        if (h[i] == n[0] && memcmp(h + i, n, (size_t)nn) == 0)
+            return (int64_t)u8_count(h, (uint64_t)i);
     }
     return -1;
 }
