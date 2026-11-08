@@ -803,11 +803,13 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
       // track them.
       ++rawRegDepth_;
       rawInvAll();
+      // Evaluate both operands to stack slots *before* loading xmm registers:
+      // evaluating the right operand may recurse through this same fast path
+      // and clobber %xmm0/%xmm1, so neither may be live across an evalSlot.
       int ls = evalSlot(x.lhs.get());
+      int rs = evalSlot(x.rhs.get());
       loadSlot(ls);
       emit("    movq %rax, %xmm0\n");
-      rawInvAll();
-      int rs = evalSlot(x.rhs.get());
       loadSlot(rs);
       emit("    movq %rax, %xmm1\n");
       emit(std::string("    ") +
@@ -1137,7 +1139,10 @@ void AsmEmitter::emitExpr(const Expr* e) {
           loadSlot(s, "%rcx");
           emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
                "\n");
-          loadSlot(s);  // %rax = aval bits
+          // %rcx was clobbered by the tag test above; drop any register-cache
+          // claim that still maps slot s to it before reloading the raw bits.
+          rawInvAll();
+          loadSlot(s, "%rax");  // %rax = aval bits
           emit("    btc $63, %rax\n");
           // NaN iff exponent is all ones and the mantissa is nonzero.
           emit("    mov %rax, %rcx\n    shr $52, %rcx\n    and $0x7FF, %ecx\n"
@@ -1148,6 +1153,7 @@ void AsmEmitter::emitExpr(const Expr* e) {
           emitLabel(finL);
           emit("    jmp " + endL + "\n");
           emitLabel(slowL);
+          rawInvAll();
           loadSlot(s, "%rdi");
           emit("    call a_neg_slow\n");
           emitLabel(endL);

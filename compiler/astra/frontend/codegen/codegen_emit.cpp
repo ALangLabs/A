@@ -638,20 +638,17 @@ bool AsmEmitter::emitFloatXmm(const Expr* e, const char* dst) {
       const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
       if (b.op != "+" && b.op != "-" && b.op != "*") return false;
       const char* other = d == "%xmm0" ? "%xmm1" : "%xmm0";
-      if (b.op == "-") {
-        // dst = lhs - rhs: lhs -> dst, rhs -> other.
-        if (!emitFloatXmm(b.lhs.get(), dst) ||
-            !emitFloatXmm(b.rhs.get(), other))
-          return false;
-        emit("    subsd " + std::string(other) + ", " + d + "\n");
-      } else {
-        // dst = rhs (+/*) lhs: commutative, either order is exact.
-        if (!emitFloatXmm(b.lhs.get(), other) ||
-            !emitFloatXmm(b.rhs.get(), dst))
-          return false;
-        emit(std::string("    ") + (b.op == "+" ? "addsd" : "mulsd") + " " +
-             other + ", " + d + "\n");
-      }
+      // Evaluate the left operand first, then spill it: evaluating the right
+      // operand may be compound and recursively clobber the partner scratch
+      // register, which previously corrupted the left operand.
+      int lhsTmp = allocSlot();
+      if (!emitFloatXmm(b.lhs.get(), dst)) return false;
+      emit("    movsd " + d + ", " + slotRef(lhsTmp) + "\n");
+      if (!emitFloatXmm(b.rhs.get(), other)) return false;
+      emit("    movsd " + slotRef(lhsTmp) + ", " + d + "\n");
+      emit(std::string("    ") +
+           (b.op == "+" ? "addsd" : b.op == "-" ? "subsd" : "mulsd") + " " +
+           std::string(other) + ", " + d + "\n");
       return true;
     }
     return false;

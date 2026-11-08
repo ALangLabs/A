@@ -17,7 +17,8 @@ fn greet(name: String) -> String:
 - Optional parameter/return type annotations; types may be omitted.
 - Default values on trailing params: `fn f(x = 1)`; variadic `*args` collects
   extras into a list.
-- Generic type params: `fn id[T](x: T) -> T`; `comptime` params:
+- Generic type params: `fn id<T>(x: T) -> T`; generic bounds use
+  `<T: Trait>`. `comptime` params:
   `fn f(comptime N: int)`; constraints via `where`:
   `fn same(a: Point, b: Point) -> bool where Equatable:`.
 - Lambdas: `double = fn(n) => n * 2`; `(fn(x, y) => x + y)(20, 22)`.

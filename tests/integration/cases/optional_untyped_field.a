@@ -1,0 +1,16 @@
+# Safe navigation flattens optional values even for untyped fields, so chained
+# access does not become Some(Some(...)).
+class Address:
+    city
+class User:
+    name
+    address
+
+fn main():
+    u = Some(User("ann", Some(Address("paris"))))
+    print(u?.name)
+    print(u?.address)
+    print(u?.address?.city)
+    n = Some(User("bob", None))
+    print(n?.address)
+    print(n?.address?.city)

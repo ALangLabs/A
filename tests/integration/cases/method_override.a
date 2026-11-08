@@ -1,0 +1,15 @@
+# A subclass may override an inherited method (not a duplicate definition).
+class Animal:
+    name
+    fn speak(self):
+        return "..."
+
+class Dog(Animal):
+    fn speak(self):
+        return "woof"
+
+fn main():
+    d = Dog("Rex")
+    print(d.speak())
+    a = Animal("generic")
+    print(a.speak())

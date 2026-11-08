@@ -1,0 +1,9 @@
+# Unparenthesized tuple targets: `a, b = pair` and `a, b = 1, 2`.
+fn main():
+    pair = (1, 2)
+    a, b = pair
+    print(a, b)
+    x, y = 10, 20
+    print(x, y)
+    p, _, r = (7, 8, 9)
+    print(p, r)

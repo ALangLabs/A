@@ -1914,6 +1914,29 @@ inline std::vector<std::string> splitUnitText(const std::string& text, int parts
   } else {
     for (long i = 0; i < firstText; ++i) bssText += lines[(std::size_t)i];
   }
+  // Local string labels (.L__a_dN) must be repeated in every chunk because they
+  // are file-local and cannot be resolved across objects by the `-r` merge.
+  // Global data such as the __a_test_names/__a_test_fns tables must NOT be
+  // repeated: only the entry chunk that references them should define them,
+  // otherwise the merge fails with "link symbol defined twice".
+  std::string rodataLocal = rodataText;
+  {
+    std::size_t p = rodataLocal.find("    .globl __a_test_names");
+    if (p != std::string::npos) {
+      std::size_t q = rodataLocal.find("__a_test_fns:", p);
+      if (q != std::string::npos) {
+        std::size_t nl = rodataLocal.find('\n', q);
+        q = (nl == std::string::npos) ? rodataLocal.size() : nl + 1;
+        // Consume the .quad entries that follow __a_test_fns:.
+        while (q < rodataLocal.size() &&
+               rodataLocal.compare(q, 11, "    .quad ") == 0) {
+          nl = rodataLocal.find('\n', q);
+          q = (nl == std::string::npos) ? rodataLocal.size() : nl + 1;
+        }
+        rodataLocal.erase(p, q - p);
+      }
+    }
+  }
   std::vector<std::string> funcs;
   std::vector<std::size_t> funcLines;
   // first func starts at firstText; subsequent funcs at each `    .text`
@@ -1945,7 +1968,7 @@ inline std::vector<std::string> splitUnitText(const std::string& text, int parts
     gsum[(std::size_t)best] += funcLines[(std::size_t)idx];
   }
   for (int g = 0; g < nparts; ++g) {
-    std::string chunk = (g == 0 ? bssText : "") + rodataText;
+    std::string chunk = (g == 0 ? bssText + rodataText : rodataLocal);
     // Preserve source order within group for determinism.
     std::sort(groups[(std::size_t)g].begin(), groups[(std::size_t)g].end());
     for (int idx : groups[(std::size_t)g]) chunk += funcs[(std::size_t)idx];

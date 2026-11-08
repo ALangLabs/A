@@ -1,0 +1,12 @@
+# `?` propagates through functions whose return type is inferred.
+fn maybefail(n):
+    if n < 0:
+        return None
+    return Some(n * 2)
+
+fn chain(n):
+    v = maybefail(n)?
+    return Some(v + 1)
+
+fn main():
+    print(chain(3), chain(-1))

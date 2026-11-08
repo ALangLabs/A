@@ -1,0 +1,14 @@
+# Regression: SSE fast-path float arithmetic must not clobber a live operand,
+# and unary minus on a variable must reload the value (not the tag scratch).
+fn lin(x: float) -> float:
+    return 1.0 + 3.0 * x
+
+fn quad(x: float) -> float:
+    return -x * x + 2.0 * x - 1.0
+
+fn main():
+    print(lin(2.0), lin(0.0))
+    print(quad(1.0), quad(3.0))
+    x = 1.5
+    print(-x, -x * x, -(x * x))
+    print(1.0 - 0.5 * x, 2.0 / (x + 0.5))

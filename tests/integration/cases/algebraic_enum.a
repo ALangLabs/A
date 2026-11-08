@@ -1,0 +1,18 @@
+# Algebraic enums: payload construction and match destructuring by position.
+enum Shape:
+    Circle(radius)
+    Rect(w, h)
+    Empty
+
+fn area(s):
+    return match s:
+        Shape.Circle(r) => r * r * 3
+        Shape.Rect(w, h) => w * h
+        Shape.Empty => 0
+        _ => -1
+
+fn main():
+    print(area(Shape.Circle(2)))
+    print(area(Shape.Rect(3, 4)))
+    print(area(Shape.Empty))
+    print(Shape.Circle(5))
