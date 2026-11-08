@@ -1,0 +1,24 @@
+# HTTP client benchmark, A side: N sequential GETs with a fresh connection each
+# (the same discipline as bench.py / bench.cpp). run.py rewrites the two
+# constants below per workload, because std:env gives strings and A has no
+# stdlib int parser.
+from std:http import get
+import std:time
+
+N = 300
+PATH = "/tiny"
+
+fn main():
+    url = "http://127.0.0.1:8901" + PATH
+    warm = get(url, None, None, 30000)
+    if len(warm.body_bytes) == 0 and PATH != "/empty":
+        core.panic("warmup failed")
+    total = 0
+    t0 = time.now()
+    i = 0
+    while i < N:
+        r = get(url, None, None, 30000)
+        total = total + len(r.body_bytes)
+        i = i + 1
+    t1 = time.now()
+    print("TIME {t1 - t0} {total}")
