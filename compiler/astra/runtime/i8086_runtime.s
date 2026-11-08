@@ -77,10 +77,10 @@ a_add_slow:
     movl 16(%ebp), %esi
     movl 20(%ebp), %edi
     call .Lunbox
-    popl %ecx
-    popl %edx
-    addl %ecx, %esi
-    adcl %edx, %edi
+    popl %ecx            # ecx = a_hi
+    popl %edx            # edx = a_lo
+    addl %edx, %esi      # b_lo += a_lo
+    adcl %ecx, %edi      # b_hi += a_hi
     call .Lrebox
     popl %ebp
     ret
@@ -109,18 +109,19 @@ a_sub_slow:
     movl 16(%ebp), %eax
     testl $1, %eax
     jz .Ls_none
-    movl 8(%ebp), %esi
-    movl 12(%ebp), %edi
-    call .Lunbox
-    pushl %esi
-    pushl %edi
+    # want l - r: unbox r (arg2) first and save it, then l lands in esi:edi.
     movl 16(%ebp), %esi
     movl 20(%ebp), %edi
     call .Lunbox
-    popl %ecx
-    popl %edx
-    subl %ecx, %esi
-    sbbl %edx, %edi
+    pushl %esi
+    pushl %edi
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox
+    popl %ecx            # ecx = r_hi
+    popl %edx            # edx = r_lo
+    subl %edx, %esi      # l_lo -= r_lo
+    sbbl %ecx, %edi      # l_hi -= r_hi
     call .Lrebox
     popl %ebp
     ret
@@ -369,19 +370,12 @@ a_lt_slow:
     # a = edx:ecx? pops: pushed esi,edi -> ecx=edi(hi) edx=esi(lo). ugh ordering again:
     # pushed a_lo then a_hi: popl %ecx = a_hi, popl %edx = a_lo
     # b currently esi:edi
-    # compare a(edx:ecx) < b(esi:edi) signed 64
-    cmpl %esi, %edx          # a_lo vs b_lo
-    jb .Llt_maybe
-    ja .Llt_no
-    cmpl %edi, %ecx          # a_hi vs b_hi
-    jb .Llt_yes
-    jmp .Llt_no
-.Llt_maybe:
-    # a_lo < b_lo but need full compare: redo properly with hi first
-    cmpl %edi, %ecx
-    jb .Llt_yes
-    ja .Llt_no
-    cmpl %esi, %edx
+    # signed 64-bit compare a < b: a_hi=ecx a_lo=edx, b_hi=edi b_lo=esi.
+    # Compare high words signed first, then low words unsigned.
+    cmpl %edi, %ecx          # a_hi - b_hi
+    jl .Llt_yes
+    jg .Llt_no
+    cmpl %esi, %edx          # a_lo - b_lo (unsigned)
     jb .Llt_yes
     jmp .Llt_no
 .Llt_yes:
@@ -425,7 +419,9 @@ a_bi_call:
     movl (%esi), %ebx
     testl $1, %ebx
     jz .Lb_q
-    call .Lb_printint        # clobbers all caller-saved regs
+    pushl %ecx              # .Lb_printint clobbers ecx (loop counter)
+    call .Lb_printint       # clobbers all caller-saved regs
+    popl %ecx
     incl %ecx
     jmp .Lb_loop
 .Lb_q:
@@ -511,9 +507,11 @@ a_bi_call:
     call .Lputc
     ret
 
-.Lputc:                     # al -> COM1
+.Lputc:                     # al -> COM1; preserves edx (callers keep i_lo there)
+    pushl %edx
     movw $0x3F8, %dx
     outb %al, %dx
+    popl %edx
     ret
 
     .section .data
