@@ -34,13 +34,16 @@ void AsmEmitter::emit(const std::string& s) {
     // frame slots before the call and reload them right after, keeping
     // residency (and correctness on the taken path) with zero cost on
     // paths that never reach the call.
-    if (!loopXmm_.empty() &&
+    if (((!loopXmm_.empty() || endHoistSlot_ >= 0)) &&
         (s.find("call ") != std::string::npos ||
          s.find("call\t") != std::string::npos)) {
       loopXmmFlush();
       text_ << s;
       if (s.back() != '\n') text_ << '\n';
       loopXmmReload();
+      // A call also clobbers the hoisted loop bound (%r11): reload it.
+      if (endHoistSlot_ >= 0)
+        text_ << "    mov " << slotRef(endHoistSlot_) << ", %r11\n";
       return;
     }
     text_ << s;

@@ -32,20 +32,19 @@ first), `A native` (`a build`) is the apples-to-apples comparison with C/C++.
 
 | Benchmark | A run | A native | C | C++ | Python | A native ÷ C |
 | --- | --- | --- | --- | --- | --- | --- |
-| arithmetic/sum (200k) | 6.9 | 2.1 | 1.6 | 2.5 | 44 | 1.4× |
-| collections/pipeline (5k) | 6.9 | 2.5 | 1.4 | 2.5 | 31 | 1.7× |
-| memory/strings (500×200) | 9.9 | 5.7 | 11.7 | 5.3 | 43 | 0.5× (faster) |
-| numerical/sqrt (50k) | 7.3 | 2.9 | 1.8 | 2.8 | 37 | 1.6× |
-| numerical/matmul (64³) | 7.2 | 2.5 | 2.5 | 3.8 | 49 | 1.0× (tie) |
+| arithmetic/sum (200k) | 6.7 | 1.8 | 1.1 | 2.1 | 45 | 1.7× |
+| collections/pipeline (5k) | 6.9 | 2.2 | 1.1 | 2.2 | 24 | 2.1× |
+| memory/strings (500×200) | 9.0 | 4.9 | 11.5 | 5.0 | 40 | 0.4× (faster) |
+| numerical/sqrt (50k) | 7.2 | 2.6 | 2.0 | 2.6 | 35 | 1.3× |
+| numerical/matmul (64³) | 6.0 | 2.0 | 2.3 | 3.2 | 47 | 0.9× (faster) |
 
 (Note: wall numbers fluctuate ±30% under host load; treat ratios, not
 the third significant digit, as load-independent.)
 
-Takeaways: A **native** ties or beats C++ on all five workloads,
-matches/beats C on string joining (2×) and matmul, and runs ~20×
-faster than pure Python. It trails C by ~1.5–1.6× on integer loops
-and `sqrt`, where the gap is a handful of remaining slot round-trips
-in the hot loops (a fully SSA/register-allocating backend would
-close it) plus a ~0.3 ms higher process startup (noop binary:
-1.1 ms vs C's 0.8 ms). A-run startup shrank from ~25 ms to ~6–8 ms
-with the binary + depfile caches.
+Takeaways: A **native** beats or ties C++ on all five workloads
+(arithmetic and strings best), and beats C on string joining (2×) and
+matmul. It trails C by ~1.3–2× on integer loops and `sqrt`, where the
+gap is a handful of remaining slot round-trips in the hot loops (a fully
+SSA/register-allocating backend would close it) plus a ~0.3 ms higher
+process startup (noop binary: 1.1 ms vs C's 0.8 ms). A-run startup
+shrank from ~25 ms to ~6–8 ms with the binary + depfile caches.

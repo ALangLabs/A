@@ -600,10 +600,51 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     if (!acc || acc->kind != BKind::Local || acc->rawInt || acc->specRaw ||
         acc->dropFn)
       return false;
+    // Constant-step detection (also drives the loop head / increment below).
+    int64_t stepConst = 0;
+    {
+      const Expr* stE0 = nullptr;
+      if (iter && iter->kind == ExprKind::Range)
+        stE0 = static_cast<const RangeExpr&>(*iter).step.get();
+      if (stE0 == nullptr)
+        stepConst = 1;
+      else if (stE0->kind == ExprKind::IntLit) {
+        int64_t v = static_cast<const IntLitExpr*>(stE0)->value;
+        if (v == 1 || v == -1) stepConst = v;
+      }
+    }
+    // Register-resident induction counter: with a +-1 step the counter
+    // lives in %xmmN across iterations (loaded once, compared and
+    // incremented in-register). A memory counter costs a store-to-load
+    // forwarding stall (~12 cy) on the increment edge every iteration.
+    // Only at the outermost residency level (empty loopXmm_): nested
+    // loops keep the outer set untouched.
+    int curReg = -1;
     // Choose a free XMM register for the resident accumulator. The loop
-    // var and other promoted bindings take registers via loopXmm_ 
+    // var and other promoted bindings take registers via loopXmm_
     // (installed by loopXmmEnter below); scratch uses xmm0/xmm1.
     int xmmMark = loopXmmEnter();
+    // Register-resident induction counter (registered after Enter so its
+    // early-return on non-empty residency is unaffected): with a +-1 step
+    // the counter lives in %xmmN across iterations, avoiding a
+    // store-to-load forwarding stall (~12 cy) on the increment edge.
+    // Only when nothing else is resident (outermost loop level).
+    if ((stepConst == 1 || stepConst == -1) && (int)loopXmmAdded_.size() == xmmMark) {
+      for (int x = 5; x <= 15; ++x) {
+        bool used = false;
+        for (const auto& kv : loopXmm_)
+          if (kv.second == x) used = true;
+        if (!used) { curReg = x; break; }
+      }
+      if (curReg >= 0) {
+        // Load BEFORE registering: loadSlot routes through loopXmm_ once
+        // the slot is registered (and would read uninitialized XMM).
+        loadSlot(curS);
+        emit("    movq %rax, %xmm" + std::to_string(curReg) + "\n");
+        loopXmm_[curS] = curReg;
+        loopXmmAdded_.push_back(curS);
+      }
+    }
     auto xmmFree = [&](int x) {
       for (const auto& kv : loopXmm_)
         if (kv.second == x) return false;
@@ -629,6 +670,15 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loadSlot(acc->slot, "%rcx");
     emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + trampL + "\n");
     emit(std::string("    movq %rcx, ") + xr + "\n");
+    // Hoisted loop bound: `end` never changes inside the loop; cache it
+    // in %r11 (reloaded after calls by emit()). Emitted on BOTH entry
+    // arms (the trampoline call clobbers %r11, so it is re-loaded there).
+    // Outermost loops only, so a nested hoisted loop cannot steal it.
+    const bool hoistEnd = endHoistSlot_ < 0;
+    if (hoistEnd) {
+      emit("    mov " + slotRef(endS) + ", %r11\n");
+      endHoistSlot_ = endS;
+    }
     emit("    jmp " + loopL + "\n");
     emitLabel(trampL);
     // acc is NOT currently a double: promote via the runtime add exactly
@@ -639,6 +689,7 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     storeRax(acc->slot);
     loadSlot(acc->slot, "%rcx");
     emit(std::string("    movq %rcx, ") + xr + "\n");
+    if (hoistEnd) emit("    mov " + slotRef(endS) + ", %r11\n");
     emitLabel(loopL);
     // continue while (step>0 ? cur<end : cur>end). Constant steps skip
     // the sign dispatch entirely at the cost of one compare.
@@ -653,14 +704,19 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         int64_t v = static_cast<const IntLitExpr*>(stE)->value;
         if (v == 1 || v == -1) nec = v;
       }
+      // Resident counter: compare straight from its XMM register.
+      const std::string curLoad =
+          curReg >= 0
+              ? "    movq %xmm" + std::to_string(curReg) + ", %rax\n"
+              : "    mov " + slotRef(curS) + ", %rax\n";
+      const std::string endCmp =
+          hoistEnd ? "    cmp %r11, %rax\n"
+                   : "    mov " + slotRef(endS) +
+                         ", %rcx\n    cmp %rcx, %rax\n";
       if (nec == 1) {
-        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
-             ", %rcx\n    cmp %rcx, %rax\n    jge " + endL + "\n");
-        emitLabel(bodyL);
+        emit(curLoad + endCmp + "    jge " + endL + "\n");
       } else if (nec == -1) {
-        emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
-             ", %rcx\n    cmp %rcx, %rax\n    jle " + endL + "\n");
-        emitLabel(bodyL);
+        emit(curLoad + endCmp + "    jle " + endL + "\n");
       } else {
         emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) +
              ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
@@ -668,16 +724,17 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
         emitLabel(bodyL + "_p");
         emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
-        emitLabel(bodyL);
       }
     }
     // Loop variable at every iteration (mirrors the generic counted path).
     // If the body never writes the loop var, its binding can *be* the
     // induction counter (no per-iteration copy to a staging slot).
     std::unordered_set<std::string> lvWrites;
-    const bool bodyPure = scanStmtsPure(st.body, &lvWrites);
+    // Write collection (not purity): calls cannot rebind loop locals.
+    const bool bodyWritesOk = collectLoopWrites(st.body, &lvWrites);
     const bool aliasVar =
-        bodyPure && !lvWrites.count(st.var);
+        bodyWritesOk && !lvWrites.count(st.var) &&
+        promoteNames_.count(st.var) != 0;
     int varS = aliasVar ? curS : allocSlot();
     emitLabel(bodyL);
     if (!aliasVar) copySlot(curS, varS);
@@ -689,8 +746,9 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     }
     // Include the loop variable in the same register residency set so raw
     // reads (e.g. f64(i)) come straight from its XMM register instead of
-    // a spill slot per iteration.
-    if (promoteNames_.count(st.var) &&
+    // a spill slot per iteration. Skipped when aliased to the counter:
+    // the increment is a mem add, so the resident XMM would go stale.
+    if (!aliasVar && promoteNames_.count(st.var) &&
         (loopXmm_.empty() || (int)loopXmmAdded_.size() > xmmMark)) {
       for (int x = 3; x <= 15; ++x) {
         ABinding* vb = lookup(st.var);
@@ -712,39 +770,113 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loopBreak_.push_back(endL);
     loopCont_.push_back(contL);
     loopDeferDepth_.push_back((int)deferStack_.size());
-    // Body: rs = eval(expr); acc += rs in %xmmR with NaN canonicalization.
-    int rs = evalSlot(as.value.get());
-    rawInvAll();  // direct movsd traffic below bypasses the reg cache
-    emit("    movsd " + slotRef(rs) + ", %xmm0\n");
-    emit(std::string("    addsd %xmm0, ") + xr + "\n");
-    emit("    ucomisd " + xr + ", " + xr + "\n");
-    emit("    jp " + nanL + "\n");
-    emit("    jmp " + doneL + "\n");
-    emitLabel(nanL);
-    movImm(kCanonNaN);
-    emit(std::string("    movq %rax, ") + xr + "\n");
-    emitLabel(doneL);
+    // Body: fused sqrt(f64(x)) keeps the value in %xmm0 end-to-end (no
+    // temp slot, no spill/reload stall); otherwise eval to rs and add.
+    const Expr* val = as.value.get();
+    bool fused = false;
+    const Expr* inner = nullptr;
+    if (val && val->kind == ExprKind::Call) {
+      const CallExpr& vc = static_cast<const CallExpr&>(*val);
+      if (vc.builtinId == BuiltinId::Sqrt && vc.args.size() == 1) {
+        const Expr* arg = vc.args[0].value.get();
+        if (arg && arg->kind == ExprKind::Call) {
+          const CallExpr& fc = static_cast<const CallExpr&>(*arg);
+          if (fc.builtinId == BuiltinId::F64 && fc.args.size() == 1 &&
+              exprIsInt(fc.args[0].value.get()) &&
+              rawSafeExpr(fc.args[0].value.get())) {
+            fused = true;
+            inner = fc.args[0].value.get();
+          }
+        }
+      }
+    }
+    if (fused) {
+      std::string domL = newLabel("sqd");
+      // Domain-check elision: sqrt(i) panics only for i < 0. With a
+      // proven non-negative iteration range (ascending from a lo >= 0,
+      // or descending to a hi >= 0) the panic is unreachable, so the
+      // xorpd/ucomisd check (which serializes cvt -> cmp -> sqrt) goes.
+      bool canElide = false;
+      if (stepConst == 1) {
+        ARange lr = exprRangeFlat(loE);
+        canElide = lr.known && lr.lo >= 0;
+      } else if (stepConst == -1) {
+        ARange hr = exprRangeFlat(hiE);
+        canElide = hr.known && hr.lo >= 0;
+      }
+      rawInvAll();  // direct mov traffic below bypasses the reg cache
+      if (inner->kind == ExprKind::Ident) {
+        ABinding* ib = lookup(static_cast<const IdentExpr*>(inner)->name);
+        auto xr2 = ib ? loopXmm_.find(ib->slot) : loopXmm_.end();
+        if (xr2 != loopXmm_.end()) {
+          emit(std::string("    movq %xmm") + std::to_string(xr2->second) +
+               ", %rax\n");
+        } else if (ib && ib->rawInt) {
+          loadSlot(ib->slot);
+        } else {
+          int s = allocSlot();
+          emitRawExpr(inner, s);
+          loadSlot(s);
+        }
+      } else {
+        int s = allocSlot();
+        emitRawExpr(inner, s);
+        loadSlot(s);
+      }
+      emit("    cvtsi2sd %rax, %xmm0\n");
+      if (canElide) {
+        emit("    sqrtsd %xmm0, %xmm0\n");
+      } else {
+        emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
+             domL + "\n    sqrtsd %xmm0, %xmm0\n");
+      }
+      emit(std::string("    addsd %xmm0, ") + xr + "\n");
+      emit("    ucomisd " + xr + ", " + xr + "\n");
+      emit("    jp " + nanL + "\n");
+      emit("    jmp " + doneL + "\n");
+      emitLabel(nanL);
+      movImm(kCanonNaN);
+      emit(std::string("    movq %rax, ") + xr + "\n");
+      emitLabel(domL);
+      emitPanicStr("math domain error");
+      emitLabel(doneL);
+    } else {
+      int rs = evalSlot(as.value.get());
+      rawInvAll();  // direct movsd traffic below bypasses the reg cache
+      emit("    movsd " + slotRef(rs) + ", %xmm0\n");
+      emit(std::string("    addsd %xmm0, ") + xr + "\n");
+      emit("    ucomisd " + xr + ", " + xr + "\n");
+      emit("    jp " + nanL + "\n");
+      emit("    jmp " + doneL + "\n");
+      emitLabel(nanL);
+      movImm(kCanonNaN);
+      emit(std::string("    movq %rax, ") + xr + "\n");
+      emitLabel(doneL);
+    }
     loopDeferDepth_.pop_back();
     loopBreak_.pop_back();
     loopCont_.pop_back();
     popScope();
     emitLabel(contL);
-    int64_t stepConst = 0;
-    {
-      const Expr* stE = nullptr;
-      if (iter && iter->kind == ExprKind::Range)
-        stE = static_cast<const RangeExpr&>(*iter).step.get();
-      if (stE == nullptr)
-        stepConst = 1;
-      else if (stE->kind == ExprKind::IntLit) {
-        int64_t v = static_cast<const IntLitExpr*>(stE)->value;
-        if (v == 1 || v == -1) stepConst = v;
-      }
+    if (curReg >= 0) {
+      // In-register increment (see counter registration above).
+      emit("    movq %xmm" + std::to_string(curReg) + ", %rax\n");
+      emit(stepConst == 1 ? "    addq $1, %rax\n" : "    subq $1, %rax\n");
+      emit("    movq %rax, %xmm" + std::to_string(curReg) + "\n");
+    } else {
+      emitRangeIncr(curS, endS, stepS, stepConst);
     }
-    emitRangeIncr(curS, endS, stepS, stepConst);
     jmp(loopL);
     emitLabel(endL);
+    if (hoistEnd) endHoistSlot_ = -1;
     loopXmmExit(xmmMark);  // flushes the resident accumulator to its slot
+    if (curReg >= 0) {
+      // Flush already wrote the final counter to its slot; drop the
+      // counter residency (it must not leak into enclosing scopes).
+      loopXmm_.erase(curS);
+      for (auto it = loopXmmAdded_.begin(); it != loopXmmAdded_.end();)
+        it = (*it == curS) ? loopXmmAdded_.erase(it) : std::next(it);
+    }
     return true;
   }
 
@@ -805,10 +937,24 @@ void AsmEmitter::emitFor(const ForStmt& st) {
       std::string contL = newLabel("forc");
       std::string endL = newLabel("fend");
       std::string bodyL = newLabel("forb");
+      // Body purity: `writes` collected once; reused for loop-var
+      // aliasing (below) and for bounds-check elimination.
+      std::unordered_set<std::string> writes;
+      const bool writesOk = collectLoopWrites(st.body, &writes);
+      // Loop-var aliasing (decided before residency registration so the
+      // resident slot is the counter itself when aliased): if the body
+      // never writes the loop var, its binding can share the induction
+      // counter's slot outright (no per-iteration staging copy). Only
+      // for promoted (raw) vars: a non-raw var slot holds a boxed aval,
+      // and the per-iteration `a_i64n` store would corrupt the counter.
+      if (writesOk && !writes.count(st.var) && promoteNames_.count(st.var))
+        varS = curS;
       int xmmMark = loopXmmEnter();
       // Raw range-loop var: written (copySlot/storeRax) before any read
       // each pass, so it can join residency without a preheader load.
-      if (promoteNames_.count(st.var) &&
+      // Skipped when aliased to the counter: the increment is a mem
+      // add, so the resident XMM would never refresh and go stale.
+      if (varS != curS && promoteNames_.count(st.var) &&
           (loopXmm_.empty() || (int)loopXmmAdded_.size() > xmmMark)) {
         for (int x = 2; x <= 15; ++x) {
           bool used = false;
@@ -822,12 +968,35 @@ void AsmEmitter::emitFor(const ForStmt& st) {
         }
       }
       emitLabel(loopL);
-      // continue while (step>0 ? cur<end : cur>end)
-      emit("    mov " + slotRef(curS) + ", %rax\n    mov " + slotRef(endS) + ", %rcx\n    mov " + slotRef(stepS) + ", %rdx\n");
-      emit("    test %rdx, %rdx\n    jns " + bodyL + "_p\n");
-      emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL + "\n");
-      emitLabel(bodyL + "_p");
-      emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL + "\n");
+      // continue while (step>0 ? cur<end : cur>end). Constant steps
+      // folded: one compare instead of the sign-dispatch sequence.
+      {
+        int64_t nec = 0;
+        if (stE == nullptr) nec = 1;
+        else if (stE->kind == ExprKind::IntLit) {
+          int64_t v = static_cast<const IntLitExpr*>(stE)->value;
+          if (v == 1 || v == -1) nec = v;
+        }
+        if (nec == 1) {
+          emit("    mov " + slotRef(curS) + ", %rax\n    mov " +
+               slotRef(endS) + ", %rcx\n    cmp %rcx, %rax\n    jge " +
+               endL + "\n");
+        } else if (nec == -1) {
+          emit("    mov " + slotRef(curS) + ", %rax\n    mov " +
+               slotRef(endS) + ", %rcx\n    cmp %rcx, %rax\n    jle " +
+               endL + "\n");
+        } else {
+          emit("    mov " + slotRef(curS) + ", %rax\n    mov " +
+               slotRef(endS) + ", %rcx\n    mov " + slotRef(stepS) +
+               ", %rdx\n");
+          emit("    test %rdx, %rdx\n    jns " + bodyL + "_p\n");
+          emit("    cmp %rcx, %rax\n    jg " + bodyL + "\n    jmp " + endL +
+               "\n");
+          emitLabel(bodyL + "_p");
+          emit("    cmp %rcx, %rax\n    jl " + bodyL + "\n    jmp " + endL +
+               "\n");
+        }
+      }
       // Promoted loop var: varS is a distinct slot holding the raw int64
       // counter value (copied, not boxed); reads box on demand and any
       // non-raw write demotes the binding. The promotion analysis only
@@ -836,7 +1005,7 @@ void AsmEmitter::emitFor(const ForStmt& st) {
       const bool rawVar = promoteNames_.count(st.var) != 0;
       emitLabel(bodyL);
       if (rawVar) {
-        copySlot(curS, varS);
+        if (varS != curS) copySlot(curS, varS);
       } else {
         // var = a_i64n(cur)
         emit("    mov " + slotRef(curS) + ", %rdi\n    call a_i64n\n");

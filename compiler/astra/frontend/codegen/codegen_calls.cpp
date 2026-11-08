@@ -223,6 +223,184 @@ bool AsmEmitter::scanStmtPure(const Stmt* s,
     }
   }
 
+// ---- loop-var write collection (for induction-slot aliasing) --------------
+bool AsmEmitter::collectLoopWrites(const std::vector<StmtPtr>& stmts,
+                                   std::unordered_set<std::string>* writes) {
+    for (const StmtPtr& s : stmts)
+      if (!collectStmtWrites(s.get(), writes)) return false;
+    return true;
+  }
+
+bool AsmEmitter::collectStmtWrites(const Stmt* s,
+                                   std::unordered_set<std::string>* writes) {
+    if (!s) return true;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const LetStmt& st = static_cast<const LetStmt&>(*s);
+        if (writes) writes->insert(st.name);
+        return collectExprWrites(st.init.get(), writes);
+      }
+      case StmtKind::Assign: {
+        const AssignStmt& st = static_cast<const AssignStmt&>(*s);
+        // Only bare Ident targets rebind a local; heap write-through
+        // targets do not (but their index expressions may hold ++/--).
+        if (st.target && st.target->kind == ExprKind::Ident) {
+          if (writes)
+            writes->insert(static_cast<const IdentExpr&>(*st.target).name);
+        } else if (st.target) {
+          if (!collectExprWrites(st.target.get(), writes)) return false;
+        }
+        return collectExprWrites(st.value.get(), writes);
+      }
+      case StmtKind::Expr:
+        return collectExprWrites(static_cast<const ExprStmt&>(*s).expr.get(),
+                                 writes);
+      case StmtKind::Destructure: {
+        const DestructureStmt& st = static_cast<const DestructureStmt&>(*s);
+        if (writes)
+          for (const std::string& nm : st.names)
+            if (nm != "_") writes->insert(nm);
+        return collectExprWrites(st.value.get(), writes);
+      }
+      case StmtKind::Return:
+        return collectExprWrites(
+            static_cast<const ReturnStmt&>(*s).value.get(), writes);
+      case StmtKind::Break:
+      case StmtKind::Continue:
+        return true;
+      case StmtKind::Defer:
+        return collectStmtWrites(static_cast<const DeferStmt&>(*s).body.get(),
+                                 writes);
+      case StmtKind::If: {
+        const IfStmt& st = static_cast<const IfStmt&>(*s);
+        for (const IfStmt::Branch& br : st.branches) {
+          if (!collectExprWrites(br.cond.get(), writes)) return false;
+          if (!collectLoopWrites(br.body, writes)) return false;
+        }
+        return collectLoopWrites(st.elseBody, writes);
+      }
+      case StmtKind::While: {
+        const WhileStmt& st = static_cast<const WhileStmt&>(*s);
+        return collectExprWrites(st.cond.get(), writes) &&
+               collectLoopWrites(st.body, writes);
+      }
+      case StmtKind::DoWhile: {
+        const DoWhileStmt& st = static_cast<const DoWhileStmt&>(*s);
+        return collectLoopWrites(st.body, writes) &&
+               collectExprWrites(st.cond.get(), writes);
+      }
+      case StmtKind::For: {
+        const ForStmt& st = static_cast<const ForStmt&>(*s);
+        if (writes) writes->insert(st.var);
+        return collectExprWrites(st.iterable.get(), writes) &&
+               collectLoopWrites(st.body, writes);
+      }
+      case StmtKind::Loop:
+        return collectLoopWrites(static_cast<const LoopStmt&>(*s).body, writes);
+      default:
+        return true;  // decls/imports emit nothing inside a body
+    }
+  }
+
+bool AsmEmitter::collectExprWrites(const Expr* e,
+                                   std::unordered_set<std::string>* writes) {
+    if (!e) return true;
+    switch (e->kind) {
+      case ExprKind::Lambda:
+      case ExprKind::Match:  // patterns may bind; closures may capture
+        return false;
+      case ExprKind::Call: {
+        const CallExpr& c = static_cast<const CallExpr&>(*e);
+        for (const auto& a : c.args)
+          if (!collectExprWrites(a.value.get(), writes)) return false;
+        return true;
+      }
+      case ExprKind::Ident:
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+        return true;
+      case ExprKind::StringLit:
+        for (const StringPart& p :
+             static_cast<const StringLitExpr&>(*e).parts)
+          if (p.isExpr && !collectExprWrites(p.expr.get(), writes))
+            return false;
+        return true;
+      case ExprKind::Unary: {
+        const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+        if ((u.op == "++" || u.op == "--") && u.operand &&
+            u.operand->kind == ExprKind::Ident && writes)
+          writes->insert(static_cast<const IdentExpr&>(*u.operand).name);
+        return collectExprWrites(u.operand.get(), writes);
+      }
+      case ExprKind::Binary: {
+        const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+        return collectExprWrites(b.lhs.get(), writes) &&
+               collectExprWrites(b.rhs.get(), writes);
+      }
+      case ExprKind::Index: {
+        const IndexExpr& x = static_cast<const IndexExpr&>(*e);
+        return collectExprWrites(x.object.get(), writes) &&
+               collectExprWrites(x.index.get(), writes);
+      }
+      case ExprKind::Slice: {
+        const SliceExpr& x = static_cast<const SliceExpr&>(*e);
+        return collectExprWrites(x.object.get(), writes) &&
+               collectExprWrites(x.start.get(), writes) &&
+               collectExprWrites(x.end.get(), writes) &&
+               collectExprWrites(x.step.get(), writes);
+      }
+      case ExprKind::Field:
+        return collectExprWrites(static_cast<const FieldExpr&>(*e).object.get(),
+                                 writes);
+      case ExprKind::SafeNav:
+        return collectExprWrites(static_cast<const SafeNavExpr&>(*e).object.get(),
+                                 writes);
+      case ExprKind::ArrayLit:
+      case ExprKind::Tuple:
+      case ExprKind::SetLit: {
+        const auto& els = e->kind == ExprKind::ArrayLit
+            ? static_cast<const ArrayLitExpr&>(*e).elements
+            : e->kind == ExprKind::SetLit
+                ? static_cast<const SetLitExpr&>(*e).elements
+                : static_cast<const TupleExpr&>(*e).elements;
+        for (const ExprPtr& el : els)
+          if (!collectExprWrites(el.get(), writes)) return false;
+        return true;
+      }
+      case ExprKind::MapLit:
+        for (const auto& kv :
+             static_cast<const MapLitExpr&>(*e).entries)
+          if (!collectExprWrites(kv.first.get(), writes) ||
+              !collectExprWrites(kv.second.get(), writes))
+            return false;
+        return true;
+      case ExprKind::Range: {
+        const RangeExpr& r = static_cast<const RangeExpr&>(*e);
+        return collectExprWrites(r.start.get(), writes) &&
+               collectExprWrites(r.end.get(), writes) &&
+               collectExprWrites(r.step.get(), writes);
+      }
+      case ExprKind::Ternary: {
+        const TernaryExpr& t = static_cast<const TernaryExpr&>(*e);
+        return collectExprWrites(t.cond.get(), writes) &&
+               collectExprWrites(t.thenValue.get(), writes) &&
+               collectExprWrites(t.elseValue.get(), writes);
+      }
+      case ExprKind::Comprehension: {
+        const ComprehensionExpr& c = static_cast<const ComprehensionExpr&>(*e);
+        return collectExprWrites(c.element.get(), writes) &&
+               collectExprWrites(c.iterable.get(), writes) &&
+               collectExprWrites(c.condition.get(), writes);
+      }
+      case ExprKind::Try:
+        return collectExprWrites(static_cast<const TryExpr&>(*e).operand.get(),
+                                 writes);
+    }
+    return false;  // unknown kind -> doubt
+  }
+
 void AsmEmitter::scanInlineExpr(AsmEmitter::InlineScan& sc, const Expr* e) {
     if (!e || sc.unsafe) return;
     if (++sc.cost > kMaxInlineCost) {
@@ -902,6 +1080,43 @@ void AsmEmitter::emitACall(const Expr* callee, const CallExpr& call) {
 // T_PYOBJ receivers consume the pairs (as Python kwargs) — every other
 // receiver kind panics on nkw > 0.
 void AsmEmitter::emitMethodCall(const Expr* objExpr, const std::string& field, const CallExpr& call) {
+    // Map receiver: `m.get(k[, dflt])` and `m.contains(k)` call the runtime
+    // helper directly instead of going through a_method's name-string
+    // dispatch (argv staging + a strcmp chain per call). Same semantics: the
+    // helpers are what method_dict dispatches to.
+    {
+      TypePtr ot = resolveType(objExpr->inferredType);
+      if (ot && ot->kind == TypeKind::Map) {
+        const bool posOnly = std::all_of(
+            call.args.begin(), call.args.end(),
+            [](const CallArg& a) { return a.name.empty(); });
+        if (posOnly && call.args.size() <= 2) {
+          const char* sym = nullptr;
+          if (field == "get" && call.args.size() >= 1) sym = "a_dict_get";
+          else if (field == "contains" && call.args.size() == 1)
+            sym = "a_dict_has";
+          if (sym) {
+            int os = evalSlot(objExpr);
+            int ks = evalSlot(call.args[0].value.get());
+            int ds = -1;
+            if (call.args.size() == 2) ds = evalSlot(call.args[1].value.get());
+            loadSlot(os, "%rdi");
+            loadSlot(ks, "%rsi");
+            if (std::string(sym) == "a_dict_get") {
+              if (ds >= 0) {
+                loadSlot(ds, "%rdx");
+              } else {
+                movImm(kNone, "%rdx");
+              }
+              emit("    call a_dict_get");
+            } else {
+              emit("    call a_dict_has");
+            }
+            return;
+          }
+        }
+      }
+    }
     // `xs.append(v)` on an array-typed receiver: direct runtime push that
     // skips the generic a_method name-dispatch chain. a_list_append keeps
     // the same semantics for non-T_LIST objects (incl. the view panic).

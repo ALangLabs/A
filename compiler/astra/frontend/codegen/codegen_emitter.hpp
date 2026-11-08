@@ -278,6 +278,12 @@ class AsmEmitter {
   std::unordered_map<int, int> loopXmm_;
   std::vector<int> loopXmmAdded_;
 
+  // Hoisted loop bound: when >= 0, this frame slot's value is cached in
+  // %r11 for the loop head (loop-invariant end). %r11 is caller-saved, so
+  // emit() reloads it from the slot after every `call` while set. Only
+  // valid within the owning loop's emission window.
+  int endHoistSlot_ = -1;
+
     void loopXmmFlush();
   // Reload resident values after a call: slots were flushed before it, so
   // movq m64->xmm restores each register without needing a scratch GPR
@@ -576,6 +582,19 @@ class AsmEmitter {
     bool scanStmtPure(const Stmt* s,
                     std::unordered_set<std::string>* writes);
 
+  // Write-collection walk for loop-var aliasing: unlike scanStmtsPure it
+  // does not fail on calls (builtins cannot rebind caller locals); it
+  // only collects every name the body binds (let/assign/destructure/
+  // for-var/++/-- targets) and returns false (doubt) on lambdas and
+  // match patterns, which may capture or bind. Lets callers prove a
+  // loop variable is never written without requiring the body pure.
+    bool collectExprWrites(const Expr* e,
+                           std::unordered_set<std::string>* writes);
+    bool collectStmtWrites(const Stmt* s,
+                           std::unordered_set<std::string>* writes);
+    bool collectLoopWrites(const std::vector<StmtPtr>& stmts,
+                           std::unordered_set<std::string>* writes);
+
   // Bounds-check elimination context: one entry per enclosing
   // `for i in lo..len(arr)` loop (lo a non-negative literal, step 1, pure
   // body that never writes i or arr). The Index fast path skips its bounds
@@ -862,7 +881,14 @@ class AsmEmitter {
   // into the head/post envs so mid-body states are never lost. Non-converged
   // variables are poisoned to unknown before the recording pass.
     void rangeLoop(const std::vector<StmtPtr>& body, const std::string* varName,
-                 const ARange* varRange, ARangeEnv& env);
+                 const ARange* varRange, ARangeEnv& env,
+                 const Expr* cond = nullptr);
+
+  // Positional facts from a while condition: "i < n" proves i <= n-1 for
+  // every body iteration (the body only runs when the condition holds).
+  // Only the body-entry env is narrowed; nothing said here survives the
+  // loop exit, so the post-loop env never takes these bounds.
+    void rangeNarrowCond(const Expr* cond, ARangeEnv& env);
 
   // Prescan equivalent of rangePoisonExpr over a stmt list (no env writes,
   // only poison side effects on `env`).
