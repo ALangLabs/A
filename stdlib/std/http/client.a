@@ -196,8 +196,9 @@ fn _read_n(conn, n: i64):
         need = n - len(out)
         if len(chunk) <= need:
             out.extend(chunk)
-        else:
+
             # keep the surplus (pipelined response bytes) for the next read
+        else:
             out.extend(_b_slice(chunk, 0, need))
             conn._buf = _b_slice(chunk, need, len(chunk))
     return out
@@ -397,6 +398,8 @@ class HTTPConnection:
             if self.proxy != "":
                 (ph, pp) = _split_hostport(self.proxy)
                 self.sock = net.tcp_connect(ph, pp)
+                if self.sock < 0:
+                    self._fail("proxy connect failed: {self.proxy}")
 
             else:
                 self.sock = net.tcp_connect(self.host, self.port)
