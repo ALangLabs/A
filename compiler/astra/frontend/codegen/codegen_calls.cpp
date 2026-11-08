@@ -695,9 +695,28 @@ void AsmEmitter::tryEmitSqrtSlot(int id, int s) {
 // int64 slot instead of boxing the aval and calling a_float.
 bool AsmEmitter::tryEmitFloatInt(const Expr* arg) {
     if (!arg || !exprIsInt(arg) || !rawSafeExpr(arg)) return false;
-    int s = allocSlot();
-    emitRawExpr(arg, s);
-    loadSlot(s, "%rax");
+    rawInvAll();  // direct mov traffic below bypasses the reg cache
+    // Materialize the raw int64 directly into %rax: loop-resident raw
+    // variables come straight from their XMM register (no spill slot).
+    if (arg->kind == ExprKind::Ident) {
+      ABinding* ib =
+          lookup(static_cast<const IdentExpr*>(arg)->name);
+      auto xr = ib ? loopXmm_.find(ib->slot) : loopXmm_.end();
+      if (xr != loopXmm_.end()) {
+        emit(std::string("    movq %xmm") + std::to_string(xr->second) +
+             ", %rax\n");
+      } else if (ib && ib->rawInt) {
+        loadSlot(ib->slot);
+      } else {
+        int s = allocSlot();
+        emitRawExpr(arg, s);
+        loadSlot(s, "%rax");
+      }
+    } else {
+      int s = allocSlot();
+      emitRawExpr(arg, s);
+      loadSlot(s, "%rax");
+    }
     emit("    cvtsi2sd %rax, %xmm0\n");
     int t = allocSlot();
     std::string doneL = newLabel("f2d");
@@ -772,9 +791,29 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
           std::string domL = newLabel("sqd"), doneL = newLabel("squareok"),
                       nanL = newLabel("sqrnan");
           rawInvAll();  // direct slotRef traffic below bypasses the reg cache
-          int s = allocSlot();
-          emitRawExpr(inner, s);
-          loadSlot(s);
+          // Materialize the raw int64 directly into %rax. A loop-resident
+          // raw variable (loopXmm_) is read from its XMM register, not
+          // through a spill slot (every spill costs a store-forwarding
+          // stall). Otherwise the generic slot route (emitRawExpr).
+          if (inner->kind == ExprKind::Ident) {
+            ABinding* ib = lookup(
+                static_cast<const IdentExpr*>(inner)->name);
+            auto xr = ib ? loopXmm_.find(ib->slot) : loopXmm_.end();
+            if (xr != loopXmm_.end()) {
+              emit(std::string("    movq %xmm") +
+                   std::to_string(xr->second) + ", %rax\n");
+            } else if (ib && ib->rawInt) {
+              loadSlot(ib->slot);
+            } else {
+              int s = allocSlot();
+              emitRawExpr(inner, s);
+              loadSlot(s);
+            }
+          } else {
+            int s = allocSlot();
+            emitRawExpr(inner, s);
+            loadSlot(s);
+          }
           emit("    cvtsi2sd %rax, %xmm0\n");
           emit("    xorpd %xmm1, %xmm1\n    ucomisd %xmm0, %xmm1\n    ja " +
                domL + "\n    sqrtsd %xmm0, %xmm0\n");
