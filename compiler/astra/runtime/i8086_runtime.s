@@ -770,13 +770,18 @@ a_bi_call:
     cmpl $27, %eax
     je .Lb_brange
     cmpl $53, %eax
-    je .Lb_bstr               # repr -> str (subset)
+    je .Lb_brepr             # repr -> a_repr (collections -> "[..]" etc)
     jmp .Lb_none
 .Lb_args:
     xorl %ecx, %ecx          # i = 0
 .Lb_loop:
     cmpl 16(%ebp), %ecx       # n (8-byte arg at +16)
     jge .Lb_nl
+    testl %ecx, %ecx          # C printv: ' ' separator between args
+    jz .Lb_nosep
+    movb $' ', %al
+    call .Lputc
+.Lb_nosep:
     movl 24(%ebp), %eax       # argv ptr (4-byte arg at +24)
     movl %ecx, %edx
     shll $3, %edx
@@ -883,6 +888,13 @@ a_bi_call:
     pushl 4(%eax)
     pushl (%eax)
     call a_str
+    addl $8, %esp
+    jmp .Lb_xret
+.Lb_brepr:
+    movl 24(%ebp), %eax
+    pushl 4(%eax)
+    pushl (%eax)
+    call a_repr
     addl $8, %esp
     jmp .Lb_xret
 .Lb_bbool:
@@ -1161,7 +1173,16 @@ a_bi_call:
     je .Lpv_set
     cmpl $4, %ecx               # T_DICT
     je .Lpv_dict
+    cmpl $10, %ecx              # T_RESULT (some/ok)
+    je .Lpv_opt
     jmp .Lpv_q
+.Lpv_opt:
+    cmpl $0, 16(%ebx)           # ok?
+    je .Lpv_q
+    movl %ebx, %esi
+    addl $24, %esi              # &value aval
+    call .Lb_paval
+    jmp .Lpv_out
 .Lpv_int:
     movl -4(%ebp), %esi
     call .Lb_printint
@@ -3142,9 +3163,7 @@ a_str:
     popl %ebp
     ret
 
-    .globl a_repr
-a_repr:
-    jmp a_str
+# a_repr is defined below (buffer-based repr for collections).
 
 # a_unwrap(v@8): AResult ok -> value; type10 !ok -> A_NONE; else v
     .globl a_unwrap
@@ -3922,29 +3941,1943 @@ a_pow:
     popl %ebp
     ret
 
-# ---- remaining stubs -----------------------------------------------------
+# ---- remaining runtime entry points ---------------------------------------
+
+# .Lstreq: esi = name cstr, edi = literal cstr -> eax = 1/0. NUL-terminated
+# compare; preserves esi,edi. clobbers eax,ecx? (uses al only + pushes)
+.Lstreq:
+    pushl %esi
+    pushl %edi
+.Lse_loop:
+    movb (%esi), %al
+    cmpb %al, (%edi)
+    jne .Lse_no
+    testb %al, %al
+    jz .Lse_yes
+    incl %esi
+    incl %edi
+    jmp .Lse_loop
+.Lse_yes:
+    movl $1, %eax
+    jmp .Lse_out
+.Lse_no:
+    xorl %eax, %eax
+.Lse_out:
+    popl %edi
+    popl %esi
+    ret
+
+# ---- a_getattr(obj@8 aval, name@16 cstr4) ---------------------------------
+# Subset of the C runtime: T_DICT looks the name up as a str key; anything
+# else yields A_NONE (C would panic; structs/modules are lowered elsewhere).
+    .section .data
+    .globl ga_key
+ga_key: .long 0
+    .long 0
+    .section .text
     .globl a_getattr
 a_getattr:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lga_none
+    cmpl $4, (%esi)             # T_DICT only
+    jne .Lga_none
+    pushl %esi                  # [ebp-4] dict
+    # strlen(name)
+    movl 16(%ebp), %edi
+.Lga_len:
+    cmpb $0, (%edi)
+    je .Lga_len_done
+    incl %edi
+    jmp .Lga_len
+.Lga_len_done:
+    movl 16(%ebp), %edx
+    subl %edx, %edi             # edi = len
+    # a_str_new(name, len): push len_hi, len_lo, ptr
+    pushl $0
+    pushl %edi
+    movl 16(%ebp), %eax
+    pushl %eax
+    call a_str_new
+    addl $12, %esp
+    movl %eax, ga_key
+    movl %edx, ga_key+4
+    movl $ga_key, %edi
+    movl -4(%ebp), %esi         # dict (.Ldict_find preserves esi/edi)
+    call .Ldict_find
+    testl %eax, %eax
+    js .Lga_none2
+    movl -4(%ebp), %ecx         # dict
+    movl 16(%ecx), %edx         # pairs
+    shll $4, %eax
+    addl %eax, %edx
+    movl 8(%edx), %eax          # v lo
+    movl 12(%edx), %edx         # v hi
+    jmp .Lga_out
+.Lga_none2:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
+.Lga_out:
+    movl %ebp, %esp
+    popl %ebp
     ret
-    .globl a_method
-a_method:
+.Lga_none:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
+    popl %ebp
     ret
-    .globl a_setattr
-a_setattr:
-    movl $0x00000002, %eax
-    movl $0xFFFF0000, %edx
+
+# ---- a_slice(obj@8, lo@16, hi@24, step@32) -> aval --------------------------
+# lo/hi/step are avals; A_NONE means "default". Bounds follow the C runtime:
+# negative indices wrap by +n, results clamp to [lower,upper] where
+# st>0 -> [0,n] dflts {0,n}, st<0 -> [-1,n-1] dflts {n-1,-1}.
+# Strings are sliced BY BYTE (the i8086 str subset is byte-oriented, same as
+# a_getitem); lists/tuples produce a fresh same-type AArr.
+# Helpers:
+#   .Lraw_s32: edi=flat aval ptr -> eax=s32, edx=1 ok / 0 bad (no none check)
+#   .Loptint:  edi=flat aval ptr, esi=default -> eax, edx ok (none->default)
+#   .Lbound:   edi=flat aval ptr, esi=n ; stack args dflt@8 lower@12
+#              upper@16 n@20 -> eax=index edx=1 ok / 0 bad
+.Lraw_s32:
+    pushl %edi
+    movl 4(%edi), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lrs_bad
+    movl (%edi), %ecx
+    testl $1, %ecx
+    jz .Lrs_bad
+    movl (%edi), %esi
+    movl 4(%edi), %edi
+    call .Lunbox               # esi=i_lo edi=i_hi ; clobbers eax,ecx,edx
+    testl %edi, %edi
+    jnz .Lrs_neg
+    cmpl $0x80000000, %esi
+    jae .Lrs_bad               # >= 2^31 : outside s32
+    movl %esi, %eax
+    movl $1, %edx
+    popl %edi
     ret
+.Lrs_neg:
+    cmpl $0xFFFFFFFF, %edi
+    jne .Lrs_bad
+    movl %esi, %eax
+    movl $1, %edx
+    popl %edi
+    ret
+.Lrs_bad:
+    xorl %edx, %edx
+    xorl %eax, %eax
+    popl %edi
+    ret
+
+.Loptint:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] default
+    movl (%edi), %eax
+    cmpl $2, %eax
+    jne .Loi_go
+    movl 4(%edi), %ecx
+    cmpl $0xFFFF0000, %ecx
+    je .Loi_dflt
+.Loi_go:
+    call .Lraw_s32
+    jmp .Loi_out
+.Loi_dflt:
+    movl -4(%ebp), %eax
+    movl $1, %edx
+.Loi_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
+.Lbound:
+    pushl %ebp
+    movl %esp, %ebp
+    movl (%edi), %eax
+    cmpl $2, %eax
+    jne .Lb_chk
+    movl 4(%edi), %ecx
+    cmpl $0xFFFF0000, %ecx
+    jne .Lb_chk
+    movl 8(%ebp), %eax          # default: already final, no adjust
+    movl $1, %edx
+    jmp .Lb_out
+.Lb_chk:
+    call .Lraw_s32
+    testl %edx, %edx
+    jz .Lb_bad
+    testl %eax, %eax
+    jns .Lb_cl
+    addl 20(%ebp), %eax         # += n
+.Lb_cl:
+    movl 12(%ebp), %ecx         # lower
+    cmpl %ecx, %eax
+    jge 1f
+    movl %ecx, %eax
+1:  movl 16(%ebp), %ecx         # upper
+    cmpl %ecx, %eax
+    jle 2f
+    movl %ecx, %eax
+2:  movl $1, %edx
+    jmp .Lb_out
+.Lb_bad:
+    xorl %edx, %edx
+    xorl %eax, %eax
+.Lb_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
     .globl a_slice
 a_slice:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lsl_fail
+    movl %esi, %ebx             # obj
+    movl (%ebx), %ecx
+    cmpl $1, %ecx
+    je .Lsl_go
+    cmpl $2, %ecx
+    je .Lsl_go
+    cmpl $3, %ecx
+    je .Lsl_go
+    jmp .Lsl_fail
+.Lsl_go:
+    movl 4(%ebx), %eax          # len (bytes for str, elems for arr)
+    pushl %ebx                  # [esp+8] obj
+    pushl %eax                  # [esp+4] n
+    # step: aval @32 -> flat ebp+0x90020 ; default 1
+    movl %ebp, %edi
+    addl $0x90020, %edi
+    movl $1, %esi
+    call .Loptint
+    testl %edx, %edx
+    jz .Lsl_fail
+    testl %eax, %eax
+    jz .Lsl_fail                # step == 0
+    pushl %eax                  # [esp] step, [esp+4] n, [esp+8] obj
+    movl (%esp), %ecx           # step
+    jns .Lsl_pos
+    # ---- negative step bounds ----
+    # lo: dflt=n-1 lower=-1 upper=n-1
+    movl 4(%esp), %eax
+    movl %eax, %ecx
+    decl %ecx                   # n-1
+    pushl %eax                  # arg4 n
+    pushl %ecx                  # upper n-1
+    pushl $0xFFFFFFFF           # lower -1
+    pushl %ecx                  # dflt n-1
+    movl %ebp, %edi
+    addl $0x90010, %edi         # &lo
+    call .Lbound
+    addl $16, %esp
+    testl %edx, %edx
+    jz .Lsl_fail
+    movl %eax, %ebx             # start
+    # hi: dflt=-1 lower=-1 upper=n-1
+    movl 4(%esp), %eax          # n
+    movl %eax, %ecx
+    decl %ecx                   # n-1
+    pushl %eax                  # arg4 n
+    pushl %ecx                  # upper n-1
+    pushl $0xFFFFFFFF           # lower -1
+    pushl $0xFFFFFFFF           # dflt -1
+    movl %ebp, %edi
+    addl $0x90018, %edi         # &hi
+    call .Lbound
+    addl $16, %esp
+    testl %edx, %edx
+    jz .Lsl_fail
+    # esi=start eax=stop step=(%esp) n=4(%esp)
+    movl %ebx, %edx
+    subl %eax, %edx             # d = start - stop
+    cmpl %eax, %ebx
+    jle .Lsl_cnt0               # start <= stop -> empty
+    movl (%esp), %ecx
+    negl %ecx                   # a = -step (>0)
+    decl %edx                   # d-1
+    movl %edx, %eax             # dividend lo = d-1
+    xorl %edx, %edx             # dividend hi = 0
+    divl %ecx                   # (d-1)/a
+    incl %eax
+    jmp .Lsl_havecnt
+.Lsl_pos:
+    # lo: dflt=0 lower=0 upper=n
+    movl 4(%esp), %eax
+    pushl %eax                  # n
+    pushl %eax                  # upper n
+    pushl $0                    # lower 0
+    pushl $0                    # dflt 0
+    movl %ebp, %edi
+    addl $0x90010, %edi
+    call .Lbound
+    addl $16, %esp
+    testl %edx, %edx
+    jz .Lsl_fail
+    movl %eax, %ebx             # start
+    # hi: dflt=n lower=0 upper=n
+    movl 4(%esp), %eax
+    pushl %eax
+    pushl %eax
+    pushl $0
+    pushl %eax
+    movl %ebp, %edi
+    addl $0x90018, %edi
+    call .Lbound
+    addl $16, %esp
+    testl %edx, %edx
+    jz .Lsl_fail
+    # stop <= start -> empty ; else cnt=(stop-start-1)/step+1
+    cmpl %ebx, %eax
+    jle .Lsl_cnt0
+    subl %ebx, %eax
+    decl %eax
+    movl (%esp), %ecx           # step > 0
+    xorl %edx, %edx
+    divl %ecx
+    incl %eax
+    jmp .Lsl_havecnt
+.Lsl_cnt0:
+    xorl %eax, %eax
+.Lsl_havecnt:
+    pushl %eax                  # [esp] cnt
+    pushl %ebx                  # [esp] start, +4 cnt, +8 step, +12 n, +16 obj
+    movl 16(%esp), %eax         # obj
+    movl (%eax), %ecx
+    cmpl $1, %ecx
+    je .Lsl_strb
+    jmp .Lsl_arrb
+# ---- string slice: byte range -> new T_STR ----
+.Lsl_strb:
+    movl 4(%esp), %ebx          # cnt
+    movl %ebx, %eax
+    addl $17, %eax              # 16 hdr + cnt + NUL (+ .Lalloc pad)
+    movl %eax, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Lsl_fail
+    movl %eax, %esi             # new str obj
+    movl $1, (%esi)
+    movl 4(%esp), %eax          # cnt
+    movl %eax, 4(%esi)
+    incl %eax
+    movl %eax, 8(%esi)
+    movl $0, 12(%esi)
+    movl %esi, %edi
+    addl $16, %edi              # dst cursor
+    movl 16(%esp), %ecx         # old obj
+    addl $16, %ecx              # data base
+    movl (%esp), %eax           # start
+    addl %eax, %ecx             # src cursor
+    movl 4(%esp), %ebx          # remaining = cnt
+.Lsl_sb_loop:
+    testl %ebx, %ebx
+    jz .Lsl_sb_done
+    movb (%ecx), %al
+    movb %al, (%edi)
+    incl %edi
+    movl 8(%esp), %eax          # step
+    addl %eax, %ecx
+    decl %ebx
+    jmp .Lsl_sb_loop
+.Lsl_sb_done:
+    movb $0, (%edi)
+    movl %esi, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lsl_out
+# ---- list/tuple slice: fresh AArr, same type, inline items@40 ----
+.Lsl_arrb:
+    movl 4(%esp), %eax          # cnt
+    shll $3, %eax
+    addl $40, %eax
+    movl %eax, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Lsl_fail
+    movl %eax, %esi             # new arr obj
+    movl 16(%esp), %eax         # old obj
+    movl (%eax), %ecx           # type 2/3
+    movl %ecx, (%esi)
+    movl 4(%esp), %eax          # cnt
+    movl %eax, 4(%esi)
+    movl %eax, 8(%esi)          # cap = cnt
+    movl $0, 12(%esi)
+    movl %esi, %ecx
+    addl $40, %ecx
+    movl %ecx, 16(%esi)         # items = obj+40
+    movl $0, 24(%esi)           # iitems
+    movl $0, 32(%esi)           # flags
+    movl %esi, %edi
+    addl $40, %edi              # dst cursor
+    movl 16(%esp), %eax         # old obj
+    movl 16(%eax), %ecx         # items ptr
+    movl (%esp), %eax           # start
+    shll $3, %eax
+    addl %eax, %ecx             # src cursor (byte addr)
+    movl 4(%esp), %ebx          # remaining
+.Lsl_ab_loop:
+    testl %ebx, %ebx
+    jz .Lsl_ab_done
+    movl (%ecx), %eax
+    movl %eax, (%edi)
+    movl 4(%ecx), %eax
+    movl %eax, 4(%edi)
+    addl $8, %edi
+    movl 8(%esp), %eax          # step
+    shll $3, %eax
+    addl %eax, %ecx
+    decl %ebx
+    jmp .Lsl_ab_loop
+.Lsl_ab_done:
+    movl %esi, %eax
+    movl $0xFFFF0000, %edx
+.Lsl_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+.Lsl_fail:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
+    movl %ebp, %esp
+    popl %ebp
     ret
+
+# ---- a_str_joinsep(sep@8 aval, n@16 u64, items@24 ptr4) -> aval ------------
+# String interpolation lowering: parts arrive as avals (codegen already ran
+# a_str on expr parts, so items are T_STR/T_CHAR; non-str leftovers are
+# converted via a_str here for robustness). sep may be any str-ish aval.
     .globl a_str_joinsep
 a_str_joinsep:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 20(%ebp), %eax         # n hi32
+    testl %eax, %eax
+    jnz .Ljs_none
+    movl 16(%ebp), %eax         # n lo
+    cmpl $65536, %eax           # sanity cap
+    ja .Ljs_none
+    pushl %eax                  # [ebp-4] n
+    movl 24(%ebp), %eax         # items ptr
+    pushl %eax                  # [ebp-8] base
+    pushl $0                    # [ebp-12] i
+    # copy items into a scratch aval array so normalization never mutates
+    # the caller's collection; -8(%ebp) is then repointed at the scratch.
+    movl -4(%ebp), %ebx
+    shll $3, %ebx               # n*8 bytes
+    call .Lalloc
+    testl %eax, %eax
+    jz .Ljs_none2
+    movl %eax, %esi             # scratch
+    movl %esi, -8(%ebp)         # base = scratch
+    # copy n avals: src = arg items ptr (24(%ebp)), dst = scratch
+    movl 24(%ebp), %ecx         # src cursor
+    movl -4(%ebp), %edx
+    shll $3, %edx               # nbytes
+.Ljs_cp:
+    testl %edx, %edx
+    jz .Ljs_cp_done
+    movl (%ecx), %eax
+    movl %eax, (%esi)
+    movl 4(%ecx), %eax
+    movl %eax, 4(%esi)
+    addl $8, %ecx
+    addl $8, %esi
+    subl $8, %edx
+    jmp .Ljs_cp
+.Ljs_cp_done:
+    xorl %esi, %esi
+    # ---- pass 1: normalize non-str items via a_str ----
+.Ljs_norm:
+    movl -12(%ebp), %eax
+    cmpl -4(%ebp), %eax
+    jae .Ljs_normdone
+    movl -8(%ebp), %edx
+    movl %eax, %ecx
+    shll $3, %ecx
+    addl %ecx, %edx             # &items[i]
+    pushl 4(%edx)
+    pushl (%edx)
+    call .Lobjptr
+    addl $8, %esp
+    testl %esi, %esi
+    jz .Ljs_conv
+    movl (%esi), %ecx
+    cmpl $1, %ecx
+    je .Ljs_next
+    cmpl $12, %ecx
+    je .Ljs_next
+.Ljs_conv:
+    movl -8(%ebp), %eax
+    movl -12(%ebp), %ecx
+    shll $3, %ecx
+    addl %ecx, %eax             # &items[i]
+    pushl 4(%eax)
+    pushl (%eax)
+    call a_str
+    addl $8, %esp
+    pushl %edx                  # aval hi
+    pushl %eax                  # aval lo
+    movl -8(%ebp), %ecx
+    movl -12(%ebp), %edx
+    shll $3, %edx
+    addl %edx, %ecx             # &items[i]
+    popl %edx                   # lo
+    movl %edx, (%ecx)
+    popl %edx                   # hi
+    movl %edx, 4(%ecx)
+.Ljs_next:
+    incl -12(%ebp)
+    jmp .Ljs_norm
+.Ljs_normdone:
+    # ---- sep -> sp/sn ----
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Ljs_nosep
+    movl (%esi), %ecx
+    cmpl $1, %ecx
+    je .Ljs_sepok
+    cmpl $12, %ecx
+    je .Ljs_sepok
+    jmp .Ljs_nosep
+.Ljs_sepok:
+    movl 4(%esi), %eax          # sn
+    movl %esi, %edx
+    addl $16, %edx              # sp
+    jmp .Ljs_savesep
+.Ljs_nosep:
+    xorl %eax, %eax
+    xorl %edx, %edx
+.Ljs_savesep:
+    pushl %edx                  # [ebp-16] sp
+    pushl %eax                  # [ebp-20] sn
+    pushl $0                    # [ebp-24] total
+    # ---- pass 2: total bytes ----
+    movl $0, -12(%ebp)          # i = 0
+.Ljs_szloop:
+    movl -12(%ebp), %eax
+    cmpl -4(%ebp), %eax
+    jae .Ljs_szdone
+    movl -8(%ebp), %edx
+    movl %eax, %ecx
+    shll $3, %ecx
+    addl %ecx, %edx             # &items[i]
+    movl (%edx), %ecx           # lo
+    movl 4(%edx), %edx          # hi
+    movl %edx, %esi
+    andl $0xFFFF0000, %esi
+    cmpl $0xFFFF0000, %esi
+    jne .Ljs_sznext
+    testl $1, %ecx
+    jnz .Ljs_sznext
+    cmpl $2, %ecx
+    je .Ljs_sznext
+    cmpl $4, %ecx
+    je .Ljs_sznext
+    cmpl $6, %ecx
+    je .Ljs_sznext
+    testl $0xF, %ecx
+    jnz .Ljs_sznext
+    testl %ecx, %ecx
+    jz .Ljs_sznext
+    movl (%ecx), %esi
+    cmpl $1, %esi
+    je .Ljs_szadd
+    cmpl $12, %esi
+    je .Ljs_szadd
+    jmp .Ljs_sznext
+.Ljs_szadd:
+    movl 4(%ecx), %edx
+    addl %edx, -24(%ebp)
+.Ljs_sznext:
+    incl -12(%ebp)
+    jmp .Ljs_szloop
+.Ljs_szdone:
+    # total += sn * (n-1) when n > 0
+    movl -4(%ebp), %eax
+    testl %eax, %eax
+    jz .Ljs_sepcnt_done
+    decl %eax
+    imull -20(%ebp), %eax       # sn * (n-1)
+    addl %eax, -24(%ebp)
+.Ljs_sepcnt_done:
+    # ---- alloc + fill ----
+    movl -24(%ebp), %ebx        # total
+    movl %ebx, %eax
+    addl $17, %eax
+    movl %eax, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Ljs_none2
+    movl %eax, %ebx             # new str obj (ebx free: n on stack)
+    movl $1, (%ebx)
+    movl -24(%ebp), %eax
+    movl %eax, 4(%ebx)
+    incl %eax
+    movl %eax, 8(%ebx)
+    movl $0, 12(%ebx)
+    movl %ebx, %edi
+    addl $16, %edi              # dst cursor
+    movl $0, -12(%ebp)          # i = 0
+.Ljs_fill:
+    movl -12(%ebp), %eax
+    cmpl -4(%ebp), %eax
+    jae .Ljs_filldone
+    testl %eax, %eax
+    jz .Ljs_fitem
+    movl -20(%ebp), %ecx        # sn
+    testl %ecx, %ecx
+    jz .Ljs_fitem
+    movl -16(%ebp), %eax        # sp
+    # copy sn bytes
+.Ljs_sepcp:
+    testl %ecx, %ecx
+    jz .Ljs_fitem
+    movb (%eax), %dl
+    movb %dl, (%edi)
+    incl %eax
+    incl %edi
+    decl %ecx
+    jmp .Ljs_sepcp
+.Ljs_fitem:
+    movl -8(%ebp), %eax
+    movl -12(%ebp), %ecx
+    shll $3, %ecx
+    addl %ecx, %eax             # &items[i]
+    movl (%eax), %ecx           # lo
+    movl 4(%eax), %edx          # hi
+    movl %edx, %esi
+    andl $0xFFFF0000, %esi
+    cmpl $0xFFFF0000, %esi
+    jne .Ljs_fnext
+    testl $1, %ecx
+    jnz .Ljs_fnext
+    cmpl $2, %ecx
+    je .Ljs_fnext
+    cmpl $4, %ecx
+    je .Ljs_fnext
+    cmpl $6, %ecx
+    je .Ljs_fnext
+    testl $0xF, %ecx
+    jnz .Ljs_fnext
+    testl %ecx, %ecx
+    jz .Ljs_fnext
+    movl (%ecx), %esi
+    cmpl $1, %esi
+    je .Ljs_fstr
+    cmpl $12, %esi
+    je .Ljs_fstr
+    jmp .Ljs_fnext
+.Ljs_fstr:
+    movl 4(%ecx), %esi          # len
+    movl %ecx, %eax
+    addl $16, %eax              # src cursor
+.Ljs_fcp:
+    testl %esi, %esi
+    jz .Ljs_fnext
+    movb (%eax), %dl
+    movb %dl, (%edi)
+    incl %eax
+    incl %edi
+    decl %esi
+    jmp .Ljs_fcp
+.Ljs_fnext:
+    incl -12(%ebp)
+    jmp .Ljs_fill
+.Ljs_filldone:
+    movb $0, (%edi)
+    movl %ebx, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Ljs_out
+.Ljs_none2:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+.Ljs_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+.Ljs_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
+# ---- a_repr(v@8) -> aval : repr via 16KiB scratch buffer -------------------
+# .Lrepr_val: esi -> aval ptr; appends repr text to [repr_pos,repr_lim).
+# Mirrors .Lb_paval's subset (int/none/bool/str-quoted/list/tuple/set/dict).
+    .section .data
+    .globl repr_buf
+    .globl repr_pos
+    .globl repr_lim
+    .globl repr_arg
+repr_buf: .long 0
+repr_pos: .long 0
+repr_lim: .long 0
+repr_arg: .long 0
+    .long 0
+    .section .text
+    .globl a_repr
+a_repr:
+    pushl %ebp
+    movl %esp, %ebp
+    movl repr_buf, %eax
+    testl %eax, %eax
+    jnz .Lrp_have
+    movl $16384, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Lrp_none
+    movl %eax, repr_buf
+    movl %eax, repr_pos
+    movl %eax, %ecx
+    addl $16384, %ecx
+    movl %ecx, repr_lim
+.Lrp_have:
+    movl repr_buf, %eax
+    movl %eax, repr_pos          # reset cursor
+    movl 8(%ebp), %eax           # copy arg aval -> repr_arg (flat slot)
+    movl %eax, repr_arg
+    movl 12(%ebp), %eax
+    movl %eax, repr_arg+4
+    movl $repr_arg, %esi
+    call .Lrepr_val
+    # a_str_new(repr_buf, len = pos - buf)
+    movl repr_pos, %eax
+    subl repr_buf, %eax
+    pushl $0                     # len hi
+    pushl %eax                   # len lo
+    movl repr_buf, %eax
+    pushl %eax                   # ptr
+    call a_str_new
+    addl $12, %esp
+    popl %ebp
+    ret
+.Lrp_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
+# .Lrepr_emit: al -> buffer (drop on overflow). clobbers eax,ecx,edx.
+.Lrepr_emit:
+    movl repr_pos, %ecx
+    movl repr_lim, %edx
+    cmpl %edx, %ecx
+    jae .Lre_done
+    movb %al, (%ecx)
+    incl repr_pos
+.Lre_done:
+    ret
+
+# .Lrepr_n: esi=ptr ebx=len -> append bytes. clobbers eax,ecx,edx,esi,ebx.
+.Lrepr_n:
+.Lrn_loop:
+    testl %ebx, %ebx
+    jz .Lrn_done
+    movb (%esi), %al
+    call .Lrepr_emit
+    incl %esi
+    decl %ebx
+    jmp .Lrn_loop
+.Lrn_done:
+    ret
+
+# .Lrepr_val: esi -> aval (8B) ; appends repr. Recursive.
+.Lrepr_val:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] aval ptr
+    movl (%esi), %eax
+    movl 4(%esi), %edx
+    movl %edx, %ecx
+    andl $0xFFFF0000, %ecx
+    cmpl $0xFFFF0000, %ecx
+    jne .Lrv_q
+    testl $1, %eax
+    jnz .Lrv_int
+    cmpl $2, %eax
+    je .Lrv_none
+    cmpl $4, %eax
+    je .Lrv_false
+    cmpl $6, %eax
+    je .Lrv_true
+    testl $0xF, %eax
+    jnz .Lrv_q
+    testl %eax, %eax
+    jz .Lrv_q
+    movl %eax, %ebx             # obj
+    movl (%ebx), %ecx
+    cmpl $1, %ecx
+    je .Lrv_str
+    cmpl $12, %ecx
+    je .Lrv_str
+    cmpl $2, %ecx
+    je .Lrv_arr
+    cmpl $3, %ecx
+    je .Lrv_arr
+    cmpl $5, %ecx
+    je .Lrv_set
+    cmpl $4, %ecx
+    je .Lrv_dict
+    jmp .Lrv_q
+.Lrv_int:
+    movl -4(%ebp), %ecx
+    movl (%ecx), %esi
+    movl 4(%ecx), %edi
+    call .Lunbox
+    call .Lint_fmt             # eax=ptr or 0, ebx=len
+    testl %eax, %eax
+    jz .Lrv_q
+    movl %eax, %esi
+    call .Lrepr_n
+    jmp .Lrv_out
+.Lrv_none:
+    movl $str_none, %esi
+    movl $4, %ebx
+    call .Lrepr_n
+    jmp .Lrv_out
+.Lrv_false:
+    movl $str_false, %esi
+    movl $5, %ebx
+    call .Lrepr_n
+    jmp .Lrv_out
+.Lrv_true:
+    movl $str_true, %esi
+    movl $4, %ebx
+    call .Lrepr_n
+    jmp .Lrv_out
+.Lrv_str:                      # ebx = obj ; "..." quoted
+    movb $'"', %al
+    call .Lrepr_emit
+    movl %ebx, %ecx
+    addl $16, %ecx
+    movl %ecx, %esi             # data ptr
+    movl 4(%ebx), %ebx          # len
+    call .Lrepr_n
+    movb $'"', %al
+    call .Lrepr_emit
+    jmp .Lrv_out
+.Lrv_arr:                      # ebx = T_LIST/T_TUPLE ; "[a, b]"
+    pushl %ebx                  # [ebp-8] obj
+    pushl $0                    # [ebp-12] i
+    movb $'[', %al
+    call .Lrepr_emit
+.Lrva_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lrva_close
+    testl %eax, %eax
+    jz .Lrva_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lrepr_n
+.Lrva_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx         # items base
+    movl -12(%ebp), %eax
+    shll $3, %eax
+    addl %eax, %ecx             # &items[i]
+    movl %ecx, %esi
+    call .Lrepr_val
+    incl -12(%ebp)
+    jmp .Lrva_loop
+.Lrva_close:
+    movb $']', %al
+    call .Lrepr_emit
+    jmp .Lrv_out
+.Lrv_set:                      # ebx = T_SET ; "{a, b}"
+    pushl %ebx
+    pushl $0
+    movb $'{', %al
+    call .Lrepr_emit
+.Lrvs_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lrvs_close
+    testl %eax, %eax
+    jz .Lrvs_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lrepr_n
+.Lrvs_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx
+    movl -12(%ebp), %eax
+    shll $3, %eax
+    addl %eax, %ecx
+    movl %ecx, %esi
+    call .Lrepr_val
+    incl -12(%ebp)
+    jmp .Lrvs_loop
+.Lrvs_close:
+    movb $'}', %al
+    call .Lrepr_emit
+    jmp .Lrv_out
+.Lrv_dict:                     # ebx = T_DICT ; "{k: v}"
+    pushl %ebx
+    pushl $0
+    movb $'{', %al
+    call .Lrepr_emit
+.Lrvd_loop:
+    movl -12(%ebp), %eax
+    movl -8(%ebp), %edx
+    cmpl 4(%edx), %eax
+    jae .Lrvd_close
+    testl %eax, %eax
+    jz .Lrvd_nosep
+    movl $str_comma, %esi
+    movl $2, %ebx
+    call .Lrepr_n
+.Lrvd_nosep:
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx         # pairs base
+    movl -12(%ebp), %eax
+    shll $4, %eax
+    addl %eax, %ecx             # &pair[i].k
+    movl %ecx, %esi
+    call .Lrepr_val
+    movl $str_colon, %esi
+    movl $2, %ebx
+    call .Lrepr_n
+    movl -8(%ebp), %edx
+    movl 16(%edx), %ecx
+    movl -12(%ebp), %eax
+    shll $4, %eax
+    addl $8, %eax
+    addl %eax, %ecx             # &pair[i].v
+    movl %ecx, %esi
+    call .Lrepr_val
+    incl -12(%ebp)
+    jmp .Lrvd_loop
+.Lrvd_close:
+    movb $'}', %al
+    call .Lrepr_emit
+    jmp .Lrv_out
+.Lrv_q:
+    movb $'?', %al
+    call .Lrepr_emit
+.Lrv_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
+# ---- a_method(obj@8 aval, name@16 cstr4, n@20 u64, nkw@28 u64, argv@36 ptr4)
+# Subset of the C method dispatch. seq (T_LIST=2/T_TUPLE=3): contains, count,
+# first, last, join, copy + list-only append, pop, clear, reverse.
+# str (T_STR=1): upper, lower, startswith, endswith, find, count, join.
+# dict (T_DICT=4): get, contains, clear. set (T_SET=5): contains, add.
+# Anything else -> A_NONE. Frame locals: [ebp-4]=obj ptr, then per-group
+# pushes for len/items/i/cnt as noted.
+    .section .rodata
+mn_append:   .asciz "append"
+mn_pop:      .asciz "pop"
+mn_clear:    .asciz "clear"
+mn_contains: .asciz "contains"
+mn_count:    .asciz "count"
+mn_first:    .asciz "first"
+mn_last:     .asciz "last"
+mn_join:     .asciz "join"
+mn_copy:     .asciz "copy"
+mn_reverse:  .asciz "reverse"
+mn_upper:    .asciz "upper"
+mn_lower:    .asciz "lower"
+mn_startswith: .asciz "startswith"
+mn_endswith:   .asciz "endswith"
+mn_find:     .asciz "find"
+mn_get:      .asciz "get"
+mn_add:      .asciz "add"
+    .section .text
+    .globl a_method
+a_method:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 28(%ebp), %eax         # nkw lo
+    orl 32(%ebp), %eax          # nkw hi
+    jnz .Lmt_none
+    movl 8(%ebp), %eax
+    movl 12(%ebp), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lmt_none
+    pushl %esi                  # [ebp-4] obj
+    movl (%esi), %ecx
+    cmpl $2, %ecx
+    je .Lmt_seq
+    cmpl $3, %ecx
+    je .Lmt_seq
+    cmpl $1, %ecx
+    je .Lmt_str
+    cmpl $4, %ecx
+    je .Lmt_dict
+    cmpl $5, %ecx
+    je .Lmt_set
+    jmp .Lmt_none_pop
+
+# ---------------- seq (list/tuple) ----------------------------------------
+# locals: -4 obj, -8 len, -12 items
+.Lmt_seq:
+    movl -4(%ebp), %eax
+    movl 4(%eax), %ecx
+    pushl %ecx                  # [ebp-8] len
+    movl 16(%eax), %ecx
+    pushl %ecx                  # [ebp-12] items
+    movl 16(%ebp), %esi
+    movl $mn_contains, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_contains
+    movl 16(%ebp), %esi
+    movl $mn_count, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_count
+    movl 16(%ebp), %esi
+    movl $mn_first, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_first
+    movl 16(%ebp), %esi
+    movl $mn_last, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_last
+    movl 16(%ebp), %esi
+    movl $mn_join, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_sjoin
+    movl 16(%ebp), %esi
+    movl $mn_copy, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_scopy
+    movl -4(%ebp), %eax
+    cmpl $2, (%eax)             # mutators: T_LIST only
+    jne .Lmt_none_pop
+    movl 16(%ebp), %esi
+    movl $mn_append, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_append
+    movl 16(%ebp), %esi
+    movl $mn_pop, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_pop
+    movl 16(%ebp), %esi
+    movl $mn_clear, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_clear
+    movl 16(%ebp), %esi
+    movl $mn_reverse, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_reverse
+    jmp .Lmt_none_pop
+
+# contains(v): n==1 -> scan items with .Leqkey -> A_TRUE/A_FALSE
+.Lmt_contains:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    pushl $0                    # [ebp-16] i
+.Lmc_loop:
+    movl -16(%ebp), %eax
+    cmpl -8(%ebp), %eax
+    jae .Lmc_false
+    movl -12(%ebp), %ecx        # items
+    movl %eax, %edx
+    shll $3, %edx
+    addl %ecx, %edx             # &items[i]
+    movl %edx, %esi             # A
+    movl 36(%ebp), %edi         # B = &argv[0]
+    call .Leqkey
+    testl %eax, %eax
+    jnz .Lmc_true
+    incl -16(%ebp)
+    jmp .Lmc_loop
+.Lmc_true:
+    movl $6, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lmt_out
+.Lmc_false:
+    movl $4, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lmt_out
+
+# count(v): n==1 -> int
+.Lmt_count:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    pushl $0                    # [ebp-16] i
+    pushl $0                    # [ebp-20] cnt
+.Lmct_loop:
+    movl -16(%ebp), %eax
+    cmpl -8(%ebp), %eax
+    jae .Lmt_cntdone
+    movl -12(%ebp), %ecx
+    movl %eax, %edx
+    shll $3, %edx
+    addl %ecx, %edx
+    movl %edx, %esi
+    movl 36(%ebp), %edi
+    call .Leqkey
+    testl %eax, %eax
+    jz .Lmct_next
+    incl -20(%ebp)
+.Lmct_next:
+    incl -16(%ebp)
+    jmp .Lmct_loop
+.Lmt_cntdone:
+    movl -20(%ebp), %eax
+    call .Lmksmall
+    jmp .Lmt_out
+
+# first()/last(): n==0 -> a_some_new(elem) or A_NONE when empty
+.Lmt_first:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    cmpl $0, -8(%ebp)
+    je .Lmt_none_pop
+    xorl %esi, %esi             # idx = 0
+    jmp .Lmt_fl_go
+.Lmt_last:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    cmpl $0, -8(%ebp)
+    je .Lmt_none_pop
+    movl -8(%ebp), %esi
+    decl %esi                   # idx = len-1
+.Lmt_fl_go:
+    movl -12(%ebp), %edx        # items
+    movl %esi, %ecx
+    shll $3, %ecx
+    addl %ecx, %edx             # &elem
+    movl 4(%edx), %eax          # hi
+    pushl %eax
+    movl (%edx), %eax           # lo
+    pushl %eax
+    call a_some_new
+    addl $8, %esp
+    jmp .Lmt_out
+
+# join(sep): n==1 -> a_str_joinsep(argv[0], len, items)
+.Lmt_sjoin:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl -12(%ebp), %ecx        # items
+    movl -8(%ebp), %edx         # len
+    pushl %ecx                  # items (arg2)
+    pushl $0                    # n hi
+    pushl %edx                  # n lo
+    movl 36(%ebp), %eax         # argv base
+    pushl 4(%eax)               # sep hi
+    pushl (%eax)                # sep lo
+    call a_str_joinsep
+    addl $20, %esp
+    jmp .Lmt_out
+
+# copy(): n==0 -> fresh AArr same type, items copied
+.Lmt_scopy:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    movl -8(%ebp), %eax
+    shll $3, %eax
+    addl $40, %eax
+    movl %eax, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Lmt_none_pop
+    movl %eax, %esi             # new obj
+    movl -4(%ebp), %eax
+    movl (%eax), %ecx           # type
+    movl %ecx, (%esi)
+    movl -8(%ebp), %ecx
+    movl %ecx, 4(%esi)
+    movl %ecx, 8(%esi)
+    movl $0, 12(%esi)
+    movl %esi, %ecx
+    addl $40, %ecx
+    movl %ecx, 16(%esi)
+    movl $0, 24(%esi)
+    movl $0, 32(%esi)
+    movl %esi, %edi
+    addl $40, %edi              # dst
+    movl -12(%ebp), %ecx        # src items
+    movl -8(%ebp), %edx
+    shll $3, %edx               # nbytes
+.Lmcp_loop:
+    testl %edx, %edx
+    jz .Lmcp_done
+    movl (%ecx), %eax
+    movl %eax, (%edi)
+    movl 4(%ecx), %eax
+    movl %eax, 4(%edi)
+    addl $8, %ecx
+    addl $8, %edi
+    subl $8, %edx
+    jmp .Lmcp_loop
+.Lmcp_done:
+    movl %esi, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lmt_out
+
+# append(v): T_LIST, n==1 -> ensure + store, returns A_NONE
+.Lmt_append:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %esi
+    call .Larr_ensure
+    testl %eax, %eax
+    jz .Lmt_none_pop
+    movl -4(%ebp), %esi
+    movl 4(%esi), %ecx
+    movl 16(%esi), %edx
+    shll $3, %ecx
+    addl %ecx, %edx
+    movl 36(%ebp), %eax         # argv base
+    movl (%eax), %ecx
+    movl %ecx, (%edx)
+    movl 4(%eax), %ecx
+    movl %ecx, 4(%edx)
+    incl 4(%esi)
+    jmp .Lmt_none_pop
+
+# pop([i]): T_LIST, n==0 or 1 -> removed elem or A_NONE
+.Lmt_pop:
+    movl 20(%ebp), %eax         # n lo
+    cmpl $2, %eax
+    ja .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    cmpl $0, -8(%ebp)
+    je .Lmt_none_pop
+    movl 20(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_pop_idx
+    movl -8(%ebp), %eax
+    decl %eax                   # idx = len-1
+    jmp .Lmt_pop_have
+.Lmt_pop_idx:
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 36(%ebp), %edi         # &argv[0]
+    movl (%edi), %esi
+    movl 4(%edi), %edi
+    call .Lunbox
+    testl %edi, %edi
+    jnz .Lmt_pop_neg
+    cmpl $0x80000000, %esi
+    jae .Lmt_badargs
+    movl %esi, %eax
+    jmp .Lmt_pop_chk
+.Lmt_pop_neg:
+    cmpl $0xFFFFFFFF, %edi
+    jne .Lmt_badargs
+    movl %esi, %eax
+.Lmt_pop_chk:
+    testl %eax, %eax
+    jns .Lmt_pop_v
+    addl -8(%ebp), %eax         # negative: += len
+.Lmt_pop_v:
+    cmpl $0, %eax
+    jl .Lmt_badargs
+    cmpl -8(%ebp), %eax
+    jge .Lmt_badargs
+.Lmt_pop_have:
+    pushl %eax                  # [ebp-16] idx
+    # elem aval -> push hi,lo (top=lo)
+    movl -12(%ebp), %ecx
+    movl -16(%ebp), %edx
+    shll $3, %edx
+    addl %edx, %ecx             # &items[idx]
+    movl 4(%ecx), %eax
+    pushl %eax                  # hi
+    movl (%ecx), %eax
+    pushl %eax                  # lo
+    # memmove items[idx+1..len) down one slot
+    movl -12(%ebp), %edi
+    movl -16(%ebp), %eax
+    incl %eax
+    shll $3, %eax
+    addl %eax, %edi             # src = items+(idx+1)*8
+    movl -12(%ebp), %edx
+    movl -16(%ebp), %eax
+    shll $3, %eax
+    addl %eax, %edx             # dst = items+idx*8
+    movl -8(%ebp), %eax         # len
+    subl -16(%ebp), %eax
+    decl %eax                   # count = len-idx-1
+    shll $3, %eax               # bytes
+.Lmtp_loop:
+    testl %eax, %eax
+    jz .Lmtp_done
+    movl (%edi), %ecx
+    movl %ecx, (%edx)
+    movl 4(%edi), %ecx
+    movl %ecx, 4(%edx)
+    addl $8, %edi
+    addl $8, %edx
+    subl $8, %eax
+    jmp .Lmtp_loop
+.Lmtp_done:
+    movl -4(%ebp), %ecx
+    decl 4(%ecx)                # obj->len--
+    popl %eax                   # lo
+    popl %edx                   # hi
+    jmp .Lmt_out
+
+# clear(): T_LIST, n==0
+.Lmt_clear:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %eax
+    movl $0, 4(%eax)
+    jmp .Lmt_none_pop
+
+# reverse(): T_LIST, n==0 ; swap items[i] <-> items[len-1-i]
+.Lmt_reverse:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    pushl $0                    # [ebp-16] i
+.Lmt_rv_loop:
+    movl -16(%ebp), %eax        # i
+    addl %eax, %eax             # 2*i
+    movl -8(%ebp), %ecx         # len
+    decl %ecx                   # len-1
+    cmpl %ecx, %eax
+    jge .Lmt_rv_done
+    # a = items+i*8
+    movl -12(%ebp), %edx
+    movl %eax, %esi
+    shll $3, %esi
+    addl %esi, %edx             # &items[i]
+    # b = items+(len-1-i)*8
+    movl -8(%ebp), %eax
+    movl -16(%ebp), %ecx
+    movl %eax, %edi
+    subl %ecx, %edi             # len-i
+    decl %edi                   # len-1-i
+    shll $3, %edi
+    addl -12(%ebp), %edi        # &items[len-1-i]
+    movl (%edx), %eax
+    xchgl %eax, (%edi)
+    movl %eax, (%edx)
+    movl 4(%edx), %eax
+    xchgl %eax, 4(%edi)
+    movl %eax, 4(%edx)
+    incl -16(%ebp)
+    jmp .Lmt_rv_loop
+.Lmt_rv_done:
+    jmp .Lmt_none_pop
+
+# ---------------- str (T_STR) ----------------------------------------------
+.Lmt_str:
+    movl 16(%ebp), %esi
+    movl $mn_upper, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_upper
+    movl 16(%ebp), %esi
+    movl $mn_lower, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_lower
+    movl 16(%ebp), %esi
+    movl $mn_startswith, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_startswith
+    movl 16(%ebp), %esi
+    movl $mn_endswith, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_endswith
+    movl 16(%ebp), %esi
+    movl $mn_find, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_find
+    movl 16(%ebp), %esi
+    movl $mn_count, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_strcount
+    movl 16(%ebp), %esi
+    movl $mn_join, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_strjoin
+    jmp .Lmt_none_pop
+
+# upper()/lower(): n==0 -> .Lstr_case(obj, 1/0)
+.Lmt_upper:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %esi
+    movl $1, %edx
+    jmp .Lmt_case_go
+.Lmt_lower:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %esi
+    xorl %edx, %edx
+.Lmt_case_go:
+    call .Lstr_case
+    jmp .Lmt_out
+
+# .Lstr_case: esi=str obj, edx=0 lower / 1 upper -> aval (ASCII only)
+.Lstr_case:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] obj
+    pushl %edx                  # [ebp-8] mode
+    movl 4(%esi), %ebx
+    movl %ebx, %eax
+    addl $17, %eax
+    movl %eax, %ebx
+    call .Lalloc
+    testl %eax, %eax
+    jz .Lscc_fail
+    movl %eax, %edi             # new obj
+    movl $1, (%edi)
+    movl -4(%ebp), %eax
+    movl 4(%eax), %ecx
+    movl %ecx, 4(%edi)
+    incl %ecx
+    movl %ecx, 8(%edi)
+    movl $0, 12(%edi)
+    movl -4(%ebp), %eax
+    addl $16, %eax              # src
+    movl %edi, %ecx
+    addl $16, %ecx              # dst
+    movl -4(%ebp), %edx
+    movl 4(%edx), %ebx          # count
+.Lscc_loop:
+    testl %ebx, %ebx
+    jz .Lscc_done
+    movb (%eax), %dl
+    movl -8(%ebp), %esi         # mode
+    testl %esi, %esi
+    jz .Lscc_lower
+    cmpb $0x61, %dl             # 'a'
+    jb .Lscc_store
+    cmpb $0x7a, %dl             # 'z'
+    ja .Lscc_store
+    subl $0x20, %edx
+    jmp .Lscc_store
+.Lscc_lower:
+    cmpb $0x41, %dl             # 'A'
+    jb .Lscc_store
+    cmpb $0x5a, %dl             # 'Z'
+    ja .Lscc_store
+    addl $0x20, %edx
+.Lscc_store:
+    movb %dl, (%ecx)
+    incl %eax
+    incl %ecx
+    decl %ebx
+    jmp .Lscc_loop
+.Lscc_done:
+    movb $0, (%ecx)
+    movl %edi, %eax
+    movl $0xFFFF0000, %edx
+    movl %ebp, %esp
+    popl %ebp
+    ret
+.Lscc_fail:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
+# startswith(prefix)/endswith(suffix): n==1, argv[0] str-ish -> bool
+.Lmt_startswith:
+    movl $0, %edx               # mode 0 = prefix
+    jmp .Lmt_affix_go
+.Lmt_endswith:
+    movl $1, %edx               # mode 1 = suffix
+.Lmt_affix_go:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    pushl %edx                  # [ebp-8] mode
+    # needle = argv[0] -> obj ptr or fail
+    movl 36(%ebp), %ecx
+    movl 4(%ecx), %edx
+    movl (%ecx), %eax
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lmt_affix_bad
+    movl (%esi), %ecx
+    cmpl $1, %ecx
+    je .Lmt_affix_nok
+    cmpl $12, %ecx
+    je .Lmt_affix_nok
+    jmp .Lmt_affix_bad
+.Lmt_affix_nok:
+    # esi = needle obj ; edx = mode on stack ; hay = -4(%ebp)
+    movl -4(%ebp), %eax         # hay obj
+    movl %eax, %ebx             # save hay (ebx free here)
+    # lengths
+    movl 4(%esi), %ecx          # nlen
+    movl 4(%ebx), %edx          # hlen
+    cmpl %edx, %ecx
+    ja .Lmt_affix_false         # needle longer -> false
+    movl -8(%ebp), %eax         # mode
+    testl %eax, %eax
+    jz .Lmt_affix_pre
+    # suffix: hayoff = hlen - nlen
+    movl %edx, %eax
+    subl %ecx, %eax
+    jmp .Lmt_affix_off
+.Lmt_affix_pre:
+    xorl %eax, %eax             # offset 0
+.Lmt_affix_off:
+    # compare nlen bytes: hay+16+off vs needle+16
+    movl %ebx, %edx
+    addl $16, %edx
+    addl %eax, %edx             # hcur
+    movl %esi, %edi
+    addl $16, %edi              # ncur
+    # count in ecx? ecx=nlen still? clobbered? .Lstreq not used; ecx intact
+    # but we used ecx for nlen earlier — still valid
+.Lmt_affix_cmp:
+    testl %ecx, %ecx
+    jz .Lmt_affix_true
+    movb (%edx), %al
+    cmpb %al, (%edi)
+    jne .Lmt_affix_false
+    incl %edx
+    incl %edi
+    decl %ecx
+    jmp .Lmt_affix_cmp
+.Lmt_affix_true:
+    movl $6, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lmt_out
+.Lmt_affix_false:
+    movl $4, %eax
+    movl $0xFFFF0000, %edx
+    jmp .Lmt_out
+.Lmt_affix_bad:
+    jmp .Lmt_badargs
+
+# find(sub): n==1 -> int index or -1
+.Lmt_find:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    # needle = argv[0] str-ish
+    movl 36(%ebp), %ecx
+    movl 4(%ecx), %edx
+    movl (%ecx), %eax
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lmt_badargs
+    movl (%esi), %ecx
+    cmpl $1, %ecx
+    je .Lmt_find_nok
+    cmpl $12, %ecx
+    je .Lmt_find_nok
+    jmp .Lmt_badargs
+.Lmt_find_nok:
+    movl %esi, %ebx             # needle obj
+    movl -4(%ebp), %esi         # hay obj
+    # .Lstr_find(hay esi, needle ebx) -> eax = s32 idx or -1
+    call .Lstr_find
+    testl %eax, %eax
+    jns .Lmt_find_pos
+    # -1
+    movl $0xFFFFFFFF, %esi
+    movl $0xFFFFFFFF, %edi
+    call .Lrebox
+    jmp .Lmt_out
+.Lmt_find_pos:
+    call .Lmksmall
+    jmp .Lmt_out
+
+# .Lstr_find: esi=hay str obj, ebx=needle str obj -> eax = first index or -1.
+# Byte search (str subset is byte-oriented). clobbers eax,ecx,edx,esi,edi; ebx preserved? NO - reload carefully: uses ebx as needle, preserves it.
+.Lstr_find:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] hay
+    pushl %ebx                  # [ebp-8] needle
+    movl 4(%ebx), %eax          # nlen
+    movl -4(%ebp), %ecx
+    movl 4(%ecx), %edx          # hlen
+    cmpl %edx, %eax
+    ja .Lsf_retneg
+    testl %eax, %eax
+    jz .Lsf_ret0                # empty needle -> index 0
+    # pos range: 0 .. hlen-nlen
+    movl %edx, %ecx
+    subl %eax, %ecx             # maxpos
+    pushl $0                    # [ebp-12] pos
+    pushl %ecx                  # [ebp-16] maxpos
+.Lsf_pl:
+    movl -12(%ebp), %eax
+    cmpl -16(%ebp), %eax
+    ja .Lsf_retneg
+    # hcur = hay+16+pos ; ncur = needle+16 ; cnt=nlen
+    movl -4(%ebp), %edx
+    addl $16, %edx
+    movl -12(%ebp), %ecx
+    addl %ecx, %edx             # hcur
+    movl -8(%ebp), %edi
+    addl $16, %edi              # ncur
+    movl -8(%ebp), %ecx
+    movl 4(%ecx), %esi          # cnt = nlen
+.Lsf_cmp:
+    testl %esi, %esi
+    jz .Lsf_hit
+    movb (%edx), %al
+    cmpb %al, (%edi)
+    jne .Lsf_pnext
+    incl %edx
+    incl %edi
+    decl %esi
+    jmp .Lsf_cmp
+.Lsf_pnext:
+    incl -12(%ebp)
+    jmp .Lsf_pl
+.Lsf_hit:
+    movl -12(%ebp), %eax
+    jmp .Lsf_out
+.Lsf_ret0:
+    xorl %eax, %eax
+    jmp .Lsf_out
+.Lsf_retneg:
+    movl $-1, %eax
+.Lsf_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
+# str count(sub): n==1 -> int count of non-overlapping occurrences
+.Lmt_strcount:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl 36(%ebp), %ecx
+    movl 4(%ecx), %edx
+    movl (%ecx), %eax
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lmt_badargs
+    movl (%esi), %ecx
+    cmpl $1, %ecx
+    je .Lmt_sc_nok
+    cmpl $12, %ecx
+    je .Lmt_sc_nok
+    jmp .Lmt_badargs
+.Lmt_sc_nok:
+    movl %esi, %ebx             # needle
+    movl -4(%ebp), %esi         # hay
+    call .Lstr_count
+    call .Lmksmall
+    jmp .Lmt_out
+
+# .Lstr_count: esi=hay, ebx=needle -> eax = occurrence count (s32)
+.Lstr_count:
+    pushl %ebp
+    movl %esp, %ebp
+    pushl %esi                  # [ebp-4] hay
+    pushl %ebx                  # [ebp-8] needle
+    movl -8(%ebp), %eax
+    movl 4(%eax), %ecx          # nlen
+    testl %ecx, %ecx
+    jnz .Lsc_nz
+    # empty needle: hlen+1
+    movl -4(%ebp), %eax
+    movl 4(%eax), %eax
+    incl %eax
+    jmp .Lsc_out
+.Lsc_nz:
+    movl -4(%ebp), %eax
+    movl 4(%eax), %edx          # hlen
+    pushl %edx                  # [ebp-12] hlen (edx gets reused as hcur)
+    pushl $0                    # [ebp-16] pos
+    pushl $0                    # [ebp-20] count
+.Lsct_loop:
+    movl -16(%ebp), %eax        # pos
+    cmpl -12(%ebp), %eax
+    ja .Lsct_done               # pos > hlen -> stop
+    # remaining = hlen - pos ; if remaining < nlen -> done
+    movl -12(%ebp), %ecx
+    subl %eax, %ecx             # remaining
+    movl -8(%ebp), %edi
+    movl 4(%edi), %esi          # nlen
+    cmpl %esi, %ecx
+    jl .Lsct_done
+    # compare at hay+16+pos
+    movl -4(%ebp), %edx
+    addl $16, %edx
+    addl %eax, %edx             # hcur
+    movl -8(%ebp), %edi
+    addl $16, %edi              # ncur
+.Lsccc_cmp:
+    testl %esi, %esi
+    jz .Lsccc_hit
+    movb (%edx), %al
+    cmpb %al, (%edi)
+    jne .Lsccc_next
+    incl %edx
+    incl %edi
+    decl %esi
+    jmp .Lsccc_cmp
+.Lsccc_hit:
+    incl -20(%ebp)              # count++
+    # pos += nlen
+    movl -8(%ebp), %eax
+    movl 4(%eax), %ecx
+    addl %ecx, -16(%ebp)
+    jmp .Lsct_loop
+.Lsccc_next:
+    incl -16(%ebp)              # pos++
+    jmp .Lsct_loop
+.Lsct_done:
+    movl -20(%ebp), %eax
+.Lsc_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+
+# str join(parts): n==1, argv[0] list/tuple -> a_str_joinsep(obj, len, items)
+.Lmt_strjoin:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl 36(%ebp), %eax         # &argv[0]
+    movl (%eax), %ecx
+    movl 4(%eax), %edx
+    call .Lobjptr
+    testl %esi, %esi
+    jz .Lmt_badargs
+    movl (%esi), %ecx
+    cmpl $2, %ecx
+    je .Lmt_strjoin_ok
+    cmpl $3, %ecx
+    je .Lmt_strjoin_ok
+    jmp .Lmt_badargs
+.Lmt_strjoin_ok:
+    movl 4(%esi), %edx          # n = parts len
+    movl 16(%esi), %ecx         # items
+    pushl %ecx                  # items
+    pushl $0                    # n hi
+    pushl %edx                  # n lo
+    pushl $0xFFFF0000           # sep hi (obj aval hi)
+    movl -4(%ebp), %eax         # sep lo = obj ptr
+    pushl %eax
+    call a_str_joinsep
+    addl $20, %esp
+    jmp .Lmt_out
+
+# ---------------- dict (T_DICT) ---------------------------------------------
+.Lmt_dict:
+    movl 16(%ebp), %esi
+    movl $mn_get, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_dget
+    movl 16(%ebp), %esi
+    movl $mn_contains, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_dcontains
+    movl 16(%ebp), %esi
+    movl $mn_clear, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_dclear
+    jmp .Lmt_none_pop
+
+# get(k[, dflt]): n==1/2 -> v or dflt/none
+.Lmt_dget:
+    movl 20(%ebp), %eax
+    testl %eax, %eax
+    jz .Lmt_badargs
+    cmpl $2, %eax
+    ja .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %esi         # dict
+    movl 36(%ebp), %edi         # &argv[0] = key
+    call .Ldict_find
+    testl %eax, %eax
+    jns .Lmt_dgot
+    movl 20(%ebp), %eax
+    cmpl $2, %eax
+    jne .Lmt_none_pop           # no default -> A_NONE
+    movl 36(%ebp), %ecx
+    movl 8(%ecx), %eax          # argv[1] lo
+    movl 12(%ecx), %edx         # argv[1] hi
+    jmp .Lmt_out
+.Lmt_dgot:
+    movl -4(%ebp), %ecx
+    movl 16(%ecx), %edx         # pairs
+    shll $4, %eax
+    addl %eax, %edx
+    movl 8(%edx), %eax
+    movl 12(%edx), %edx
+    jmp .Lmt_out
+
+# contains(k): n==1 -> bool
+.Lmt_dcontains:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %esi
+    movl 36(%ebp), %edi
+    call .Ldict_find
+    testl %eax, %eax
+    jns .Lmc_true
+    jmp .Lmc_false
+
+# clear(): n==0
+.Lmt_dclear:
+    movl 20(%ebp), %eax
+    orl 24(%ebp), %eax
+    jnz .Lmt_badargs
+    movl -4(%ebp), %eax
+    movl $0, 4(%eax)
+    jmp .Lmt_none_pop
+
+# ---------------- set (T_SET) -----------------------------------------------
+# locals same as seq: -4 obj, -8 len, -12 items
+.Lmt_set:
+    movl -4(%ebp), %eax
+    movl 4(%eax), %ecx
+    pushl %ecx                  # [ebp-8] len
+    movl 16(%eax), %ecx
+    pushl %ecx                  # [ebp-12] items
+    movl 16(%ebp), %esi
+    movl $mn_contains, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_contains
+    movl 16(%ebp), %esi
+    movl $mn_add, %edi
+    call .Lstreq
+    testl %eax, %eax
+    jnz .Lmt_sadd
+    jmp .Lmt_none_pop
+
+# add(v): n==1; dedup via .Leqkey then append
+.Lmt_sadd:
+    movl 20(%ebp), %eax
+    cmpl $1, %eax
+    jne .Lmt_badargs
+    movl 24(%ebp), %eax
+    testl %eax, %eax
+    jnz .Lmt_badargs
+    pushl $0                    # [ebp-16] i
+.Lmsa_scan:
+    movl -16(%ebp), %eax
+    cmpl -8(%ebp), %eax
+    jae .Lmsa_add
+    movl -12(%ebp), %edx        # items
+    movl %eax, %ecx
+    shll $3, %ecx
+    addl %ecx, %edx             # &items[i]
+    movl %edx, %esi             # A = item
+    movl 36(%ebp), %edi         # B = argv[0]
+    call .Leqkey
+    testl %eax, %eax
+    jnz .Lmt_none_pop           # present -> A_NONE
+    incl -16(%ebp)
+    jmp .Lmsa_scan
+.Lmsa_add:
+    movl -4(%ebp), %esi         # set obj
+    call .Larr_ensure
+    testl %eax, %eax
+    jz .Lmt_none_pop
+    movl -4(%ebp), %esi
+    movl 4(%esi), %ecx
+    movl 16(%esi), %edx
+    shll $3, %ecx
+    addl %ecx, %edx
+    movl 36(%ebp), %eax
+    movl (%eax), %ecx
+    movl %ecx, (%edx)
+    movl 4(%eax), %ecx
+    movl %ecx, 4(%edx)
+    incl 4(%esi)
+    jmp .Lmt_none_pop
+
+.Lmt_badargs:
+    jmp .Lmt_none_pop
+.Lmt_none_pop:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+.Lmt_out:
+    movl %ebp, %esp
+    popl %ebp
+    ret
+.Lmt_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
+
+    .globl a_setattr
+a_setattr:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     ret
