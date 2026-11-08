@@ -3871,6 +3871,11 @@ struct Arm32Target : NatTarget {
   void ret(std::string& o) const override { o += "    bx lr\n"; }
 };
 
+// i8086 real mode: identical instruction dialect to i386 — the backend
+// assembler emits 0x66/0x67 prefixes automatically. Only the entry stub
+// differs (no crt: _start sets up segments/stack and calls main).
+struct I8086Target : I386Target {};
+
 }  // namespace
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
@@ -3900,6 +3905,33 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     Arm32Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
+  }
+  if (arch == "i8086" || arch == "8086") {
+    if (testMode) {
+      error = "native backend: i8086 test mode unsupported";
+      return false;
+    }
+    I8086Target t;
+    NativeEmitter e(graph, sema, t, testMode);
+    if (!e.run(out, error)) return false;
+    // Bare-metal boot stub: real mode needs segments zeroed and a stack
+    // before main runs. Exit via isa-debug-exit (port 0xf4) for qemu.
+    out = std::string(
+        "    .section .text\n"
+        "    .globl _start\n"
+        "_start:\n"
+        "    cli\n"
+        "    xorl %eax, %eax\n"
+        "    movl %eax, %ds\n"
+        "    movl %eax, %es\n"
+        "    movl %eax, %ss\n"
+        "    movl $0x90000, %esp\n"
+        "    call main\n"
+        "    movw $0xf4, %dx\n"
+        "    movb $42, %al\n"
+        "    outb %al, %dx\n"
+        "    hlt\n") + out;
+    return true;
   }
   error = "native backend: arch '" + arch + "' not implemented";
   return false;
