@@ -852,6 +852,12 @@ again:
             b = op0_codes[opcode - TOK_ASM_first];
             if (b & 0xff00)
                 g(b >> 8);
+#ifdef ASTRA_TARGET_I8086
+            /* OP0 forms bypass the prefix logic above; near ret still must
+               be operand32 to match operand32 near call (EIP push/pop). */
+            if (opcode == TOK_ASM_ret || opcode == TOK_ASM_retl)
+                g(0x66);
+#endif
             g(b);
             return;
         } else if (opcode <= TOK_ASM_alllast) {
@@ -949,7 +955,9 @@ again:
         }
         if (hasmem)
             g(0x67);
-        if (s != 1)
+        /* Near call is operand32 (pushes EIP); near ret must match or ESP
+           comes back two bytes low and corrupts the caller frame. */
+        if (pa->opcode == 0xc3 || pa->opcode == 0xc2 || s != 1)
             g(0x66);
     }
 #else

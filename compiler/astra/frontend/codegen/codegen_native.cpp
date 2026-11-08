@@ -4068,7 +4068,7 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
         "    andb $0x3f, %al\n"
         "    movb %al, 0x7db6\n"
         "    movb $0, 0x7db9\n"
-        "    movw $1, 0x7da4\n"
+        "    movw $2, 0x7da4\n"
         "    movw $0, 0x7da6\n"
         "    movw $0, 0x7da8\n"
         "    movl $0x7e00, 0x7dac\n"

@@ -407,16 +407,6 @@ a_bi_call:
     movl %esp, %ebp
     cmpl $0, 8(%ebp)          # id low32 == 0 (print)?
     jne .Lb_none
-    cmpb $0, serial_init
-    jne .Lb_args
-    movw $0x3F8, %dx
-    movb $0x80, %al
-    outb %al, %dx
-    xorl %eax, %eax
-    outw %ax, %dx
-    movb $0x03, %al
-    outb %al, %dx
-    movb $1, serial_init
 .Lb_args:
     xorl %ecx, %ecx          # i = 0
 .Lb_loop:
