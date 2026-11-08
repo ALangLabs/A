@@ -96,6 +96,8 @@ int builtinRuntimeId(const std::string& name) {
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
       {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
+      {"linalg_matmul", 219}, {"linalg_softmax", 220}, {"linalg_attention", 221},
+      {"matmul", 219}, {"softmax", 220}, {"attention", 221},
       {"net_tcp_connect", 196}, {"net_send", 197}, {"net_recv", 198},
       {"net_close", 199}, {"net_set_timeout", 200}, {"net_local_port", 201},
       {"net_tls_connect", 202},

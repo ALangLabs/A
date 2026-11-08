@@ -58,6 +58,24 @@ static double *to_f64(const AArr *a, uint64_t n, const char *what) {
     return out;
 }
 
+/* Returns a raw double view of the first `need` elements, materializing a
+ * malloc'd copy into *tmp when the list is not already verified all-double.
+ * Caller frees *tmp (NULL when a direct view was returned). */
+static const double *as_f64(const AArr *a, uint64_t need, double **tmp,
+                            const char *what) {
+    *tmp = NULL;
+    if ((uint64_t)a->h.len < need) panicf("%s too short", what);
+    const double *view = f64_ptr((AArr *)a);
+    if (view) return view;
+    *tmp = to_f64(a, need, what);
+    return *tmp;
+}
+
+/* Tile width for the blocked matmul loops (Mojo/CBLAS-style cache blocking:
+ * a 32-wide tile of doubles is 256 bytes, so an output row segment and the
+ * 32 B-rows it touches stay hot in L1 while the k loop streams). */
+#define LINALG_TILE 32
+
 static aval f64_list(uint64_t n, const double *src) {
     AArr *a = (AArr *)xmalloc(sizeof(AArr));
     a->h.type = T_LIST;
@@ -70,7 +88,9 @@ static aval f64_list(uint64_t n, const double *src) {
     return mkobj(a);
 }
 
-/* dot(a, b) -> float : sum_i a[i]*b[i] over min(len) */
+/* dot(a, b) -> float : sum_i a[i]*b[i] over min(len). 4-way unrolled with
+ * fma() so each multiply-add rounds once (single-rounding contraction,
+ * like LLVM's fmuladd / Mojo SIMD dot). */
 aval bi_linalg_dot(uint64_t n, aval *argv) {
     want_args("linalg_dot", n, 2, 2);
     AArr *aa = as_arr(argv[0], "dot() first argument");
@@ -82,20 +102,20 @@ aval bi_linalg_dot(uint64_t n, aval *argv) {
     uint64_t i = 0;
     if (ad && bd) {
         for (; i + 4 <= m; i += 4) {
-            acc0 += ad[i] * bd[i];
-            acc1 += ad[i + 1] * bd[i + 1];
-            acc2 += ad[i + 2] * bd[i + 2];
-            acc3 += ad[i + 3] * bd[i + 3];
+            acc0 = fma(ad[i], bd[i], acc0);
+            acc1 = fma(ad[i + 1], bd[i + 1], acc1);
+            acc2 = fma(ad[i + 2], bd[i + 2], acc2);
+            acc3 = fma(ad[i + 3], bd[i + 3], acc3);
         }
-        for (; i < m; i++) acc0 += ad[i] * bd[i];
+        for (; i < m; i++) acc0 = fma(ad[i], bd[i], acc0);
     } else {
         for (; i + 4 <= m; i += 4) {
-            acc0 += arr_num(aa, i) * arr_num(bb, i);
-            acc1 += arr_num(aa, i + 1) * arr_num(bb, i + 1);
-            acc2 += arr_num(aa, i + 2) * arr_num(bb, i + 2);
-            acc3 += arr_num(aa, i + 3) * arr_num(bb, i + 3);
+            acc0 = fma(arr_num(aa, i), arr_num(bb, i), acc0);
+            acc1 = fma(arr_num(aa, i + 1), arr_num(bb, i + 1), acc1);
+            acc2 = fma(arr_num(aa, i + 2), arr_num(bb, i + 2), acc2);
+            acc3 = fma(arr_num(aa, i + 3), arr_num(bb, i + 3), acc3);
         }
-        for (; i < m; i++) acc0 += arr_num(aa, i) * arr_num(bb, i);
+        for (; i < m; i++) acc0 = fma(arr_num(aa, i), arr_num(bb, i), acc0);
     }
     return mkdouble((acc0 + acc1) + (acc2 + acc3));
 }
@@ -128,13 +148,13 @@ aval bi_linalg_matvec(uint64_t n, aval *argv) {
         uint64_t base = (uint64_t)i * (uint64_t)nout;
         if (wf) {
             const double *wr = wf + base;
-            for (int64_t j = 0; j < nout; j++) out[j] += xi * wr[j];
+            for (int64_t j = 0; j < nout; j++) out[j] = fma(xi, wr[j], out[j]);
         } else if (wp) {
             const int64_t *wr = wa->iitems + base;
-            for (int64_t j = 0; j < nout; j++) out[j] += xi * (double)wr[j];
+            for (int64_t j = 0; j < nout; j++) out[j] = fma(xi, (double)wr[j], out[j]);
         } else {
             const aval *wr = wa->items + base;
-            for (int64_t j = 0; j < nout; j++) out[j] += xi * aval_num(wr[j]);
+            for (int64_t j = 0; j < nout; j++) out[j] = fma(xi, aval_num(wr[j]), out[j]);
         }
     }
     aval r = f64_list((uint64_t)nout, out);
@@ -170,30 +190,30 @@ aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
         if (wf) {
             const double *wr = wf + base;
             for (; j + 4 <= nin; j += 4) {
-                acc0 += wr[j] * x[j];
-                acc1 += wr[j + 1] * x[j + 1];
-                acc2 += wr[j + 2] * x[j + 2];
-                acc3 += wr[j + 3] * x[j + 3];
+                acc0 = fma(wr[j], x[j], acc0);
+                acc1 = fma(wr[j + 1], x[j + 1], acc1);
+                acc2 = fma(wr[j + 2], x[j + 2], acc2);
+                acc3 = fma(wr[j + 3], x[j + 3], acc3);
             }
-            for (; j < nin; j++) acc0 += wr[j] * x[j];
+            for (; j < nin; j++) acc0 = fma(wr[j], x[j], acc0);
         } else if (wp) {
             const int64_t *wr = wa->iitems + base;
             for (; j + 4 <= nin; j += 4) {
-                acc0 += (double)wr[j] * x[j];
-                acc1 += (double)wr[j + 1] * x[j + 1];
-                acc2 += (double)wr[j + 2] * x[j + 2];
-                acc3 += (double)wr[j + 3] * x[j + 3];
+                acc0 = fma((double)wr[j], x[j], acc0);
+                acc1 = fma((double)wr[j + 1], x[j + 1], acc1);
+                acc2 = fma((double)wr[j + 2], x[j + 2], acc2);
+                acc3 = fma((double)wr[j + 3], x[j + 3], acc3);
             }
-            for (; j < nin; j++) acc0 += (double)wr[j] * x[j];
+            for (; j < nin; j++) acc0 = fma((double)wr[j], x[j], acc0);
         } else {
             const aval *wr = wa->items + base;
             for (; j + 4 <= nin; j += 4) {
-                acc0 += aval_num(wr[j]) * x[j];
-                acc1 += aval_num(wr[j + 1]) * x[j + 1];
-                acc2 += aval_num(wr[j + 2]) * x[j + 2];
-                acc3 += aval_num(wr[j + 3]) * x[j + 3];
+                acc0 = fma(aval_num(wr[j]), x[j], acc0);
+                acc1 = fma(aval_num(wr[j + 1]), x[j + 1], acc1);
+                acc2 = fma(aval_num(wr[j + 2]), x[j + 2], acc2);
+                acc3 = fma(aval_num(wr[j + 3]), x[j + 3], acc3);
             }
-            for (; j < nin; j++) acc0 += aval_num(wr[j]) * x[j];
+            for (; j < nin; j++) acc0 = fma(aval_num(wr[j]), x[j], acc0);
         }
         double bias = has_bias ? arr_num(ba, (uint64_t)i) : 0.0;
         out[i] = ((acc0 + acc1) + (acc2 + acc3)) + bias;
@@ -202,4 +222,132 @@ aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
     free(out);
     free(x);
     return r;
+}
+
+/* matmul(a, b, m, k, n) -> flat [f64] of length m*n.
+ * a is m×k row-major, b is k×n row-major; out[i*n+j] = sum_t a[i][t]*b[t][j].
+ * Blocked ikj order (Mojo/CBLAS-style tiling): the n loop runs in tiles of
+ * LINALG_TILE so an output row segment stays in L1 while B rows stream
+ * sequentially, and every multiply-add uses fma() (one rounding). */
+aval bi_linalg_matmul(uint64_t n, aval *argv) {
+    want_args("linalg_matmul", n, 5, 5);
+    AArr *aa = as_arr(argv[0], "matmul() left operand");
+    AArr *bb = as_arr(argv[1], "matmul() right operand");
+    int64_t m = a_int_full(argv[2]);
+    int64_t k = a_int_full(argv[3]);
+    int64_t cols = a_int_full(argv[4]);
+    if (m <= 0 || k <= 0 || cols <= 0) panicf("matmul: bad dims");
+    if ((int64_t)aa->h.len < m * k) panicf("matmul: left operand too short");
+    if ((int64_t)bb->h.len < k * cols) panicf("matmul: right operand too short");
+    double *ta = NULL, *tb = NULL;
+    const double *ad = as_f64(aa, (uint64_t)(m * k), &ta, "matmul() left operand");
+    const double *bd = as_f64(bb, (uint64_t)(k * cols), &tb, "matmul() right operand");
+    double *out = (double *)malloc((size_t)(m * cols) * sizeof(double));
+    if (!out) panicf("out of memory");
+    memset(out, 0, (size_t)(m * cols) * sizeof(double));
+    for (int64_t i = 0; i < m; i++) {
+        double *orow = out + (uint64_t)i * (uint64_t)cols;
+        const double *arow = ad + (uint64_t)i * (uint64_t)k;
+        for (int64_t jj = 0; jj < cols; jj += LINALG_TILE) {
+            int64_t jend = jj + LINALG_TILE < cols ? jj + LINALG_TILE : cols;
+            for (int64_t t = 0; t < k; t++) {
+                double a = arow[t];
+                const double *brow = bd + (uint64_t)t * (uint64_t)cols;
+                for (int64_t j = jj; j < jend; j++)
+                    orow[j] = fma(a, brow[j], orow[j]);
+            }
+        }
+    }
+    aval r = f64_list((uint64_t)(m * cols), out);
+    free(out);
+    free(ta);
+    free(tb);
+    return r;
+}
+
+/* softmax(x) -> [f64]. Numerically stable: subtract the max before exp(),
+ * so arbitrarily large logits never overflow. */
+aval bi_linalg_softmax(uint64_t n, aval *argv) {
+    want_args("linalg_softmax", n, 1, 1);
+    AArr *xa = as_arr(argv[0], "softmax() argument");
+    uint64_t len = xa->h.len;
+    if (len == 0) panicf("softmax: empty input");
+    double *tmp = NULL;
+    const double *xp = as_f64(xa, len, &tmp, "softmax() argument");
+    double *out = (double *)malloc((size_t)len * sizeof(double));
+    if (!out) panicf("out of memory");
+    double top = xp[0];
+    for (uint64_t i = 1; i < len; i++) if (xp[i] > top) top = xp[i];
+    double total = 0.0;
+    for (uint64_t i = 0; i < len; i++) {
+        out[i] = exp(xp[i] - top);
+        total += out[i];
+    }
+    for (uint64_t i = 0; i < len; i++) out[i] /= total;
+    aval r = f64_list(len, out);
+    free(out);
+    free(tmp);
+    return r;
+}
+
+/* attention(q, k, v, nk, dk, dv) -> [f64] of length dv.
+ * Single-query scaled dot-product attention, fully fused in one pass with no
+ * intermediate lists (Mojo-style kernel fusion):
+ *   scores[r] = dot(q, k[r]) / sqrt(dk); w = softmax(scores);
+ *   out[c]    = sum_r w[r] * v[r][c].
+ * k is nk×dk row-major, v is nk×dv row-major. */
+aval bi_linalg_attention(uint64_t n, aval *argv) {
+    want_args("linalg_attention", n, 6, 6);
+    AArr *qa = as_arr(argv[0], "attention() query");
+    AArr *ka = as_arr(argv[1], "attention() keys");
+    AArr *va = as_arr(argv[2], "attention() values");
+    int64_t nk = a_int_full(argv[3]);
+    int64_t dk = a_int_full(argv[4]);
+    int64_t dv = a_int_full(argv[5]);
+    if (nk <= 0 || dk <= 0 || dv <= 0) panicf("attention: bad dims");
+    if ((int64_t)qa->h.len < dk) panicf("attention: query too short");
+    if ((int64_t)ka->h.len < nk * dk) panicf("attention: keys too short");
+    if ((int64_t)va->h.len < nk * dv) panicf("attention: values too short");
+    double *tq = NULL, *tk = NULL, *tv = NULL;
+    const double *qp = as_f64(qa, (uint64_t)dk, &tq, "attention() query");
+    const double *kp = as_f64(ka, (uint64_t)(nk * dk), &tk, "attention() keys");
+    const double *vp = as_f64(va, (uint64_t)(nk * dv), &tv, "attention() values");
+    double *scores = (double *)malloc((size_t)nk * sizeof(double));
+    double *out = (double *)malloc((size_t)dv * sizeof(double));
+    if (!scores || !out) panicf("out of memory");
+    const double scale = 1.0 / sqrt((double)dk);
+    for (int64_t r = 0; r < nk; r++) {
+        const double *krow = kp + (uint64_t)r * (uint64_t)dk;
+        double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+        int64_t t = 0;
+        for (; t + 4 <= dk; t += 4) {
+            acc0 = fma(qp[t], krow[t], acc0);
+            acc1 = fma(qp[t + 1], krow[t + 1], acc1);
+            acc2 = fma(qp[t + 2], krow[t + 2], acc2);
+            acc3 = fma(qp[t + 3], krow[t + 3], acc3);
+        }
+        for (; t < dk; t++) acc0 = fma(qp[t], krow[t], acc0);
+        scores[r] = ((acc0 + acc1) + (acc2 + acc3)) * scale;
+    }
+    double top = scores[0];
+    for (int64_t r = 1; r < nk; r++) if (scores[r] > top) top = scores[r];
+    double total = 0.0;
+    for (int64_t r = 0; r < nk; r++) {
+        scores[r] = exp(scores[r] - top);
+        total += scores[r];
+    }
+    memset(out, 0, (size_t)dv * sizeof(double));
+    for (int64_t r = 0; r < nk; r++) {
+        double w = scores[r] / total;
+        const double *vrow = vp + (uint64_t)r * (uint64_t)dv;
+        for (int64_t c = 0; c < dv; c++)
+            out[c] = fma(w, vrow[c], out[c]);
+    }
+    aval result = f64_list((uint64_t)dv, out);
+    free(scores);
+    free(out);
+    free(tq);
+    free(tk);
+    free(tv);
+    return result;
 }

@@ -121,7 +121,10 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "net_udp_send", bi_net_udp_send }, { "net_udp_recv", bi_net_udp_recv },
     { "net_send_bytes", bi_net_send_bytes }, { "net_recv_bytes", bi_net_recv_bytes },
     { "net_tls_wrap", bi_net_tls_wrap }, { "net_inflate_bytes", bi_net_inflate_bytes },
-    { "net_inflate_available", bi_net_inflate_available }
+    { "net_inflate_available", bi_net_inflate_available },
+    { "linalg_matmul", bi_linalg_matmul },
+    { "linalg_softmax", bi_linalg_softmax },
+    { "linalg_attention", bi_linalg_attention }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

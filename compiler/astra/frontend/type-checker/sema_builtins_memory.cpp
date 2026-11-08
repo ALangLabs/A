@@ -8,9 +8,16 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
   if (name == "dot") linalg = "linalg_dot";
   else if (name == "matvec") linalg = "linalg_matvec";
   else if (name == "matvec_t") linalg = "linalg_matvec_t";
+  else if (name == "matmul") linalg = "linalg_matmul";
+  else if (name == "softmax") linalg = "linalg_softmax";
+  else if (name == "attention") linalg = "linalg_attention";
 
-  if (linalg == "linalg_dot" || linalg == "linalg_matvec" || linalg == "linalg_matvec_t") {
-    const std::size_t expected = linalg == "linalg_dot" ? 2 : 5;
+  if (linalg == "linalg_dot" || linalg == "linalg_matvec" || linalg == "linalg_matvec_t" ||
+      linalg == "linalg_matmul" || linalg == "linalg_softmax" || linalg == "linalg_attention") {
+    std::size_t expected = 5;
+    if (linalg == "linalg_dot") expected = 2;
+    else if (linalg == "linalg_softmax") expected = 1;
+    else if (linalg == "linalg_attention") expected = 6;
     if (call.args.size() != expected) {
       builtinArityError(name, call, expected);
       inferCallArgTypes(call);
