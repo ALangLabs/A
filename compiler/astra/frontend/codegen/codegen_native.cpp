@@ -3020,7 +3020,8 @@ struct Riscv64Target : NatTarget {
     o += "    lla t5, " + sym + "\n    sd " + r + ", 0(t5)\n";
   }
   void callSym(std::string& o, const std::string& sym) const override {
-    o += "    call " + sym + "\n";
+    // astra-riscv64's `call` pseudo mis-assembles; `jal ra` is correct.
+    o += "    jal ra, " + sym + "\n";
   }
   void jmp(std::string& o, const std::string& l) const override {
     o += "    j " + l + "\n";
