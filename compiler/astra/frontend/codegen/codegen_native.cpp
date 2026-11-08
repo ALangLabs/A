@@ -3476,6 +3476,7 @@ struct I386Target : NatTarget {
         {"a_unwrap",{{8},false}},{"a_some_new",{{8},false}},
         {"a_try_result",{{8},false}},{"a_match_fail",{{8},false}},
         {"a_is_propagate",{{8},true}},{"a_obj_is_instance",{{8,4},true}},
+        {"a_test_main",{{8,4,4},false}},
         {"a_runtime_init",{{},false}},
     };
     return m;
@@ -3741,6 +3742,7 @@ struct Arm32Target : NatTarget {
         {"a_unwrap",{{8},false}},{"a_some_new",{{8},false}},
         {"a_try_result",{{8},false}},{"a_match_fail",{{8},false}},
         {"a_is_propagate",{{8},true}},{"a_obj_is_instance",{{8,4},true}},
+        {"a_test_main",{{8,4,4},false}},
         {"a_runtime_init",{{},false}},
     };
     return m;
@@ -3890,21 +3892,11 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     return e.run(out, error);
   }
   if (arch == "i386" || arch == "x86") {
-    if (testMode) {
-      // .long pointer arrays assemble but i386-link doesn't relocate
-      // data-section symbol entries yet — keep test mode on emitC.
-      error = "native backend: i386 test mode unsupported";
-      return false;
-    }
     I386Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
   }
   if (arch == "arm" || arch == "arm32") {
-    if (testMode) {
-      error = "native backend: arm32 test mode unsupported";
-      return false;
-    }
     Arm32Target t;
     NativeEmitter e(graph, sema, t, testMode);
     return e.run(out, error);
