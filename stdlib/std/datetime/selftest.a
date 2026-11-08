@@ -1,7 +1,7 @@
 # std.datetime selftest — civil calendar conversions and formatting.
 # Run: ./build/a test stdlib/std/datetime/selftest.a
 import std:datetime
-from std:datetime import DateTime, from_timestamp, timestamp, date, now, add_seconds, diff_ms, weekday, isoweekday, days_in_month, is_leap_year
+from std:datetime import DateTime, from_timestamp, timestamp, date, now, add_seconds, diff_ms, weekday, isoweekday, days_in_month, is_leap_year, strptime
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -106,3 +106,41 @@ fn test_calendar_helpers():
     # now() returns a sane current DateTime.
     n = now()
     assert_true(n.year >= 2024)
+
+fn test_strptime():
+    dt = strptime("2024-03-01 13:05:09", "%Y-%m-%d %H:%M:%S")
+    assert(dt != None)
+    assert_eq(dt!.isoformat(), "2024-03-01T13:05:09.000")
+    # ISO composite %F %T
+    dt2 = strptime("1970-01-01T00:00:00", "%FT%T")
+    assert(dt2 != None)
+    assert_eq(timestamp(dt2!), 0)
+    # %y pivot: 68 -> 2068, 69 -> 1969
+    assert_eq(strptime("68-01-01", "%y-%m-%d")!.year, 2068)
+    assert_eq(strptime("69-01-01", "%y-%m-%d")!.year, 1969)
+    # %I + %p
+    assert_eq(strptime("11:30 PM", "%I:%M %p")!.hour, 23)
+    assert_eq(strptime("12:30 AM", "%I:%M %p")!.hour, 0)
+    assert_eq(strptime("12:30 PM", "%I:%M %p")!.hour, 12)
+    # %f milliseconds (first three digits)
+    assert_eq(strptime("01:02:03.456789", "%H:%M:%S.%f")!.millisecond, 456)
+    assert_eq(strptime("01:02:03.5", "%H:%M:%S.%f")!.millisecond, 500)
+    # %j day-of-year
+    assert_eq(strptime("2024 060", "%Y %j")!.isoformat(), "2024-02-29T00:00:00.000")
+    # month names
+    assert_eq(strptime("1 March 2024", "%d %B %Y")!.month, 3)
+    assert_eq(strptime("1 Mar 2024", "%d %b %Y")!.month, 3)
+    # composites %D %R %r
+    assert_eq(strptime("03/01/24 13:05", "%D %R")!.isoformat(), "2024-03-01T13:05:00.000")
+    assert_eq(strptime("01:02:03 PM", "%r")!.hour, 13)
+    # tz and weekday names consumed but ignored
+    assert_eq(strptime("2024-01-01 +0530 Mon", "%Y-%m-%d %z %a")!.day, 1)
+    assert_eq(strptime("2024-01-01 UTC", "%Y-%m-%d %Z")!.day, 1)
+    # defaults: date-only -> midnight, year defaults handled by %Y anyway
+    assert_eq(strptime("2024-02-29", "%Y-%m-%d")!.isoformat(), "2024-02-29T00:00:00.000")
+    # mismatches -> None
+    assert(strptime("2024-13-01", "%Y-%m-%d") == None)
+    assert(strptime("2024-02-30", "%Y-%m-%d") == None)
+    assert(strptime("2024-01-01x", "%Y-%m-%d") == None)
+    assert(strptime("hello", "%Y-%m-%d") == None)
+    assert(strptime("2023-02-29", "%Y-%m-%d") == None)

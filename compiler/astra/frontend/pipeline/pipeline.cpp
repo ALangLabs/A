@@ -758,14 +758,16 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   const char* forced = std::getenv("A_CODEGEN");
   bool preferC = forced && lowerStr(forced) == "c";
   bool preferAsm = forced && lowerStr(forced) == "asm";
+  (void)preferAsm;  // asm path is selected by the target; A_CODEGEN=c opts out
   if (td->useAsm && !preferC) {
     // Preferred path: x86-64 assembly (fast, no C intermediate).
     if (emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode)) {
       emitted = true;
       srcPath = stageSrc(srcSource, ".s", err);
-    } else if (!preferAsm) {
-      // Fall through to the portable C emitter for anything the asm
+    } else if (std::getenv("A_DEBUG_NATIVE")) {
+      // Fall through to the native/C emitters for anything the asm
       // backend does not cover.
+      err << "note: asm backend declined: " << srcError << "\n";
     }
   }
   if (!emitted) {
@@ -859,6 +861,8 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   bool preferC = forced && lowerStr(forced) == "c";
   if (td.useAsm && !preferC) {
     if (emitAsm(*m.graph, *m.sema, srcSource, srcError)) emitted = true;
+    else if (std::getenv("A_DEBUG_NATIVE"))
+      err << "note: asm backend declined: " << srcError << "\n";
   }
   std::string srcPath;
   if (!emitted) {

@@ -185,7 +185,11 @@ fn _fill_until(conn, pat: [i64]):
         i = _b_find_from(conn._buf, pat, 0)
     return i
 
-"""_read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer."""
+"""
+_read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer.
+Bytes past n are kept in conn._buf: pipelined responses and the next keep-alive
+reply must not be thrown away.
+"""
 fn _read_n(conn, n: i64):
     out = _b_slice(conn._buf, 0, n)
     conn._buf = _b_slice(conn._buf, len(out), len(conn._buf))
@@ -197,7 +201,6 @@ fn _read_n(conn, n: i64):
         if len(chunk) <= need:
             out.extend(chunk)
 
-            # keep the surplus (pipelined response bytes) for the next read
         else:
             out.extend(_b_slice(chunk, 0, need))
             conn._buf = _b_slice(chunk, need, len(chunk))

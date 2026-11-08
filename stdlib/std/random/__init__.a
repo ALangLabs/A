@@ -294,65 +294,117 @@ fn Random_new(seed):
     return r
 
 # -- module-level API (shared global stream) ---------------------------------
+#
+# The stream state lives in the scalar `_gstate` and is round-tripped through
+# a fresh Random on every call. A shared Random INSTANCE cannot be used here:
+# under `a test` no module top-level code runs, so `_default = Random(1)` is
+# never executed and `_default` reads as 0.0 ("'float' object has no attribute
+# 'state'"). Scalar module vars DO persist writes made inside functions, but
+# an uninitialized one reads as float 0.0 and int-typed locals/comparisons
+# reject it ("internal: not an integer") — so `_gstate` is kept FLOAT-typed
+# end to end (the Park-Miller state < 2^31 is exact in a double) and every
+# read goes through `+ 0.0` / `int(...)`. `_gstate <= 0` means "unseeded" ->
+# seed from the wall clock (same as the old _default_seeded flag; explicit
+# seed() always wins).
 
-_default = Random(1)
-_default_seeded = false
+_gstate = 0.0
 
-fn _ensure_seeded():
-    if not _default_seeded:
-        _default.seed(time.now())
-        _default_seeded = true
-    return _default
+fn _load():
+    s = _gstate + 0.0
+    if s <= 0.0:
+        s = (time.now() % 2147483646) + 1.0
+        _gstate = s
+    return Random(int(s))
+
+fn _store(r):
+    _gstate = r.state + 0.0
 
 """seed(s = None) -> reseed the global stream."""
 fn seed(s = None):
-    _ensure_seeded()
-    _default.seed(s)
+    r = _load()
+    r.seed(s)
+    _store(r)
 
 """random() -> float in [0.0, 1.0) from the global stream."""
 fn random():
-    return _ensure_seeded().random()
+    r = _load()
+    v = r.random()
+    _store(r)
+    return v
 
 """randint(a, b) -> i64 in [a, b] inclusive."""
 fn randint(a, b):
-    return _ensure_seeded().randint(a, b)
+    r = _load()
+    v = r.randint(a, b)
+    _store(r)
+    return v
 
 """randrange(start, stop = None, step = 1) -> i64 (Python semantics)."""
 fn randrange(start, stop = None, step = 1):
-    return _ensure_seeded().randrange(start, stop, step)
+    r = _load()
+    v = r.randrange(start, stop, step)
+    _store(r)
+    return v
 
 """choice(seq) -> random element of a non-empty array."""
 fn choice(seq):
-    return _ensure_seeded().choice(seq)
+    r = _load()
+    v = r.choice(seq)
+    _store(r)
+    return v
 
 """choices(seq, k) -> array of k independent choices."""
 fn choices(seq, k):
-    return _ensure_seeded().choices(seq, k)
+    r = _load()
+    v = r.choices(seq, k)
+    _store(r)
+    return v
 
 """sample(population, k) -> new array of k unique elements."""
 fn sample(population, k):
-    return _ensure_seeded().sample(population, k)
+    r = _load()
+    v = r.sample(population, k)
+    _store(r)
+    return v
 
 """shuffle(x) -> x shuffled in place (also returned)."""
 fn shuffle(x):
-    return _ensure_seeded().shuffle(x)
+    r = _load()
+    v = r.shuffle(x)
+    _store(r)
+    return v
 
 """shuffled(x) -> new array with x's elements shuffled."""
 fn shuffled(x):
-    return _ensure_seeded().shuffled(x)
+    r = _load()
+    v = r.shuffled(x)
+    _store(r)
+    return v
 
 """uniform(a, b) -> float in [a, b]."""
 fn uniform(a, b):
-    return _ensure_seeded().uniform(a, b)
+    r = _load()
+    v = r.uniform(a, b)
+    _store(r)
+    return v
 
 """triangular(low, high, mode) -> float (sum-of-uniforms distribution)."""
 fn triangular(low, high, mode):
-    return _ensure_seeded().triangular(low, high, mode)
+    r = _load()
+    v = r.triangular(low, high, mode)
+    _store(r)
+    return v
 
 """getrandbits(k) -> i64 with k random bits (1 <= k <= 62)."""
 fn getrandbits(k):
-    return _ensure_seeded().getrandbits(k)
+    r = _load()
+    v = r.getrandbits(k)
+    _store(r)
+    return v
 
 """randbytes(n) -> [i64] of n bytes in 0..255."""
 fn randbytes(n):
-    return _ensure_seeded().randbytes(n)
+    r = _load()
+    v = r.randbytes(n)
+    _store(r)
+    return v

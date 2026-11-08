@@ -1,8 +1,6 @@
 # std.random selftest — deterministic PRNG behavior.
-# NOTE: exercised through Random instances because module-level state
-# (`random.seed`/`random.random`) relies on module variables, which read
-# as 0.0 inside `a test` test functions (toolchain quirk). The module-level
-# API works normally under `a run`/`a build`.
+# Covers both Random instances and the module-level API (which now works
+# under `a test` too: state round-trips through the float `_gstate`).
 # Run: ./build/a test stdlib/std/random/selftest.a
 import std:random
 
@@ -135,3 +133,46 @@ fn test_string_seed_deterministic():
     r3.seed("hello")
     r4 = random.Random_new("hello")
     assert_eq(r3.random(), r4.random())
+
+# -- module-level API under `a test` -----------------------------------------
+# These exercise the _gstate round-trip: under `a test` module top-level code
+# does not run, so a shared Random instance would read as 0.0. Scalar module
+# vars written inside functions DO persist, which is what _load/_store rely on.
+
+fn test_module_level_seeded():
+    random.seed(42)
+    a = random.randint(1, 1000000)
+    b = random.randint(1, 1000000)
+    assert(a >= 1 and a <= 1000000)
+    assert(b >= 1 and b <= 1000000)
+    # same seed -> same sequence
+    random.seed(42)
+    assert_eq(random.randint(1, 1000000), a)
+    # stream advances between calls (not stuck at a constant)
+    assert(random.randint(1, 1000000) != a or random.randint(1, 1000000) != b)
+
+fn test_module_level_other_fns():
+    random.seed(7)
+    x = random.random()
+    assert(x >= 0.0 and x < 1.0)
+    r = random.randrange(10)
+    assert(r >= 0 and r < 10)
+    c = random.choice(["a", "b", "c"])
+    assert(c == "a" or c == "b" or c == "c")
+    cs = random.choices([1, 2], 4)
+    assert_eq(len(cs), 4)
+    s = random.sample([1, 2, 3, 4, 5], 3)
+    assert_eq(len(s), 3)
+    u = random.uniform(0, 1)
+    assert(u >= 0.0 and u <= 1.0)
+    gb = random.getrandbits(8)
+    assert(gb >= 0 and gb < 256)
+    rb = random.randbytes(4)
+    assert_eq(len(rb), 4)
+    deck = [1, 2, 3, 4]
+    random.shuffle(deck)
+    assert_eq(len(deck), 4)
+    sh = random.shuffled(deck)
+    assert_eq(len(sh), 4)
+    rr = random.randrange(5, 10, 2)
+    assert(rr >= 5 and rr < 10)
