@@ -472,12 +472,10 @@ void AsmEmitter::emitFunction(FnInfo* f) {
       for (const std::string& nm : promoteNames_)
         line += " " + nm + (specNames_.count(nm) ? "(spec)" : "");
       std::fprintf(stderr, "%s\n", line.c_str());
-      for (const std::string& nm : promoteNames_) {
-        auto it = nameRanges_.find(nm);
-        const bool known = it != nameRanges_.end() && it->second.known;
-        std::fprintf(stderr, "  range %s: %s\n", nm.c_str(),
-                     known ? "known" : "unknown");
-      }
+      for (const auto& kv : nameRanges_)
+        std::fprintf(stderr, "  range %s: %s %lld..%lld\n", kv.first.c_str(),
+                     kv.second.known ? "known" : "unknown",
+                     (long long)kv.second.lo, (long long)kv.second.hi);
     }
     // Strength reduction scans pre-loop writes via the current body.
     const std::vector<StmtPtr>* savedBody = curFnBody_;

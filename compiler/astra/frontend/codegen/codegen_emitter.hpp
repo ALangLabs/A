@@ -212,6 +212,7 @@ class AsmEmitter {
   // restored together with promoteNames_ (inlined callees get their own).
   std::unordered_map<std::string, ARange> nameRanges_;
   int rangeFreeze_ = 0;    // >0 suppresses acc recording (loop fixpoint)
+  bool rangeRecording_ = true;  // acc recording enabled (see rangeLoop)
   int rangeBudget_ = 0;    // stmt-processing budget; exhaustion -> prove nothing
   bool rangeAbort_ = false;
   struct RangeLoopCtx {

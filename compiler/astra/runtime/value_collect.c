@@ -120,7 +120,6 @@ aval a_dict_new(void) {
     d->h.len = 0;
     d->h.cap = 0;
     d->pairs = NULL;
-    d->phash = NULL;
     d->slots = NULL;
     d->scap = 0;
     return mkobj(&d->h);
@@ -132,7 +131,6 @@ aval a_struct_new(aval name, aval methods) {
     s->d.h.len = 0;
     s->d.h.cap = 0;
     s->d.pairs = NULL;
-    s->d.phash = NULL;
     s->d.slots = NULL;
     s->d.scap = 0;
     s->name = name;

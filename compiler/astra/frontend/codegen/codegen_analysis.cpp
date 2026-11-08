@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <set>
 #include <sstream>
@@ -44,9 +45,13 @@ void AsmEmitter::rawDropReg(int r) {
 void AsmEmitter::rawInvAll() { rawRegOf_.clear(); }
 
 // Slot's memory now holds the bits in register r; drop the slot's stale
-// claims in other registers (its old contents are gone).
+// claims in other registers (its old contents are gone) and drop every other
+// slot's claim on r (that register now mirrors this slot only).
 void AsmEmitter::rawLearn(int slot, int r) {
     if (!rawRegOn()) return;
+    // One register mirrors at most one slot: claiming r for `slot` proves the
+    // bits of any other slot previously said to live in r are gone.
+    rawDropReg(r);
     rawRegOf_.erase(slot);
     rawRegOf_[slot] = r;
   }
@@ -719,15 +724,31 @@ bool AsmEmitter::arithFits(const ARange& a, const ARange& b,
 ARange AsmEmitter::rangeBinOp(const std::string& op, const ARange& l,
                     const ARange& r) const {
     if (op == "+" || op == "-" || op == "*") {
-      if (!arithFits(l, r, op)) return ARange{};
-      if (op == "+") return rngSpan(l.lo + r.lo, l.hi + r.hi);
-      if (op == "-") return rngSpan(l.lo - r.hi, l.hi - r.lo);
-      __int128 ps[4] = {l.lo * r.lo, l.lo * r.hi, l.hi * r.lo, l.hi * r.hi};
-      __int128 mn = ps[0], mx = ps[0];
-      for (int i = 1; i < 4; ++i) {
-        if (ps[i] < mn) mn = ps[i];
-        if (ps[i] > mx) mx = ps[i];
+      // Saturate to the int64 extremes instead of dropping to "unknown": the
+      // endpoints then act as +-infinity, which lets a loop head carry a
+      // one-sided fact (`i = i + 1` climbing with no upper bound yet) and lets
+      // the loop-condition narrowing intersect it back into a tight range.
+      // A saturated result is never accepted by arithFits, so nothing that
+      // could really overflow is ever taken as a raw int64 value.
+      if (!l.known || !r.known) return ARange{};
+      __int128 mn = 0, mx = 0;
+      if (op == "+") {
+        mn = l.lo + r.lo;
+        mx = l.hi + r.hi;
+      } else if (op == "-") {
+        mn = l.lo - r.hi;
+        mx = l.hi - r.lo;
+      } else {
+        __int128 ps[4] = {l.lo * r.lo, l.lo * r.hi, l.hi * r.lo, l.hi * r.hi};
+        mn = ps[0];
+        mx = ps[0];
+        for (int i = 1; i < 4; ++i) {
+          if (ps[i] < mn) mn = ps[i];
+          if (ps[i] > mx) mx = ps[i];
+        }
       }
+      if (mn < rngI64Min()) mn = rngI64Min();
+      if (mx > rngI64Max()) mx = rngI64Max();
       return rngSpan(mn, mx);
     }
     if (op == "%") {
@@ -1028,7 +1049,7 @@ bool AsmEmitter::rangeEnvEq(const ARangeEnv& a, const ARangeEnv& b) const {
   }
 
 void AsmEmitter::rangeRecord(const ARangeEnv& env) {
-    if (rangeFreeze_ > 0 || rangeAbort_) return;
+    if (!rangeRecording_ || rangeAbort_) return;
     for (const auto& sc : env.scopes)
       for (const auto& kv : sc) {
         auto it = nameRanges_.find(kv.first);
@@ -1403,6 +1424,13 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
     // fallback poisons every assigned name.
     bool converged = false;
     ++rangeFreeze_;
+    // Fixpoint states are transient (they grow monotonically until they
+    // stabilize), so nothing they see may be recorded as a fact. Nested
+    // loops re-enable recording for their own recording pass, which starts
+    // from the enclosing loop's converged head — that is what gives an
+    // inner while-counter a proven range at all.
+    const bool savedRecording = rangeRecording_;
+    rangeRecording_ = false;
     for (int round = 0; round < 6 && !converged && !rangeAbort_; ++round) {
       ARangeEnv prev;
       for (int it = 0; it < kMaxRangeIter && !rangeAbort_; ++it) {
@@ -1427,18 +1455,27 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
       // Widen: poison the names whose interval moved in the last step, then
       // re-run so dependents collapse to unknown too. Unknown is top, so each
       // round strictly shrinks the known set and this terminates.
+      // Directional widening: push only the bound that moved out to the
+      // extreme instead of discarding the interval. A counter `i = i + 1`
+      // creeps upward one step per fixpoint round, so its upper bound moves
+      // and its lower bound (the pre-loop value) does not: widening to
+      // [lo, +inf] then intersecting with the loop condition gives the tight
+      // [lo, cond] range the raw int64 path needs, where poisoning used to
+      // leave the name entirely unknown.
       bool any = false;
       for (std::size_t i = 0; i < head.scopes.size() && i < prev.scopes.size();
            ++i) {
         for (const auto& kv : head.scopes[i]) {
           auto f = prev.scopes[i].find(kv.first);
-          const bool moved =
-              f == prev.scopes[i].end() || f->second.known != kv.second.known ||
-              f->second.lo != kv.second.lo || f->second.hi != kv.second.hi;
-          if (moved && kv.second.known) {
-            head.scopes[i][kv.first] = ARange{};
-            any = true;
-          }
+          if (!kv.second.known) continue;
+          if (f == prev.scopes[i].end() || !f->second.known) continue;
+          const bool loMoved = kv.second.lo != f->second.lo;
+          const bool hiMoved = kv.second.hi != f->second.hi;
+          if (!loMoved && !hiMoved) continue;
+          __int128 lo = loMoved ? rngI64Min() : kv.second.lo;
+          __int128 hi = hiMoved ? rngI64Max() : kv.second.hi;
+          if (lo <= hi) head.scopes[i][kv.first] = rngSpan(lo, hi);
+          any = true;
         }
       }
       if (varName && varRange)
@@ -1468,6 +1505,7 @@ void AsmEmitter::rangeLoop(const std::vector<StmtPtr>& body, const std::string* 
     }
     --rangeFreeze_;
     rangeLoops_.pop_back();
+    rangeRecording_ = savedRecording;
     if (rangeAbort_) {
       env.scopes.clear();
       return;
@@ -1593,7 +1631,10 @@ void AsmEmitter::rangeStmt(const Stmt* s, ARangeEnv& env) {
             std::string base = st.op.substr(0, st.op.size() - 1);
             r = rangeBinOp(base, env.find(nm), exprRangeIn(st.value.get(), lk));
           }
-          env.assign(nm, r);
+          // A's implicit declarations (`x = v` with no earlier binding)
+          // create the local here; bind it so its range is recorded and the
+          // while-condition narrowing has something to intersect with.
+          if (!env.assign(nm, r)) env.bindTop(nm, r);
         } else {
           rangePoisonExpr(st.target.get(), env);
         }

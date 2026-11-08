@@ -70,18 +70,22 @@ static uint64_t dict_key_hash(aval k) {
     return UINT64_C(0x9e3779b97f4a7c15);
 }
 
-/* Rebuild slots from pairs[0..len) using the cached phash values.
+/* Rebuild slots from pairs[0..len), re-deriving each key hash (the slot
+   word carries the hash tag, so there is no separate hash array).
    ncap must be a power of two with load factor < 1. */
+static inline uint32_t dict_tag(uint64_t h) { return (uint32_t)(h >> 32); }
+
 static void dict_rehash(ADict *d, uint64_t ncap) {
     free(d->slots);
-    d->slots = (uint32_t *)xmalloc((size_t)ncap * sizeof(uint32_t));
-    memset(d->slots, 0, (size_t)ncap * sizeof(uint32_t));
+    d->slots = (uint64_t *)xmalloc((size_t)ncap * sizeof(uint64_t));
+    memset(d->slots, 0, (size_t)ncap * sizeof(uint64_t));
     d->scap = ncap;
     uint64_t mask = ncap - 1;
     for (uint64_t i = 0; i < d->h.len; ++i) {
-        uint64_t s = d->phash[i] & mask;
+        uint64_t h = dict_key_hash(d->pairs[i].k);
+        uint64_t s = h & mask;
         while (d->slots[s]) s = (s + 1) & mask;
-        d->slots[s] = (uint32_t)(i + 1);
+        d->slots[s] = ((uint64_t)dict_tag(h) << 32) | (uint32_t)(i + 1);
     }
 }
 
@@ -90,7 +94,6 @@ static void dict_reserve(ADict *d, uint64_t need) {
         uint64_t nc = d->h.cap ? d->h.cap : 4;
         while (nc < need) nc *= 2;
         d->pairs = (APair *)xrealloc(d->pairs, (size_t)nc * sizeof(APair));
-        d->phash = (uint64_t *)xrealloc(d->phash, (size_t)nc * sizeof(uint64_t));
         d->h.cap = nc;
     }
     /* keep the probe table below ~70% load so lookups stay short */
@@ -105,13 +108,16 @@ static int64_t dict_find_h(ADict *d, aval k, uint64_t h) {
     if (d->scap == 0) return -1;
     uint64_t mask = d->scap - 1;
     uint64_t s = h & mask;
-    while (d->slots[s]) {
-        uint32_t i = d->slots[s] - 1;
-        if (d->phash[i] == h && dict_key_eq(d->pairs[i].k, k))
-            return (int64_t)i;
+    const uint32_t tag = dict_tag(h);
+    for (;;) {
+        uint64_t w = d->slots[s];
+        if (!w) return -1;
+        if ((uint32_t)(w >> 32) == tag) {
+            uint32_t i = (uint32_t)w - 1;
+            if (dict_key_eq(d->pairs[i].k, k)) return (int64_t)i;
+        }
         s = (s + 1) & mask;
     }
-    return -1;
 }
 
 /* Probe once for `k`, returning the pair index (>= 0) or, when absent, the
@@ -121,10 +127,14 @@ static int64_t dict_find_h(ADict *d, aval k, uint64_t h) {
 static int64_t dict_probe(ADict *d, aval k, uint64_t h) {
     uint64_t mask = d->scap ? d->scap - 1 : 0;
     uint64_t s = h & mask;
-    while (d->scap && d->slots[s]) {
-        uint32_t i = d->slots[s] - 1;
-        if (d->phash[i] == h && dict_key_eq(d->pairs[i].k, k))
-            return (int64_t)i;
+    const uint32_t tag = dict_tag(h);
+    while (d->scap) {
+        uint64_t w = d->slots[s];
+        if (!w) break;
+        if ((uint32_t)(w >> 32) == tag) {
+            uint32_t i = (uint32_t)w - 1;
+            if (dict_key_eq(d->pairs[i].k, k)) return (int64_t)i;
+        }
         s = (s + 1) & mask;
     }
     return -(int64_t)(s + 1);
@@ -151,7 +161,6 @@ void dict_put(ADict *d, aval k, aval v) {
     uint64_t idx = d->h.len;
     d->pairs[idx].k = k;
     d->pairs[idx].v = v;
-    d->phash[idx] = h;
     d->h.len++;
     uint64_t mask = d->scap - 1;
     uint64_t s;
@@ -161,7 +170,7 @@ void dict_put(ADict *d, aval k, aval v) {
         s = h & mask;  /* rehash moved every slot: walk the new chain */
         while (d->slots[s]) s = (s + 1) & mask;
     }
-    d->slots[s] = (uint32_t)(idx + 1);
+    d->slots[s] = ((uint64_t)dict_tag(h) << 32) | (uint32_t)(idx + 1);
 }
 
 /* Remove pair i preserving insertion order of the rest; rebuilds the
@@ -169,14 +178,13 @@ void dict_put(ADict *d, aval k, aval v) {
 void dict_remove_at(ADict *d, uint64_t i) {
     uint64_t tail = d->h.len - i - 1;
     memmove(d->pairs + i, d->pairs + i + 1, (size_t)tail * sizeof(APair));
-    memmove(d->phash + i, d->phash + i + 1, (size_t)tail * sizeof(uint64_t));
     d->h.len--;
     if (d->scap) dict_rehash(d, d->scap);
 }
 
 void dict_clear(ADict *d) {
     d->h.len = 0;
-    if (d->scap) memset(d->slots, 0, (size_t)d->scap * sizeof(uint32_t));
+    if (d->scap) memset(d->slots, 0, (size_t)d->scap * sizeof(uint64_t));
 }
 
 int set_contains(AArr *s, aval v) {

@@ -84,14 +84,15 @@ typedef struct { AObj h; char data[]; } AStr;
 typedef struct { AObj h; char *data; } ABytes;
 typedef struct { AObj h; aval *items; int64_t *iitems; uint32_t flags; } AArr;
 typedef struct { aval k, v; } APair;
-/* pairs keeps insertion order; phash[i] is the cached hash of pairs[i].k;
-   slots is an open-addressed index (power-of-two scap, 0 = empty, else
-   pair index + 1) mapping hash -> pair index for O(1) dict_find. */
+/* pairs keeps insertion order; slots is an open-addressed index (power-of-two
+   scap, 0 = empty) mapping hash -> pair index for O(1) dict_find. Each slot
+   word packs a 32-bit hash tag in the high half and `pair index + 1` in the
+   low half, so one load both rejects most collisions and locates the pair:
+   the probe chain never touches a separate hash array. */
 typedef struct {
     AObj h;
     APair *pairs;
-    uint64_t *phash;
-    uint32_t *slots;
+    uint64_t *slots;
     uint64_t scap;
 } ADict;
 /* Class instance: ADict embedded first so every (ADict *)obj_of(v) cast

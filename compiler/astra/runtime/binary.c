@@ -43,11 +43,6 @@ static void bin_str(BinBuf *b, const char *s, size_t n) {
 
 static void bin_encode_val(BinBuf *b, aval v);
 
-static void bin_encode_bytes(BinBuf *b, const void *data, size_t n) {
-    const uint8_t *p = (const uint8_t *)data;
-    for (size_t i = 0; i < n; ++i) bin_put(b, p[i]);
-}
-
 static int utf8_decode_cp(const char *p, uint64_t n, uint64_t *cp) {
     if (!n) return 0;
     const unsigned char *s = (const unsigned char *)p;
@@ -219,7 +214,6 @@ aval dict_new_empty(void) {
     d->h.len = 0;
     d->h.cap = 0;
     d->pairs = NULL;
-    d->phash = NULL;
     d->slots = NULL;
     d->scap = 0;
     return mkobj(&d->h);
