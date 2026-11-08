@@ -13,8 +13,13 @@
 #   resp = post(url, "body", {"k": "v"})         # data, then a json value
 #
 # A has no keyword arguments: the optional parameters below are positional.
-# Bodies are read as raw bytes; `body` is the UTF-8 decode (empty when the
-# payload is binary) and `body_bytes` is always the exact payload.
+# `body` is the payload as a String (empty when the payload is binary) and
+# `body_bytes` holds the payload as raw bytes when it is *not* valid UTF-8.
+# The split is what makes bodies fast: an A [i64] byte array costs 8 bytes per
+# payload byte plus an expansion pass, so text payloads (HTML, JSON) are read
+# into a flat char buffer and never materialized as [i64] (~1 GB/s vs ~90 MB/s
+# on 1 MiB bodies). Pass fetch_bytes=true to HTTPConnection.request to get
+# `.body_bytes` for text payloads too.
 # Content-Encoding: gzip/deflate is decoded transparently when zlib is
 # available. Proxies come from http_proxy/https_proxy/no_proxy (or uppercase):
 # https requests tunnel through CONNECT and then start TLS. Certificates are
@@ -256,43 +261,42 @@ fn _read_headers(conn):
         pos = e + 2
     return lines
 
-"""_read_body_bytes(conn, headers) -> [i64] body per framing rules."""
-fn _read_body_bytes(conn, headers):
-    te = headers.get("transfer-encoding")
-    if te != None and te.lower().contains("chunked"):
-        # RFC 7230: chunked beats content-length when both are present.
-        # Dechunk as we read, so the payload is copied once instead of twice
-        # (framing bytes are discarded rather than collected and stripped).
-        chunks = []
-        while true:
-            size_line = _read_line(conn)
-            if len(size_line) == 0:
-                break
-            size = _parse_hex(b2s(size_line))
-            if size <= 0:
-                # consume trailers until blank line
-                while true:
-                    t = _read_line(conn)
-                    if len(t) == 0 or b2s(t) == "\r\n":
-                        break
-                break
-            chunks.append(_read_n(conn, size))
-            _read_line(conn)  # discard the CRLF that ends the chunk
-        if len(chunks) == 0:
-            return []
-        if len(chunks) == 1:
-            return chunks[0]  # no copy for the usual single-chunk response
-        body = []
-        for c in chunks:
-            body.extend(c)
-        return body
-    cl = headers.get("content-length")
-    if cl != None:
-        n = int(cl)
-        if n < 0:
-            n = 0
-        return _read_n(conn, n)
-    # read until close; bytes already buffered belong to the body too
+"""BodyParts: the payload either as text (flat String) or as raw bytes."""
+class BodyParts:
+    text: String
+    bytes: [i64]
+
+"""_read_chunked(conn) -> [i64] dechunked payload."""
+fn _read_chunked(conn) -> [i64]:
+    # RFC 7230: chunked beats content-length when both are present.
+    # Dechunk as we read, so the payload is copied once instead of twice
+    # (framing bytes are discarded rather than collected and stripped).
+    chunks = []
+    while true:
+        size_line = _read_line(conn)
+        if len(size_line) == 0:
+            break
+        size = _parse_hex(b2s(size_line))
+        if size <= 0:
+            # consume trailers until blank line
+            while true:
+                t = _read_line(conn)
+                if len(t) == 0 or b2s(t) == "\r\n":
+                    break
+            break
+        chunks.append(_read_n(conn, size))
+        _read_line(conn)  # discard the CRLF that ends the chunk
+    if len(chunks) == 0:
+        return []
+    if len(chunks) == 1:
+        return chunks[0]  # no copy for the usual single-chunk response
+    body = []
+    for c in chunks:
+        body.extend(c)
+    return body
+
+"""_read_to_close(conn) -> [i64] body delimited by the server closing."""
+fn _read_to_close(conn) -> [i64]:
     body = conn._buf
     conn._buf = []
     while true:
@@ -301,6 +305,49 @@ fn _read_body_bytes(conn, headers):
             break
         body.extend(chunk)
     return body
+
+"""_short_read(conn, got, want) -> fail; a body shorter than its framing says."""
+fn _short_read(conn, got: i64, want: i64):
+    st = net.recv_status(conn.sock)
+    if st == 3:
+        conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+    conn._fail("connection closed after {got} of {want} body bytes from {conn.host}:{conn.port}")
+
+"""
+_read_body(conn, headers, fetch_bytes) -> BodyParts per the framing rules.
+A text payload with a Content-Length is read by net.recv_body, which validates
+UTF-8 as it copies and hands back a flat String, so a 1 MiB body costs one read
+pass instead of an int64 expansion plus a decode. Chunked, compressed, pipelined
+(bytes already buffered) and fetch_bytes=true payloads take the byte path.
+"""
+fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
+    ce = headers.get("content-encoding", "").lower()
+    want_bytes = fetch_bytes or ce.contains("gzip") or ce.contains("deflate")
+    te = headers.get("transfer-encoding")
+    if te != None and te.lower().contains("chunked"):
+        return BodyParts("", _read_chunked(conn))
+    cl = headers.get("content-length")
+    if cl != None:
+        n = int(cl)
+        if n <= 0:
+            return BodyParts("", [])
+        if want_bytes or len(conn._buf) > 0:
+            return BodyParts("", _read_n(conn, n))
+        (text, raw) = net.recv_body(conn.sock, n)
+        if text != None:
+            if len(text) < n:
+                _short_read(conn, len(text), n)
+            return BodyParts(text, [])
+        if len(raw) < n:
+            _short_read(conn, len(raw), n)
+        return BodyParts("", raw)
+    if want_bytes or len(conn._buf) > 0:
+        return BodyParts("", _read_to_close(conn))
+    # close-delimited: read straight into a flat buffer until EOF
+    (text, raw) = net.recv_body_all(conn.sock)
+    if text != None:
+        return BodyParts(text, [])
+    return BodyParts("", raw)
 
 """_env_str(name) -> String ("" when unset; env.get returns "")."""
 fn _env_str(name: String):
@@ -389,6 +436,7 @@ class HTTPConnection:
     _method: String  # last request method (HEAD responses carry no body)
     proxy: String  # "host:port" of the proxy in use, "" = direct
     verify: bool  # check the peer certificate and host name
+    _fetch_bytes: bool  # keep .body_bytes even when the payload is text
 
     fn _fail(self, msg):
         core.panic("http: " + msg)
@@ -447,10 +495,11 @@ class HTTPConnection:
     # Send an HTTP request; body is a String, body_bytes an [i64] payload.
     # path is the origin-form target unless this is a plain-HTTP proxy hop,
     # in which case the caller passes the absolute URI.
-    fn request(self, method: String, path: String, body = None, headers = None, body_bytes = None):
+    fn request(self, method: String, path: String, body = None, headers = None, body_bytes = None, fetch_bytes = false):
 
         self.connect()
         self._method = method.upper()
+        self._fetch_bytes = fetch_bytes
         h = ""
         has_cl = false
         if headers != None:
@@ -508,16 +557,19 @@ class HTTPConnection:
             if len(lines) == 0:
                 self._fail("interim response without a final status")
         hdrs = _headers_map(lines[1..])
-        body_bytes = []
+        parts = BodyParts("", [])
         if self._method != "HEAD" and status != 204 and status != 304 and status >= 200:
-            body_bytes = _read_body_bytes(self, hdrs)
+            parts = _read_body(self, hdrs, self._fetch_bytes)
         self.close()
+        body_bytes = parts.bytes
         ce = hdrs.get("content-encoding", "").lower()
         if len(body_bytes) > 0 and net.inflate_available():
             if ce.contains("gzip") or ce.contains("deflate"):
                 body_bytes = net.inflate_bytes(body_bytes, 47)
-        # binary payloads have no UTF-8 decode: body stays "" (use body_bytes)
-        body = utf8_decode(body_bytes) ?? ""
+        body = parts.text
+        if len(body_bytes) > 0:
+            # byte path (chunked / compressed / binary): decode once, natively
+            body = utf8_decode(body_bytes) ?? ""
         enc = hdrs.get("content-type", "")
         encoding = "utf-8"
         if enc.contains("charset="):
@@ -553,7 +605,7 @@ fn http_connection(host: String, port = 80, timeout = 0):
     proxy = ""
     if proxy_host != "":
         proxy = proxy_host + ":" + str(proxy_port)
-    return HTTPConnection(host, port, timeout, false, -1, false, [], "", proxy, true)
+    return HTTPConnection(host, port, timeout, false, -1, false, [], "", proxy, true, false)
 
 """https_connection(host, port=443, timeout=0, verify=true) -> HTTPConnection"""
 fn https_connection(host: String, port = 443, timeout = 0, verify = true):
@@ -561,7 +613,7 @@ fn https_connection(host: String, port = 443, timeout = 0, verify = true):
     proxy = ""
     if proxy_host != "":
         proxy = proxy_host + ":" + str(proxy_port)
-    return HTTPConnection(host, port, timeout, true, -1, false, [], "", proxy, verify)
+    return HTTPConnection(host, port, timeout, true, -1, false, [], "", proxy, verify, false)
 
 """_conn_for(url, timeout, verify) -> (HTTPConnection, UrlParts) or panics."""
 fn _conn_for(url: String, timeout: i64, verify = true):

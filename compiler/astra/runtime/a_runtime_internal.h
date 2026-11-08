@@ -415,10 +415,13 @@ aval bi_net_udp_recv(uint64_t n, aval *argv);
 aval bi_net_send_bytes(uint64_t n, aval *argv);
 aval bi_net_recv_bytes(uint64_t n, aval *argv);
 aval bi_net_recv_exact(uint64_t n, aval *argv);
+aval bi_net_recv_body(uint64_t n, aval *argv);
+aval bi_net_recv_body_all(uint64_t n, aval *argv);
 aval bi_net_tls_wrap(uint64_t n, aval *argv);
 aval bi_net_inflate_bytes(uint64_t n, aval *argv);
 aval bi_net_inflate_available(uint64_t n, aval *argv);
 /* bytes_conv.c: linear-time bytes <-> string conversion */
+int a_utf8_valid(const char *p, uint64_t len);
 aval bi_bytes_decode_utf8(uint64_t n, aval *argv);
 aval bi_str_encode_utf8(uint64_t n, aval *argv);
 aval bi_read_bytes(uint64_t n, aval *argv);

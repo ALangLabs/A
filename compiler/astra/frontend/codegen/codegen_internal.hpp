@@ -101,7 +101,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"net_tls_wrap", 216}, {"net_inflate_bytes", 217},
             {"net_inflate_available", 218},
       {"bytes_decode_utf8", 222}, {"str_encode_utf8", 223},
-      {"net_recv_exact", 224},
+      {"net_recv_exact", 224}, {"net_recv_body", 225}, {"net_recv_body_all", 226},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
