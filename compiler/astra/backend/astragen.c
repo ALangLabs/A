@@ -3689,6 +3689,9 @@ static void verify_assign_cast(CType *dt)
 
 static void gen_assign_cast(CType *dt)
 {
+#ifdef ASTRA_TARGET_I8086
+    astra_error("i8086: C code generation is not supported (assembly input only)");
+#endif
     verify_assign_cast(dt);
     gen_cast(dt);
 }
@@ -8590,6 +8593,9 @@ static void sym_push_params(Sym *ref)
    'cur_text_section' */
 static void gen_function(Sym *sym)
 {
+#ifdef ASTRA_TARGET_I8086
+    astra_error("i8086: C code generation is not supported (assembly input only)");
+#endif
     struct scope f = { 0 };
 
     cur_scope = root_scope = &f;

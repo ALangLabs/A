@@ -53,6 +53,10 @@
 #include "riscv64-gen.c"
 #include "riscv64-link.c"
 #include "riscv64-asm.c"
+#elif defined(ASTRA_TARGET_I8086)
+#include "i8086-gen.c"
+#include "i8086-link.c"
+#include "i8086-asm.c"
 #else
 #error unknown target
 #endif

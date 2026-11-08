@@ -158,11 +158,13 @@ extern long double strtold (const char *__nptr, char **__endptr);
 /* #define ASTRA_TARGET_ARM64  *//* ARMv8 code generator */
 /* #define ASTRA_TARGET_C67    *//* TMS320C67xx code generator */
 /* #define ASTRA_TARGET_RISCV64 *//* risc-v code generator */
+/* #define ASTRA_TARGET_I8086   *//* i8086 real-mode code generator (asm only) */
 
 /* default target is I386 */
 #if !defined(ASTRA_TARGET_I386) && !defined(ASTRA_TARGET_ARM) && \
     !defined(ASTRA_TARGET_ARM64) && !defined(ASTRA_TARGET_C67) && \
-    !defined(ASTRA_TARGET_X86_64) && !defined(ASTRA_TARGET_RISCV64)
+    !defined(ASTRA_TARGET_X86_64) && !defined(ASTRA_TARGET_RISCV64) && \
+    !defined(ASTRA_TARGET_I8086)
 # if defined __x86_64__
 #  define ASTRA_TARGET_X86_64
 # elif defined __arm__
@@ -387,6 +389,9 @@ extern long double strtold (const char *__nptr, char **__endptr);
 # include "riscv64-gen.c"
 # include "riscv64-link.c"
 # include "riscv64-asm.c"
+#elif defined(ASTRA_TARGET_I8086)
+# include "i8086-gen.c"
+# include "i8086-link.c"
 #else
 #error unknown target
 #endif
@@ -1678,12 +1683,12 @@ static inline void add64le(unsigned char *p, int64_t x) {
     write64le(p, read64le(p) + x);
 }
 /* ------------ i386-gen.c ------------ */
-#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64 || defined ASTRA_TARGET_ARM
+#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64 || defined ASTRA_TARGET_ARM || defined ASTRA_TARGET_I8086
 ST_FUNC void g(int c);
 ST_FUNC void gen_le16(int c);
 ST_FUNC void gen_le32(int c);
 #endif
-#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64
+#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64 || defined ASTRA_TARGET_I8086
 ST_FUNC void gen_addr32(int r, Sym *sym, int c);
 ST_FUNC void gen_addrpc32(int r, Sym *sym, int c);
 ST_FUNC void gen_cvt_csti(int t);

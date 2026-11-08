@@ -207,7 +207,7 @@
      DEF(TOK_pack, "pack")
 #if !defined(ASTRA_TARGET_I386) && !defined(ASTRA_TARGET_X86_64) && \
     !defined(ASTRA_TARGET_ARM) && !defined(ASTRA_TARGET_ARM64) && \
-    !defined(ASTRA_TARGET_RISCV64)
+    !defined(ASTRA_TARGET_RISCV64) && !defined(ASTRA_TARGET_I8086)
      /* already defined for assembler */
      DEF(TOK_ASM_push, "push")
      DEF(TOK_ASM_pop, "pop")
@@ -293,7 +293,7 @@
      DEF(TOK__remu, "_remu")
 #endif
 
-#if defined ASTRA_TARGET_I386
+#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_I8086
      DEF(TOK___fixsfdi, "__fixsfdi")
      DEF(TOK___fixdfdi, "__fixdfdi")
      DEF(TOK___fixxfdi, "__fixxfdi")
@@ -425,7 +425,7 @@
  DEF_ASMDIR(reloc)
  DEF_ASMDIR(section)    /* must be last directive */
 
-#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64
+#if defined ASTRA_TARGET_I386 || defined ASTRA_TARGET_X86_64 || defined ASTRA_TARGET_I8086
 #include "i386-tok.h"
 #endif
 

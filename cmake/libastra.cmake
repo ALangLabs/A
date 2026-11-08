@@ -333,7 +333,7 @@ message(STATUS "libastra: native backend (${astra_version}) for ${astra_arch}")
 # ============================================================================
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(ASTRA_ALL_ARCHES x86_64 i386 arm arm64 riscv64)
+    set(ASTRA_ALL_ARCHES x86_64 i386 arm arm64 riscv64 i8086)
 elseif(APPLE)
     set(ASTRA_ALL_ARCHES x86_64 arm64)
 elseif(WIN32)
@@ -353,6 +353,8 @@ function(astra_arch_defines arch out_var)
         set(defs ASTRA_TARGET_ARM ASTRA_ARM_EABI ASTRA_ARM_VFP ASTRA_ARM_HARDFLOAT)
     elseif(arch STREQUAL "riscv64")
         set(defs ASTRA_TARGET_RISCV64)
+    elseif(arch STREQUAL "i8086")
+        set(defs ASTRA_TARGET_I8086)
     else()
         set(defs "")
     endif()
@@ -387,6 +389,11 @@ endfunction()
 
 # Per-target libastra1.a object list (backend/lib/Makefile OBJ-<t>-<os>).
 function(astra_arch_lib1_srcs arch out_var)
+    if(arch STREQUAL "i8086")
+        # asm-only bare-metal target: no libastra1 objects, no runmain
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
     set(common lib/stdatomic.c lib/atomic.S lib/builtin.c lib/alloca.S lib/alloca-bt.S)
     if(arch STREQUAL "arm64" OR arch STREQUAL "riscv64")
         set(main lib/lib-arm64.c lib/armflush.c)
@@ -547,19 +554,24 @@ foreach(xarch IN LISTS ASTRA_ALL_ARCHES)
         VERBATIM)
 
     # runmain.o: the astra_run() entry used by JIT/in-process runs.
+    if(NOT xarch STREQUAL "i8086")
     add_custom_command(OUTPUT "${XLIBDIR}/runmain.o"
         COMMAND "${ASTRA_BUILD}/astra-${xarch}${CMAKE_EXECUTABLE_SUFFIX}" ${xflags}
                 -c "${ASTRA_SRC}/lib/runmain.c" -o "${XLIBDIR}/runmain.o"
         DEPENDS astra_driver_${xarch} "${ASTRA_SRC}/lib/runmain.c"
         COMMENT "astra-${xarch} lib/runmain.c"
         VERBATIM)
+    endif()
 
     # NOTE: no prebuilt libaruntime-<arch>.a — compiling the runtime for a
     # foreign arch needs that target's libc headers (sysroot); the `a`
     # pipeline falls back to compiling runtime sources per program, which
     # works wherever the target sysroot is installed.
 
-    set(XDEPS "${XLIBDIR}/libastra1.a" "${XLIBDIR}/runmain.o" ${XSTAGED_OUTPUTS})
+    set(XDEPS "${XLIBDIR}/libastra1.a" ${XSTAGED_OUTPUTS})
+    if(NOT xarch STREQUAL "i8086")
+        list(APPEND XDEPS "${XLIBDIR}/runmain.o")
+    endif()
     add_custom_target(astra_runtime_${xarch} ALL DEPENDS ${XDEPS})
     list(APPEND ASTRA_ALL_DEPS astra_runtime_${xarch})
     message(STATUS "libastra: cross backend for ${xarch}")
