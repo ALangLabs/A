@@ -77,31 +77,33 @@ void testFormatter() {
 
 void testDocgen() {
   const std::string source = R"(
-## Utility helpers.
+"""Utility helpers."""
 
-## Adds two numbers.
-##
-## The result is an i32.
+"""
+Adds two numbers.
+
+The result is an i32.
+"""
 fn add(a: i32, b: i32) -> i32:
     return a + b
 
-## A two-dimensional point.
+"""A two-dimensional point."""
 class Point:
-    ## Horizontal position.
+    """Horizontal position."""
     x: i32
     y: i32
 
-    ## Squared distance from the origin.
+    """Squared distance from the origin."""
     fn length_squared(self) -> i32:
         return self.x * self.x + self.y * self.y
 
-## Available colors.
+"""Available colors."""
 enum Color:
-    ## The color red.
+    """The color red."""
     Red
     Green
 
-## The mathematical constant.
+"""The mathematical constant."""
 PI: f64 = 3.14159
 )";
 
