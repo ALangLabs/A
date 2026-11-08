@@ -61,6 +61,20 @@ ExprPtr Parser::parsePrimary() {
       expr->name = "None";
       return expr;
     }
+    case Tok::KwType: {
+      // 'type' is a keyword for alias declarations, but 'type(x)' is the
+      // builtin call. Only the call form is a valid expression.
+      if (peek(1).kind != Tok::LParen) {
+        fail(token.span, "Expected an expression, found " + describeToken(token) + ".",
+             "Use 'type(x)' to get a value's type name, or 'type Name = ...' to declare "
+             "a type alias.");
+      }
+      advance();
+      auto expr = std::make_unique<IdentExpr>();
+      expr->span = token.span;
+      expr->name = "type";
+      return expr;
+    }
     case Tok::KwFn:
       return parseLambda();
     case Tok::KwMatch:

@@ -1,0 +1,10 @@
+# 'type' is both a keyword (alias decls) and a builtin call.
+print(type(42))
+print(type("hi"))
+print(type([1, 2]))
+x = type(3.5)
+print(x)
+
+type Meters = f64
+m: Meters = 1.5
+print(m)

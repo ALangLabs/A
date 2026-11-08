@@ -359,9 +359,16 @@ TypePtr Sema::iterableElementType(TypePtr iterableType, Span span, const std::st
   }
   if (resolved->kind == TypeKind::Map) return resolved->elem;  // keys
   if (resolved->kind == TypeKind::String) return typeChar();
+  if (resolved->kind == TypeKind::Tuple) {
+    // Tuples iterate element-by-element at runtime (a_iter handles them), but
+    // elements may be heterogeneous, so the loop variable is unconstrained.
+    return freshVar(Constraint::None, span,
+                    "the element type iterated over a tuple");
+  }
   sink_.error(span,
               "Cannot iterate over " + typePhrase(resolved) + ".",
-              "Loops " + hint + " iterate over arrays, strings, maps (keys), sets, and integer "
+              "Loops " + hint + " iterate over arrays, tuples, strings, maps (keys), sets, "
+              "and integer "
               "ranges ('0..10').");
   return typeError();
 }

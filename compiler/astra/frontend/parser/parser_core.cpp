@@ -97,6 +97,9 @@ StmtPtr Parser::parseStatement() {
      case Tok::KwImpl:
        return parseImplDecl();
      case Tok::KwType:
+       // 'type(...)' is the builtin type-name call; 'type Name = ...' is an
+       // alias declaration. The '(' disambiguates.
+       if (peek(1).kind == Tok::LParen) return parseSimpleStatement();
        return parseTypeAliasDecl();
     case Tok::KwIf:
       return parseIf();
