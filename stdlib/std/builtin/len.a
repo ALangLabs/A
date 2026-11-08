@@ -1,3 +1,0 @@
-
-fn len_of(x):
-    return len(x)

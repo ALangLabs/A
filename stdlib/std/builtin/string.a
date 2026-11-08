@@ -1,6 +1,0 @@
-
-fn String(x):
-    return str(x)
-
-fn str_of(x):
-    return str(x)

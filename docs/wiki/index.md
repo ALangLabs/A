@@ -20,6 +20,5 @@ the golden tests in `tests/integration/cases/`.
 - [Python interop](python-interop.md) — calling Python from A, buffers, examples.
 - [Testing](testing.md) — `a test`, `fn test_*()`, `assert`/`assert_eq`, `std:testing`.
 - [CLI and tooling](cli.md) — `a run/build/check/test/fmt/doc/ir/repl` and useful flags.
-- [Kernels](kernels.md) — the self-hosted numeric kernel library.
 - [Examples](examples.md) — runnable programs by category.
 - [Benchmarks](benchmarks.md) — timed workloads and cross-language equivalents.

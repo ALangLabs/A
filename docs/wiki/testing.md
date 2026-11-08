@@ -21,7 +21,7 @@ See `examples/advanced/testing.a`.
 - `assert_eq(a, b)` — panics unless `a == b`.
 - `panic(msg)` — unconditional abort.
 
-## `std:testing` / `std:test`
+## `std:testing`
 
 Property-style helpers exist in the stdlib (`testing_seed`,
 `for_all_int`, `for_all_float`, `for_all_bool`, `for_all_string`,

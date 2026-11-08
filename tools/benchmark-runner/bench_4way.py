@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """4-way benchmark: A vs C vs C++ vs Python on the benchmarks/ suite.
 
-Measures end-to-end wall time (best of N runs) — the same protocol as
-compare.py (which covers A/C++/Python) — and adds the C baseline plus the
-matmul workload (blocked ikj in every language).
+Measures end-to-end wall time (best of N runs) for A run vs native vs C vs
+C++ vs Python, including the matmul workload (blocked ikj in every language).
 
 Usage:
     python3 tools/benchmark-runner/bench_4way.py [--a build/a] [--runs 7] [--json results.json]
+    python3 tools/benchmark-runner/bench_4way.py --a-only [--a build/a] [--runs 3]
 
-Requires: a built `a` binary, gcc, g++, python3.
+--a-only times just the A programs (like run.sh did); the default needs gcc,
+g++, python3.
 """
 
 from __future__ import annotations
@@ -58,11 +59,21 @@ def main() -> int:
     parser.add_argument("--a", default=os.path.join(ROOT, "build", "a"))
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--json", default="")
+    parser.add_argument("--a-only", action="store_true",
+                        help="time only the A programs (no C/C++/Python)")
     args = parser.parse_args()
 
     if not os.access(args.a, os.X_OK):
         print(f"error: A binary not found at {args.a}", file=sys.stderr)
         return 1
+
+    if args.a_only:
+        print(f"{'benchmark':28s} {'best (ms)':>9s} {'output':>10s}")
+        for name, (src_a, _k, _p) in BENCHES.items():
+            best, _med, out = time_cmd([args.a, "run", os.path.join(ROOT, src_a)],
+                                        args.runs)
+            print(f"{name:28s} {best:9.2f} {out:>10s}")
+        return 0
 
     tmp = tempfile.mkdtemp(prefix="a-bench4-")
 

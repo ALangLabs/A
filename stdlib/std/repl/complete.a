@@ -137,8 +137,7 @@ module_members = {
 module_names = ["math", "io", "fs", "strings", "collections", "core",
                 "time", "json", "binary", "testing", "log", "metrics",
                 "trace", "net", "terminal", "env", "repl", "arena",
-                "unsafe", "prelude", "simd", "iter", "format", "test",
-                "comptime", "gpu", "memory", "traits", "kernels"]
+                "unsafe", "prelude", "simd", "iter", "format", "comptime"]
 
 method_names = ["append", "extend", "insert", "remove_at", "pop", "remove",
                 "clear", "copy", "count", "index", "contains", "sort",

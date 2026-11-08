@@ -1,9 +1,0 @@
-
-fn assert_true(condition, message):
-    assert(condition, message)
-
-fn assert_eq_val(actual, expected, message):
-    assert_eq(actual, expected, message)
-
-fn panic_msg(message):
-    panic(message)

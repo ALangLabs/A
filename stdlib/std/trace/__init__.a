@@ -1,4 +1,0 @@
-# This package is backed by the native module `trace` implemented in the
-# toolchain (see compiler/astra/frontend/name-resolution/native_modules.hpp and
-# compiler/astra/frontend/backend/stdlib/builtins.cpp). `import trace` resolves to
-# the native implementation.

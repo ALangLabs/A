@@ -56,8 +56,7 @@ builtins = ["print", "eprint", "input", "flush", "len", "str", "int",
 modules = ["math", "io", "fs", "strings", "collections", "core", "time",
            "json", "binary", "testing", "log", "metrics", "trace", "net",
            "http", "terminal", "env", "repl", "arena", "unsafe", "prelude",
-           "simd", "iter", "format", "test", "comptime", "gpu", "memory",
-           "traits", "kernels"]
+           "simd", "iter", "format", "comptime"]
 
 class HlState:
     quote

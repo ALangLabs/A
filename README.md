@@ -40,10 +40,8 @@ compiles A straight to native machine code.
 - **Python interop** — `import python:<pkg>` calls into CPython at run time via
   a `dlopen`'d libpython bridge (NumPy, PyTorch, …), including zero-copy
   buffer-protocol views.
-- **Self-hosted kernels** — numeric kernels (matmul, attention, conv, softmax,
-  quantization, …) written in A under [`kernels/`](kernels/), plus native
-  Mojo-inspired ML kernels (`matmul` block-tiled, fused `attention`/`softmax`,
-  FMA hot loops, and an IR `fuseFma` contraction pass).
+- **Native ML kernels** — Mojo-inspired kernels (`matmul` block-tiled, fused
+  `attention`/`softmax`, FMA hot loops, and an IR `fuseFma` contraction pass).
 - **First-class tooling** — `a fmt`, `a doc`, `a ir`, a REPL, a full **LSP**
   server (`a-lsp`), and a VS Code extension.
 - **LLVM-style optimization pipeline** — constant folding, DCE, inlining, LICM,
@@ -222,7 +220,7 @@ program output — verified 70/70 on i386 (native), arm, aarch64 and riscv64
 ## 📚 Documentation
 
 - **[Technical wiki](docs/wiki/index.md)** — deep-dive pages for every
-  subsystem: frontend stages, backend, runtime, stdlib, kernels, tooling,
+  subsystem: frontend stages, backend, runtime, stdlib, tooling,
   tests, and examples.
 - **[`examples/`](examples/)** — runnable programs by category (basics,
   control flow, classes, enums, modules, stdlib, Python interop, …).

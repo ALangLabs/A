@@ -1,11 +1,12 @@
 build/
+!/tooling/build/
+!/tooling/build/build.sh
 build-*/
 cmake-build-*/
 *.o
 
 !examples/*.a
 !examples/**/*.a
-!kernels/**/*.a
 !tests/**/*.a
 !stdlib/**/*.a
 !benchmarks/*.a
@@ -25,3 +26,5 @@ dist/
 .vtx/
 .venv/
 demo/
+# test output residue (written by tests/integration/cases/file_io.a)
+data.txt

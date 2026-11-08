@@ -1,9 +1,0 @@
-
-trait Equatable:
-    fn eq(self, other) -> bool
-
-fn eq<T>(a: T, b: T) -> bool:
-    return a == b
-
-fn ne<T>(a: T, b: T) -> bool:
-    return a != b

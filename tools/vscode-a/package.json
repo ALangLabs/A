@@ -68,7 +68,7 @@
         ],
         "icon": {
           "dark": "./fileicons/a-dark.png",
-          "light": "./fileicons/a-light.png"
+          "light": "./fileicons/a-dark.png"
         },
         "extensions": [
           ".a"

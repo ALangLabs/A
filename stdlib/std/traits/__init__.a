@@ -1,4 +1,0 @@
-from "equatable.a" import Equatable, eq, ne
-from "hashable.a" import Hashable
-from "comparable.a" import Comparable, lt, gt
-from "copyable.a" import Copyable, is_copyable, is_equatable, copy_value

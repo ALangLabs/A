@@ -11,8 +11,6 @@ system as user code (verified against `stdlib/std/` layout).
   `net`, `env`, … — see [builtins](builtins.md)); names with no native
   module resolve to a package under `stdlib/std/` (so `std:net` and
   `std:env` are the native modules, not A files).
-- `stdlib/std/std.a` re-exports the common subset (`map_list`,
-  `sqrt`, …).
 
 ## Packages (`stdlib/std/`)
 

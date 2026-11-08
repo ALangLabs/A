@@ -30,6 +30,6 @@ organization.
 ```
 
 Python-interop examples require a Python installation with the relevant
-packages (the runtime `dlopen`s libpython at run time — see
-[runtime.md](runtime.md)). Related: [Stdlib](stdlib.md), [Tests](tests.md),
+packages (the runtime `dlopen`s libpython at run time).
+Related: [Stdlib](stdlib.md),
 [overview](overview.md).

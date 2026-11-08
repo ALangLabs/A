@@ -1,3 +1,0 @@
-
-fn Bool(x):
-    return x != 0

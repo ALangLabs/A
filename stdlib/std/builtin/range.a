@@ -1,8 +1,0 @@
-
-fn range_list(stop):
-    out = []
-    i = 0
-    while i < stop:
-        out.append(i)
-        i = i + 1
-    return out

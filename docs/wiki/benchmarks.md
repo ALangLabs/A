@@ -13,15 +13,18 @@ other languages.
 - `benchmarks/equivalents/` — same workloads in Python (`sum.py`,
   `pipeline.py`, `sqrt.py`, `strings.py`, `matmul.py`), C (`bench.c`),
   and C++ (`bench.cpp`) for comparison.
+- `benchmarks/lang/` — cross-language (A/C/Rust/Python/Node) loop benchmarks:
+  `benchmarks/lang/run.py`.
+- `benchmarks/http/` — HTTP client benchmark (A/`std:http` vs Python vs raw
+  C++ sockets): `benchmarks/http/run.py`.
 
 ## Running
 
-`tools/benchmark-runner/run.sh [a-binary]` times each `benchmarks/*/*.a`
-with `a run` (env `RUNS`, default 3; best time reported);
-`tools/benchmark-runner/compare.py` compares A vs C++ vs Python;
+`tools/benchmark-runner/bench_4way.py --a-only` times each `benchmarks/*/*.a`
+with `a run` (no other languages needed);
 `tools/benchmark-runner/bench_4way.py` compares all four (A run vs
-native vs C vs C++ vs Python) and writes `--json` results. See
-[tools-scripts](tools-scripts.md). Related: [Examples](examples.md),
+native vs C vs C++ vs Python) and writes `--json` results.
+Related: [Examples](examples.md),
 [overview](overview.md).
 
 ## Results (Nov 2026, Ryzen 5 7520U, best of 7)

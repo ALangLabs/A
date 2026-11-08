@@ -1,4 +1,0 @@
-# This package is backed by the native module `time` implemented in the
-# toolchain (see compiler/astra/frontend/name-resolution/native_modules.hpp and
-# compiler/astra/frontend/backend/stdlib/builtins.cpp). `import time` resolves to
-# the native implementation.

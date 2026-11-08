@@ -200,12 +200,16 @@ else()
     endif()
 endif()
 list(APPEND astra1_srcs lib/stdatomic.c lib/atomic.S lib/builtin.c
-                      lib/alloca.S lib/alloca-bt.S)
+                      lib/alloca.S lib/alloca-bt.S lib/tcov.c)
 if(WIN32)
     # crt1.c is where the Windows _runmain lives — the entry point astra_run()
     # calls, which the platform-independent lib/runmain.c defines only for the
-    # ELF and Mach-O targets.
-    list(APPEND astra1_srcs win32/lib/chkstk.S win32/lib/winex.c win32/lib/crt1.c)
+    # ELF and Mach-O targets. wincrt1.c / dllcrt1.c (+ crt1w.c / wincrt1w.c
+    # UNICODE variants) provide the GUI and DLL entry points astrape.c looks
+    # up by symbol (__winstart/__wwinstart/__dllstart) in this archive.
+    list(APPEND astra1_srcs win32/lib/chkstk.S win32/lib/winex.c win32/lib/crt1.c
+                        win32/lib/crt1w.c win32/lib/wincrt1.c win32/lib/wincrt1w.c
+                        win32/lib/dllcrt1.c win32/lib/dllmain.c)
 elseif(NOT APPLE)
     list(APPEND astra1_srcs lib/dsohandle.c)
 endif()
@@ -395,7 +399,7 @@ function(astra_arch_lib1_srcs arch out_var)
         set(${out_var} "" PARENT_SCOPE)
         return()
     endif()
-    set(common lib/stdatomic.c lib/atomic.S lib/builtin.c lib/alloca.S lib/alloca-bt.S)
+    set(common lib/stdatomic.c lib/atomic.S lib/builtin.c lib/alloca.S lib/alloca-bt.S lib/tcov.c)
     if(arch STREQUAL "arm64" OR arch STREQUAL "riscv64")
         set(main lib/lib-arm64.c lib/armflush.c)
     elseif(arch STREQUAL "arm")
@@ -409,7 +413,9 @@ function(astra_arch_lib1_srcs arch out_var)
         list(APPEND main lib/va_list.c)
     endif()
     if(WIN32)
-        list(APPEND main win32/lib/chkstk.S win32/lib/winex.c win32/lib/crt1.c)
+        list(APPEND main win32/lib/chkstk.S win32/lib/winex.c win32/lib/crt1.c
+                       win32/lib/crt1w.c win32/lib/wincrt1.c win32/lib/wincrt1w.c
+                       win32/lib/dllcrt1.c win32/lib/dllmain.c)
     elseif(NOT APPLE)
         list(APPEND main lib/dsohandle.c)
     endif()

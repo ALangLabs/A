@@ -1,4 +1,0 @@
-from "equatable.a" import Equatable
-
-trait Hashable(Equatable):
-    fn hash(self) -> i64
