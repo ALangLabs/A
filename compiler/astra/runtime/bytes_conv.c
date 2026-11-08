@@ -19,9 +19,24 @@ static char *conv_bytes_in(aval v, uint64_t *out_len, int *bad) {
     *bad = 0;
     *out_len = 0;
     if (!a) return NULL;
-    arr_ensure_aval(a);
     uint64_t n = a->h.len;
     char *buf = (char *)xmalloc(n ? n : 1);
+    if (arr_packed(a)) {
+        /* Socket reads hand back packed int64 storage; unpacking it into
+           1M tagged values first would double the cost of every decode. */
+        for (uint64_t i = 0; i < n; ++i) {
+            int64_t b = a->iitems[i];
+            if (b < 0 || b > 255) {
+                free(buf);
+                *bad = 1;
+                return NULL;
+            }
+            buf[i] = (char)b;
+        }
+        *out_len = n;
+        return buf;
+    }
+    arr_ensure_aval(a);
     for (uint64_t i = 0; i < n; ++i) {
         int64_t b = expect_int64(a->items[i], "a byte value");
         if (b < 0 || b > 255) {

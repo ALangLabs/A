@@ -58,6 +58,34 @@ aval list_from_vec(const aval *p, uint64_t n, int tuple) {
     return mkobj(&a->h);
 }
 
+/* Packed int list straight from int64 storage: no aval round-trip, so a
+   1 MiB byte array costs one malloc + one memcpy instead of a million tagged
+   values. Used by the socket byte readers. */
+aval a_list_from_i64(const int64_t *v, uint64_t n) {
+    AArr *a = (AArr *)xmalloc(sizeof(AArr));
+    a->h.type = T_LIST;
+    a->h.len = (uint32_t)n;
+    a->h.cap = n;
+    a->items = NULL;
+    a->iitems = (int64_t *)xmalloc((size_t)(n ? n : 1) * sizeof(int64_t));
+    if (n) memcpy(a->iitems, v, (size_t)n * sizeof(int64_t));
+    a->flags = ARR_F_PACKED;
+    return mkobj(&a->h);
+}
+
+/* Same as a_list_from_i64 but takes ownership of `v` (no copy). The caller
+   must have allocated it with xmalloc and never use it again. */
+aval a_list_take_i64(int64_t *v, uint64_t n) {
+    AArr *a = (AArr *)xmalloc(sizeof(AArr));
+    a->h.type = T_LIST;
+    a->h.len = (uint32_t)n;
+    a->h.cap = n;
+    a->items = NULL;
+    a->iitems = v;
+    a->flags = ARR_F_PACKED;
+    return mkobj(&a->h);
+}
+
 aval a_list_new(uint64_t n, aval *items) {
     return list_from_vec(items, n, 0);
 }

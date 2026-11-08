@@ -183,6 +183,7 @@ enum {
     /* ML kernels (appended at the end so existing builtin ids stay stable) */
     A_BI_LINALG_MATMUL, A_BI_LINALG_SOFTMAX, A_BI_LINALG_ATTENTION,
     A_BI_BYTES_DECODE_UTF8, A_BI_STR_ENCODE_UTF8,
+    A_BI_NET_RECV_EXACT,
     A_BI_COUNT
 };
 

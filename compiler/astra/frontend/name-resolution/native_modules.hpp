@@ -168,6 +168,7 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                         {"tls_available", "net_tls_available"},
                         {"send_bytes", "net_send_bytes"},
                         {"recv_bytes", "net_recv_bytes"},
+                        {"recv_exact", "net_recv_exact"},
                         {"inflate_bytes", "net_inflate_bytes"},
                         {"inflate_available", "net_inflate_available"},
                         {"recv_status", "net_recv_status"}},

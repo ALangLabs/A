@@ -191,6 +191,20 @@ Bytes past n are kept in conn._buf: pipelined responses and the next keep-alive
 reply must not be thrown away.
 """
 fn _read_n(conn, n: i64):
+    if n <= 0:
+        return []
+    if len(conn._buf) == 0:
+        # Fast path: one native call, packed [i64] storage. The A-level loop
+        # below costs ~35 ns per byte (list.extend + slice copies), which caps
+        # large bodies at ~17 MB/s; this path is transport bound (~90 MB/s).
+        body = net.recv_exact(conn.sock, n)
+        if len(body) == 0:
+            st = net.recv_status(conn.sock)
+            if st == 3:
+                conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+            if st == 2:
+                conn._fail("socket error reading {conn.host}:{conn.port}")
+        return body
     out = _b_slice(conn._buf, 0, n)
     conn._buf = _b_slice(conn._buf, len(out), len(conn._buf))
     while len(out) < n:
@@ -246,13 +260,14 @@ fn _read_headers(conn):
 fn _read_body_bytes(conn, headers):
     te = headers.get("transfer-encoding")
     if te != None and te.lower().contains("chunked"):
-        # RFC 7230: chunked beats content-length when both are present
-        raw = []
+        # RFC 7230: chunked beats content-length when both are present.
+        # Dechunk as we read, so the payload is copied once instead of twice
+        # (framing bytes are discarded rather than collected and stripped).
+        chunks = []
         while true:
             size_line = _read_line(conn)
             if len(size_line) == 0:
                 break
-            raw.extend(size_line)
             size = _parse_hex(b2s(size_line))
             if size <= 0:
                 # consume trailers until blank line
@@ -261,9 +276,16 @@ fn _read_body_bytes(conn, headers):
                     if len(t) == 0 or b2s(t) == "\r\n":
                         break
                 break
-            raw.extend(_read_n(conn, size))
-            raw.extend(_read_line(conn))  # trailing CRLF after chunk data
-        return _dechunk_bytes(raw)
+            chunks.append(_read_n(conn, size))
+            _read_line(conn)  # discard the CRLF that ends the chunk
+        if len(chunks) == 0:
+            return []
+        if len(chunks) == 1:
+            return chunks[0]  # no copy for the usual single-chunk response
+        body = []
+        for c in chunks:
+            body.extend(c)
+        return body
     cl = headers.get("content-length")
     if cl != None:
         n = int(cl)

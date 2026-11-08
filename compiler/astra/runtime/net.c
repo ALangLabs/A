@@ -593,10 +593,10 @@ static char *net_bytes_in(aval v, uint64_t *len) {
 }
 
 static aval net_bytes_out(const char *buf, uint64_t len) {
-    aval *items = (aval *)xmalloc((len ? len : 1) * sizeof(aval));
-    for (uint64_t i = 0; i < len; ++i)
-        items[i] = mkint_full((unsigned char)buf[i]);
-    aval out = list_from_vec(items, len, 0);
+    /* Packed int storage: one allocation, no per-byte tagged values. */
+    int64_t *items = (int64_t *)xmalloc((len ? len : 1) * sizeof(int64_t));
+    for (uint64_t i = 0; i < len; ++i) items[i] = (unsigned char)buf[i];
+    aval out = a_list_from_i64(items, len);
     free(items);
     return out;
 }
@@ -637,6 +637,33 @@ aval bi_net_recv_bytes(uint64_t n, aval *argv) {
     aval out = r > 0 ? net_bytes_out(buf, (uint64_t)r) : net_bytes_out("", 0);
     free(buf);
     return out;
+}
+
+/* Read exactly nBytes from the socket in one native call. This is the HTTP
+   body fast path: the pure-A loop pays ~35 ns per byte for list.extend and
+   slice copies, which caps 1 MiB bodies at ~17 MB/s. Returns the bytes read
+   (shorter than requested only at EOF/error). */
+aval bi_net_recv_exact(uint64_t n, aval *argv) {
+    want_args("net.recv_exact", n, 2, 2);
+    NetSock *s = net_sock_get(argv[0], "net.recv_exact");
+    int64_t want = expect_int64(argv[1], "net.recv_exact byteCount");
+    if (want < 0) want = 0;
+    /* Bytes live as int64 elements, so they are expanded straight into the
+       packed array while reading: one allocation, one pass over the data. */
+    int64_t *items = (int64_t *)xmalloc((size_t)(want ? want : 1) * sizeof(int64_t));
+    char tmp[65536];
+    size_t got = 0;
+    while (got < (size_t)want) {
+        size_t room = (size_t)want - got;
+        size_t chunk = room < sizeof tmp ? room : sizeof tmp;
+        ssize_t r = s->ssl ? net_ssl_read(s->ssl, tmp, (int)chunk)
+                           : recv(s->fd, tmp, chunk, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        for (ssize_t i = 0; i < r; ++i) items[got + (size_t)i] = (unsigned char)tmp[i];
+        got += (size_t)r;
+    }
+    return a_list_take_i64(items, got);
 }
 
 /* zlib via dlopen: gzip/deflate bodies without a link-time dependency. */

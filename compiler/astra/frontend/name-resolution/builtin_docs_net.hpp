@@ -42,6 +42,8 @@ inline void addNetDocs(StringMap<BuiltinDoc>& docs) {
                             "Bytes written from an [i64] byte array."}},
       {"net_recv_bytes", {"net_recv_bytes", "net.recv_bytes(handle, maxBytes) -> [i64]",
                             "Byte array read; empty at EOF or when nothing is waiting."}},
+      {"net_recv_exact", {"net_recv_exact", "net.recv_exact(handle, byteCount) -> [i64]",
+                            "Exactly byteCount bytes, one native call (HTTP body fast path); shorter only at EOF."}},
       {"net_inflate_bytes", {"net_inflate_bytes", "net.inflate_bytes(bytes, windowBits) -> [i64]",
                                "zlib decompression; 47 auto-detects gzip and zlib headers."}},
       {"net_inflate_available", {"net_inflate_available", "net.inflate_available() -> bool",

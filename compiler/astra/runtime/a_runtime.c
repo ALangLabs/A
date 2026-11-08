@@ -126,7 +126,8 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "linalg_softmax", bi_linalg_softmax },
     { "linalg_attention", bi_linalg_attention },
     { "bytes_decode_utf8", bi_bytes_decode_utf8 },
-    { "str_encode_utf8", bi_str_encode_utf8 }
+    { "str_encode_utf8", bi_str_encode_utf8 },
+    { "net_recv_exact", bi_net_recv_exact }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
