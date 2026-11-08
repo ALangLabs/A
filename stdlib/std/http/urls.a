@@ -111,6 +111,7 @@ fn quote(s: String):
         b = ord(ch)!
         if _unreserved(b):
             out = out + ch
+
         else:
             out = out + "%" + hex[b / 16] + hex[b % 16]
     return out

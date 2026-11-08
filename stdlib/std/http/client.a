@@ -17,7 +17,9 @@
 # payload is binary) and `body_bytes` is always the exact payload.
 # Content-Encoding: gzip/deflate is decoded transparently when zlib is
 # available. Proxies come from http_proxy/https_proxy/no_proxy (or uppercase):
-# https requests tunnel through CONNECT and then start TLS.
+# https requests tunnel through CONNECT and then start TLS. Certificates are
+# verified against the system roots plus A_TLS_CA_FILE; pass verify=false to
+# accept self-signed peers.
 # shortcut: recv() returns "" on EOF *and* on timeout — bodies delimited by
 #   connection close rely on the server closing promptly.
 import std:net
@@ -42,8 +44,8 @@ class Response:
 
     fn json(self):
         return parse_json(self.body)
-
     """raise_for_status() -> panics when status >= 400 (requests analogue)."""
+
     fn raise_for_status(self):
         if self.status >= 400:
             core.panic("http: {self.status} {self.reason} for url '{self.url}'")
@@ -157,11 +159,26 @@ fn _dechunk_bytes(s: [i64]):
 fn _is_redirect_status(status: i64):
     return status == 301 or status == 302 or status == 303 or status == 307 or status == 308
 
+"""
+_recv_chunk(conn) -> [i64] next bytes from the socket ([] at EOF). A read
+that stops on the socket timeout is a hard error: a silently truncated body
+is worse than a failure (requests raises requests.exceptions.Timeout).
+"""
+fn _recv_chunk(conn):
+    chunk = net.recv_bytes(conn.sock, 65536)
+    if len(chunk) == 0:
+        st = net.recv_status(conn.sock)
+        if st == 3:
+            conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+        if st == 2:
+            conn._fail("socket error reading {conn.host}:{conn.port}")
+    return chunk
+
 """_fill_until(conn, pat) -> index of pat in the buffer, reading until found."""
 fn _fill_until(conn, pat: [i64]):
     i = _b_find_from(conn._buf, pat, 0)
     while i < 0:
-        chunk = net.recv_bytes(conn.sock, 65536)
+        chunk = _recv_chunk(conn)
         if len(chunk) == 0:
             break
         conn._buf.extend(chunk)
@@ -171,7 +188,7 @@ fn _fill_until(conn, pat: [i64]):
 """_read_n(conn, n) -> [i64] reading exactly n bytes from the recv buffer."""
 fn _read_n(conn, n: i64):
     while len(conn._buf) < n:
-        chunk = net.recv_bytes(conn.sock, 65536)
+        chunk = _recv_chunk(conn)
         if len(chunk) == 0:
             break
         conn._buf.extend(chunk)
@@ -201,6 +218,7 @@ fn _read_headers(conn):
         # EOF before header terminator: treat everything as headers
         raw = conn._buf
         conn._buf = []
+
     else:
         raw = _b_slice(conn._buf, 0, i + 4)
         conn._buf = _b_slice(conn._buf, i + 4, len(conn._buf))
@@ -249,7 +267,7 @@ fn _read_body_bytes(conn, headers):
     body = conn._buf
     conn._buf = []
     while true:
-        chunk = net.recv_bytes(conn.sock, 65536)
+        chunk = _recv_chunk(conn)
         if len(chunk) == 0:
             break
         body.extend(chunk)
@@ -334,14 +352,14 @@ fn _read_connect_reply(sock):
 class HTTPConnection:
     host: String
     port: i64
-    timeout: i64        # milliseconds, 0 = block forever
+    timeout: i64  # milliseconds, 0 = block forever
     tls: bool
     sock: i64
     connected: bool
-    _buf: [i64]         # read buffer (private by convention)
-    _method: String     # last request method (HEAD responses carry no body)
-    proxy: String       # "host:port" of the proxy in use, "" = direct
-    verify: bool        # check the peer certificate and host name
+    _buf: [i64]  # read buffer (private by convention)
+    _method: String  # last request method (HEAD responses carry no body)
+    proxy: String  # "host:port" of the proxy in use, "" = direct
+    verify: bool  # check the peer certificate and host name
 
     fn _fail(self, msg):
         core.panic("http: " + msg)
@@ -368,18 +386,22 @@ class HTTPConnection:
                     net.close(tunnel)
                     self._fail("proxy CONNECT refused ({code}) for {authority}")
                 self.sock = net.tls_wrap(tunnel, self.host, self.verify)
+
             else:
                 self.sock = net.tls_connect(self.host, self.port, self.verify)
+
         else:
             if self.proxy != "":
                 (ph, pp) = _split_hostport(self.proxy)
                 self.sock = net.tcp_connect(ph, pp)
+
             else:
                 self.sock = net.tcp_connect(self.host, self.port)
         if self.sock < 0:
             if self.tls:
-                self._fail("TLS failed for {self.host}:{self.port} " +
-                           "(bad or untrusted certificate? pass verify=false)")
+                self._fail(
+                    "TLS failed for {self.host}:{self.port} " + "(bad or untrusted certificate? pass verify=false)",
+                )
             self._fail("connect failed: {self.host}:{self.port}")
         if self.timeout > 0:
             net.set_timeout(self.sock, self.timeout)
@@ -394,8 +416,8 @@ class HTTPConnection:
     # Send an HTTP request; body is a String, body_bytes an [i64] payload.
     # path is the origin-form target unless this is a plain-HTTP proxy hop,
     # in which case the caller passes the absolute URI.
-    fn request(self, method: String, path: String, body = None, headers = None,
-               body_bytes = None):
+    fn request(self, method: String, path: String, body = None, headers = None, body_bytes = None):
+
         self.connect()
         self._method = method.upper()
         h = ""
@@ -405,7 +427,7 @@ class HTTPConnection:
                 h = h + kv[0] + ": " + kv[1] + "\r\n"
                 if kv[0].lower() == "content-length":
                     has_cl = true
-        has_body = (body != None and body != "") or (body_bytes != None and len(body_bytes) > 0)
+        has_body = body != None and body != "" or body_bytes != None and len(body_bytes) > 0
         host = self.host
         if self.port > 0 and self.port != _default_port(_scheme_of(self)):
             host = host + ":" + str(self.port)
@@ -421,6 +443,7 @@ class HTTPConnection:
             n = 0
             if body_bytes != None:
                 n = len(body_bytes)
+
             else:
                 n = len(body ?? "")
             req = req + "Content-Length: " + str(n) + "\r\n"
@@ -469,8 +492,16 @@ class HTTPConnection:
         if enc.contains("charset="):
             i = enc.find("charset=")
             encoding = enc[i + 8..].split(";")[0].strip()
-        return Response(status, reason, hdrs, body, body_bytes, "",
-                        encoding, status >= 200 and status < 400)
+        return Response(
+            status,
+            reason,
+            hdrs,
+            body,
+            body_bytes,
+            "",
+            encoding,
+            status >= 200 and status < 400,
+        )
 
 """_scheme_of(conn) -> String; the scheme a connection speaks."""
 fn _scheme_of(conn):
@@ -520,9 +551,8 @@ appended as a percent-encoded query string. verify=false accepts
 self-signed certificates (requests verify=False). body_bytes sends an
 [i64] byte payload verbatim instead of the `body` string.
 """
-fn request(method: String, url: String, body = None, headers = None,
-           params = None, timeout = 0, allow_redirects = true, max_redirects = 10,
-           verify = true, body_bytes = None):
+fn request(method: String, url: String, body = None, headers = None, params = None, timeout = 0, allow_redirects = true, max_redirects = 10, verify = true, body_bytes = None):
+
     u = url
     m = method.upper()
     b = body
@@ -554,7 +584,7 @@ fn request(method: String, url: String, body = None, headers = None,
             if loc != None and loc != "":
                 redirects = redirects + 1
                 # 303 and POST->301/302 become GET without a body
-                to_get = resp.status == 303 or (m == "POST" and resp.status != 307 and resp.status != 308)
+                to_get = resp.status == 303 or m == "POST" and resp.status != 307 and resp.status != 308
                 if to_get:
                     m = "GET"
                     b = None
@@ -568,6 +598,7 @@ fn request(method: String, url: String, body = None, headers = None,
                     u = base + loc
                 elif loc.startswith("http://") or loc.startswith("https://"):
                     u = loc
+
                 else:
                     u = base + "/" + loc
                 continue
@@ -576,13 +607,13 @@ fn request(method: String, url: String, body = None, headers = None,
     return Response(0, "", {}, "", [], "", "utf-8", false)
 
 """get(url[, headers[, params[, timeout[, allow_redirects[, verify]]]]]) -> Response"""
-fn get(url: String, headers = None, params = None, timeout = 0,
-        allow_redirects = true, verify = true):
+fn get(url: String, headers = None, params = None, timeout = 0, allow_redirects = true, verify = true):
+
     return request("GET", url, None, headers, params, timeout, allow_redirects, 10, verify)
 
 """post(url[, data[, json[, headers[, params[, timeout[, verify]]]]]]) -> Response"""
-fn post(url: String, data = None, json = None, headers = None,
-         params = None, timeout = 0, verify = true):
+fn post(url: String, data = None, json = None, headers = None, params = None, timeout = 0, verify = true):
+
     b = data
     h = headers
     if json != None:
@@ -596,12 +627,12 @@ fn post(url: String, data = None, json = None, headers = None,
 fn delete(url: String, headers = None, params = None, timeout = 0, verify = true):
     return request("DELETE", url, None, headers, params, timeout, true, 10, verify)
 
-fn put(url: String, data = None, headers = None, params = None, timeout = 0,
-        verify = true):
+fn put(url: String, data = None, headers = None, params = None, timeout = 0, verify = true):
+
     return request("PUT", url, data, headers, params, timeout, true, 10, verify)
 
-fn patch(url: String, data = None, headers = None, params = None, timeout = 0,
-        verify = true):
+fn patch(url: String, data = None, headers = None, params = None, timeout = 0, verify = true):
+
     return request("PATCH", url, data, headers, params, timeout, true, 10, verify)
 
 fn head(url: String, headers = None, params = None, timeout = 0, verify = true):

@@ -113,8 +113,8 @@ fn test_tcp_listen_nonblocking():
     assert(l > 0)
     assert(net.local_port(l) > 0)
     net.set_nonblocking(l, true)
-    assert_eq(net.accept(l), -1)          # nothing pending on a fresh listener
-    assert_eq(len(net.poll([l], 0)), 0)   # ...and nothing readable
+    assert_eq(net.accept(l), -1)  # nothing pending on a fresh listener
+    assert_eq(len(net.poll([l], 0)), 0)  # ...and nothing readable
     net.close(l)
 
 fn test_quote_urlencode():
@@ -129,14 +129,38 @@ fn test_b_find_and_slice():
     assert_eq(_b_find_from(buf, [9, 9], 0), -1)
     s = _b_slice(buf, 1, 4)
     assert_eq(len(s), 3)
-    s.extend([7])                       # must be a real list, not a view
+    s.extend([7])  # must be a real list, not a view
     assert_eq(len(s), 4)
     assert_eq(join([str(x) for x in _b_slice(buf, 5, 99)], ","), "13,10")
 
 fn test_dechunk_bytes():
     # "5\r\nhello\r\n4\r\na\r\nb\r\n0\r\n\r\n" as bytes
-    s = [53, 13, 10, 104, 101, 108, 108, 111, 13, 10, 52, 13, 10, 97, 13, 10, 98, 13, 10,
-         48, 13, 10, 13, 10]
+    s = [
+        53,
+        13,
+        10,
+        104,
+        101,
+        108,
+        108,
+        111,
+        13,
+        10,
+        52,
+        13,
+        10,
+        97,
+        13,
+        10,
+        98,
+        13,
+        10,
+        48,
+        13,
+        10,
+        13,
+        10,
+    ]
     out = _dechunk_bytes(s)
     assert_eq(len(out), 9)
     assert_eq(join([str(x) for x in out], ","), "104,101,108,108,111,97,13,10,98")
@@ -169,8 +193,43 @@ fn test_net_byte_io():
 fn test_inflate_gzip():
     if net.inflate_available():
         # gzip("hello gzip body")
-        gz = [31, 139, 8, 0, 54, 49, 240, 106, 2, 255, 203, 72, 205, 201, 201, 87, 72,
-              175, 202, 44, 80, 72, 202, 79, 169, 4, 0, 173, 214, 201, 76, 15, 0, 0, 0]
+        gz = [
+            31,
+            139,
+            8,
+            0,
+            54,
+            49,
+            240,
+            106,
+            2,
+            255,
+            203,
+            72,
+            205,
+            201,
+            201,
+            87,
+            72,
+            175,
+            202,
+            44,
+            80,
+            72,
+            202,
+            79,
+            169,
+            4,
+            0,
+            173,
+            214,
+            201,
+            76,
+            15,
+            0,
+            0,
+            0,
+        ]
         out = net.inflate_bytes(gz, 47)
         assert_eq(len(out), 15)
         assert_eq(out[0], 104)
