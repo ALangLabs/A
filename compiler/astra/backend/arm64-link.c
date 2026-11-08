@@ -71,6 +71,7 @@ ST_FUNC int gotplt_entry_type (int reloc_type)
         case R_AARCH64_MOVW_UABS_G2_NC:
         case R_AARCH64_MOVW_UABS_G3:
         case R_AARCH64_ADR_PREL_PG_HI21:
+        case R_AARCH64_ADR_PREL_LO21:
         case R_AARCH64_ADD_ABS_LO12_NC:
         case R_AARCH64_LDST128_ABS_LO12_NC:
         case R_AARCH64_LDST64_ABS_LO12_NC:
@@ -266,6 +267,16 @@ ST_FUNC void relocate(ASTRAState *s1, ElfW_Rel *rel, int type, unsigned char *pt
 #endif
             write32le(ptr, ((read32le(ptr) & 0x9f00001f) |
                             (off & 0x1ffffc) << 3 | (off & 3) << 29));
+            return;
+        }
+        case R_AARCH64_ADR_PREL_LO21: {
+            /* ADR: signed byte offset in immhi:immlo, range +/-1MB. */
+            int64_t off = (int64_t)(val - addr);
+            if (off < -(1 << 20) || off >= (1 << 20))
+                astra_error_noabort("R_AARCH64_ADR_PREL_LO21 relocation failed");
+            uint32_t u = (uint32_t)off & 0x1fffff;
+            write32le(ptr, ((read32le(ptr) & 0x9f00001f) |
+                            ((u & 0x1ffffc) << 3) | ((u & 3) << 29)));
             return;
         }
         case R_AARCH64_ADD_ABS_LO12_NC:

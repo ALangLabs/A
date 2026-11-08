@@ -606,13 +606,21 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   }
   std::string srcPath;
   if (!emitted) {
+    // Native per-arch asm emitters (A -> .s -> machine code, no C step).
+    // emitNative covers a growing subset; emitC remains the fallback.
+    if (emitNative(*m.graph, *m.sema, td->arch, srcSource, srcError, testMode)) {
+      emitted = true;
+      srcPath = stageSrc(srcSource, ".s", err);
+    } else if (std::getenv("A_DEBUG_NATIVE")) {
+      err << "note: native backend declined: " << srcError << "\n";
+    }
+  }
+  if (!emitted) {
     if (!emitC(*m.graph, *m.sema, srcSource, srcError, testMode)) {
       err << "error: code generation failed: " << srcError << "\n";
       return kCErr;
     }
     srcPath = stageSrc(srcSource, ".c", err);
-  } else {
-    srcPath = stageSrc(srcSource, ".s", err);
   }
   if (srcPath.empty()) return kCErr;
   std::string tmpBin = tempPath("bin");
@@ -673,9 +681,17 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     if (emitAsm(*m.graph, *m.sema, srcSource, srcError)) emitted = true;
   }
   std::string srcPath;
-  if (emitted) {
-    srcPath = stageSrc(srcSource, ".s", err);
+  if (!emitted) {
+    if (emitNative(*m.graph, *m.sema, td.arch, srcSource, srcError)) {
+      emitted = true;
+      srcPath = stageSrc(srcSource, ".s", err);
+    } else if (std::getenv("A_DEBUG_NATIVE")) {
+      err << "note: native backend declined: " << srcError << "\n";
+    }
   } else {
+    srcPath = stageSrc(srcSource, ".s", err);
+  }
+  if (!emitted) {
     if (!emitC(*m.graph, *m.sema, srcSource, srcError)) {
       err << "error: code generation failed: " << srcError << "\n"; return kCErr;
     }

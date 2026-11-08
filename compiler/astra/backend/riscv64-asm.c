@@ -208,27 +208,16 @@ static void parse_operand(ASTRAState *s1, Operand *op)
     if (!op->e.sym) {
         if ((int) op->e.v >= -0x1000 && (int) op->e.v < 0x1000)
             op->type = OP_IM12S;
-    } else if (op->e.sym->type.t & (VT_EXTERN | VT_STATIC)) {
-        /* see also: "RISC-V ABIs Specification" V1.0
-
-           section 5.2 recommends using a GOT for
-           "possibly-undefined weak symbols"
-
-           section 5.3: "Medium position independent code model"
-           if this is a non-local symbol: use a GOT
-           non-local: outside of a pc-relative +- 2 GiB range
-        */
-
+    } else if (op->e.sym) {
+        /* Symbol address: emit auipc/addi (or auipc/lw for extern GOT) pair.
+           Local/defined symbols use PCREL relocs; extern symbols use GOT. */
         label.type.t = VT_VOID | VT_STATIC;
-
-        /* use the medium PIC model: GOT, auipc, lw */
-        if (op->e.sym->type.t & VT_STATIC)
-            greloca(cur_text_section, op->e.sym, ind, R_RISCV_PCREL_HI20, 0);
-        else
+        if (op->e.sym->type.t & VT_EXTERN)
             greloca(cur_text_section, op->e.sym, ind, R_RISCV_GOT_HI20, 0);
+        else
+            greloca(cur_text_section, op->e.sym, ind, R_RISCV_PCREL_HI20, 0);
         put_extern_sym(&label, cur_text_section, ind, 0);
         greloca(cur_text_section, &label, ind+4, R_RISCV_PCREL_LO12_I, 0);
-
         op->type = OP_IM12S;
         op->e.v = 0;
     } else {

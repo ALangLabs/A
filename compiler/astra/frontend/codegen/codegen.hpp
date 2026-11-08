@@ -27,4 +27,14 @@ bool emitAsm(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
 // `error` on unsupported constructs.
 bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
            std::string& error, bool testMode = false);
+
+// Emits target-native assembly (A -> .s -> astra -> machine code) for the
+// given arch ("arm64"/"aarch64" today; more targets plug into the same
+// NatTarget layer). No C intermediate: values are aval words in frame
+// slots, all semantics via a_*_slow runtime calls. Returns false and fills
+// `error` for unimplemented arches or uncovered constructs so the pipeline
+// can fall back to emitC.
+bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
+                const std::string& arch, std::string& out,
+                std::string& error, bool testMode = false);
 }  // namespace a

@@ -8,6 +8,7 @@ add_library(a_codegen STATIC
   codegen_decls.cpp
   codegen_emit.cpp
   codegen_expr.cpp
+  codegen_native.cpp
   codegen_stmt.cpp
 )
 target_link_libraries(a_codegen PUBLIC a_type_checker a_project_options)
