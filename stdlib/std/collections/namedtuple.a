@@ -70,6 +70,10 @@ class NamedTuple:
     fn asdict(self):
         return self._values.copy()
 
+    """_asdict() -> alias of asdict (Python namedtuple method name)."""
+    fn _asdict(self):
+        return self.asdict()
+
     """
     values_list() -> field values as a list in definition order
     (the tuple analogue; A tuples cannot be indexed).
@@ -92,6 +96,10 @@ class NamedTuple:
         nt = NamedTuple(self._typename, self._fields.copy(), self._values.copy())
         nt._values[name] = value
         return nt
+
+    """_replace(name, value) -> alias of replace (Python `_replace`)."""
+    fn _replace(self, name, value):
+        return self.replace(name, value)
 
     """count(v) -> occurrences of v among field values."""
     fn count(self, v):
@@ -162,6 +170,10 @@ class NamedTupleSpec:
                 core.panic("namedtuple '" + self._typename + "' missing field '" + f + "'")
             nt._values[f] = d[f]
         return nt
+
+    """_make(values) -> alias of make (Python `_make` classmethod)."""
+    fn _make(self, values):
+        return self.make(values)
 
     """field_names() -> the field-name list."""
     fn field_names(self):

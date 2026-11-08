@@ -64,7 +64,7 @@ class OrderedDict:
     last=true removes the most recently inserted pair (Python default);
     last=false removes the oldest (FIFO, `popitem(last=False)`).
     """
-    fn popitem(self, last):
+    fn popitem(self, last = true):
         ks = self.data.keys()
         if len(ks) == 0:
             core.panic("popitem from empty OrderedDict")
@@ -80,7 +80,7 @@ class OrderedDict:
     (last=true, Python default) or to the front (last=false).
     Runtime error when k is absent (Python raises KeyError).
     """
-    fn move_to_end(self, k, last):
+    fn move_to_end(self, k, last = true):
         if k not in self.data:
             core.panic("OrderedDict has no key '" + str(k) + "'")
         v = self.data[k]

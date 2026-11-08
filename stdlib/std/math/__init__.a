@@ -1,2 +1,2 @@
-from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, floor, ceil, round_val, clamp
+from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round_val, trunc, random, random_int, clamp
 from "constants.a" import PI, E

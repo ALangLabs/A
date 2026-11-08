@@ -1,29 +1,89 @@
 # std.copy - port of CPython Lib/copy.py (adapted to A's runtime model).
 #
+# `copy(x)` performs a SHALLOW copy: containers (lists/arrays and maps)
+# are rebuilt one level deep while their elements are shared, matching
+# Python `copy.copy`. `deepcopy(x)` recursively copies nested arrays and
+# maps.
+#
 # Deviations from CPython:
-#   * `copy(x)`/`deepcopy(x)` provide practical value copying for common
-#     A containers/scalars. This implementation uses JSON serialization
-#     when available as a portable deep-copy strategy.
-#   * Cycle detection and user-defined hooks are not implemented.
-#   * Behavior may differ from CPython for identity-sensitive or
-#     non-JSON-native A values.
+#   * Structs, tuples, sets, strings, numbers, bools and None are returned
+#     as-is: structs/tuples/sets have no generic A-level rebuild path, and
+#     Python treats them as immutable for copy purposes (deepcopy of a
+#     tuple/set yields a new container of the same runtime type, which A
+#     cannot synthesize — nested copies inside tuples/sets are therefore
+#     shared, documented here).
+#   * Cycle detection and user-defined hooks (`__copy__`/`__deepcopy__`,
+#     memo) are not implemented; self-referential structures are not
+#     expected.
+#   * Behavior may differ from CPython for identity-sensitive values.
 
 import std:json
 
-fn copy(x):
-    "Copy common values; deep-copies JSON-compatible containers via stringify/parse."
-    k = str(json.kind(x))
+"""
+_probe_map(x) -> the dict inside `x` when `json.as_map` succeeds,
+else the string "NONE" sentinel (container optionals cannot be
+None-compared in A; see std/pprint for the same idiom).
+"""
+fn _probe_map(x):
+    return json.as_map(x) ?? "NONE"
+
+"""
+_is_plain_list(x) -> true when `x` is a `[T]` list (kind "array" but
+not a tuple/set — those render with `(`/`{` prefixes, matching the
+std/pprint `_seq_kind` probe).
+"""
+fn _is_plain_list(x):
+    if json.kind(x) != "array":
+        return false
+    s = str(x)
+    return not s.startswith("(") and not s.startswith("\{")
+
+fn _copy_shallow(x):
+    k = json.kind(x)
     if k == "array":
-        return json.parse(json.stringify(x))
+        if not _is_plain_list(x):
+            # tuple/set: immutable in Python — share like copy.copy does
+            return x
+        out = []
+        for e in (json.as_array(x))!:
+            out.append(e)
+        return out
     if k == "object":
-        return json.parse(json.stringify(x))
+        src = _probe_map(x)
+        if json.kind(src) == "string":
+            # struct: no generic map rebuild path — share
+            return x
+        out = {}
+        mm = (json.as_map(x))!
+        for key in mm:
+            out[key] = mm[key]
+        return out
     return x
 
-fn deepcopy(x):
-    "Deep-copy nested containers (no cycle detection/hooks)."
-    k = str(json.kind(x))
+fn _copy_deep(x):
+    k = json.kind(x)
     if k == "array":
-        return json.parse(json.stringify(x))
+        if not _is_plain_list(x):
+            return x
+        out = []
+        for e in (json.as_array(x))!:
+            out.append(_copy_deep(e))
+        return out
     if k == "object":
-        return json.parse(json.stringify(x))
+        src = _probe_map(x)
+        if json.kind(src) == "string":
+            return x
+        out = {}
+        mm = (json.as_map(x))!
+        for key in mm:
+            out[key] = _copy_deep(mm[key])
+        return out
     return x
+
+"""copy(x) -> shallow copy (Python `copy.copy`)."""
+fn copy(x):
+    return _copy_shallow(x)
+
+"""deepcopy(x) -> recursive copy of arrays/maps (Python `copy.deepcopy`)."""
+fn deepcopy(x):
+    return _copy_deep(x)

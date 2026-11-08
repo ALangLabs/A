@@ -1,5 +1,5 @@
 # std.collections selftest — run: ./build/a test stdlib/std/collections/selftest.a
-from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter
+from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter, defaultdict, namedtuple
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -44,3 +44,56 @@ fn test_counter_smoke():
     assert_eq(k, 3)
     assert_eq(cnt, 3)
     assert_eq(c.total(), 6)
+
+fn test_deque_index_stop():
+    d = deque_of([1, 2, 1, 2, 1])
+    # index_from with explicit stop bound (Python index(x, start, stop))
+    assert_eq(d.index_from(1, 0, 2), 0)
+    assert_eq(d.index_from(1, 2, 4), 2)
+    assert_eq(d.index_from(2, 0, -1), 1)
+    # default stop keeps the old 2-arg behaviour
+    assert_eq(d.index_from(1, 2), 2)
+
+fn _zero():
+    return 0
+
+fn test_defaultdict_pop():
+    dd = defaultdict(_zero)
+    dd.set("a", 5)
+    assert_eq(dd.at("b"), 0)          # factory auto-vivifies
+    assert_eq(dd.pop_or("a", -1), 5)  # present: removed, value returned
+    assert_eq(dd.pop_or("zz", -1), -1)  # absent: default, no factory call
+    assert_eq(dd.contains("a"), false)
+    # popitem removes the most recently inserted pair
+    dd.set("x", 1)
+    dd.set("y", 2)
+    (k1, v1) = dd.popitem()
+    assert_eq(k1, "y")
+    assert_eq(v1, 2)
+    (k2, v2) = dd.popitem()
+    assert_eq(k2, "x")
+    assert_eq(v2, 1)
+
+fn test_namedtuple_aliases():
+    Point = namedtuple("Point", ["x", "y"])
+    p = Point.make([3, 4])
+    # Python-method-name aliases
+    d1 = p._asdict()
+    assert_eq(d1["x"], 3)
+    p2 = p._replace("x", 9)
+    assert_eq(p2.field("x"), 9)
+    assert_eq(p2.field("y"), 4)
+    p3 = Point._make([7, 8])
+    assert_eq(p3.at(0), 7)
+    assert_eq(p3.at(1), 8)
+
+fn test_ordereddict_popitem_default():
+    od = OrderedDict({})
+    od.set("a", 1)
+    od.set("b", 2)
+    (k, v) = od.popitem()   # Python default: last=True
+    assert_eq(k, "b")
+    assert_eq(v, 2)
+    (k2, v2) = od.popitem(false)  # explicit FIFO still works
+    assert_eq(k2, "a")
+    assert_eq(v2, 1)

@@ -574,6 +574,17 @@ class PrettyPrinter:
 fn _default_printer(sort_dicts):
     return PrettyPrinter(1, 80, 0, false, sort_dicts, false, true, true)
 
+"""
+PrettyPrinter_new(indent = 1, width = 80, depth = 0, compact = false,
+sort_dicts = true, underscore_numbers = false) -> PrettyPrinter.
+
+Friendlier front-end for the positional `PrettyPrinter(...)`
+constructor: `depth` 0 means unlimited (Python `depth=None`);
+`_readable`/`_recursive` start true like a fresh Python printer.
+"""
+fn PrettyPrinter_new(indent = 1, width = 80, depth = 0, compact = false, sort_dicts = true, underscore_numbers = false):
+    return PrettyPrinter(indent, width, depth, compact, sort_dicts, underscore_numbers, true, true)
+
 """pprint(object) -> pretty-print to stdout (Python pprint.pprint)."""
 fn pprint(object):
     _default_printer(true).pprint(object)

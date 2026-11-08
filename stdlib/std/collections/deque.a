@@ -168,15 +168,22 @@ class Deque<T>:
         return -1
 
     """
-    index_from(x, start) -> index of first occurrence at or after
-    `start` (Python `index(x[, start[, stop]])`; `stop` unsupported).
+    index_from(x, start, stop = -1) -> index of first occurrence in
+    [start, stop) (Python `index(x[, start[, stop]])`; negative stop
+    counts from the end, -1/absent means "to the end").
     """
-    fn index_from(self, x, start):
+    fn index_from(self, x, start, stop = -1):
         xs = self.to_list()
+        n = len(xs)
         i = start
         if i < 0:
-            i = i + len(xs)
-        while i < len(xs):
+            i = i + n
+        end = stop
+        if end < 0:
+            end = end + n
+        if end < 0 or end > n:
+            end = n
+        while i < end:
             if xs[i] == x:
                 return i
             i = i + 1

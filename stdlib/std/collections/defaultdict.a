@@ -7,6 +7,14 @@
 import std:core
 
 """
+_call_factory(f) -> invoke a stored `fn() -> T` factory. Needed because
+`self.factory()` parses as a method call in A; passing the field through
+a parameter reaches the function value correctly.
+"""
+fn _call_factory<T>(f: fn() -> T) -> T:
+    return f()
+
+"""
 DefaultDict<T>: map with a default factory.
 `factory` is a `fn() -> T` called once per missing key (the value is
 then stored, like Python).
@@ -22,7 +30,7 @@ class DefaultDict<T>:
     fn at(self, k):
         if k in self.data:
             return self.data[k]
-        v = self.factory()
+        v = _call_factory(self.factory)
         self.data[k] = v
         return v
 
@@ -66,6 +74,29 @@ class DefaultDict<T>:
         if k not in self.data:
             core.panic("DefaultDict has no key '" + str(k) + "'")
         return self.data.pop(k)
+
+    """
+    pop_or(k, default) -> remove k and return its value, or `default`
+    when absent (Python `dd.pop(k, default)`; does not call the factory).
+    """
+    fn pop_or(self, k, default):
+        if k in self.data:
+            return self.data.pop(k)
+        return default
+
+    """
+    popitem() -> remove and return the most recently inserted (key,
+    value) pair as a tuple; runtime error when empty (Python `dict.popitem`,
+    which defaultdict inherits — LIFO since Python 3.7).
+    """
+    fn popitem(self):
+        if len(self.data) == 0:
+            core.panic("popitem from an empty DefaultDict")
+        ks = self.data.keys()
+        k = ks[len(ks) - 1]
+        v = self.data[k]
+        self.data.pop(k)
+        return (k, v)
 
     fn contains(self, k):
         return k in self.data

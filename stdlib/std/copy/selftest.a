@@ -1,0 +1,84 @@
+# std.copy selftest — shallow vs deep copy semantics.
+# Run: ./build/a test stdlib/std/copy/selftest.a
+#
+# copy()/deepcopy() take and return dynamic Json values, so results are
+# inspected through the json.* accessors rather than typed indexing.
+from "std/copy/__init__.a" import copy, deepcopy
+import std:json
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_copy_scalars():
+    assert_eq(copy(42), 42)
+    assert_eq(copy(3.5), 3.5)
+    assert_eq(copy("hi"), "hi")
+    assert_eq(copy(true), true)
+    assert_eq(deepcopy(42), 42)
+    assert_eq(deepcopy("hi"), "hi")
+
+fn test_copy_list_is_shallow():
+    inner = [1, 2]
+    xs = [inner]
+    ys = copy(xs)
+    assert_eq(json.stringify(ys), "[[1, 2]]")
+    # mutate the shared nested list through the typed reference
+    inner.append(9)
+    # shallow copy shares elements: ys sees the mutation
+    assert_eq(json.stringify(ys), "[[1, 2, 9]]")
+
+fn test_deepcopy_list_is_recursive():
+    inner = [1, 2]
+    xs = [inner]
+    ys = deepcopy(xs)
+    assert_eq(json.stringify(ys), "[[1, 2]]")
+    inner.append(9)
+    # deep copy is independent
+    assert_eq(json.stringify(ys), "[[1, 2]]")
+    assert_eq(json.stringify(xs), "[[1, 2, 9]]")
+
+fn test_copy_map_is_shallow():
+    inner = [1]
+    m = {"a": inner, "b": [4]}
+    n = copy(m)
+    assert_eq(json.stringify(n), "\{\"a\": [1], \"b\": [4]\}")
+    # new top-level map: json.set on the copy must not touch m
+    json.set(n, "c", 3)
+    assert_eq(json.has(m, "c"), false)
+    assert_eq(json.has(n, "c"), true)
+    # nested value is shared
+    inner.append(7)
+    got = json.get(n, "a")!
+    assert_eq(json.stringify(got), "[1, 7]")
+
+fn test_deepcopy_map_is_recursive():
+    inner = [1, 2]
+    m = {"a": inner, "b": [5]}
+    n = deepcopy(m)
+    assert_eq(json.stringify(n), "\{\"a\": [1, 2], \"b\": [5]\}")
+    inner.append(9)
+    got = json.get(n, "a")!
+    assert_eq(json.stringify(got), "[1, 2]")
+    gotm = json.get(m, "a")!
+    assert_eq(json.stringify(gotm), "[1, 2, 9]")
+
+fn test_copy_nested_map_in_list():
+    inner = {"k": [3]}
+    # homogeneous: single map value type
+    holder = {"x": inner, "y": {"k": [0]}}
+    xs = [holder]
+    ys = deepcopy(xs)
+    inner["k"].append(8)
+    elem = json.at(ys, 0)!
+    sub = json.get(elem, "x")!
+    arr = json.get(sub, "k")!
+    assert_eq(json.stringify(arr), "[3]")
+
+fn main():
+    test_copy_scalars()
+    test_copy_list_is_shallow()
+    test_deepcopy_list_is_recursive()
+    test_copy_map_is_shallow()
+    test_deepcopy_map_is_recursive()
+    test_copy_nested_map_in_list()
+    print("std.copy selftest: all tests passed")

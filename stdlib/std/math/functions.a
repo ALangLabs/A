@@ -30,6 +30,42 @@ fn ceil(x):
 fn round_val(x):
     return math.round(x)
 
+fn tan(x):
+    return math.tan(x)
+
+fn asin(x):
+    return math.asin(x)
+
+fn acos(x):
+    return math.acos(x)
+
+fn atan(x):
+    return math.atan(x)
+
+fn atan2(y, x):
+    return math.atan2(y, x)
+
+fn exp(x):
+    return math.exp(x)
+
+fn log(x):
+    return math.log(x)
+
+fn log2(x):
+    return math.log2(x)
+
+fn log10(x):
+    return math.log10(x)
+
+fn trunc(x):
+    return math.trunc(x)
+
+fn random():
+    return math.random()
+
+fn random_int(lo, hi):
+    return math.random_int(lo, hi)
+
 fn clamp(x, lo, hi):
     if x < lo:
         return lo
