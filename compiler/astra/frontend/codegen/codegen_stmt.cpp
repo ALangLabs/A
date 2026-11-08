@@ -613,38 +613,18 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         if (v == 1 || v == -1) stepConst = v;
       }
     }
-    // Register-resident induction counter: with a +-1 step the counter
-    // lives in %xmmN across iterations (loaded once, compared and
-    // incremented in-register). A memory counter costs a store-to-load
-    // forwarding stall (~12 cy) on the increment edge every iteration.
-    // Only at the outermost residency level (empty loopXmm_): nested
-    // loops keep the outer set untouched.
-    int curReg = -1;
+    // GPR-resident induction counter (see curGprSlot_): with a +-1 step
+    // the counter lives in %r10 across iterations (loaded once, compared
+    // and incremented in-register), avoiding the store-to-load forwarding
+    // stall a memory counter pays on the increment edge. %r10 is
+    // caller-saved: emit() flushes/reloads it around calls. Outermost
+    // loops only; nested loops take the memory path.
+    const bool gprCtr =
+        (stepConst == 1 || stepConst == -1) && curGprSlot_ < 0;
     // Choose a free XMM register for the resident accumulator. The loop
     // var and other promoted bindings take registers via loopXmm_
     // (installed by loopXmmEnter below); scratch uses xmm0/xmm1.
     int xmmMark = loopXmmEnter();
-    // Register-resident induction counter (registered after Enter so its
-    // early-return on non-empty residency is unaffected): with a +-1 step
-    // the counter lives in %xmmN across iterations, avoiding a
-    // store-to-load forwarding stall (~12 cy) on the increment edge.
-    // Only when nothing else is resident (outermost loop level).
-    if ((stepConst == 1 || stepConst == -1) && (int)loopXmmAdded_.size() == xmmMark) {
-      for (int x = 5; x <= 15; ++x) {
-        bool used = false;
-        for (const auto& kv : loopXmm_)
-          if (kv.second == x) used = true;
-        if (!used) { curReg = x; break; }
-      }
-      if (curReg >= 0) {
-        // Load BEFORE registering: loadSlot routes through loopXmm_ once
-        // the slot is registered (and would read uninitialized XMM).
-        loadSlot(curS);
-        emit("    movq %rax, %xmm" + std::to_string(curReg) + "\n");
-        loopXmm_[curS] = curReg;
-        loopXmmAdded_.push_back(curS);
-      }
-    }
     auto xmmFree = [&](int x) {
       for (const auto& kv : loopXmm_)
         if (kv.second == x) return false;
@@ -679,6 +659,7 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
       emit("    mov " + slotRef(endS) + ", %r11\n");
       endHoistSlot_ = endS;
     }
+    if (gprCtr) emit("    mov " + slotRef(curS) + ", %r10\n");
     emit("    jmp " + loopL + "\n");
     emitLabel(trampL);
     // acc is NOT currently a double: promote via the runtime add exactly
@@ -690,6 +671,12 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loadSlot(acc->slot, "%rcx");
     emit(std::string("    movq %rcx, ") + xr + "\n");
     if (hoistEnd) emit("    mov " + slotRef(endS) + ", %r11\n");
+    if (gprCtr) {
+      // The trampoline call clobbers %r10: reload and publish the
+      // counter residency for the body reads below.
+      emit("    mov " + slotRef(curS) + ", %r10\n");
+      curGprSlot_ = curS;
+    }
     emitLabel(loopL);
     // continue while (step>0 ? cur<end : cur>end). Constant steps skip
     // the sign dispatch entirely at the cost of one compare.
@@ -704,11 +691,10 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         int64_t v = static_cast<const IntLitExpr*>(stE)->value;
         if (v == 1 || v == -1) nec = v;
       }
-      // Resident counter: compare straight from its XMM register.
+      // GPR counter: compare straight from %r10.
       const std::string curLoad =
-          curReg >= 0
-              ? "    movq %xmm" + std::to_string(curReg) + ", %rax\n"
-              : "    mov " + slotRef(curS) + ", %rax\n";
+          gprCtr ? "    mov %r10, %rax\n"
+                 : "    mov " + slotRef(curS) + ", %rax\n";
       const std::string endCmp =
           hoistEnd ? "    cmp %r11, %rax\n"
                    : "    mov " + slotRef(endS) +
@@ -811,6 +797,8 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
         if (xr2 != loopXmm_.end()) {
           emit(std::string("    movq %xmm") + std::to_string(xr2->second) +
                ", %rax\n");
+        } else if (ib && ib->slot == curGprSlot_) {
+          emit("    mov %r10, %rax\n");
         } else if (ib && ib->rawInt) {
           loadSlot(ib->slot);
         } else {
@@ -858,25 +846,20 @@ bool AsmEmitter::tryEmitForFloatAccum(const ForStmt& st, int curS, int endS,
     loopCont_.pop_back();
     popScope();
     emitLabel(contL);
-    if (curReg >= 0) {
-      // In-register increment (see counter registration above).
-      emit("    movq %xmm" + std::to_string(curReg) + ", %rax\n");
-      emit(stepConst == 1 ? "    addq $1, %rax\n" : "    subq $1, %rax\n");
-      emit("    movq %rax, %xmm" + std::to_string(curReg) + "\n");
+    if (gprCtr) {
+      // In-register increment (see counter decision above).
+      emit(stepConst == 1 ? "    addq $1, %r10\n" : "    subq $1, %r10\n");
     } else {
       emitRangeIncr(curS, endS, stepS, stepConst);
     }
     jmp(loopL);
     emitLabel(endL);
     if (hoistEnd) endHoistSlot_ = -1;
-    loopXmmExit(xmmMark);  // flushes the resident accumulator to its slot
-    if (curReg >= 0) {
-      // Flush already wrote the final counter to its slot; drop the
-      // counter residency (it must not leak into enclosing scopes).
-      loopXmm_.erase(curS);
-      for (auto it = loopXmmAdded_.begin(); it != loopXmmAdded_.end();)
-        it = (*it == curS) ? loopXmmAdded_.erase(it) : std::next(it);
+    if (gprCtr) {
+      emit("    mov %r10, " + slotRef(curS) + "\n");
+      curGprSlot_ = -1;
     }
+    loopXmmExit(xmmMark);  // flushes the resident accumulator to its slot
     return true;
   }
 

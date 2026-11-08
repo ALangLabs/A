@@ -883,6 +883,8 @@ bool AsmEmitter::tryEmitFloatInt(const Expr* arg) {
       if (xr != loopXmm_.end()) {
         emit(std::string("    movq %xmm") + std::to_string(xr->second) +
              ", %rax\n");
+      } else if (ib && ib->slot == curGprSlot_) {
+        emit("    mov %r10, %rax\n");
       } else if (ib && ib->rawInt) {
         loadSlot(ib->slot);
       } else {
@@ -981,6 +983,8 @@ void AsmEmitter::emitBiCall(int id, const CallExpr& call) {
             if (xr != loopXmm_.end()) {
               emit(std::string("    movq %xmm") +
                    std::to_string(xr->second) + ", %rax\n");
+            } else if (ib && ib->slot == curGprSlot_) {
+              emit("    mov %r10, %rax\n");
             } else if (ib && ib->rawInt) {
               loadSlot(ib->slot);
             } else {

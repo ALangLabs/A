@@ -284,6 +284,14 @@ class AsmEmitter {
   // valid within the owning loop's emission window.
   int endHoistSlot_ = -1;
 
+  // GPR induction counter: when >= 0, this frame slot's value is mirrored
+  // in %r10 (caller-saved scratch) for the loop head/body reads, so the
+  // +-1 increment is one `add/sub $1` on a register instead of a memory
+  // RMW plus a store-to-load forwarding stall. %r10 is caller-saved, so
+  // emit() flushes it back to the slot before every `call` and reloads
+  // it after. Only valid within the owning loop's emission window.
+  int curGprSlot_ = -1;
+
     void loopXmmFlush();
   // Reload resident values after a call: slots were flushed before it, so
   // movq m64->xmm restores each register without needing a scratch GPR

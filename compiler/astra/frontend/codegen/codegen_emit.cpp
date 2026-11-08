@@ -34,9 +34,13 @@ void AsmEmitter::emit(const std::string& s) {
     // frame slots before the call and reload them right after, keeping
     // residency (and correctness on the taken path) with zero cost on
     // paths that never reach the call.
-    if (((!loopXmm_.empty() || endHoistSlot_ >= 0)) &&
+    if (((!loopXmm_.empty() || endHoistSlot_ >= 0 || curGprSlot_ >= 0)) &&
         (s.find("call ") != std::string::npos ||
          s.find("call\t") != std::string::npos)) {
+      // Flush the GPR counter to its slot first (it may hold the freshest
+      // value; the slot is what the callee must see if it reads it).
+      if (curGprSlot_ >= 0)
+        text_ << "    mov %r10, " << slotRef(curGprSlot_) << "\n";
       loopXmmFlush();
       text_ << s;
       if (s.back() != '\n') text_ << '\n';
@@ -44,6 +48,8 @@ void AsmEmitter::emit(const std::string& s) {
       // A call also clobbers the hoisted loop bound (%r11): reload it.
       if (endHoistSlot_ >= 0)
         text_ << "    mov " << slotRef(endHoistSlot_) << ", %r11\n";
+      if (curGprSlot_ >= 0)
+        text_ << "    mov " << slotRef(curGprSlot_) << ", %r10\n";
       return;
     }
     text_ << s;
@@ -146,6 +152,19 @@ void AsmEmitter::leaSlot(int slot, const char* reg) {
 
 // mem -> mem is impossible on x86; route slot copies through %rcx.
 void AsmEmitter::copySlot(int from, int to) {
+    // Counter mirrored in %r10 (see curGprSlot_): the frame slot may be
+    // stale between calls, so read straight from the register.
+    if (from == curGprSlot_ && from != to) {
+      auto xt2 = loopXmm_.find(to);
+      if (xt2 != loopXmm_.end()) {
+        emit("    mov %r10, %rcx\n    movq %rcx, %xmm" +
+             std::to_string(xt2->second));
+      } else {
+        emit("    mov %r10, %rcx\n    mov %rcx, " + slotRef(to));
+      }
+      rawLearn(to, kRRcx);
+      return;
+    }
     auto xf = loopXmm_.find(from), xt = loopXmm_.find(to);
     if (xf != loopXmm_.end() && xt != loopXmm_.end()) {
       emit(std::string("    movapd %xmm") + std::to_string(xf->second) +
