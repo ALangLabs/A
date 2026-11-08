@@ -3910,6 +3910,19 @@ struct Arm32Target : NatTarget {
 // differs (no crt: _start sets up segments/stack and calls main).
 struct I8086Target : I386Target {
   bool bareMetal() const override { return true; }
+  // Real mode uses SS=0x9000 while DS=0. Slot *contents* are accessed via
+  // SS:ESP, but pointers handed to runtime/code must be flat physical
+  // addresses (DS=0), so add the stack segment bias when taking a slot
+  // address. ESP stays a 16-bit offset (<64K) for push/pop compatibility.
+  void leaSlot(std::string& o, int slot, const std::string& r) const override {
+    int d = I386Target::offOf(r);
+    uint32_t bias = 0x90000u + (uint32_t)I386Target::kReserve +
+                    (uint32_t)(8 * slot);
+    o += "    movl %esp, %eax\n    addl $" + std::to_string(bias) +
+         ", %eax\n";
+    o += "    movl %eax, " + I386Target::ref(d) + "\n    movl $0, " +
+         I386Target::refAdd(d, 4) + "\n";
+  }
 };
 
 // Dead-function elimination for bare-metal targets: real-mode CS:IP is
