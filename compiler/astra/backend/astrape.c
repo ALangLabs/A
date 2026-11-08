@@ -1,5 +1,5 @@
 /*
- *  ASTRAPE.C - PE file output for the Tiny C Compiler
+ *  ASTRAPE.C - PE file output for ASTRA
  *
  *  Copyright (c) 2005-2007 grischka
  *

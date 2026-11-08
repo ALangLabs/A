@@ -1,8 +1,8 @@
 
- Relicensing TinyCC
+ Relicensing ASTRA upstream codebase
  ------------------
 
- The authors listed below hereby confirm their agreement to relicense TinyCC
+ The authors listed below hereby confirm their agreement to relicense ASTRA upstream codebase
  including their past contributions under the following terms:
 
 
@@ -62,6 +62,6 @@
  and (after fetching the latest version) commit to the "mob" branch with
  commit message:
 
-     Relicensing TinyCC
+     Relicensing ASTRA upstream codebase
 
  Thanks.

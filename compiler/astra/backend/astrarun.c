@@ -1,5 +1,5 @@
 /*
- *  ASTRA - Tiny C Compiler - Support for -run switch
+ *  ASTRA - compiler for the A language - Support for -run switch
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *

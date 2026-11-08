@@ -1,5 +1,5 @@
 /*
- *  ASTRA - Tiny C Compiler
+ *  ASTRA - compiler for the A language
  * 
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *
@@ -33,7 +33,7 @@
 #endif
 
 static const char help[] =
-    "Astra "ASTRA_VERSION" - Tiny C Compiler fork for the A language\n"
+    "Astra "ASTRA_VERSION" - compiler for the A language\n"
     "Usage: astra [link|cc] [options...] [-o outfile] [-c] infile(s)...\n"
     "       astra [options...] -run infile (or --) [arguments...]\n"
     "Commands:\n"
@@ -99,7 +99,7 @@ static const char help[] =
     ;
 
 static const char help2[] =
-    "Tiny C Compiler "ASTRA_VERSION" - More Options\n"
+    "ASTRA "ASTRA_VERSION" - More Options\n"
     "Special options:\n"
     "  -P -P1                        with -E: no/alternative #line output\n"
     "  -dD -dM                       with -E: output #define directives\n"

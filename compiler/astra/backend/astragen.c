@@ -1,5 +1,5 @@
 /*
- *  ASTRA - Tiny C Compiler
+ *  ASTRA - compiler for the A language
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *

@@ -1,5 +1,5 @@
 #
-# Tiny C Compiler Makefile for libastra1.a
+# ASTRA makefile for libastra1.a
 #
 
 TOP = ..

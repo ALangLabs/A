@@ -1,6 +1,6 @@
 /* -------------------------------------------------------------- */
 /*
- *  ASTRA - Tiny C Compiler
+ *  ASTRA - compiler for the A language
  *
  *  astratools.c - extra tools and and -m32/64 support
  *
@@ -464,7 +464,7 @@ the_end:
 
 /* -------------------------------------------------------------- */
 /*
- *  ASTRA - Tiny C Compiler
+ *  ASTRA - compiler for the A language
  *
  *  Copyright (c) 2001-2004 Fabrice Bellard
  *

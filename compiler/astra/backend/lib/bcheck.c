@@ -1,5 +1,5 @@
 /*
- *  Tiny C Memory and bounds checker
+ *  ASTRA memory and bounds checker
  * 
  *  Copyright (c) 2002 Fabrice Bellard
  *
