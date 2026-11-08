@@ -236,13 +236,11 @@ static void parse_branch_offset_operand(ASTRAState *s1, Operand *op){
     if (!op->e.sym) {
         if ((int) op->e.v >= -0x1000 && (int) op->e.v < 0x1000)
             op->type = OP_IM12S;
-    } else if (op->e.sym->type.t & (VT_EXTERN | VT_STATIC)) {
-        /* For extern/static symbols, always use far-branch expansion
+    } else {
+        /* For symbol targets, always use far-branch expansion
            since linker relaxation (R_RISCV_RELAX) is not implemented. */
         op->type = OP_IM32;
         op->e.v = 0;
-    } else {
-        expect("operand");
     }
 }
 
@@ -256,12 +254,10 @@ static void parse_jump_offset_operand(ASTRAState *s1, Operand *op){
     if (!op->e.sym) {
         if ((int) op->e.v >= -0x1000 && (int) op->e.v < 0x1000)
             op->type = OP_IM12S;
-    } else if (op->e.sym->type.t & (VT_EXTERN | VT_STATIC)) {
+    } else {
         greloca(cur_text_section, op->e.sym, ind, R_RISCV_JAL, 0);
         op->type = OP_IM12S;
         op->e.v = 0;
-    } else {
-        expect("operand");
     }
 }
 
@@ -1627,23 +1623,25 @@ static void asm_emit_b(int token, uint32_t opcode, const Operand *rs1, const Ope
         astra_error("'%s': Expected destination operand that is a register", get_tok_str(token, NULL));
     }
     if (imm->type == OP_IM32 && imm->e.sym) {
-        /* far branch: expand to inverted short branch + auipc + jalr */
+        /* far branch: expand to inverted short branch + auipc + jalr.
+           R_RISCV_CALL patches the auipc/jalr pair with the target address. */
         int b_ofs = ind;
         uint32_t inv_func3 = ((opcode >> 12) & 7) ^ 1;
         uint32_t inv_opcode = (opcode & ~(7 << 12)) | (inv_func3 << 12);
-        /* b<inverse> .+8 */
         asm_emit_opcode(inv_opcode | ENCODE_RS1(rs1->reg)
-                        | ENCODE_RS2(rs2->reg) | (1 << 8));
-        /* auipc t0, 0 */
+                        | ENCODE_RS2(rs2->reg));
+        /* auipc t0, 0 ; jalr x0, 0(t0) — relocated as a CALL pair */
         greloca(cur_text_section, imm->e.sym, ind, R_RISCV_CALL, 0);
         asm_emit_opcode(0x17 | ENCODE_RD(5));
-        /* jalr x0, 0(t0) */
+        asm_emit_opcode(0x67 | ENCODE_RS1(5));
+        /* patch b<inverse> to skip the 8-byte auipc+jalr pair */
+        uint32_t skip = (uint32_t)(ind - b_ofs);
         write32le(cur_text_section->data + b_ofs,
                   read32le(cur_text_section->data + b_ofs)
-                  | (((ind - b_ofs) >> 1) & 0xf) << 8
-                  | (((ind - b_ofs) >> 5) & 0x3f) << 25
-                  | (((ind - b_ofs) >> 11) & 1) << 7
-                  | (((ind - b_ofs) >> 12) & 1) << 31);
+                  | (((skip >> 1) & 0xf) << 8)
+                  | (((skip >> 5) & 0x1f) << 25)
+                  | (((skip >> 11) & 1) << 7)
+                  | (((skip >> 12) & 1) << 31));
         return;
     }
     if (imm->type != OP_IM12S) {
