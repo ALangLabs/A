@@ -46,15 +46,18 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
 
 // ---------------------------------------------------------------- Astra exec
 // `a run`/`a build`/`a test` are thin wrappers over the Astra toolchain
-// driver (compiler/astra/): the frontend emits x86-64 assembly (or portable
-// C for non-x86-64 targets), `astra` compiles/assembles that together with
+// driver (compiler/astra/): the frontend emits target assembly (x86-64
+// SysV via emitAsm, other arches via emitNative) or portable C (emitC)
+// as a fallback, `astra` compiles/assembles that together with
 // the C A runtime (a_runtime.c) to machine code and links the executable.
 //
 // Cross-compilation: astra ships one driver binary per target architecture
 // (astra-<arch>, built by cmake/libastra.cmake). The frontend picks the
-// emitter by target: x86-64 SysV targets use the asm backend; every other
-// arch goes through the portable C emitter (emitC), which astra then
-// compiles for i386/ARM/AArch64/RISC-V64 like any other C file. Astra
+// emitter by target: x86-64 SysV targets prefer the asm backend; every
+// other arch goes through emitNative (native per-arch assembly), with
+// emitC as the portable fallback for constructs the native backends do
+// not cover (e.g. python interop on non-x86-64 targets). i8086 is
+// asm-only — astra rejects C input for it. Astra
 // binaries are bound to the host OS at build time, so the target OS must
 // match the host — only the architecture is selectable.
 
@@ -152,8 +155,8 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
     return false;
   }
   // The asm emitter is x86-64 SysV only: valid for ELF (linux) and Mach-O
-  // (macos) x86-64 targets. i386, ARM, RISC-V and Windows x86-64 (MS ABI)
-  // go through the portable C emitter.
+  // (macos) x86-64 targets. i386, ARM, RISC-V, i8086 and Windows x86-64
+  // (MS ABI) go through emitNative; emitC remains the fallback.
   t.useAsm = (arch == "x86_64" && (t.os == "linux" || t.os == "macos"));
   return true;
 }
@@ -548,8 +551,8 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   }
   return p;
 }
-// Compiles emitted source (assembly or C, plus the runtime modules) with the
-// astra driver for `arch` into outPath. The runtime is modular: every *.c
+// Compiles emitted source (target assembly or portable C, plus the runtime
+// modules) with the astra driver for `arch` into outPath. The runtime is modular: every *.c
 // next to the located a_runtime.c (dispatch/printing plus the domain .c
 // modules) is compiled and linked in, unless the prebuilt libaruntime.a
 // archive exists for the default opt level. -B points astra at the staged
@@ -743,13 +746,20 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   }
   if (!emitted) {
     // Native per-arch asm emitters (A -> .s -> machine code, no C step).
-    // emitNative covers a growing subset; emitC remains the fallback.
+    // emitNative covers a growing subset; emitC remains the fallback —
+    // except for i8086, which is asm-only bare-metal (astra rejects C
+    // input), so a native-emission failure is fatal there.
     if (emitNative(*m.graph, *m.sema, td->arch, srcSource, srcError, testMode)) {
       emitted = true;
       srcPath = stageSrc(srcSource, ".s", err);
     } else if (std::getenv("A_DEBUG_NATIVE")) {
       err << "note: native backend declined: " << srcError << "\n";
     }
+  }
+  if (!emitted && td->arch == "i8086") {
+    err << "error: code generation failed for i8086 (asm-only target): "
+        << srcError << "\n";
+    return kCErr;
   }
   if (!emitted) {
     if (!emitC(*m.graph, *m.sema, srcSource, srcError, testMode)) {
@@ -787,8 +797,8 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; if(config.checkOnly) return kOk;
-  // Execution: the frontend emits assembly (x86-64) or C (other targets),
-  // Astra compiles it with the runtime into a binary, and the binary runs
+  // Execution: the frontend emits target assembly or portable C, Astra
+  // compiles it with the runtime into a binary, and the binary runs
   // as a child process — host targets only.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
@@ -807,13 +817,15 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  // `a build`: emit asm (x86-64 SysV) or portable C, then astra links a
-  // native executable for the requested target arch.
+  // `a build`: emit target assembly (x86-64 SysV asm, per-arch native) or
+  // portable C, then astra links a native executable for the target arch.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   std::string srcSource, srcError;
   bool emitted = false;
-  if (td.useAsm) {
+  const char* forced = std::getenv("A_CODEGEN");
+  bool preferC = forced && lowerStr(forced) == "c";
+  if (td.useAsm && !preferC) {
     if (emitAsm(*m.graph, *m.sema, srcSource, srcError)) emitted = true;
   }
   std::string srcPath;
@@ -826,6 +838,13 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     }
   } else {
     srcPath = stageSrc(srcSource, ".s", err);
+  }
+  if (!emitted && td.arch == "i8086") {
+    // i8086 is asm-only bare-metal: astra rejects C input, so emitC can
+    // never produce a bootable image for it.
+    err << "error: code generation failed for i8086 (asm-only target): "
+        << srcError << "\n";
+    return kCErr;
   }
   if (!emitted) {
     if (!emitC(*m.graph, *m.sema, srcSource, srcError)) {
