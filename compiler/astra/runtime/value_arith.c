@@ -122,9 +122,52 @@ static aval arith_int_int(aval l, aval r, char op) {
     return A_NONE;
 }
 
+/* Decimal digits of |v| written backwards into tmp; returns the count. */
+static size_t i64_digits(int64_t v, char *tmp) {
+    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    size_t n = 0;
+    do {
+        tmp[n++] = (char)('0' + (int)(u % 10));
+        u /= 10;
+    } while (u);
+    return n;
+}
+
+/* str + str / str + int are the two hot shapes (building log lines, keys and
+   filenames): both fit one exact-size allocation, so they skip the Buf path
+   whose growth reallocs and second copy dominated the measurement. */
 static aval concat_str(aval strv, aval other, int str_left) {
     uint64_t sn;
     const char *sp = str_data(strv, &sn);
+    char tmp[24];
+    const char *tp = NULL;
+    uint64_t tn = 0;
+    char rev[24];
+    if (kind_of(other) == K_STR) {
+        tp = str_data(other, &tn);
+    } else if (is_int_val(other)) {
+        int64_t v = int_val_full(other);
+        size_t nd = i64_digits(v, rev);
+        size_t o = 0;
+        if (v < 0) tmp[o++] = '-';
+        while (nd) tmp[o++] = rev[--nd];
+        tp = tmp;
+        tn = (uint64_t)o;
+    }
+    if (tp) {
+        if ((uint64_t)UINT32_MAX - sn < tn) panicf("string too large");
+        aval outv = a_str_new_uninit(sn + tn);
+        AStr *o = (AStr *)obj_of(outv);
+        char *d = o->data;
+        if (str_left) {
+            memcpy(d, sp, (size_t)sn);
+            memcpy(d + sn, tp, (size_t)tn);
+        } else {
+            memcpy(d, tp, (size_t)tn);
+            memcpy(d + tn, sp, (size_t)sn);
+        }
+        return outv;
+    }
     Buf b;
     buf_init(&b);
     if (str_left) {

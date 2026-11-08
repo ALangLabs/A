@@ -63,6 +63,94 @@ int snprintf(char *s, size_t n, const char *format, ...);
 int64_t a_win_time_ms(void);    /* wall clock, Unix epoch milliseconds */
 int64_t a_win_mono_ms(void);    /* monotonic milliseconds (QPC) */
 void a_win_sleep_ms(int64_t ms);
+
+/* Win32 API surface used by fs.c and terminal.c. Declared directly (the
+   same approach core_util.c uses for the timing helpers) so runtime TUs
+   do not need windows.h; kernel32 imports resolve through
+   backend/win32/lib/kernel32.def and the CRT helpers (_read, _mktemp,
+   _spawnvp, _putenv) through msvcrt.def. WINAPI is __stdcall on 32-bit
+   Windows and empty on Win64; BOOL is int, HANDLE is void*, DWORD is
+   unsigned long. */
+#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
+#define A_WINAPI
+#else
+#define A_WINAPI __stdcall
+#endif
+extern void A_WINAPI GetSystemTimeAsFileTime(void *lpSystemTimeAsFileTime);
+extern int A_WINAPI QueryPerformanceCounter(long long *lpPerformanceCount);
+extern int A_WINAPI QueryPerformanceFrequency(long long *lpPerformanceFrequency);
+extern void A_WINAPI Sleep(unsigned long dwMilliseconds);
+extern void *A_WINAPI GetStdHandle(unsigned long nStdHandle);
+extern int A_WINAPI GetConsoleMode(void *hConsoleHandle, unsigned long *lpMode);
+extern int A_WINAPI SetConsoleMode(void *hConsoleHandle, unsigned long dwMode);
+extern int A_WINAPI GetConsoleScreenBufferInfo(void *hConsoleOutput,
+                                               void *lpConsoleScreenBufferInfo);
+extern unsigned long A_WINAPI WaitForSingleObject(void *hHandle,
+                                                  unsigned long dwMilliseconds);
+extern unsigned long A_WINAPI GetCurrentDirectoryA(unsigned long nBufferLength,
+                                                   char *lpBuffer);
+extern unsigned long A_WINAPI GetTempPathA(unsigned long nBufferLength,
+                                           char *lpBuffer);
+extern unsigned long A_WINAPI GetEnvironmentVariableA(const char *lpName,
+                                                      char *lpBuffer,
+                                                      unsigned long nSize);
+extern unsigned long A_WINAPI GetFileAttributesA(const char *lpFileName);
+extern int A_WINAPI CreateDirectoryA(const char *lpPathName,
+                                     void *lpSecurityAttributes);
+extern int A_WINAPI RemoveDirectoryA(const char *lpPathName);
+extern int A_WINAPI DeleteFileA(const char *lpFileName);
+extern void *A_WINAPI FindFirstFileA(const char *lpFileName,
+                                     void *lpFindFileData);
+extern int A_WINAPI FindNextFileA(void *hFindFile, void *lpFindFileData);
+extern int A_WINAPI FindClose(void *hFindFile);
+extern unsigned long A_WINAPI GetLastError(void);
+/* msvcrt helpers (cdecl, no A_WINAPI): fd-level read for terminal input,
+   temp-name generation and PATH-searching child spawn for repl.eval,
+   and env mutation. */
+extern int _read(int _FileHandle, void *_DstBuf, unsigned long _MaxCharCount);
+extern char *_mktemp(char *_TemplateName);
+extern intptr_t _spawnvp(int _Mode, const char *_Filename,
+                         const char * const *_ArgList);
+extern int _putenv(const char *_EnvString);
+
+/* Win32 constants (values from the SDK headers; named A_WIN_* so they
+   cannot collide with winsock2.h macros). */
+#define A_WIN_STDIN_HANDLE   ((unsigned long)-10)
+#define A_WIN_STDOUT_HANDLE  ((unsigned long)-11)
+#define A_WIN_INVALID_HANDLE ((void *)-1)
+#define A_WIN_INVALID_FILE_ATTRIBUTES 0xFFFFFFFFUL
+#define A_WIN_FILE_ATTRIBUTE_DIRECTORY     0x00000010UL
+#define A_WIN_FILE_ATTRIBUTE_REPARSE_POINT 0x00000400UL
+#define A_WIN_ERROR_FILE_EXISTS      80UL
+#define A_WIN_ERROR_ALREADY_EXISTS  183UL
+#define A_WIN_WAIT_OBJECT_0           0UL
+/* ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT: cleared for REPL raw mode. */
+#define A_WIN_CONSOLE_RAW_MASK     0x00000006UL
+
+/* WIN32_FIND_DATAA layout (frozen Win32 ABI). The three FILETIMEs are
+   declared as DWORD pairs so field offsets and 4-byte alignment are
+   identical on 32- and 64-bit Windows; only dwFileAttributes and
+   cFileName are read. */
+typedef struct {
+    unsigned long dwFileAttributes;
+    unsigned long ftCreationTimeLo, ftCreationTimeHi;
+    unsigned long ftLastAccessTimeLo, ftLastAccessTimeHi;
+    unsigned long ftLastWriteTimeLo, ftLastWriteTimeHi;
+    unsigned long nFileSizeHigh, nFileSizeLow;
+    unsigned long dwReserved0, dwReserved1;
+    char cFileName[260];              /* MAX_PATH */
+    char cAlternateFileName[14];      /* MAX_PATH - 246 */
+} AWinFindData;
+
+/* CONSOLE_SCREEN_BUFFER_INFO layout: every field is a 16-bit value, so a
+   flat short array reproduces the struct exactly (dwSize is first). */
+typedef struct {
+    short sizeX, sizeY;          /* dwSize: terminal columns, rows */
+    short cursorX, cursorY;      /* dwCursorPosition */
+    unsigned short attributes;   /* wAttributes */
+    short winLeft, winTop, winRight, winBottom;  /* srWindow */
+    short maxX, maxY;            /* dwMaximumWindowSize */
+} AWinConsoleInfo;
 #endif
 
 /* object model */
@@ -92,6 +180,20 @@ enum {
 };
 
 typedef struct { AObj h; char data[]; } AStr;
+
+/* len() on a string is a code-point count, i.e. a UTF-8 scan. The result is
+   cached in the otherwise-unused high half of the string's cap word (the low
+   half stays len+1, so `data` keeps a fixed offset that generated code may
+   address directly). Stored as count+1; 0 means "not computed yet", which is
+   what every constructor but a_str_i64() and concat_str() set. */
+#define ASTR_CP_MASK UINT64_C(0xFFFFFFFF00000000)
+static inline uint32_t astr_cp_cached(const AStr *s) {
+    return (uint32_t)(s->h.cap >> 32);
+}
+static inline void astr_cp_cache(AStr *s, uint32_t cp) {
+    s->h.cap = (s->h.cap & ~ASTR_CP_MASK) | ((uint64_t)(cp + 1u) << 32);
+}
+static inline void astr_cp_uncache(AStr *s) { s->h.cap &= ~ASTR_CP_MASK; }
 /* First-class bytes: h.len is the byte count, h.cap the allocation size,
    `data` is NUL-terminated for C interop (length is authoritative). */
 typedef struct { AObj h; char *data; } ABytes;
@@ -190,6 +292,8 @@ typedef struct { aval *p; size_t len, cap; } AVec;
 /* shared helpers (defined across the rt_*.c modules) */
 void panicf(const char *fmt, ...);
 void *xmalloc(size_t n);
+/* Arena chunks: mmap + MADV_HUGEPAGE where available (see core_util.c). */
+char *xarena(size_t n);
 void *xrealloc(void *p, size_t n);
 char *xstrndup(const char *s, size_t n);
 char *xstrdup(const char *s);
@@ -574,17 +678,6 @@ aval bi_sin(uint64_t n, aval *argv);
 aval bi_cos(uint64_t n, aval *argv);
 aval bi_tan(uint64_t n, aval *argv);
 aval bi_exp(uint64_t n, aval *argv);
-aval bi_terminal_unsupported(uint64_t n, aval *argv);
-#if defined(_WIN32)
-#define bi_terminal_isatty bi_terminal_unsupported
-#define bi_terminal_raw_mode bi_terminal_unsupported
-#define bi_terminal_read_char bi_terminal_unsupported
-#define bi_terminal_read_char_ms bi_terminal_unsupported
-#define bi_terminal_write bi_terminal_unsupported
-#define bi_terminal_flush bi_terminal_unsupported
-#define bi_terminal_size bi_terminal_unsupported
-#define bi_terminal_home bi_terminal_unsupported
-#endif
 int a_rt_repl_quiet(void);
 
 /* ------------------------------------------------------------------ */

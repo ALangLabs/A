@@ -8,17 +8,14 @@ aval a_str_concat(aval l, aval r) {
     uint64_t ln, rn;
     const char *lp = str_data(l, &ln), *rp = str_data(r, &rn);
     if ((uint64_t)UINT32_MAX - ln < rn) panicf("string too large");
-    AStr *s = (AStr *)xmalloc(sizeof(AStr) + (size_t)ln + rn + 1);
-    s->h.type = T_STR;
-    s->h.len = (uint32_t)(ln + rn);
-    s->h.cap = s->h.len + 1;
-    memcpy(s->data, lp, (size_t)ln);
-    memcpy(s->data + ln, rp, (size_t)rn);
-    s->data[ln + rn] = '\0';
-    return mkobj(&s->h);
+    /* Small results come from the bump arena (AStr objects are never freed
+       individually), so a concat loop allocates without touching malloc. */
+    aval outv = a_str_new_uninit(ln + rn);
+    AStr *s = (AStr *)obj_of(outv);
+    if (ln) memcpy(s->data, lp, (size_t)ln);
+    if (rn) memcpy(s->data + ln, rp, (size_t)rn);
+    return outv;
 }
-
-
 
 void avec_push(AVec *v, aval x) {
     if (v->len == v->cap) {

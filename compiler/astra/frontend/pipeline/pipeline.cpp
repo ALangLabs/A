@@ -7,6 +7,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <set>
 #include <system_error>
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -642,14 +643,169 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   return p;
 }
 
-// Pre-parse depfile key (executePipeline): hashes the entry content plus a
-// bounded stat snapshot of every `.a` file under the entry dir, the stdlib
-// root and the module search dirs. A hit lets `a run` skip the frontend
-// entirely (lex/parse/sema/ownership ≈ 5ms) and go straight to the binary.
-// Snapshot records are (path, size, mtime); any file below a search dir
-// that could shadow a resolved module invalidates by altering the digest.
-// Returns "" when the walk is unbounded (too many files) or the layout
-// cannot be hashed — the caller then falls back to the frontend path.
+// One import edge found by the textual scan, tagged with the resolution
+// table ModuleLoader would use for it.
+struct PreImport {
+  int kind = 3;  // 0 bare name, 1 std:<package>, 2 quoted path, 3 unknown
+  std::string target;
+};
+
+// Collects every module import in a source text. Statement position is
+// decided textually (`import`/`from` as the first token of a line), which is
+// also true for imports nested in blocks: treating a nested import as a
+// dependency can only make the key more sensitive, never less. An import
+// whose target cannot be classified is reported as kind 3 so the caller can
+// fall back to a full frontend run instead of trusting an incomplete key.
+inline void scanImports(const std::string& text, std::vector<PreImport>& out) {
+  std::istringstream ss(text);
+  std::string line;
+  const auto isName = [](unsigned char c) {
+    return std::isalnum(c) != 0 || c == '_' || c == '.' || c == '/' ||
+           c == '-' || c == '$';
+  };
+  while (std::getline(ss, line)) {
+    std::size_t i = 0;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (line.compare(i, 7, "import ") == 0) i += 7;
+    else if (line.compare(i, 5, "from ") == 0) i += 5;
+    else continue;
+    while (i < line.size() && (line[i] == ' ' || line[i] == '\t')) ++i;
+    if (i >= line.size()) continue;
+    PreImport imp;
+    if (line[i] == '"') {
+      const std::size_t end = line.find('"', i + 1);
+      if (end == std::string::npos) {
+        imp.kind = 3;
+      } else {
+        imp.kind = 2;
+        imp.target = line.substr(i + 1, end - i - 1);
+      }
+    } else if (line.compare(i, 4, "std:") == 0) {
+      std::size_t j = i + 4;
+      while (j < line.size() && isName((unsigned char)line[j])) ++j;
+      imp.kind = 1;
+      imp.target = line.substr(i + 4, j - (i + 4));
+    } else if (line.compare(i, 7, "python:") == 0) {
+      continue;  // Python interop: no A module on disk
+    } else {
+      std::size_t j = i;
+      while (j < line.size() && isName((unsigned char)line[j])) ++j;
+      imp.kind = 0;
+      imp.target = line.substr(i, j - i);
+    }
+    if (imp.target.empty()) imp.kind = 3;
+    out.push_back(std::move(imp));
+  }
+}
+
+// Walks the same candidate tables as ModuleLoader, but without compiling:
+// each resolved module contributes its content to the key, and every
+// candidate checked before it contributes an "absent" marker, so creating a
+// file that would shadow a resolved module changes the key. Depth is the
+// real dependency graph, so a directory full of unrelated `.a` files (or a
+// temp dir) costs nothing and can never disable the cache.
+struct PreScan {
+  const PipelineConfig& config;
+  std::string stdRoot;
+  std::vector<std::string> envDirs;
+  std::set<std::string> seen;
+  std::uint64_t h;
+  std::size_t files = 0;
+  bool ok = true;
+};
+
+constexpr std::size_t kPreMaxFiles = 512;
+
+inline void preAbsent(PreScan& s, const std::string& p) {
+  s.h = mixBytes(s.h, "<absent>:" + p);
+}
+
+inline void preWalk(PreScan& s, const std::string& fromDir, const PreImport& imp);
+
+inline bool preVisitor(PreScan& s, const std::string& path) {
+  std::error_code ec;
+  const std::string key =
+      std::filesystem::absolute(path, ec).lexically_normal().string();
+  if (!s.seen.insert(key).second) return true;  // already hashed
+  if (++s.files > kPreMaxFiles) { s.ok = false; return false; }
+  std::string text;
+  if (!readFileText(path, text)) { s.ok = false; return false; }
+  s.h = mixBytes(s.h, path);
+  s.h = mixBytes(s.h, text);
+  std::vector<PreImport> imps;
+  scanImports(text, imps);
+  std::filesystem::path pp(path);
+  const std::string dir = pp.parent_path().empty() ? std::string(".")
+                                                   : pp.parent_path().string();
+  for (const PreImport& imp : imps) preWalk(s, dir, imp);
+  return s.ok;
+}
+
+// Hashes one import: candidates in resolution order, first regular file wins.
+inline void preWalk(PreScan& s, const std::string& fromDir, const PreImport& imp) {
+  if (!s.ok) return;
+  if (imp.kind == 3) { s.ok = false; return; }
+  std::vector<std::string> cands;
+  if (imp.kind == 2) {
+    const std::filesystem::path requested(imp.target);
+    if (requested.is_absolute()) {
+      cands.push_back(requested.string());
+    } else {
+      cands.push_back((std::filesystem::path(fromDir) / requested).string());
+      for (const std::string& d : s.config.modulePaths)
+        cands.push_back((std::filesystem::path(d) / requested).string());
+      for (const std::string& d : s.envDirs)
+        cands.push_back((std::filesystem::path(d) / requested).string());
+      if (!s.stdRoot.empty())
+        cands.push_back((std::filesystem::path(s.stdRoot) / requested).string());
+    }
+  } else if (imp.kind == 1) {
+    std::string rel = imp.target;
+    std::replace(rel.begin(), rel.end(), '.', '/');
+    const std::size_t slash = rel.find_last_of('/');
+    const std::string leaf =
+        slash == std::string::npos ? rel : rel.substr(slash + 1);
+    const std::filesystem::path root =
+        std::filesystem::path(s.stdRoot) / "std";
+    cands.push_back((root / (rel + ".a")).string());
+    cands.push_back((root / rel / "__init__.a").string());
+    cands.push_back((root / rel / (leaf + ".a")).string());
+  } else {
+    // Bare name: stdlib package layout first, then each search dir, exactly
+    // as ModuleLoader::resolveBare orders them.
+    const std::string& name = imp.target;
+    const auto addRoot = [&](const std::filesystem::path& root) {
+      cands.push_back((root / (name + ".a")).string());
+      cands.push_back((root / name / (name + ".a")).string());
+      cands.push_back((root / name / "__init__.a").string());
+    };
+    if (!s.stdRoot.empty()) {
+      const std::filesystem::path root(s.stdRoot);
+      addRoot(root);
+      addRoot(root / "std");
+      cands.push_back((root / "std" / (name + ".a")).string());
+      cands.push_back((root / "std" / name / (name + ".a")).string());
+      cands.push_back((root / "std" / name / "__init__.a").string());
+    }
+    for (const std::string& d : s.config.modulePaths) addRoot(d);
+  }
+  for (const std::string& c : cands) {
+    std::error_code ec;
+    if (std::filesystem::is_regular_file(c, ec) && !ec) {
+      preVisitor(s, c);
+      return;
+    }
+    preAbsent(s, c);
+  }
+}
+
+// Pre-parse key (executePipeline): hashes the entry content, the prelude and
+// every module the entry transitively resolves to, following ModuleLoader's
+// candidates so that a shadowing file invalidates the key. A hit lets
+// `a run` skip the frontend entirely (lex/parse/sema/ownership) and exec the
+// cached binary. Returns "" when the program is too large to key this way or
+// an import could not be classified — the caller then falls back to the
+// frontend path, which is always correct.
 inline std::string precheckKey(const std::string& path,
                                const std::string& source,
                                const PipelineConfig& config,
@@ -678,103 +834,61 @@ inline std::string precheckKey(const std::string& path,
   h = mixBytes(h, source);
   h = mixFileStat(h, astraBin);
   h = mixBytes(h, runtimeDir);
-  constexpr std::size_t kMaxFiles = 4096;
-  constexpr int kMaxDepth = 5;
-  std::vector<std::pair<std::string, std::pair<std::uint64_t, std::uint64_t>>> recs;
-  std::size_t visited = 0;
-  constexpr std::size_t kMaxVisited = 8192;
-  std::function<void(const std::string&, int)> walk =
-      [&](const std::string& dir, int depth) {
-        std::error_code ec;
-        std::filesystem::directory_iterator it(
-            dir, std::filesystem::directory_options::skip_permission_denied, ec);
-        if (ec) return;  // missing dir: no modules, but not an error
-        std::filesystem::directory_iterator end;
-        for (; it != end; it.increment(ec)) {
-          if (ec) return;
-          if (++visited > kMaxVisited) return;
-          const auto& de = *it;
-          std::error_code sec;
-          std::filesystem::file_status st = de.symlink_status(sec);
-          if (!std::filesystem::exists(st)) continue;
-          const std::filesystem::path p = de.path();
-          if (std::filesystem::is_directory(st)) {
-            const std::string name = p.filename().string();
-            if (!name.empty() && name[0] == '.') continue;  // no .a modules
-            if (depth >= kMaxDepth) continue;
-            walk(p.string(), depth + 1);
-          } else if (std::filesystem::is_regular_file(st) &&
-                     p.extension() == ".a") {
-            std::error_code fec;
-            std::uint64_t sz = static_cast<std::uint64_t>(
-                std::filesystem::file_size(p, fec));
-            std::uint64_t mt = static_cast<std::uint64_t>(
-                std::filesystem::last_write_time(p, fec)
-                    .time_since_epoch()
-                    .count());
-            if (fec) return;
-            recs.emplace_back(p.string(), std::make_pair(sz, mt));
-            if (recs.size() > kMaxFiles) return;
-          }
-        }
-      };
-  // Entry dir, stdlib root, then every -I dir. Whether the full stdlib
-  // subtree matters depends on the entry's imports: `import std:...`, bare
-  // imports, `..` quoted paths, or any unparseable line all force a full
-  // walk (sound); a plain file with no imports only needs its own dir and
-  // the always-loaded std/prelude.a single file stat.
-  std::string entryDir;
+  PreScan ps{config, std::string(), {}, {}, h};
+  ps.stdRoot = config.stdlibRoot.empty() ? defaultStdlibRoot()
+                                         : config.stdlibRoot;
   {
-    std::filesystem::path pp(path);
-    entryDir = pp.parent_path().empty() ? std::string(".")
-                                        : pp.parent_path().string();
-  }
-  std::vector<std::string> dirs;
-  dirs.push_back(entryDir);
-  for (const std::string& mp : config.modulePaths) dirs.push_back(mp);
-  {
-    const std::string stdRoot = config.stdlibRoot.empty()
-                                    ? defaultStdlibRoot()
-                                    : config.stdlibRoot;
-    bool needFull = false;
-    {
-      std::istringstream ss(source);
-      std::string line;
-      while (std::getline(ss, line)) {
-        if (line.find("import") == std::string::npos) continue;
-        if (line.find("std:") != std::string::npos || line.find("..") != std::string::npos)
-          needFull = true;
-        std::istringstream ls(line);
-        std::string tok;
-        bool sawImport = false;
-        while (ls >> tok) {
-          if (tok == "import" || tok == "from") { sawImport = true; break; }
-        }
-        if (sawImport && line.find('"') == std::string::npos)
-          needFull = true;  // bare-name import: may resolve in stdlib
-        if (needFull) break;
+    const char* apath = std::getenv("A_PATH");
+    if (apath && *apath) {
+      std::string rest(apath);
+      std::size_t pos = 0;
+      while (pos <= rest.size()) {
+        const std::size_t sep = rest.find_first_of(":;", pos);
+        std::string part = rest.substr(
+            pos, sep == std::string::npos ? std::string::npos : sep - pos);
+        if (!part.empty()) ps.envDirs.push_back(part);
+        if (sep == std::string::npos) break;
+        pos = sep + 1;
       }
     }
-    if (needFull) {
-      dirs.push_back(stdRoot);
-    } else {
-      h = mixFileStat(h, stdRoot + "/std/prelude.a");
+  }
+  for (const std::string& d : config.modulePaths) ps.h = mixBytes(ps.h, "I:" + d);
+  for (const std::string& d : ps.envDirs) ps.h = mixBytes(ps.h, "P:" + d);
+  ps.h = mixBytes(ps.h, "S:" + ps.stdRoot);
+  // The prelude is loaded before the entry in every program.
+  {
+    const std::filesystem::path root(ps.stdRoot);
+    bool found = false;
+    for (const std::filesystem::path& cand :
+         {root / "std" / "prelude.a", root / "prelude.a"}) {
+      std::error_code ec;
+      if (std::filesystem::is_regular_file(cand, ec) && !ec) {
+        preVisitor(ps, cand.string());
+        found = true;
+        break;
+      }
+      preAbsent(ps, cand.string());
     }
+    if (!found) ps.ok = false;  // no stdlib on disk: let the frontend decide
   }
-  for (const std::string& d : dirs) walk(d, 0);
-  if (recs.size() > kMaxFiles || visited > kMaxVisited) return "";
-  std::sort(recs.begin(), recs.end());
-  for (const auto& r : recs) {
-    h = mixBytes(h, r.first);
-    h = mixInt(h, r.second.first);
-    h = mixInt(h, r.second.second);
+  // The entry: its text is already hashed above, so only its imports are new.
+  {
+    std::filesystem::path pp(path);
+    const std::string dir = pp.parent_path().empty()
+                                ? std::string(".")
+                                : pp.parent_path().string();
+    std::vector<PreImport> imps;
+    scanImports(source, imps);
+    for (const PreImport& imp : imps) preWalk(ps, dir, imp);
   }
+  if (!ps.ok) return "";
   // Runtime sources and the archived runtime objects (mtime/size).
-  mixRuntimeSources(h, runtimeC);
-  h = mixFileStat(h, runtimeDir + "/libaruntime.a");
+  std::uint64_t h2 = ps.h;
+  mixRuntimeSources(h2, runtimeC);
+  h2 = mixFileStat(h2, runtimeDir + "/libaruntime.a");
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
-                static_cast<unsigned long long>(h));
+                static_cast<unsigned long long>(h2));
   return cacheDir() + "/pre-" + hex;
 }
 

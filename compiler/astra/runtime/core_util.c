@@ -1,5 +1,9 @@
 #include "a_runtime_internal.h"
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
+
 /* ------------------------------------------------------------------ */
 /* small utilities                                                     */
 /* ------------------------------------------------------------------ */
@@ -81,6 +85,26 @@ void *xmalloc(size_t n) {
 #endif
 }
 
+/* Arena chunks come straight from mmap with MADV_HUGEPAGE. A has no
+   reclamation for values, so an allocation-heavy program faults in fresh
+   memory continuously; when a minor fault costs microseconds (VMs, hardened
+   hosts) that page traffic, not the bump pointer, is what an allocation
+   costs. Huge pages cut the fault count by ~500x. Falls back to the heap
+   where mmap/huge pages are unavailable; untouched pages cost nothing. */
+char *xarena(size_t n) {
+#if defined(__linux__) && defined(MAP_ANONYMOUS)
+    void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p != MAP_FAILED) {
+#ifdef MADV_HUGEPAGE
+        (void)madvise(p, n, MADV_HUGEPAGE);
+#endif
+        return (char *)p;
+    }
+#endif
+    return (char *)xmalloc(n);
+}
+
 void *xrealloc(void *p, size_t n) {
     void *q = realloc(p, n ? n : 1);
     if (!q) panicf("out of memory");
@@ -149,7 +173,7 @@ int64_t expect_int64(aval v, const char *what) {
    value: it removes malloc's size-class logic and bookkeeping, which was the
    entire cost of integer arithmetic that leaves the inline range (e.g. any
    product above 7e13, as in a 32-bit LCG step). */
-#define INT_BOX_CHUNK (1u << 16)
+#define INT_BOX_CHUNK (2u << 20)  /* one huge page */
 static char *g_intbox_cursor = NULL;
 static size_t g_intbox_left = 0;
 
@@ -169,7 +193,7 @@ static AInt64 *intbox_alloc(void) {
     pthread_mutex_lock(&g_intbox_mu);
 #endif
     if (g_intbox_left < INT_BOX_STEP) {
-        g_intbox_cursor = (char *)xmalloc(INT_BOX_CHUNK);
+        g_intbox_cursor = xarena(INT_BOX_CHUNK);
         g_intbox_left = INT_BOX_CHUNK;
     }
     AInt64 *p = (AInt64 *)g_intbox_cursor;

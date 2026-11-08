@@ -15,6 +15,8 @@ AStr *str_of(aval v, const char *what) {
    and other short conversions dominate allocation-heavy benchmarks, and
    AStr objects are never individually freed. Large strings still use
    xmalloc so a few big allocations cannot waste arena space. */
+/* 2 MiB (one huge page) per chunk, from the mmap arena. */
+static const size_t kSmallStrChunk = 2u << 20;
 static char *g_small_str = NULL;
 static char *g_small_str_end = NULL;
 
@@ -25,8 +27,8 @@ aval a_str_new(const char *p, uint64_t len) {
         need = (need + 15) & ~(size_t)15;
         size_t avail = g_small_str ? (size_t)(g_small_str_end - g_small_str) : 0;
         if (avail < need) {
-            g_small_str = (char *)xmalloc(1u << 20);
-            g_small_str_end = g_small_str + (1u << 20);
+            g_small_str = xarena(kSmallStrChunk);
+            g_small_str_end = g_small_str + kSmallStrChunk;
         }
         AStr *s = (AStr *)g_small_str;
         g_small_str += need;
@@ -53,8 +55,8 @@ aval a_str_new_uninit(uint64_t len) {
         need = (need + 15) & ~(size_t)15;
         size_t avail = g_small_str ? (size_t)(g_small_str_end - g_small_str) : 0;
         if (avail < need) {
-            g_small_str = (char *)xmalloc(1u << 20);
-            g_small_str_end = g_small_str + (1u << 20);
+            g_small_str = xarena(kSmallStrChunk);
+            g_small_str_end = g_small_str + kSmallStrChunk;
         }
         s = (AStr *)g_small_str;
         g_small_str += need;
@@ -73,6 +75,7 @@ aval a_str_new_uninit(uint64_t len) {
 char *str_mut_data(aval v, uint64_t *len) {
     AStr *s = str_of(v, "string");
     if (len) *len = s->h.len;
+    astr_cp_uncache(s);  /* the caller is about to overwrite bytes */
     return s->data;
 }
 

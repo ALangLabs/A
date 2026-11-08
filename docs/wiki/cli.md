@@ -91,11 +91,25 @@ default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`).
 ## Run cache
 
 `a run` and the REPL reuse a content-addressed compiled binary across
-invocations. The key hashes every module source, the runtime files,
-the astra binary, target/opt level, codegen-forcing environment and
-toolchain version, so any edit invalidates the entry. Repeat runs
-cost ~2 ms (source validation) + binary exec instead of ~20 ms
-(compile). Set `A_NO_CACHE=1` to always recompile. Covered by
+invocations. Two keys are involved:
+
+- the **pre-parse key** lets a hit skip the frontend entirely. It follows
+  the entry's imports textually through the same candidate tables the module
+  loader uses (entry dir, `-I` dirs, `A_PATH`, the stdlib package layouts),
+  hashing the content of every module reached and marking every candidate
+  that was checked and absent, so creating a shadowing file changes the key.
+  Only the real dependency graph is touched: a directory holding thousands of
+  unrelated `.a` files, or `/tmp`, neither slows the check nor disables it.
+  A module is re-hashed only while it is reachable, and imports the scanner
+  cannot classify fall back to the frontend rather than trusting a partial key.
+- the **binary key** hashes every module source, the runtime files, the astra
+  binary, target/opt level, codegen-forcing environment and toolchain version.
+
+A warm run costs one dependency check plus an `execve` of the cached binary.
+On the development box that is ~10 ms end to end (`python3 -c pass` is ~20 ms);
+`a build` produces a binary that starts in ~1 ms, and the difference is the
+dependency stat/hash pass, which is what keeps `a run` honest after an edit.
+Set `A_NO_CACHE=1` to always recompile. Covered by
 `tests/integration/cache_test.sh` (the `run-cache` CTest entry).
 
 `a run <file.a>` additionally skips the frontend on repeat runs via

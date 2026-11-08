@@ -28,7 +28,7 @@ ms, lower is better:
 | `fib30` | recursive `fib(30)` (1.6M calls) | 35.0 | 2.1 | 3.5 | 138 | 12.1 | 16.9x | **0.25x** |
 | `sort500k` | sort 500k LCG ints | 118 | 71.7 | 11.4 | 246 | 300 | 1.65x | **0.48x** |
 | `dict500k` | 500k inserts + 500k lookups | 255 | 22.4 | 84.8 | 628 | 65.3 | 11.4x | **0.41x** |
-| `str200k` | build 200k strings, one join | 49 | 30.9 | 21.3 | 38.3 | 27.5 | 1.59x | **1.28x** |
+| `str200k` | build 200k strings, one join | 33 | 32.2 | 21.2 | 38.5 | 31.3 | 1.03x | **0.86x** |
 
 Absolute numbers move 2-3x with machine load (this box builds in the
 background); the ratios are stable across runs.
@@ -41,9 +41,9 @@ array: 1000 MB/s vs 83 MB/s.
 
 ## What the numbers mean
 
-**A is 14x faster than Python on integer loops, 1.6x on sorting, 1.3x on string
-building and 2.4x on dict churn**, and it is 1.6-1.7x off C for
-arithmetic/algorithm code. Three workloads are still far off, and all three are
+**A is 14x faster than Python on integer loops, 1.9x on sorting, 1.2x on
+string building and 2.4x on dict churn**, and it is 1.6-1.7x off C for
+arithmetic/algorithm code — and at parity with C on string building. Three workloads are still far off, and all three are
 structural rather than tuning:
 
 1. **`fib30` — 16.9x off C.** A function call costs ~20 ns vs C's ~3 ns. Each
@@ -55,10 +55,13 @@ structural rather than tuning:
    `pairs[]` plus a separate open-addressed table, so a probe touches two cache
    lines where C's purpose-built int→int table touches one. 500k entries is
    ~16 MB, so this is a memory-bound measurement as much as an algorithmic one.
-3. **`float_loop` — 4.8x off C.** Integer locals now run on the raw int64 path
+3. **`float_loop` — 4.9x off C.** Integer locals now run on the raw int64 path
    (see below), but floats still round-trip through `aval` slots: each `+`/`*`
    reloads both operands from the frame and canonicalizes NaN. Keeping a
    loop-carried double in an xmm register is the next structural fix.
+
+`str200k` is now at parity with C (33 vs 32 ms) and 1.16x faster than CPython:
+string building is no longer a weak spot.
 
 ### What this suite already fixed
 
@@ -70,6 +73,9 @@ structural rather than tuning:
 | every dict probe loaded a separate `phash[]` array | the slot word carries a 32-bit hash tag, so one load rejects collisions and locates the pair: `dict500k` 406 ms → 255 ms (**1.6x**) |
 | raw-op register cache let one slot claim a register another operand then overwrote | fixed (`rawLearn` drops the register's other claims); this was miscompiling `while i < N` into `N < N` once counters were promoted |
 | float fast path spilled each intermediate to the frame | the register cache stays live across a float operand tree, and NaN canonicalization is one branch: `float_loop` 20M 228 ms → 179 ms (**1.3x** alone, measured without the suite's larger frame) |
+| `len(str)` re-scanned the whole string for UTF-8 code points on every call | the count is cached per string in the unused high half of the header word (Python caches it too): `len(300 B)` 5M calls 585 ms → 98 ms (**6x**) |
+| `str + str` / `str + int` went through a growable Buf (`format_into` reformatted a value that was already a string, then `buf_take` copied again) | both shapes build one exact-size string and copy twice: `"item" + str(i)` 200k 45 ms → 25 ms (**1.8x**) |
+| every allocation touched fresh 4 KiB pages | A never frees values, so allocation-heavy loops fault continuously; arena chunks now come from `mmap` + `MADV_HUGEPAGE` (2 MiB) and int boxes use a 2 MiB chunk. On this box a minor fault costs ~5 us, so this is what `str200k` needed most: 49 ms → 30-33 ms (**1.5x**), i.e. parity with C |
 | `list.sort()` was an insertion sort | 200k ints: 230 s → 0.03 s (**7700x**) |
 | `str.contains` scanned with `memcmp` per offset | 200 KB miss: 1.7 ms → 0.006 ms (**280x**) |
 | HTTP bodies were materialised as `[i64]` (8 B/byte) | 1 MiB body 94 → 388 MB/s, and the `Bytes` type took the raw read from 83 → 1000 MB/s |

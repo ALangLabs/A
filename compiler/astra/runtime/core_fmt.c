@@ -1,6 +1,8 @@
 #include "a_runtime_internal.h"
 
 static aval g_int_str_cache[4096];
+/* 2 MiB (one huge page) per chunk, from the mmap arena. */
+static const size_t kSmallStrChunk = 2u << 20;
 static char *g_small_str = NULL;
 static char *g_small_str_end = NULL;
 
@@ -301,14 +303,15 @@ static aval a_str_i64(int64_t v) {
     size_t need = (sizeof(AStr) + len + 1 + 15) & ~(size_t)15;
     size_t avail = g_small_str ? (size_t)(g_small_str_end - g_small_str) : 0;
     if (avail < need) {
-        g_small_str = (char *)xmalloc(1u << 20);
-        g_small_str_end = g_small_str + (1u << 20);
+        g_small_str = xarena(kSmallStrChunk);
+        g_small_str_end = g_small_str + kSmallStrChunk;
     }
     AStr *s = (AStr *)g_small_str;
     g_small_str += need;
     s->h.type = T_STR;
     s->h.len = (uint32_t)len;
     s->h.cap = len + 1;
+    astr_cp_cache(s, (uint32_t)len);  /* digits and '-' are ASCII */
     char *p = s->data + len;
     do {
         *--p = (char)('0' + (u % 10));

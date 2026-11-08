@@ -1,0 +1,20 @@
+# len() on strings is a code-point count, cached per string in the high half
+# of the header's cap word; concat/join/str(int) build exact-size strings and
+# must keep that cache honest (and be invalidated by str_mut_data).
+s = "héllo"
+print(len(s), len("ascii"), len(""))
+t = s + "!"
+print(t, len(t))
+print(len("x" * 300))
+print(len("x" * 300 + "x" * 300))
+print("item" + str(42), str(42) + "item")
+print("neg" + str(0 - 7), "" + "e", "e" + "")
+print("float" + str(3.5), "list" + str([1, 2]))
+parts = []
+i = 0
+while i < 5:
+    parts.append("v" + str(i))
+    i = i + 1
+joined = join(parts, "-")
+print(joined, len(joined))
+print(joined.upper(), len(joined.upper()))
