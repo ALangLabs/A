@@ -3842,6 +3842,8 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
   }
   if (arch == "i386" || arch == "x86") {
     if (testMode) {
+      // names[]/fns[] are raw C pointer arrays (ptr-sized elements); the
+      // slot-based emitter only works where ptr == 8 bytes.
       error = "native backend: i386 test mode unsupported";
       return false;
     }
