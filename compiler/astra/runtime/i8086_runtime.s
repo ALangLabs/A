@@ -3498,13 +3498,22 @@ a_call:
     movl %esp, %eax
     addl $0x90000, %eax         # flat ptr to av[0]
     pushl %eax                  # arg0 = av ptr
-    movl 16(%esi), %ecx         # entry
+    movl 16(%esi), %ecx         # entry (flat link VMA)
+    # call *%ecx is a NEAR indirect call: the operand is an IP offset
+    # within CS, not a linear address. CS base is 0x10000 (ljmp 0x1000:0
+    # in _entry), so subtract selector<<4 to get the in-segment offset.
+    movw %cs, %ax
+    movzwl %ax, %eax
+    shll $4, %eax
+    subl %eax, %ecx
     call *%ecx
     addl $4, %esp               # drop av ptr
-    movl 16(%ebp), %eax
-    incl %eax
-    shll $3, %eax
-    addl %eax, %esp             # drop (n+1)*8 av bytes
+    # eax:edx hold the callee's aval return — compute the drop count in ecx
+    # so the return value survives.
+    movl 16(%ebp), %ecx
+    incl %ecx
+    shll $3, %ecx
+    addl %ecx, %esp             # drop (n+1)*8 av bytes
     movl %ebp, %esp
     popl %ebp
     ret
