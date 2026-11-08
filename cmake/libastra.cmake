@@ -326,11 +326,11 @@ message(STATUS "libastra: native backend (${astra_version}) for ${astra_arch}")
 # dir astralib-<arch>/ (headers + runtime sources + support archive) that the
 # `a` driver selects via --target. Astra binaries are bound to the host OS at
 # build time, so the arch list is host-OS dependent:
-#   Linux:   x86_64 i386 arm arm64 riscv64   (ELF)
+#   Linux:   x86_64 i386 arm arm64 riscv64 i8086   (ELF / i8086 flat binary)
 #   macOS:   x86_64 arm64                    (Mach-O)
 #   Windows: x86_64 i386 arm64               (PE)
-# The TMS320C67x DSP target and 16-bit are intentionally unsupported: there is
-# no libc/runtime environment for them.
+# i8086 is asm-only bare metal (no libc/sysroot). The TMS320C67x DSP target
+# and other 16-bit architectures are intentionally unsupported.
 # ============================================================================
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
