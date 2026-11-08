@@ -42,7 +42,7 @@ aval bi_set(uint64_t n, aval *argv) {
     if (n == 1) {
         aval tmp = collect_iterable(argv[0]);
         AArr *a = (AArr *)obj_of(tmp);
-        for (uint64_t i = 0; i < a->h.len; ++i) a_set_add(s, a->items[i]);
+        for (uint64_t i = 0; i < a->h.len; ++i) a_set_add(s, arr_elem(a, i));
     }
     return s;
 }
@@ -50,8 +50,17 @@ aval bi_set(uint64_t n, aval *argv) {
 aval bi_tuple(uint64_t n, aval *argv) {
     want_args("tuple", n, 0, 1);
     if (n == 0) return a_tuple_new(0, NULL);
-    aval tmp = collect_iterable(argv[0]);
-    AArr *a = (AArr *)obj_of(tmp);
+    aval tmp;
+    AArr *a = iterable_arr(argv[0], &tmp);
+    if (arr_packed(a)) {
+        /* packed int storage has no aval items array; copy elementwise */
+        AVec v = { NULL, 0, 0 };
+        for (uint64_t i = 0; i < a->h.len; ++i)
+            avec_push(&v, mkint_full(a->iitems[i]));
+        aval r = a_tuple_new(v.len, v.p);
+        free(v.p);
+        return r;
+    }
     return a_tuple_new(a->h.len, a->items);
 }
 
@@ -72,7 +81,7 @@ aval bi_dict(uint64_t n, aval *argv) {
             aval tmp = collect_iterable(argv[0]);
             AArr *a = (AArr *)obj_of(tmp);
             for (uint64_t i = 0; i < a->h.len; ++i) {
-                aval p = a->items[i];
+                aval p = arr_elem(a, i);
                 if (kind_of(p) != K_LIST && kind_of(p) != K_TUPLE)
                     panicf("cannot convert dictionary update sequence element #%llu", (unsigned long long)i);
                 AArr *pa = (AArr *)obj_of(p);

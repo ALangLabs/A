@@ -123,21 +123,36 @@ static void bin_encode_val(BinBuf *b, aval v) {
     }
     case K_DICT: {
         ADict *d = (ADict *)obj_of(v);
-        /* Structs are dicts carrying a "__name" string: encode as BIN_STRUCT. */
-        uint64_t nl;
-        const char *np = NULL;
-        int64_t ni = dict_find(d, a_str_new("__name", 6));
+        AObj *oo = obj_of(v);
+        /* Structs carry their name in AStruct.name (not in the pairs);
+           plain dicts are treated as struct-shaped when they hold a
+           "__name" string key. Either way the name is written once as a
+           leading string and skipped among the field pairs on encode;
+           decode stores it back under "__name" so re-encoding is stable. */
         aval tn = A_NONE;
-        if (ni >= 0) {
-            aval tv = d->pairs[ni].v;
-            if (kind_of(tv) == K_STR) { np = str_data(tv, &nl); tn = tv; }
+        const char *np = NULL;
+        uint64_t nl = 0;
+        int64_t skip = -1;
+        if (oo->type == T_STRUCT) {
+            tn = ((AStruct *)oo)->name;
+            if (kind_of(tn) == K_STR) np = str_data(tn, &nl);
+        } else {
+            int64_t ni = dict_find(d, a_str_new("__name", 6));
+            if (ni >= 0) {
+                aval tv = d->pairs[ni].v;
+                if (kind_of(tv) == K_STR) {
+                    np = str_data(tv, &nl);
+                    tn = tv;
+                    skip = ni;
+                }
+            }
         }
         if (tn != A_NONE) {
             bin_put(b, BIN_STRUCT);
             bin_str(b, np, (size_t)nl);
-            bin_varint(b, d->h.len - 1);
+            bin_varint(b, d->h.len - (skip >= 0 ? 1 : 0));
             for (uint32_t i = 0; i < d->h.len; ++i) {
-                if ((int64_t)i == ni) continue;
+                if ((int64_t)i == skip) continue;
                 uint64_t kl;
                 const char *kp = str_data(d->pairs[i].k, &kl);
                 bin_str(b, kp, (size_t)kl);
@@ -233,7 +248,10 @@ static aval bin_decode_val(BinReader *r) {
     case BIN_STRING: return bin_string_rd(r);
     case BIN_CHAR: {
         uint64_t cp = bin_varint_rd(r);
-        if (r->err || cp > 0x10FFFF) { r->err = 1; return A_NONE; }
+        if (r->err || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF)) {
+            r->err = 1;
+            return A_NONE;
+        }
         char buf[4];
         int n = utf8_encode_cp(cp, buf);
         return a_char_new(buf, (uint64_t)n);
@@ -276,7 +294,9 @@ static aval bin_decode_val(BinReader *r) {
         if (r->err) return A_NONE;
         aval d = dict_new_empty();
         ADict *dd = (ADict *)obj_of(d);
-        dict_put(dd, a_str_new("$type", 5), tn);
+        /* "__name" is the key the encoder treats as the struct marker,
+           so decode stores the decoded name there for round-trips. */
+        dict_put(dd, a_str_new("__name", 6), tn);
         for (uint64_t i = 0; i < n; ++i) {
             aval k = bin_string_rd(r);
             aval v = bin_decode_val(r);
