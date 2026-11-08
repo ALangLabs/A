@@ -235,6 +235,7 @@ int builtinRuntimeId(const std::string& name) {
       {"fn_signature", 190}, {"fn_doc", 191},
       {"file_size", 192},
       {"linalg_dot", 193}, {"linalg_matvec", 194}, {"linalg_matvec_t", 195},
+      {"dot", 193}, {"matvec", 194}, {"matvec_t", 195},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -310,7 +311,7 @@ struct EnumVariantInfo {
 };
 
 enum class BKind { Local, Global, Param, FnValue, Builtin, StructCtor,
-                   EnumValue, Module, Capture };
+                   EnumValue, Module, Capture, NativeConst };
 
 struct ABinding {
   BKind kind = BKind::Local;
@@ -634,6 +635,42 @@ class NativeEmitter {
     uint64_t bits;
     std::memcpy(&bits, &d, 8);
     movImm(bits, acc());
+  }
+  // Native module constant (PI, E) -> boxed double aval. Same lowering as
+  // emitC's NativeConst binding.
+  void emitNativeConst(const std::string& name) {
+    emitDoubleLit(name == "PI"   ? 3.14159265358979323846
+                 : name == "E"    ? 2.71828182845904523536
+                                   : 0.0);
+  }
+  // Enum variant as a value: simple variants load their global aval;
+  // algebraic variants build {__tag, __name} (mirrors emitC).
+  void emitEnumVariantValue(const EnumVariantInfo& ev,
+                            const std::string& fieldName) {
+    if (!ev.algebraic) {
+      loadSym(ev.globalVar, acc());
+      return;
+    }
+    int dS = allocSlot();
+    callSym("a_dict_new");
+    storeAcc(dS);
+    int tagS = strLitSlot("__tag");
+    int tagV = allocSlot();
+    movImm(mkintA(ev.tag), acc());
+    storeAcc(tagV);
+    loadSlot(dS, A(0));
+    loadSlot(tagS, A(1));
+    loadSlot(tagV, A(2));
+    callSym("a_dict_set");
+    int nameS = strLitSlot("__name");
+    int nameV = allocSlot();
+    emitStringLit(fieldName);
+    storeAcc(nameV);
+    loadSlot(dS, A(0));
+    loadSlot(nameS, A(1));
+    loadSlot(nameV, A(2));
+    callSym("a_dict_set");
+    loadSlot(dS, acc());
   }
   std::string emitStrData(const std::string& bytes, bool nulTerm) {
     std::string l = "__na_d" + std::to_string(counter_++);
@@ -1207,8 +1244,85 @@ class NativeEmitter {
       b.kind = BKind::Module;
       b.moduleId = mod.id;
       b.aux = mod.name;
-      g[mod.name] = b;
-      g[stemOf(mod.path)] = b;
+      // Never shadow a builtin or an existing binding (e.g. a file named
+      // input.a must not turn the `input` builtin into a module).
+      if (!g.count(mod.name) && builtinRuntimeId(mod.name) < 0) g[mod.name] = b;
+      std::string stem = stemOf(mod.path);
+      if (!g.count(stem) && builtinRuntimeId(stem) < 0) g[stem] = b;
+    }
+  }
+
+  // Register a module's import aliases (import x / from x import y,
+  // including native `std:` modules) into the current scope. Mirrors
+  // emitC's bindModuleImportStmts; python: imports are skipped — uses of
+  // them fail later and the pipeline falls back to emitC.
+  void bindModuleImports(const Module& mod) {
+    if (!mod.program) return;
+    for (const StmtPtr& s : mod.program->statements) {
+      if (s->kind == StmtKind::Import) {
+        const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
+        if (im->pythonModuleImport) continue;
+        std::string alias = !im->alias.empty() ? im->alias
+                             : !im->bareName.empty() ? im->bareName
+                             : stemOf(im->path);
+        if (im->nativeModule || im->moduleId >= 0) {
+          ABinding b;
+          b.kind = BKind::Module;
+          b.moduleId = im->moduleId;
+          b.aux = im->bareName;
+          scopes_.back()[alias] = b;
+        }
+      } else if (s->kind == StmtKind::FromImport) {
+        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+        if (im->pythonModuleImport) continue;
+        for (const auto& item : im->items) {
+          std::string alias = item.alias.empty() ? item.name : item.alias;
+          if (im->nativeModule) {
+            if (const std::string* bn = nativeFunction(im->bareName, item.name)) {
+              int bid = builtinRuntimeId(*bn);
+              if (bid >= 0) {
+                ABinding b;
+                b.kind = BKind::Builtin;
+                b.builtinId = bid;
+                scopes_.back()[alias] = b;
+                continue;
+              }
+            }
+            if (const std::string* cn = nativeConstant(im->bareName, item.name)) {
+              ABinding b;
+              b.kind = BKind::NativeConst;
+              b.aux = *cn;
+              scopes_.back()[alias] = b;
+              continue;
+            }
+            fail("native: module '" + im->bareName + "' has no member '" +
+                 item.name + "'");
+            return;
+          }
+          if (im->moduleId >= 0) {
+            ABinding b;
+            if (FnInfo* mf = findModuleFn(im->moduleId, item.name)) {
+              b.kind = BKind::FnValue;
+              b.sym = mf->globalVar;
+              b.fn = mf;
+            } else if (StructInfo* mst = findModuleStruct(im->moduleId, item.name)) {
+              b.kind = BKind::StructCtor;
+              b.sym = mst->globalVar;
+              b.st = mst;
+            } else {
+              std::string gsym;
+              if (moduleGlobalSym(im->moduleId, item.name, gsym)) {
+                b.kind = BKind::Global;
+                b.sym = gsym;
+              } else {
+                // Unresolved member: leave unbound; use fails -> emitC fallback.
+                continue;
+              }
+            }
+            scopes_.back()[alias] = b;
+          }
+        }
+      }
     }
   }
 
@@ -1229,6 +1343,8 @@ class NativeEmitter {
     scopeDeclOrder_.clear();
       buildGlobalScope();
       pushScope();
+      if (st->moduleId >= 0 && st->moduleId < (int)graph_.modules.size())
+        bindModuleImports(graph_.at(st->moduleId));
       int argvS = allocSlot();
       // argv arrives in arg0.
       storeSlot(argvS, A(0));
@@ -1295,6 +1411,8 @@ class NativeEmitter {
     scopeDeclOrder_.clear();
       buildGlobalScope();
       pushScope();
+      if (f->moduleId >= 0 && f->moduleId < (int)graph_.modules.size())
+        bindModuleImports(graph_.at(f->moduleId));
       curArgvSlot_ = allocSlot();
       storeSlot(curArgvSlot_, A(0));
       curEnvSlot_ = allocSlot();
@@ -1376,6 +1494,8 @@ class NativeEmitter {
     scopeDeclOrder_.clear();
     buildGlobalScope();
     pushScope();
+    if (job.moduleId >= 0 && job.moduleId < (int)graph_.modules.size())
+      bindModuleImports(graph_.at(job.moduleId));
     curArgvSlot_ = allocSlot();
     storeSlot(curArgvSlot_, A(0));
     curEnvSlot_ = allocSlot();
@@ -1526,20 +1646,7 @@ class NativeEmitter {
         if (mod.name == "prelude" ||
             mod.path.find("stdlib/") != std::string::npos ||
             mod.path.find("/stdlib/") != std::string::npos) continue;
-        for (const StmtPtr& s : mod.program->statements) {
-          if (s->kind == StmtKind::Import) {
-            const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
-            std::string alias = !im->alias.empty() ? im->alias
-                             : !im->bareName.empty() ? im->bareName
-                             : stemOf(im->path);
-            if (im->moduleId >= 0) {
-              ABinding b;
-              b.kind = BKind::Module;
-              b.moduleId = im->moduleId;
-              scopes_.back()[alias] = b;
-            }
-          }
-        }
+        bindModuleImports(mod);
         for (const StmtPtr& s : mod.program->statements) {
           curFnName_ = "<toplevel:" + mod.name + ">";
           emitStmt(s.get());
@@ -2427,6 +2534,10 @@ class NativeEmitter {
             loadSym(b->sym, acc());
             return;
           }
+          if (b->kind == BKind::NativeConst) {
+            emitNativeConst(b->aux);
+            return;
+          }
           if (b->kind == BKind::Builtin) {
             movImm((uint64_t)b->builtinId, A(0));
             callSym("a_builtin");
@@ -2749,6 +2860,10 @@ class NativeEmitter {
             fail("native: cannot call module '" + nm + "'");
             return;
           }
+          if (b && b->kind == BKind::NativeConst) {
+            fail("native: value is not callable");
+            return;
+          }
           int bid = builtinRuntimeId(nm);
           if (bid >= 0) {
             emitBiCall(bid, args);
@@ -2896,6 +3011,94 @@ class NativeEmitter {
       }
       case ExprKind::Field: {
         auto& x = static_cast<const FieldExpr&>(*e);
+        // Module-qualified chain: c.Color.Red, c.LIMIT, mod.fn (as value)
+        {
+          std::vector<std::string> chain;
+          const Expr* cur = e;
+          while (cur && cur->kind == ExprKind::Field) {
+            chain.push_back(static_cast<const FieldExpr*>(cur)->field);
+            cur = static_cast<const FieldExpr*>(cur)->object.get();
+          }
+          if (cur && cur->kind == ExprKind::Ident && !chain.empty()) {
+            std::reverse(chain.begin(), chain.end());
+            const std::string& first =
+                static_cast<const IdentExpr*>(cur)->name;
+            ABinding* mb = lookup(first);
+            if (mb && mb->kind == BKind::Module) {
+              if (mb->moduleId >= 0) {
+                // Enum variant via module: c.Color.Red
+                if (chain.size() >= 2) {
+                  auto it = enums_.find(chain[chain.size() - 2] + "." +
+                                        chain.back());
+                  if (it != enums_.end()) {
+                    emitEnumVariantValue(it->second, chain.back());
+                    return;
+                  }
+                }
+                // Top-level let / fn / struct in that module: c.LIMIT
+                if (chain.size() == 1) {
+                  if (FnInfo* mf = findModuleFn(mb->moduleId, chain[0])) {
+                    loadSym(mf->globalVar, acc());
+                    return;
+                  }
+                  if (StructInfo* mst =
+                          findModuleStruct(mb->moduleId, chain[0])) {
+                    loadSym(mst->globalVar, acc());
+                    return;
+                  }
+                  std::string gsym;
+                  if (moduleGlobalSym(mb->moduleId, chain[0], gsym)) {
+                    loadSym(gsym, acc());
+                    return;
+                  }
+                }
+              } else if (chain.size() == 1) {
+                // Native module member as a value: math.PI, math.sqrt
+                if (const std::string* cn =
+                        nativeConstant(mb->aux, chain[0])) {
+                  emitNativeConst(*cn);
+                  return;
+                }
+                if (const std::string* fn =
+                        nativeFunction(mb->aux, chain[0])) {
+                  int bid = builtinRuntimeId(*fn);
+                  if (bid >= 0) {
+                    movImm((uint64_t)bid, A(0));
+                    callSym("a_builtin");
+                    return;
+                  }
+                }
+                int bid = builtinRuntimeId(chain[0]);
+                if (bid >= 0) {
+                  movImm((uint64_t)bid, A(0));
+                  callSym("a_builtin");
+                  return;
+                }
+                fail("native: unknown native module member '" + first + "." +
+                     chain[0] + "'");
+                return;
+              }
+            }
+          }
+        }
+        // Enum variant: Color.Red
+        if (x.object->kind == ExprKind::Ident) {
+          const std::string& oname =
+              static_cast<const IdentExpr*>(x.object.get())->name;
+          auto it = enums_.find(oname + "." + x.field);
+          if (it != enums_.end()) {
+            emitEnumVariantValue(it->second, x.field);
+            return;
+          }
+          ABinding* mb = lookup(oname);
+          if (mb && mb->kind == BKind::Module) {
+            auto it2 = enums_.find(x.field);
+            if (it2 != enums_.end()) {
+              emitEnumVariantValue(it2->second, x.field);
+              return;
+            }
+          }
+        }
         int os = allocSlot();
         emitExpr(x.object.get());
         storeAcc(os);
