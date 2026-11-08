@@ -95,7 +95,7 @@ AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
         size_t p;
         if (!find_bytes(s->data + pos, (size_t)(n - pos), sp, (size_t)sn, 0, &p)) break;
         uint64_t at = pos + p;
-        avec_push(&occ, (aval)at);
+        avec_push(&occ, mkint_full((int64_t)at));
         pos = at + sn;
     }
     if ((int64_t)occ.len <= maxsplit) {
@@ -107,7 +107,7 @@ AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
     uint64_t first = occ.len - keep; /* index of first kept occurrence */
     uint64_t start = 0;
     for (uint64_t k = first; k < occ.len; ++k) {
-        uint64_t at = (uint64_t)occ.p[k];
+        uint64_t at = (uint64_t)int_val_full(occ.p[k]);
         avec_push(&out, a_str_new(s->data + start, at - start));
         start = at + sn;
     }

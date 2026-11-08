@@ -50,6 +50,7 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             want_args(name, n, 1, 1);
             aval tmp = collect_iterable(argv[0]);
             AArr *a = (AArr *)obj_of(tmp);
+            arr_ensure_aval(a);
             for (uint64_t i = 0; i < a->h.len; ++i)
                 if (kind_of(a->items[i]) != K_STR && kind_of(a->items[i]) != K_CHAR)
                     panicf("sequence item %llu: expected str instance, %s found",

@@ -17,7 +17,8 @@ static const char *json_kind_of(aval v) {
     v = json_unwrap(v);
     if (a_is_none(v)) return "null";
     if (v == A_TRUE || v == A_FALSE) return "bool";
-    if (is_int_val(v) || a_is_double(v)) return "number";
+    if (is_int_val(v)) return "int";
+    if (a_is_double(v)) return "float";
     AObj *o = obj_of(v);
     if (!o) return "unknown";
     switch (o->type) {
@@ -113,6 +114,7 @@ static aval jstring(JParser *ps) {
                 default: ps->err = 1; break;
             }
         } else {
+            if (c < 0x20) { ps->err = 1; break; }
             buf_addc(&b, (char)c);
         }
         if (ps->err) break;
@@ -125,32 +127,53 @@ static aval jstring(JParser *ps) {
 static aval jnumber(JParser *ps) {
     const char *start = ps->p;
     if (ps->p < ps->end && *ps->p == '-') ++ps->p;
+    const char *int_start = ps->p;
+    int digits = 0;
+    while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') { ++ps->p; ++digits; }
+    if (!digits ||
+        (int_start[0] == '0' && ps->p - int_start > 1)) {
+        ps->err = 1;
+        return A_NONE;
+    }
     int isDouble = 0;
-    while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
     if (ps->p < ps->end && *ps->p == '.') {
         isDouble = 1;
         ++ps->p;
-        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
+        int frac = 0;
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') { ++ps->p; ++frac; }
+        if (!frac) { ps->err = 1; return A_NONE; }
     }
     if (ps->p < ps->end && (*ps->p == 'e' || *ps->p == 'E')) {
         isDouble = 1;
         ++ps->p;
         if (ps->p < ps->end && (*ps->p == '+' || *ps->p == '-')) ++ps->p;
-        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') ++ps->p;
+        int exp = 0;
+        while (ps->p < ps->end && *ps->p >= '0' && *ps->p <= '9') { ++ps->p; ++exp; }
+        if (!exp) { ps->err = 1; return A_NONE; }
     }
-    if (ps->p == start || (isDouble == 0 && ps->p == start + 1 && *start == '-')) {
-        ps->err = 1;
-        return A_NONE;
-    }
-    char tmp[64];
     size_t n = (size_t)(ps->p - start);
-    if (n >= sizeof(tmp)) { ps->err = 1; return A_NONE; }
-    memcpy(tmp, start, n);
-    tmp[n] = '\0';
-    if (isDouble) return mkdouble(strtod(tmp, NULL));
+    char tmp[64];
+    char *heap = NULL;
+    char *num = tmp;
+    if (n >= sizeof(tmp)) {
+        heap = (char *)xmalloc(n + 1);
+        num = heap;
+    }
+    memcpy(num, start, n);
+    num[n] = '\0';
+    if (isDouble) {
+        double d = strtod(num, NULL);
+        free(heap);
+        return mkdouble(d);
+    }
     errno = 0;
-    long long v = strtoll(tmp, NULL, 10);
-    if (errno == ERANGE) return mkdouble(strtod(tmp, NULL));
+    long long v = strtoll(num, NULL, 10);
+    if (errno == ERANGE) {
+        double d = strtod(num, NULL);
+        free(heap);
+        return mkdouble(d);
+    }
+    free(heap);
     return mkint_full(v);
 }
 

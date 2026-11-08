@@ -72,7 +72,7 @@ static aval f64_list(uint64_t n, const double *src) {
 
 /* dot(a, b) -> float : sum_i a[i]*b[i] over min(len) */
 aval bi_linalg_dot(uint64_t n, aval *argv) {
-    (void)n;
+    want_args("linalg_dot", n, 2, 2);
     AArr *aa = as_arr(argv[0], "dot() first argument");
     AArr *bb = as_arr(argv[1], "dot() second argument");
     uint64_t na = aa->h.len, nb = bb->h.len;
@@ -105,7 +105,7 @@ aval bi_linalg_dot(uint64_t n, aval *argv) {
  *   out[j] = bias[j] + sum_i x[i] * w[i*nout + j]
  * Sequential w reads, `out` stays cache-hot. */
 aval bi_linalg_matvec(uint64_t n, aval *argv) {
-    (void)n;
+    want_args("linalg_matvec", n, 5, 5);
     AArr *xa = as_arr(argv[0], "matvec() vector");
     AArr *wa = as_arr(argv[1], "matvec() weights");
     AArr *ba = as_arr_opt(argv[2], "matvec() bias");
@@ -148,7 +148,7 @@ aval bi_linalg_matvec(uint64_t n, aval *argv) {
  * w is stored [out][in] (row-major, e.g. wte for the tied lm_head):
  *   out[i] = bias[i] + sum_j x[j] * w[i*nin + j] */
 aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
-    (void)n;
+    want_args("linalg_matvec_t", n, 5, 5);
     AArr *xa = as_arr(argv[0], "matvec_t() vector");
     AArr *wa = as_arr(argv[1], "matvec_t() weights");
     AArr *ba = as_arr_opt(argv[2], "matvec_t() bias");

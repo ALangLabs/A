@@ -246,6 +246,12 @@ static aval bin_decode_val(BinReader *r) {
             items[i] = bin_decode_val(r);
             if (r->err) { free(items); return A_NONE; }
         }
+        if (tag == BIN_SET) {
+            aval set = a_set_new();
+            for (uint64_t i = 0; i < n; ++i) a_set_add(set, items[i]);
+            free(items);
+            return set;
+        }
         aval out = list_from_vec(items, (uint64_t)n, tag == BIN_TUPLE);
         free(items);
         return out;

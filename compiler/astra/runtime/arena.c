@@ -26,24 +26,26 @@ static aval arena_new_impl(uint64_t cap) {
 
 aval bi_arena_new(uint64_t n, aval *argv) {
     want_args("arena.new", n, 0, 1);
-    uint64_t cap = n ? (uint64_t)int_val_full(argv[0]) : 1u << 20;
+    uint64_t cap = n ? (uint64_t)expect_int64(argv[0], "arena capacity") : 1u << 20;
     return arena_new_impl(cap);
 }
 
 aval bi_arena_pool(uint64_t n, aval *argv) {
     want_args("arena.pool", n, 1, 1);
-    return arena_new_impl((uint64_t)int_val_full(argv[0]));
+    return arena_new_impl((uint64_t)expect_int64(argv[0], "arena capacity"));
 }
 
 aval bi_arena_region(uint64_t n, aval *argv) {
     want_args("arena.region", n, 1, 1);
-    return arena_new_impl((uint64_t)int_val_full(argv[0]));
+    return arena_new_impl((uint64_t)expect_int64(argv[0], "arena capacity"));
 }
 
 aval bi_arena_alloc(uint64_t n, aval *argv) {
     want_args("arena.alloc", n, 2, 2);
     AArena *a = arena_of(argv[0]);
-    uint64_t size = (uint64_t)int_val_full(argv[1]);
+    int64_t sz = expect_int64(argv[1], "arena.alloc size");
+    if (sz < 0) panicf("arena.alloc: size must be non-negative");
+    uint64_t size = (uint64_t)sz;
     size = (size + 7) & ~7ULL;
     /* reuse a freed slot when possible */
     for (uint64_t i = 0; i < a->nalloc; ++i) {
@@ -70,7 +72,9 @@ aval bi_arena_alloc(uint64_t n, aval *argv) {
 aval bi_arena_release(uint64_t n, aval *argv) {
     want_args("arena.release", n, 2, 2);
     AArena *a = arena_of(argv[0]);
-    uint64_t h = (uint64_t)int_val_full(argv[1]);
+    int64_t h0 = expect_int64(argv[1], "arena.release handle");
+    if (h0 < 0) panicf("arena.release: invalid handle");
+    uint64_t h = (uint64_t)h0;
     if (h == 0 || h > a->nalloc || a->allocs[h - 1].free)
         panicf("arena.release: invalid handle");
     a->allocs[h - 1].free = 1;

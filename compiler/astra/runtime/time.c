@@ -14,7 +14,7 @@ aval bi_time_now(uint64_t n, aval *argv) {
 
 aval bi_time_sleep(uint64_t n, aval *argv) {
     want_args("sleep", n, 1, 1);
-    int64_t ms = int_val_full(argv[0]);
+    int64_t ms = expect_int64(argv[0], "sleep() milliseconds");
     if (ms < 0) ms = 0;
     struct timespec ts;
     ts.tv_sec = (time_t)(ms / 1000);

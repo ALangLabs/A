@@ -17,6 +17,8 @@ static ASpan *g_spans;
 static size_t g_nspans, g_capspans;
 static uint64_t g_next_span = 1;
 static uint64_t g_current_span = 0;
+static uint64_t g_trace_id_hi = UINT64_C(0x4bf92f3577b34da6);
+static uint64_t g_trace_id_lo = 0;
 
 static ASpan *span_find(uint64_t id) {
     for (size_t i = g_nspans; i-- > 0;)
@@ -43,6 +45,8 @@ aval bi_trace_start(uint64_t n, aval *argv) {
     s->events = list_from_vec(NULL, 0, 0);
     s->start_ms = now_ms();
     s->end_ms = -1;
+    if (!g_trace_id_lo)
+        g_trace_id_lo = ((uint64_t)time(NULL) << 32) ^ (s->id * UINT64_C(0x9e3779b97f4a7c15));
     g_current_span = s->id;
     return mkint_full((int64_t)s->id);
 }
@@ -58,7 +62,7 @@ aval bi_trace_end(uint64_t n, aval *argv) {
 
 aval bi_trace_current(uint64_t n, aval *argv) {
     want_args("trace.current", n, 0, 0);
-    return g_current_span ? mkint_full((int64_t)g_current_span) : A_NONE;
+    return mkint_full((int64_t)g_current_span);
 }
 
 aval bi_trace_set_attribute(uint64_t n, aval *argv) {
@@ -78,36 +82,43 @@ aval bi_trace_add_event(uint64_t n, aval *argv) {
     ADict *ed = (ADict *)obj_of(ev);
     dict_put(ed, a_str_new("name", 4), argv[1]);
     if (n > 2) dict_put(ed, a_str_new("attributes", 10), argv[2]);
-    /* append to events list: rebuild via list concat helper is overkill;
-       store events as dict keyed by count instead */
-    ADict *ad = (ADict *)obj_of(s->attrs);
-    aval cnt = dict_find(ad, a_str_new("__nevents", 9)) >= 0
-                   ? ad->pairs[dict_find(ad, a_str_new("__nevents", 9))].v
-                   : a_mkint(0);
-    dict_put(ad, a_str_new("__nevents", 9), a_mkint(int_val_full(cnt) + 1));
-    dict_put(ad, a_str_new("__evt", 5), ev); /* keeps last; list form below */
-    /* simpler: keep an AArr of events */
     AArr *ea = (AArr *)obj_of(s->events);
-    uint64_t idx = ea->h.len;
-    ea->items = (aval *)xrealloc(ea->items, sizeof(aval) * (idx + 1));
-    ea->items[idx] = ev;
-    ea->h.len = (uint32_t)(idx + 1);
+    arr_push(ea, ev);
     return A_NONE;
 }
 
+static int trace_hexval(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 aval bi_trace_inject(uint64_t n, aval *argv) {
-    want_args("trace.inject", n, 0, 1);
-    aval d = dict_new_empty();
-    ADict *dd = (ADict *)obj_of(d);
-    dict_put(dd, a_str_new("trace_id", 8), a_mkint(1));
-    dict_put(dd, a_str_new("span_id", 7), g_current_span ? mkint_full((int64_t)g_current_span) : A_NONE);
-    return d;
+    want_args("trace.inject", n, 0, 0);
+    if (!g_current_span) return a_str_new("", 0);
+    char buf[64];
+    snprintf(buf, sizeof buf, "00-%016llx%016llx-%016llx-01",
+             (unsigned long long)g_trace_id_hi,
+             (unsigned long long)g_trace_id_lo,
+             (unsigned long long)g_current_span);
+    return a_str_new(buf, strlen(buf));
 }
 
 aval bi_trace_extract(uint64_t n, aval *argv) {
     want_args("trace.extract", n, 1, 1);
-    (void)argv;
-    return A_NONE;
+    uint64_t len;
+    const char *s = str_data(argv[0], &len);
+    /* W3C traceparent: version(2)-traceid(32)-spanid(16)-flags(2). */
+    if (len != 55 || s[2] != '-' || s[35] != '-' || s[52] != '-')
+        return mkint_full(0);
+    uint64_t span = 0;
+    for (int i = 36; i < 52; ++i) {
+        int v = trace_hexval(s[i]);
+        if (v < 0) return mkint_full(0);
+        span = (span << 4) | (uint64_t)v;
+    }
+    return mkint_full((int64_t)span);
 }
 
 aval bi_trace_spans(uint64_t n, aval *argv) {

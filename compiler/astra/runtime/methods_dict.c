@@ -20,7 +20,7 @@ aval method_dict(aval obj, const char *name, uint64_t n, aval *argv) {
                         panicf("cannot convert dictionary update sequence element #%llu", (unsigned long long)i);
                     AArr *pa = (AArr *)obj_of(p);
                     if (pa->h.len != 2) panicf("dictionary update sequence element has length %u; 2 is required", pa->h.len);
-                    dict_put(d, pa->items[0], pa->items[1]);
+                    dict_put(d, arr_elem(pa, 0), arr_elem(pa, 1));
                 }
             }
             return A_NONE;

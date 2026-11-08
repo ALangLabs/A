@@ -38,6 +38,8 @@ inline void addNetDocs(StringMap<BuiltinDoc>& docs) {
                             "TLS client socket; requires a build with OpenSSL."}},
       {"net_tls_available", {"net_tls_available", "net.tls_available() -> bool",
                               "Whether the toolchain was built with TLS support."}},
+      {"net_recv_status", {"net_recv_status", "net.recv_status(handle) -> i64",
+                            "Last recv outcome: 0 ok, 1 EOF, 2 error, 3 timeout; -1 bad handle."}},
 
       // http
       {"http_get", {"http_get", "http.get(url) -> (i64, {String: String}, String)",

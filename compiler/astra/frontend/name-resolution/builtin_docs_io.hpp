@@ -67,6 +67,12 @@ inline void addIoDocs(StringMap<BuiltinDoc>& docs) {
       {"current_dir", {"current_dir", "current_dir() -> String", "The process working directory.",
                        ">>> current_dir()\n'/home/user/project'",
                        "list_dir"}},
+      {"read_bytes", {"read_bytes", "read_bytes(path) -> [i64]", "Reads an entire file as byte values 0-255.",
+                      ">>> fs.read_bytes('model.bin')\n[0, 1, 255]",
+                      "write_bytes, read_file"}},
+      {"write_bytes", {"write_bytes", "write_bytes(path, bytes: [i64])", "Writes byte values 0-255 to a file.",
+                       ">>> fs.write_bytes('out.bin', [0, 255])",
+                       "read_bytes, write_file"}},
   });
 }
 

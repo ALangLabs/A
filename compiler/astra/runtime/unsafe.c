@@ -63,6 +63,7 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
             a->flags |= ARR_F_NOMIX;
             arr_ensure_aval(a);
         }
+        if ((a->flags & ARR_F_F64) && !a_is_double(argv[2])) a->flags &= ~ARR_F_F64;
         a->items[i] = argv[2];
         return A_NONE;
     }

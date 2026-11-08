@@ -8,6 +8,31 @@ static int g_log_level = 1;   /* 0=debug 1=info 2=warn 3=error */
 static int g_log_json = 0;
 static const char *const k_log_level_names[] = {"debug", "info", "warn", "error"};
 
+static void log_append_json_str(Buf *b, const char *s, uint64_t n) {
+    buf_addc(b, '"');
+    for (uint64_t i = 0; i < n; ++i) {
+        unsigned char c = (unsigned char)s[i];
+        switch (c) {
+            case '"': buf_adds(b, "\\\""); break;
+            case '\\': buf_adds(b, "\\\\"); break;
+            case '\b': buf_adds(b, "\\b"); break;
+            case '\f': buf_adds(b, "\\f"); break;
+            case '\n': buf_adds(b, "\\n"); break;
+            case '\r': buf_adds(b, "\\r"); break;
+            case '\t': buf_adds(b, "\\t"); break;
+            default:
+                if (c < 0x20) {
+                    char tmp[8];
+                    snprintf(tmp, sizeof tmp, "\\u%04x", c);
+                    buf_adds(b, tmp);
+                } else {
+                    buf_addc(b, (char)c);
+                }
+        }
+    }
+    buf_addc(b, '"');
+}
+
 static void log_write_line(int level, const char *msg, uint64_t mlen, aval fields) {
     FILE *f = stderr;
     if (g_log_json) {
@@ -17,12 +42,14 @@ static void log_write_line(int level, const char *msg, uint64_t mlen, aval field
         buf_adds(&b, "\"level\":\"");
         buf_adds(&b, k_log_level_names[level]);
         buf_adds(&b, "\",\"msg\":");
-        /* reuse the JSON string escaper via format_into on the raw string */
-        aval ms = a_str_new(msg, mlen);
-        format_into(&b, ms, 0);
+        log_append_json_str(&b, msg, mlen);
         if (fields != A_NONE) {
             buf_adds(&b, ",\"fields\":");
-            format_into(&b, fields, 0);
+            aval one[1] = { fields };
+            aval js = bi_json_stringify(1, one);
+            uint64_t fl;
+            const char *fp = str_data(js, &fl);
+            buf_addn(&b, fp, (size_t)fl);
         }
         buf_adds(&b, "}\n");
         fwrite(b.p, 1, (size_t)b.len, f);
