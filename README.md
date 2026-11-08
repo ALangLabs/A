@@ -41,7 +41,9 @@ compiles A straight to native machine code.
   a `dlopen`'d libpython bridge (NumPy, PyTorch, …), including zero-copy
   buffer-protocol views.
 - **Self-hosted kernels** — numeric kernels (matmul, attention, conv, softmax,
-  quantization, …) written in A under [`kernels/`](kernels/).
+  quantization, …) written in A under [`kernels/`](kernels/), plus native
+  Mojo-inspired ML kernels (`matmul` block-tiled, fused `attention`/`softmax`,
+  FMA hot loops, and an IR `fuseFma` contraction pass).
 - **First-class tooling** — `a fmt`, `a doc`, `a ir`, a REPL, a full **LSP**
   server (`a-lsp`), and a VS Code extension.
 - **LLVM-style optimization pipeline** — constant folding, DCE, inlining, LICM,

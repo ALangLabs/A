@@ -10,7 +10,7 @@ Core builtin functions are available without imports (verified against
 | I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()` |
 | Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)` |
 | Math | `abs`, `min`, `max`, `sum`, `pow`, `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int` |
-| Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work |
+| Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops |
 | Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `range`-style iteration via `a..b` |
 | Option/Result | `Some(v)`, `Ok(v)`, `Err(e)` constructors; `None` literal |
 | Assertions | `assert(cond)`, `assert_eq(a, b)`, `panic(msg)` |
@@ -28,7 +28,7 @@ Note: `range(5)` is **not** a function — write `0..5` range literals instead.
 
 `math` (sqrt/abs/min/max/pow/trig/log/floor/ceil/round/trunc/random + `PI`,`E`),
 `io` (print/eprint/input/flush), `fs` (file ops), `strings`, `collections`,
-`core` (panic/assert/assert_eq), `time` (now/sleep), `json`, `binary`,
+`core` (panic/assert/assert_eq/bytes_utf8_decode/bytes_utf8_encode), `time` (now/sleep), `json`, `binary`,
 `testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_listen/tcp_connect/accept/
 send/recv/recv_status/close/set_timeout/set_nonblocking/poll/local_port/
 udp_socket/udp_bind/udp_send/udp_recv/tls_connect/tls_wrap/tls_available/
@@ -38,6 +38,11 @@ send_bytes/recv_bytes/inflate_bytes/inflate_available), `terminal`,
 
 `env.get(name) -> String` returns the environment variable's value, or the
 empty string when it is unset — it is *not* an `Optional`.
+
+`core.bytes_utf8_decode(bytes) -> String?` and `core.bytes_utf8_encode(s) ->
+[i64]` are the single-pass native conversions behind `std:bytes`
+`utf8_decode`/`utf8_encode`; they exist so a multi-megabyte body decodes in
+microseconds instead of allocating one string per byte.
 
 Prefer `import std:<pkg>` for the ergonomic stdlib wrappers — see
 [stdlib](stdlib.md).
