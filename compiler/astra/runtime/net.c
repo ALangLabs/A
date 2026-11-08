@@ -92,11 +92,19 @@ static NetSock *net_sock_get(aval hv, const char *what) {
 
 static void net_host_port(aval hv, aval pv, char *host, size_t hsz,
                           char *port, size_t psz) {
-    uint64_t hl, pl;
+    uint64_t hl;
     const char *h = str_data(hv, &hl);
-    const char *p = str_data(pv, &pl);
-    if (hl >= hsz || pl >= psz) panicf("net: host/port too long");
+    if (hl >= hsz) panicf("net: host too long");
     memcpy(host, h, hl); host[hl] = '\0';
+    /* The type checker takes the port as an integer; a string is still
+       accepted for callers that format it themselves. */
+    if (is_int_val(pv)) {
+        snprintf(port, psz, "%lld", (long long)int_val_full(pv));
+        return;
+    }
+    uint64_t pl;
+    const char *p = str_data(pv, &pl);
+    if (pl >= psz) panicf("net: port too long");
     memcpy(port, p, pl); port[pl] = '\0';
 }
 

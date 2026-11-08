@@ -206,9 +206,9 @@ class HTTPConnection:
         if self.tls:
             if not net.tls_available():
                 self._fail("TLS not available (libssl not found)")
-            self.sock = net.tls_connect(self.host, str(self.port))
+            self.sock = net.tls_connect(self.host, self.port)
         else:
-            self.sock = net.tcp_connect(self.host, str(self.port))
+            self.sock = net.tcp_connect(self.host, self.port)
         if self.sock < 0:
             self._fail("connect failed: {self.host}:{self.port}")
         if self.timeout > 0:
