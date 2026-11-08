@@ -3949,71 +3949,135 @@ void gcAsmFunctions(std::string& src) {
     std::string l;
     while (std::getline(in, l)) lines.push_back(l);
   }
-  // Any __na_* global symbol block (fn/method/lambda/ctor code, field and
-  // name-string rodata, global slots) is droppable when unreferenced.
-  // `main`/`_start`/runtime `a_*` symbols are not __na_ and always stay.
-  const std::regex fnLabel(R"(^__na_[A-Za-z0-9_]+:$)");
-  const std::regex anyLabel(R"(^([A-Za-z_][A-Za-z0-9_]*):$)");
-  // Block = [header start, next header start). Header start walks back
-  // over indented .section/.globl directive lines.
-  struct Block { std::size_t begin, end; std::string name; bool isFn; };
-  std::vector<Block> blocks;
-  std::vector<std::size_t> labelIdx;
+  // Column-0 label classification. NativeEmitter emits:
+  //  - function bodies as `__na_f<N>`/`__na_m<N>`/`__na_lam<N>`/
+  //    `__na_ctor<N>`/`__na_top_<N>` (droppable when unreferenced),
+  //  - data/metadata as `__na_d<N>`/`__na_gf<N>`/`__na_gs<N>` and
+  //    `__na_fld_*`/`__na_cs_*`/`__na_mn_*`/`__na_ev_*`/`__na_sn_*`/
+  //    `__na_tn_*`/`__na_tnames`/`__na_tfns`/`__na_lnm_*`/`__na_snv_*`/
+  //    `__na_fs_*` (always kept),
+  //  - internal control-flow labels `__na_<word><N>` (`__na_ret`,
+  //    `__na_ifnext`, `__na_while`, `__na_for`, `__na_fend`, `__na_fcont`,
+  //    `__na_sc`, ...) at column 0 INSIDE function bodies — these are not
+  //    block boundaries.
+  const std::regex colLabel(R"(^([A-Za-z_][A-Za-z0-9_]*):$)");
+  const std::regex fnName(R"(^__na_(?:f|m|lam|ctor|top)_?[0-9]+$)");
+  const std::regex shortData(R"(^__na_(?:gf|gs|d)[0-9]+$)");
+  const std::regex internalName(R"(^__na_[a-z]+[0-9]+$)");
+  // Indented header directives that belong to the block whose label
+  // follows them (.section/.globl/.text/.align/.org — never .byte/.long/
+  // .space, which are the block's payload).
+  const std::regex hdrDir(R"(^\s*\.(?:section|globl|text|align|p2align|org)\b)");
+  const std::regex globlDir(R"(^\s*\.globl\b)");
+  const std::regex symTok(R"(__na_[A-Za-z0-9_]+)");
+  const std::regex gfNum(R"(^__na_gf([0-9]+)$)");
+  const std::regex gsNum(R"(^__na_gs([0-9]+)$)");
+
+  auto isHdr = [&](const std::string& l) {
+    return !l.empty() && l[0] == ' ' &&
+           std::regex_search(l, hdrDir);
+  };
+
+  // Boundary labels = column-0 labels that are not internal control-flow
+  // labels. Internal labels stay inside the enclosing function's block.
+  std::vector<std::size_t> bounds;
+  std::vector<std::string> boundNames;
+  std::vector<char> boundIsFn;
   for (std::size_t i = 0; i < lines.size(); ++i) {
     std::smatch m;
-    if (std::regex_match(lines[i], m, anyLabel)) labelIdx.push_back(i);
+    if (!std::regex_match(lines[i], m, colLabel)) continue;
+    const std::string& name = m[1].str();
+    if (std::regex_match(name, internalName) &&
+        !std::regex_match(name, fnName) &&
+        !std::regex_match(name, shortData))
+      continue;  // internal label: part of the enclosing function
+    bounds.push_back(i);
+    boundNames.push_back(name);
+    boundIsFn.push_back(std::regex_match(name, fnName));
   }
-  for (std::size_t k = 0; k < labelIdx.size(); ++k) {
-    std::size_t li = labelIdx[k];
-    std::smatch m;
-    std::regex_match(lines[li], m, anyLabel);
-    std::string name = m[1].str();
-    std::size_t h = li;
-    while (h > 0 &&
-           (lines[h - 1].find(".section") != std::string::npos ||
-            lines[h - 1].find(".globl") != std::string::npos) &&
-           !lines[h - 1].empty() && lines[h - 1][0] == ' ')
-      --h;
-    std::size_t e = (k + 1 < labelIdx.size()) ? labelIdx[k + 1] : lines.size();
-    // extend end backwards over the next block's header directives
-    while (e > li + 1 &&
-           (lines[e - 1].find(".section") != std::string::npos ||
-            lines[e - 1].find(".globl") != std::string::npos) &&
-           !lines[e - 1].empty() && lines[e - 1][0] == ' ')
-      --e;
-    blocks.push_back({h, e, name, std::regex_match(name, fnLabel)});
+  if (bounds.empty()) return;
+
+  // Block = [header start, next block's header start). Header start walks
+  // back over the indented directive lines preceding the label.
+  struct Block { std::size_t begin, end; std::string name; bool isFn; };
+  std::vector<Block> blocks;
+  std::vector<std::size_t> hdr;
+  hdr.reserve(bounds.size());
+  for (std::size_t k = 0; k < bounds.size(); ++k) {
+    std::size_t h = bounds[k];
+    while (h > 0 && isHdr(lines[h - 1])) --h;
+    hdr.push_back(h);
   }
-  if (blocks.empty()) return;
-  // kept[i] for fn blocks; non-fn blocks are always kept.
-  std::vector<char> kept(blocks.size(), 1);
-  for (std::size_t i = 0; i < blocks.size(); ++i)
-    if (!blocks[i].isFn) kept[i] = 1;
-  // Fixpoint: scan kept blocks for references to fn symbols.
-  const std::regex fnRef(R"(\b(__na_[A-Za-z0-9_]+)\b)");
+  for (std::size_t k = 0; k < bounds.size(); ++k) {
+    std::size_t e = (k + 1 < bounds.size()) ? hdr[k + 1] : lines.size();
+    blocks.push_back({hdr[k], e, boundNames[k], boundIsFn[k] != 0});
+  }
+
   std::unordered_map<std::string, std::size_t> byName;
   for (std::size_t i = 0; i < blocks.size(); ++i)
     if (blocks[i].isFn) byName[blocks[i].name] = i;
-  bool changed = true;
-  while (changed) {
-    changed = false;
+
+  // Roots: every non-function block (boot/_start/_entry/main/data/metadata)
+  // is kept. Function blocks start unkept and are added by the fixpoint.
+  std::vector<char> kept(blocks.size(), 0);
+  for (std::size_t i = 0; i < blocks.size(); ++i)
+    kept[i] = !blocks[i].isFn;
+
+  // A symbol token keeps a function alive when it is a real operand
+  // (call/jmp/mov/lea/.long ...). `.globl`/`.section` directive lines are
+  // skipped: `.globl __na_gfN` must not resurrect the function behind the
+  // global slot. `__na_gfK` slots pair with the FnInfo whose cname number
+  // is K-1 (f or m — they share the fnId counter); `__na_gsK` pairs with
+  // `__na_ctorK`.
+  bool grew = false;
+  auto markIdx = [&](std::size_t bi) {
+    if (!kept[bi]) {
+      kept[bi] = 1;
+      grew = true;
+    }
+  };
+  auto markSym = [&](const std::string& sym) {
+    if (std::regex_match(sym, fnName)) {
+      auto f = byName.find(sym);
+      if (f != byName.end()) markIdx(f->second);
+      return;
+    }
+    std::smatch gm;
+    if (std::regex_match(sym, gm, gfNum)) {
+      long k = std::stol(gm[1].str());
+      if (k >= 1) {
+        for (const char* p : {"__na_f", "__na_m"}) {
+          auto f = byName.find(std::string(p) + std::to_string(k - 1));
+          if (f != byName.end()) markIdx(f->second);
+        }
+      }
+      return;
+    }
+    if (std::regex_match(sym, gm, gsNum)) {
+      auto f = byName.find("__na_ctor" + gm[1].str());
+      if (f != byName.end()) markIdx(f->second);
+    }
+  };
+
+  do {
+    grew = false;
     for (std::size_t i = 0; i < blocks.size(); ++i) {
       if (!kept[i]) continue;
       for (std::size_t j = blocks[i].begin; j < blocks[i].end; ++j) {
         const std::string& l = lines[j];
         if (l.find("__na_") == std::string::npos) continue;
-        std::sregex_iterator it(l.begin(), l.end(), fnRef), end;
-        for (; it != end; ++it) {
-          auto f = byName.find((*it)[1].str());
-          if (f != byName.end() && !kept[f->second]) {
-            kept[f->second] = 1;
-            changed = true;
-          }
-        }
+        if (std::regex_search(l, globlDir)) continue;
+        // Label definitions (`name:` alone on a line) are not references:
+        // `__na_gf1:` must not keep `__na_f0` alive via the gf->f mapping.
+        if (std::regex_match(l, colLabel)) continue;
+        std::sregex_iterator it(l.begin(), l.end(), symTok), end;
+        for (; it != end; ++it) markSym((*it).str());
       }
     }
-  }
-  // Rebuild: keep all lines except dropped fn blocks. Lines before the
-  // first block and non-block gaps are always kept.
+  } while (grew);
+
+  // Rebuild: keep all lines except dropped function blocks. Lines before
+  // the first block and non-block gaps are always kept.
   std::vector<char> dropLine(lines.size(), 0);
   for (std::size_t i = 0; i < blocks.size(); ++i)
     if (blocks[i].isFn && !kept[i])
