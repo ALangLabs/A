@@ -506,6 +506,39 @@ inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
   return mixInt(h, mt);
 }
 
+// Runtime C/headers are compiled into every binary, so a change to any of
+// them must invalidate cached binaries: without this, editing net.c or
+// bytes_conv.c and re-running `a run` silently reused the old executable.
+inline void mixRuntimeSources(std::uint64_t& h, const std::string& runtimeC) {
+  if (runtimeC.empty()) return;
+  std::error_code ec;
+  std::filesystem::path src = std::filesystem::path(runtimeC).parent_path();
+  if (src.empty()) return;
+  std::vector<std::string> files;
+  std::function<void(const std::filesystem::path&, int)> collect =
+      [&](const std::filesystem::path& dir, int depth) {
+    std::error_code dec;
+    std::filesystem::directory_iterator it(
+        dir, std::filesystem::directory_options::skip_permission_denied, dec);
+    if (dec) return;
+    for (std::filesystem::directory_iterator end; it != end; it.increment(dec)) {
+      if (dec) return;
+      std::error_code sec;
+      const std::filesystem::path p = it->path();
+      std::filesystem::file_status st = it->symlink_status(sec);
+      if (std::filesystem::is_directory(st)) {
+        if (depth < 1) collect(p, depth + 1);
+        continue;
+      }
+      const std::string ext = p.extension().string();
+      if (ext == ".c" || ext == ".h") files.push_back(p.string());
+    }
+      };
+  collect(src, 0);
+  std::sort(files.begin(), files.end());
+  for (const std::string& f : files) h = mixFileStat(h, f);
+}
+
 struct Plan {
   bool active = false;
   std::string file;  // final cache file path
@@ -559,6 +592,8 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
     if (std::filesystem::exists(cand)) { h = mixFileStat(h, cand); break; }
   }
   h = mixBytes(h, runtimeDir);
+  mixRuntimeSources(h, runtimeC);
+  h = mixFileStat(h, runtimeDir + "/libaruntime.a");
   // Module sources: entry first-class (inline "<repl>"/"-c" sources come
   // from entrySource), every other module must read from disk.
   const ModuleGraph& g = *m.graph;
@@ -704,20 +739,9 @@ inline std::string precheckKey(const std::string& path,
     h = mixInt(h, r.second.first);
     h = mixInt(h, r.second.second);
   }
-  // Runtime files: stat every sibling *.c (mtime/size invalidation).
-  {
-    std::error_code ec;
-    std::filesystem::directory_iterator it(
-        runtimeDir, std::filesystem::directory_options::skip_permission_denied, ec);
-    if (!ec) {
-      std::vector<std::string> rt;
-      for (std::filesystem::directory_iterator end; it != end;
-           it.increment(ec))
-        if (it->path().extension() == ".c") rt.push_back(it->path().string());
-      std::sort(rt.begin(), rt.end());
-      for (const std::string& f : rt) h = mixFileStat(h, f);
-    }
-  }
+  // Runtime sources and the archived runtime objects (mtime/size).
+  mixRuntimeSources(h, runtimeC);
+  h = mixFileStat(h, runtimeDir + "/libaruntime.a");
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
                 static_cast<unsigned long long>(h));
@@ -1216,22 +1240,38 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   }
   // Pre-parse cache hit: skip the frontend entirely and exec the cached
   // binary (depfile + entry-content key, see run_cache::precheckKey).
+  // Compile-time diagnostics (warnings) are observable behaviour, so they
+  // are recorded alongside the binary on a miss and replayed on a hit.
   std::string preBin;
   if(td.native){
     preBin = run_cache::precheckKey(path, source, config, td, config.optimizationLevel);
     if(!preBin.empty()){
       std::error_code ec;
       if(std::filesystem::exists(preBin, ec)){
+        std::string diag;
+        if(run_cache::readFileText(preBin + ".diag", diag) && !diag.empty()) err << diag;
         int hit = runBinary(preBin);
         if(hit != 127) return hit < 0 ? kCErr : hit;
         std::filesystem::remove(preBin, ec);
+        std::filesystem::remove(preBin + ".diag", ec);
       }
       std::filesystem::create_directories(run_cache::cacheDir(), ec);
     }
   }
-  DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr;
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,
+  std::string diagCapture;
+  {
+    std::ostringstream diagStream;
+    DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,diagStream); if(!m.ok){ err << diagStream.str(); return kCErr; }
+    diagCapture = diagStream.str();
+    err << diagCapture;
+    if(!preBin.empty()){
+      std::error_code ec;
+      std::ofstream sidecar(preBin + ".diag", std::ios::binary | std::ios::trunc);
+      if(sidecar) sidecar << diagCapture;
+    }
+    return compileAndRun(m,in,out,err,false,config.optimizationLevel,
                        preBin.empty() ? nullptr : &preBin, &td, &source);
+  }
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   std::string src; if(!readAll(path,src,err)) return kNoIn;

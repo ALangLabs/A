@@ -666,19 +666,21 @@ aval bi_net_recv_exact(uint64_t n, aval *argv) {
     return a_list_take_i64(items, got);
 }
 
-/* Read up to `want` bytes (want < 0: until EOF) from s into a fresh buffer. */
-static char *net_read_to_buf(NetSock *s, int64_t want, size_t *got_out) {
-    size_t cap = want > 0 ? (size_t)want : 65536;
+/* Read until EOF into a fresh buffer, after copying `pre` (body bytes the
+   header reader already consumed). */
+static char *net_read_to_buf_prefixed(NetSock *s, const char *pre, uint64_t prelen,
+                                     size_t *got_out) {
+    size_t cap = prelen + 65536;
     char *buf = (char *)xmalloc(cap);
     size_t got = 0;
+    if (prelen) { memcpy(buf, pre, (size_t)prelen); got = (size_t)prelen; }
     for (;;) {
         if (got == cap) {
-            if (want > 0) break;          /* exact read satisfied */
             cap *= 2;
             buf = (char *)xrealloc(buf, cap);
         }
         size_t chunk = cap - got;
-        if (chunk > 65536) chunk = 65536;
+        if (chunk > 262144) chunk = 262144;
         ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf + got, (int)chunk)
                            : recv(s->fd, buf + got, chunk, 0);
         if (r < 0 && errno == EINTR) continue;
@@ -692,38 +694,101 @@ static char *net_read_to_buf(NetSock *s, int64_t want, size_t *got_out) {
 /* Body result shared by recv_body/recv_body_all: a (String?, [i64]) pair with
    exactly one side filled. Text payloads stay a flat char buffer end to end;
    only payloads that are not UTF-8 pay for int64 byte storage (8x memory). */
+/* Copy n chars into packed int64 storage (the [i64] byte-array shape). */
+static aval net_bytes_from_chars(const char *buf, size_t got) {
+    int64_t *ints = (int64_t *)xmalloc((got ? got : 1) * sizeof(int64_t));
+    for (size_t i = 0; i < got; ++i) ints[i] = (unsigned char)buf[i];
+    return a_list_take_i64(ints, got);
+}
+
 static aval net_body_result(char *buf, size_t got) {
     aval parts[2];
     if (a_utf8_valid(buf, got)) {
         parts[0] = a_str_new(buf, got);
         parts[1] = a_list_from_i64(NULL, 0);
     } else {
-        int64_t *ints = (int64_t *)xmalloc((got ? got : 1) * sizeof(int64_t));
-        for (size_t i = 0; i < got; ++i) ints[i] = (unsigned char)buf[i];
         parts[0] = A_NONE;
-        parts[1] = a_list_take_i64(ints, got);
+        parts[1] = net_bytes_from_chars(buf, got);
     }
     free(buf);
     return a_tuple_new(2, parts);
 }
 
-/* net.recv_body(handle, byteCount) -> (String?, [i64]) */
+/* net.recv_body(handle, byteCount) -> (String?, [i64])
+
+   Text fast path: the body is read straight into an uninitialised String of
+   exactly `want` bytes, so a 1 MiB text body costs one kernel copy and one
+   validation pass — no scratch buffer, no second 1 MiB allocation and no
+   memcpy (that copy alone measured ~2 ms per MiB). Payloads that fail UTF-8
+   validation (or come up short) fall back to the byte/string construction. */
 aval bi_net_recv_body(uint64_t n, aval *argv) {
-    want_args("net.recv_body", n, 2, 2);
+    want_args("net.recv_body", n, 2, 3);
     NetSock *s = net_sock_get(argv[0], "net.recv_body");
     int64_t want = expect_int64(argv[1], "net.recv_body byteCount");
     if (want < 0) want = 0;
+    /* Optional prefix: body bytes the header reader already buffered. */
+    const char *pre = NULL;
+    uint64_t prelen = 0;
+    if (n >= 3 && argv[2] != A_NONE) {
+        pre = str_data(argv[2], &prelen);
+        if (!pre) { pre = ""; prelen = 0; }
+        if (prelen > (uint64_t)want) prelen = (uint64_t)want;
+    }
+    if (want == 0) {
+        aval empty[2] = { a_str_new("", 0), a_list_from_i64(NULL, 0) };
+        return a_tuple_new(2, empty);
+    }
+    int dbg = getenv("A_NET_DEBUG") != NULL;
+    struct timespec dbg_t0, dbg_t1;
+    if (dbg) clock_gettime(CLOCK_MONOTONIC, &dbg_t0);
+    aval sv = a_str_new_uninit((uint64_t)want);
+    if (dbg) { clock_gettime(CLOCK_MONOTONIC, &dbg_t1); fprintf(stderr, "[netdbg] alloc %.3f ms\n", (dbg_t1.tv_sec - dbg_t0.tv_sec) * 1e3 + (dbg_t1.tv_nsec - dbg_t0.tv_nsec) / 1e6); }
+    uint64_t svlen = 0;
+    char *dst = str_mut_data(sv, &svlen);
     size_t got = 0;
-    char *buf = net_read_to_buf(s, want, &got);
-    return net_body_result(buf, got);
+    if (prelen) {
+        memcpy(dst, pre, (size_t)prelen);
+        got = (size_t)prelen;
+    }
+    while (got < (size_t)want) {
+        size_t chunk = (size_t)want - got;
+        if (chunk > 262144) chunk = 262144;
+        ssize_t r = s->ssl ? net_ssl_read(s->ssl, dst + got, (int)chunk)
+                           : recv(s->fd, dst + got, chunk, 0);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    if (dbg) { clock_gettime(CLOCK_MONOTONIC, &dbg_t1); fprintf(stderr, "[netdbg] read %.3f ms (%zu bytes)\n", (dbg_t1.tv_sec - dbg_t0.tv_sec) * 1e3 + (dbg_t1.tv_nsec - dbg_t0.tv_nsec) / 1e6, got); }
+    if (got == (size_t)want && a_utf8_valid(dst, got)) {
+        aval parts[2] = { sv, a_list_from_i64(NULL, 0) };
+        aval tup = a_tuple_new(2, parts);
+        if (dbg) { struct timespec e; clock_gettime(CLOCK_MONOTONIC, &e); fprintf(stderr, "[netdbg] total %.3f ms\n", (e.tv_sec - dbg_t0.tv_sec) * 1e3 + (e.tv_nsec - dbg_t0.tv_nsec) / 1e6); }
+        return tup;
+    }
+    aval parts[2];
+    if (a_utf8_valid(dst, got)) {
+        parts[0] = got == (uint64_t)want ? sv : a_str_new(dst, got);
+        parts[1] = a_list_from_i64(NULL, 0);
+    } else {
+        parts[0] = A_NONE;
+        parts[1] = net_bytes_from_chars(dst, got);
+    }
+    return a_tuple_new(2, parts);
 }
 
 /* net.recv_body_all(handle) -> (String?, [i64]) — close-delimited bodies. */
 aval bi_net_recv_body_all(uint64_t n, aval *argv) {
-    want_args("net.recv_body_all", n, 1, 1);
+    want_args("net.recv_body_all", n, 1, 2);
     NetSock *s = net_sock_get(argv[0], "net.recv_body_all");
+    uint64_t prelen = 0;
+    const char *pre = NULL;
+    if (n >= 2 && argv[1] != A_NONE) {
+        pre = str_data(argv[1], &prelen);
+        if (!pre) { pre = ""; prelen = 0; }
+    }
     size_t got = 0;
-    char *buf = net_read_to_buf(s, -1, &got);
+    char *buf = net_read_to_buf_prefixed(s, pre, prelen, &got);
     return net_body_result(buf, got);
 }
 

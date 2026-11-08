@@ -68,6 +68,14 @@ aval a_str_new_uninit(uint64_t len) {
     return mkobj(&s->h);
 }
 
+/* Writable view of a string's storage, for native code that fills the buffer
+   it just allocated (net.recv_body reads a body straight into the string). */
+char *str_mut_data(aval v, uint64_t *len) {
+    AStr *s = str_of(v, "string");
+    if (len) *len = s->h.len;
+    return s->data;
+}
+
 aval a_char_new(const char *p, uint64_t len) {
     if (len && !p) panicf("null string data");
     AStr *s = (AStr *)xmalloc(sizeof(AStr) + (size_t)len + 1);

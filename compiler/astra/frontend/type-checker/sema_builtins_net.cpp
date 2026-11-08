@@ -170,16 +170,21 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
 
   if (name == "net_recv_body" || name == "net_recv_body_all") {
     bool all = name == "net_recv_body_all";
-    if (call.args.size() != (all ? 1u : 2u)) {
-      builtinArityError(name, call, all ? 1 : 2);
+    std::size_t hi = all ? 2u : 3u;
+    if (call.args.size() < (all ? 1u : 2u) || call.args.size() > hi) {
+      builtinArityError(name, call, static_cast<int>(hi));
       inferCallArgTypes(call);
       return typeTuple({typeOptional(typeString()), typeArray(typeInt(64, true))});
     }
     requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
                    "The socket handle");
+    std::size_t prefixAt = all ? 1u : 2u;
     if (!all)
       requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
                      "The byte count");
+    if (call.args.size() > prefixAt)
+      checkArgAgainst(*call.args[prefixAt].value, typeString(),
+                      "as the buffered body prefix");
     return typeTuple({typeOptional(typeString()), typeArray(typeInt(64, true))});
   }
 

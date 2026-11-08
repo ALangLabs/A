@@ -21,6 +21,14 @@ int a_utf8_valid(const char *p, uint64_t len) {
     const unsigned char *s = (const unsigned char *)p;
     uint64_t i = 0;
     while (i < len) {
+        /* ASCII fast path: eight bytes per iteration while all high bits are
+           clear. Text payloads are almost entirely ASCII, and the byte loop
+           below runs at ~560 MB/s, which would dominate a 1 MiB body. */
+        if (i + 8 <= len) {
+            uint64_t w;
+            memcpy(&w, s + i, 8);
+            if (!(w & 0x8080808080808080ull)) { i += 8; continue; }
+        }
         unsigned char b = s[i];
         if (b < 0x80) { i += 1; continue; }
         uint64_t need = (b & 0xE0) == 0xC0 ? 2
