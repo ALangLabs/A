@@ -9,10 +9,10 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
     if (call.args.size() != expected) {
       builtinArityError(name, call, expected);
       inferCallArgTypes(call);
-      return name == "linalg_dot" ? typeFloat() : typeArray(typeFloat());
+      return name == "linalg_dot" ? typeFloat(64) : typeArray(typeFloat(64));
     }
     for (std::size_t i = 0; i < call.args.size(); i++) inferExpr(*call.args[i].value);
-    return name == "linalg_dot" ? typeFloat() : typeArray(typeFloat());
+    return name == "linalg_dot" ? typeFloat(64) : typeArray(typeFloat(64));
   }
 
   if (name == "unsafe_get" || name == "unsafe_set") {
