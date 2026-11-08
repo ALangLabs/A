@@ -125,9 +125,11 @@ aval method_seq(aval obj, const char *name, uint64_t n, aval *argv) {
         if (!strcmp(name, "clear")) { want_args(name, n, 0, 0); a->h.len = 0; return A_NONE; }
         if (!strcmp(name, "sort")) {
             want_args(name, n, 0, 0);
-            arr_ensure_aval(a);
+            if (arr_packed(a)) {  /* list of ints: sort int64 storage in place */
+                sort_ints(a->iitems, a->h.len);
+                return A_NONE;
+            }
             sort_arr(a->items, a->h.len);
-            arr_try_pack(a);  /* an all-int sort may re-pack lazily */
             return A_NONE;
         }
         if (!strcmp(name, "reverse")) {

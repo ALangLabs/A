@@ -147,7 +147,9 @@ aval bi_sorted(uint64_t n, aval *argv) {
     want_args("sorted", n, 1, 1);
     aval t = collect_iterable(argv[0]);
     AArr *a = (AArr *)obj_of(t);
-    sort_arr(a->items, a->h.len);
+    if (!a) return t;
+    if (arr_packed(a)) sort_ints(a->iitems, a->h.len);
+    else sort_arr(a->items, a->h.len);
     return t;
 }
 

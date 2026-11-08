@@ -241,6 +241,7 @@ int result_ok(aval v);
 aval a_call(aval fn, uint64_t n, aval *argv);
 void want_args(const char *name, uint64_t n, uint64_t min, uint64_t max);
 void sort_arr(aval *a, uint64_t n);
+void sort_ints(int64_t *a, uint64_t n);
 aval collect_iterable(aval v);
 double math_arg(aval v, const char *name);
 aval bi_print(uint64_t n, aval *argv);
