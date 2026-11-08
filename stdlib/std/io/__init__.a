@@ -22,6 +22,7 @@
 #   * Indices/positions are in CHARACTERS for StringIO and BYTES for
 #     BytesIO, matching Python.
 import std:core
+import std:terminal
 
 """
 _srange(s, a, b) -> substring s[a:b] in characters (end exclusive,
@@ -352,3 +353,36 @@ with the cursor at position 0 (Python `io.BytesIO(initial_bytes)`).
 """
 fn BytesIO_new(initial = []):
     return BytesIO(initial.copy(), 0, false)
+
+# ---------------------------------------------------------------------------
+# Standard input
+# ---------------------------------------------------------------------------
+
+"""
+read_line() -> String: reads one line from standard input.
+
+Returns the line without the trailing '\\n' (a trailing '\\r' of CRLF
+endings is stripped too). At end-of-file it returns whatever was read —
+the empty string when nothing remains — instead of panicking like the
+`input()` builtin does. A final line without a newline is returned as-is.
+
+Implemented on `std:terminal.read_char`, so it is safe on terminals and
+pipes alike; avoid mixing it with `input()`/`read_file` on stdin in the
+same program (stdio buffering vs. raw fd reads do not share a buffer).
+
+    from "std/io/__init__.a" import read_line
+    name = read_line()
+"""
+fn read_line():
+    parts = []
+    while true:
+        c = terminal.read_char()
+        if c == None:
+            c = ""
+        if c == "" or c == "\n":
+            break
+        parts.append(c)
+    n = len(parts)
+    if n > 0 and parts[n - 1] == "\r":
+        parts.pop()
+    return parts.join("")

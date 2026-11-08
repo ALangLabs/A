@@ -227,6 +227,11 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       if (!arity(0, 0, "no arguments")) return typeError();
       return typeOptional(object->elem);
     }
+    if (method == "len") {
+      if (rejectNamed()) return typeError();
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeInt(64, true);
+    }
     sink_.error(field.fieldSpan,
                 "Array has no method named '" + method + "'.",
                 availableMethodsHelp("array", arrayMethods()));
@@ -315,6 +320,10 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       }
       return typeVoid();
     }
+    if (method == "len") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeInt(64, true);
+    }
     sink_.error(field.fieldSpan,
                 "Map has no method named '" + method + "'.",
                 availableMethodsHelp("map", mapMethods()));
@@ -383,6 +392,10 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
                     "'" + method + "' expects a set, found " + typePhrase(resolved) + ".");
       }
       return typeBool();
+    }
+    if (method == "len") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeInt(64, true);
     }
     sink_.error(field.fieldSpan,
                 "Set has no method named '" + method + "'.",
@@ -531,6 +544,10 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       if (!arity(0, 0, "no arguments")) return typeError();
       return typeArray(typeChar());
     }
+    if (method == "len") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeInt(64, true);
+    }
     sink_.error(field.fieldSpan,
                 "String has no method named '" + method + "'.",
                 availableMethodsHelp("string", stringMethods()));
@@ -582,6 +599,10 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     if (method == "copy") {
       if (!arity(0, 0, "no arguments")) return typeError();
       return object;
+    }
+    if (method == "len") {
+      if (!arity(0, 0, "no arguments")) return typeError();
+      return typeInt(64, true);
     }
     sink_.error(field.fieldSpan,
                 "Tuple has no method named '" + method + "'.",

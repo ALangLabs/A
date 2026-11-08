@@ -34,6 +34,7 @@ inline const std::vector<MethodSig>& arrayMethods() {
       {"first", "first()", "The first element as an optional."},
       {"last", "last()", "The last element as an optional."},
       {"join", "join(sep)", "Concatenates the elements with a separator."},
+      {"len", "len()", "Number of elements; same as the len() builtin."},
   };
   return methods;
 }
@@ -50,6 +51,7 @@ inline const std::vector<MethodSig>& mapMethods() {
       {"update", "update(other)", "Copies every entry of another map into this one."},
       {"copy", "copy()", "Returns a shallow copy of the map."},
       {"clear", "clear()", "Removes every entry."},
+      {"len", "len()", "Number of entries; same as the len() builtin."},
   };
   return methods;
 }
@@ -67,6 +69,7 @@ inline const std::vector<MethodSig>& setMethods() {
       {"issuperset", "issuperset(s)", "True when the other set is contained here."},
       {"copy", "copy()", "Returns a shallow copy of the set."},
       {"clear", "clear()", "Removes every element."},
+      {"len", "len()", "Number of elements; same as the len() builtin."},
   };
   return methods;
 }
@@ -80,6 +83,7 @@ inline const std::vector<MethodSig>& tupleMethods() {
       {"last", "last()", "The last element as an optional."},
       {"join", "join(sep)", "Concatenates the elements with a separator."},
       {"copy", "copy()", "Returns a shallow copy of the tuple."},
+      {"len", "len()", "Number of elements; same as the len() builtin."},
   };
   return methods;
 }
@@ -131,6 +135,7 @@ inline const std::vector<MethodSig>& stringMethods() {
       {"contains", "contains(sub)", "True when the substring occurs."},
       {"repeat", "repeat(n)", "Repeats the string n times."},
       {"chars", "chars()", "The characters as an array."},
+      {"len", "len()", "Length in characters; same as the len() builtin."},
   };
   return methods;
 }

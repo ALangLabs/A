@@ -113,6 +113,20 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
     AObj *po0 = obj_of(obj);
     if (nkw && !(po0 && po0->type == T_PYOBJ))
         panicf("'%s' object has no support for named arguments", type_name_cstr(obj));
+    /* `.len()` mirrors the len() builtin for every sized value kind. Only
+       the builtin container/scalar kinds are intercepted here; other
+       receivers (structs reached through `var`, Python objects) keep the
+       normal dispatch so user-defined `len` methods still win. */
+    if (!strcmp(name, "len")) {
+        switch (kind_of(obj)) {
+        case K_STR: case K_CHAR: case K_LIST: case K_TUPLE:
+        case K_SET: case K_DICT: case K_VIEW: case K_BYTES:
+        case K_RANGE:
+            want_args("len", n, 0, 0);
+            return a_len(obj);
+        default: break;
+        }
+    }
     switch (kind_of(obj)) {
     case K_STR: return method_str(obj, name, n, argv);
     case K_LIST:

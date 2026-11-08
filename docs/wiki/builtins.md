@@ -7,8 +7,8 @@ Core builtin functions are available without imports (verified against
 
 | Category | Functions |
 | --- | --- |
-| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()` |
-| Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)` |
+| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.a" import read_line`), which returns `""` at end-of-file |
+| Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)`; sized values (str, list, tuple, set, map) also accept the method form `x.len()` |
 | Math | `abs`, `min`, `max`, `sum`, `pow`, `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int` |
 | Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops |
 | Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `range`-style iteration via `a..b` |
