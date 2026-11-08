@@ -394,6 +394,157 @@ a_lt_slow:
     popl %ebp
     ret
 
+# a_gt_slow / a_le_slow / a_ge_slow : signed 64-bit int compares
+    .globl a_gt_slow
+a_gt_slow:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 12(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lgt_slow_none
+    movl 8(%ebp), %eax
+    testl $1, %eax
+    jz .Lgt_slow_none
+    movl 20(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lgt_slow_none
+    movl 16(%ebp), %eax
+    testl $1, %eax
+    jz .Lgt_slow_none
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox
+    pushl %esi
+    pushl %edi
+    movl 16(%ebp), %esi
+    movl 20(%ebp), %edi
+    call .Lunbox
+    popl %ecx
+    popl %edx
+    cmpl %edi, %ecx
+    jg .Lgt_slow_yes
+    jl .Lgt_slow_no
+    cmpl %esi, %edx
+    ja .Lgt_slow_yes
+    jmp .Lgt_slow_no
+.Lgt_slow_yes:
+    movl $0x00000006, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lgt_slow_no:
+    movl $0x00000004, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lgt_slow_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
+    .globl a_le_slow
+a_le_slow:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 12(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lle_slow_none
+    movl 8(%ebp), %eax
+    testl $1, %eax
+    jz .Lle_slow_none
+    movl 20(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lle_slow_none
+    movl 16(%ebp), %eax
+    testl $1, %eax
+    jz .Lle_slow_none
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox
+    pushl %esi
+    pushl %edi
+    movl 16(%ebp), %esi
+    movl 20(%ebp), %edi
+    call .Lunbox
+    popl %ecx
+    popl %edx
+    cmpl %edi, %ecx
+    jl .Lle_slow_yes
+    jg .Lle_slow_no
+    cmpl %esi, %edx
+    jbe .Lle_slow_yes
+    jmp .Lle_slow_no
+.Lle_slow_yes:
+    movl $0x00000006, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lle_slow_no:
+    movl $0x00000004, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lle_slow_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
+    .globl a_ge_slow
+a_ge_slow:
+    pushl %ebp
+    movl %esp, %ebp
+    movl 12(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lge_slow_none
+    movl 8(%ebp), %eax
+    testl $1, %eax
+    jz .Lge_slow_none
+    movl 20(%ebp), %eax
+    andl $0xFFFF0000, %eax
+    cmpl $0xFFFF0000, %eax
+    jne .Lge_slow_none
+    movl 16(%ebp), %eax
+    testl $1, %eax
+    jz .Lge_slow_none
+    movl 8(%ebp), %esi
+    movl 12(%ebp), %edi
+    call .Lunbox
+    pushl %esi
+    pushl %edi
+    movl 16(%ebp), %esi
+    movl 20(%ebp), %edi
+    call .Lunbox
+    popl %ecx
+    popl %edx
+    cmpl %edi, %ecx
+    jg .Lge_slow_yes
+    jl .Lge_slow_no
+    cmpl %esi, %edx
+    jae .Lge_slow_yes
+    jmp .Lge_slow_no
+.Lge_slow_yes:
+    movl $0x00000006, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lge_slow_no:
+    movl $0x00000004, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+.Lge_slow_none:
+    movl $0x00000002, %eax
+    movl $0xFFFF0000, %edx
+    popl %ebp
+    ret
+
 # a_bi_call(id, n, argv) -> aval ; id 0 = print
     .globl a_bi_call
 a_bi_call:
@@ -418,7 +569,7 @@ a_bi_call:
     jne .Lb_q
     movl (%esi), %ebx
     testl $1, %ebx
-    jz .Lb_q
+    jz .Lb_even
     pushl %ecx              # .Lb_printint clobbers ecx (loop counter)
     call .Lb_printint       # clobbers all caller-saved regs
     popl %ecx
@@ -427,6 +578,38 @@ a_bi_call:
 .Lb_q:
     movb $'?', %al
     call .Lputc
+    incl %ecx
+    jmp .Lb_loop
+.Lb_even:                   # even low word: none/false/true or '?'
+    cmpl $2, %ebx
+    je .Lb_cnone
+    cmpl $4, %ebx
+    je .Lb_cfalse
+    cmpl $6, %ebx
+    je .Lb_ctrue
+    jmp .Lb_q
+.Lb_cnone:
+    pushl %ecx
+    movl $str_none, %esi
+    movl $4, %ebx
+    call .Lb_printn
+    popl %ecx
+    incl %ecx
+    jmp .Lb_loop
+.Lb_cfalse:
+    pushl %ecx
+    movl $str_false, %esi
+    movl $5, %ebx
+    call .Lb_printn
+    popl %ecx
+    incl %ecx
+    jmp .Lb_loop
+.Lb_ctrue:
+    pushl %ecx
+    movl $str_true, %esi
+    movl $4, %ebx
+    call .Lb_printn
+    popl %ecx
     incl %ecx
     jmp .Lb_loop
 .Lb_nl:
@@ -507,12 +690,29 @@ a_bi_call:
     call .Lputc
     ret
 
+.Lb_printn:                 # esi=ptr ebx=len; clobbers eax,esi,ebx
+.Lpn_loop:
+    testl %ebx, %ebx
+    jz .Lpn_done
+    movb (%esi), %al
+    call .Lputc
+    incl %esi
+    decl %ebx
+    jmp .Lpn_loop
+.Lpn_done:
+    ret
+
 .Lputc:                     # al -> COM1; preserves edx (callers keep i_lo there)
     pushl %edx
     movw $0x3F8, %dx
     outb %al, %dx
     popl %edx
     ret
+
+    .section .rodata
+str_none:  .ascii "none"
+str_false: .ascii "false"
+str_true:  .ascii "true"
 
     .section .data
     .globl serial_init
@@ -560,18 +760,8 @@ a_method:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     ret
-    .globl a_le_slow
-a_le_slow:
-    movl $0x00000002, %eax
-    movl $0xFFFF0000, %edx
-    ret
     .globl a_getitem
 a_getitem:
-    movl $0x00000002, %eax
-    movl $0xFFFF0000, %edx
-    ret
-    .globl a_gt_slow
-a_gt_slow:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
     ret
