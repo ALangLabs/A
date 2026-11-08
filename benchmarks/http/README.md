@@ -19,22 +19,22 @@ of `--reps` runs.
 
 | payload | n   | client           | total ms | ms/req | MB/s |
 |---------|-----|------------------|---------:|-------:|-----:|
-| 2 B     | 300 | A `std:http`     |    303   |  1.010 |  –   |
-| 2 B     | 300 | Python           |    263   |  0.877 |  –   |
-| 2 B     | 300 | C++ raw sockets  |    175   |  0.583 |  –   |
-| 16 KiB  | 200 | A `std:http`     |    239   |  1.195 | 13.7 |
-| 16 KiB  | 200 | Python           |    152   |  0.760 | 21.6 |
-| 16 KiB  | 200 | C++ raw sockets  |     96   |  0.480 | 34.1 |
-| 1 MiB   |  20 | A `std:http`     |    103   |  5.150 |  203 |
-| 1 MiB   |  20 | Python           |     28   |  1.400 |  750 |
-| 1 MiB   |  20 | C++ raw sockets  |     27   |  1.350 |  777 |
-| 1 MiB   |  20 | Python keep-alive|     13   |  0.650 | 1613 |
+| 2 B     | 300 | A `std:http`     |    320   |  1.067 |  –   |
+| 2 B     | 300 | Python           |    234   |  0.780 |  –   |
+| 2 B     | 300 | C++ raw sockets  |    136   |  0.453 |  –   |
+| 16 KiB  | 200 | A `std:http`     |    183   |  0.915 | 17.9 |
+| 16 KiB  | 200 | Python           |    137   |  0.685 | 23.9 |
+| 16 KiB  | 200 | C++ raw sockets  |     90   |  0.450 | 36.4 |
+| 1 MiB   |  20 | A `std:http`     |     54   |  2.700 |  388 |
+| 1 MiB   |  20 | Python           |     29   |  1.450 |  723 |
+| 1 MiB   |  20 | C++ raw sockets  |     26   |  1.300 |  807 |
+| 1 MiB   |  20 | Python keep-alive|     15   |  0.750 | 1398 |
 | 1 MiB   |  20 | C++ keep-alive   |     10   |  0.500 | 2097 |
-| 10 MiB  |   5 | A `std:http`     |    193   | 38.600 |  271 |
-| 10 MiB  |   5 | Python           |    122   | 24.400 |  430 |
-| 10 MiB  |   5 | C++ raw sockets  |     25   |  5.000 | 2097 |
-| 10 MiB  |   5 | Python keep-alive|    121   | 24.200 |  433 |
-| 10 MiB  |   5 | C++ keep-alive   |     25   |  5.000 | 2097 |
+| 10 MiB  |   5 | A `std:http`     |     86   | 17.200 |  610 |
+| 10 MiB  |   5 | Python           |    129   | 25.800 |  406 |
+| 10 MiB  |   5 | C++ raw sockets  |     34   |  6.800 | 1542 |
+| 10 MiB  |   5 | Python keep-alive|    127   | 25.400 |  413 |
+| 10 MiB  |   5 | C++ keep-alive   |     24   |  4.800 | 2185 |
 
 Numbers move ±2x with machine load (the box is shared); the ratios are stable.
 
@@ -45,37 +45,41 @@ pooling yet, so it has no keep-alive row.
 
 ## What the numbers say
 
-**Small requests: within ~1.6-2.5x of raw C++, ~1.15x of Python.** Per-request
-cost is dominated by the connect and the server, not by A: 300 two-byte
-requests cost 303 ms against Python's 263 ms and C++'s 175 ms.
+**Small requests: 1.4x Python, 2.4x raw C++.** Per-request cost is dominated by
+the connect, the header parse and the server, not by A's body handling.
 
-**Bulk bodies: ~3-5x off raw C++, and now ahead of Python on 10 MiB**
-(271 vs 430 MB/s is Python; on 1 MiB A is at 203 vs Python's 750). The gap is
-structural, not a bug: an A `[i64]` byte array stores **8 bytes per payload
-byte**, so any body that has to be materialised as bytes costs 8x the memory
-traffic. Text bodies now avoid that entirely.
+**Bulk bodies: 2-2.5x off raw C++, and faster than Python on 10 MiB**
+(610 vs 406 MB/s; Python is 723 MB/s on 1 MiB where its per-request overhead is
+amortised differently). What remains is structural: an A `[i64]` byte array
+stores 8 bytes per payload byte, so any payload that has to be materialised as
+bytes costs 8x the memory traffic. Text bodies now avoid that entirely.
 
-### What was fixed while measuring
+### What was found and fixed while measuring
 
-| change | effect |
+| issue | effect |
 |---|---|
-| `net.recv_body(handle, n)` reads a text body **straight into the String**, validating UTF-8 in the same call | 1 read pass instead of int64 expansion + decode |
-| ASCII fast path (8 bytes/iteration) in the UTF-8 validator | validation of a 1 MiB text body 1.8 ms -> 0.1 ms |
-| header reads capped at 4096 B; the over-read is handed to the body reader as a String prefix | avoids expanding 64 KiB of body into `[i64]` before the body read starts |
-| `list.sort()` / `sorted()` replaced the O(n^2) insertion sort with a stable merge sort plus a three-way quicksort for packed int arrays | **sorting 200k ints: 230 s -> 0.03 s (7700x)** |
-| run-binary cache key now hashes the runtime C sources | editing the runtime no longer reuses a stale cached binary |
+| `list.sort()` / `sorted()` were an **insertion sort** | sorting 200k ints: 230 s -> 0.03 s (**7700x**); now a stable merge sort for generic values plus a three-way quicksort over packed int arrays |
+| `str.contains` scanned with `memcmp` at every offset | 200 KB miss: 1.7 ms -> 0.006 ms (**280x**); now a `memchr` (SIMD) search, same helper as `find`/`index` |
+| `str_find` counted codepoints over the whole haystack before searching, then again to convert the hit offset | one full pass removed from every `find`/`index`/`contains` |
+| `u8_count` (codepoint length of a string) was a byte-at-a-time loop | 8-bytes-per-iteration ASCII fast path; used by slicing, find and every `len`-by-codepoint path |
+| `net.recv_body` materialised bodies as `[i64]` (8 B/byte) and then decoded them | 1 MiB text body: one read pass into the destination String, ~2.5x faster |
+| `json.parse` grew every string through a `Buf` byte by byte | no-escape fast path (a String copy of the input slice); A now parses JSON faster than CPython's C parser (820 KB: 42 ms vs 73 ms) |
+| header reads over-read up to 64 KiB into the body as `[i64]` | capped at 4 KiB and handed to the body reader as a byte prefix (byte-exact: `b2s` would drop invalid UTF-8) |
+| the run-binary cache hashed module sources but **not** the runtime C sources | editing the runtime silently reused a stale cached binary; the key now covers every runtime `.c`/`.h` and `libaruntime.a` |
 
-Performance vs the first measurement of this benchmark: 17 MB/s -> 203 MB/s on
-1 MiB bodies (12x) and 17.8 -> 271 MB/s on 10 MiB.
+Progression for this benchmark, 1 MiB bodies: **94 -> 388 MB/s** (4.1x),
+10 MiB bodies: **108 -> 610 MB/s** (5.6x), against a raw-socket C++ baseline of
+807 / 1542 MB/s.
 
 ## If A needs to close the rest
 
 1. **A `bytes` value type backed by `char*`/`(ptr,len)`** instead of `[i64]`.
    Binary bodies stop costing 8x memory and 8x copy; this is the last real
    structural gap for bulk transfers.
-2. **Connection pooling** (`Connection: keep-alive` reuse) — worth 1.6-2.1 GB/s
+2. **Connection pooling** (`Connection: keep-alive` reuse) — worth 1.4-2.2 GB/s
    for the other two clients on 1 MiB bodies; A currently connects per request.
-3. **Value unboxing / type specialization in the compiler** — the remaining
-   fixed cost per request (~0.4 ms) and the 3-5x gap on arithmetic loops
-   (`while` loop summing 5M ints: A 48 ms, C 10 ms) both come from boxed `aval`
-   dispatch on every operation.
+3. **Value unboxing / type specialization in the compiler.** Measured on this
+   box: `while` loop summing 5M ints A 48 ms vs C 10 ms (4.8x), recursive
+   `fib(27)` A 18 ms vs C 1.1 ms (16x), a direct function call 17 ns vs ~3 ns.
+   Everything in the list above was per-call or per-byte overhead; this one is
+   per-operation, and it needs specialization rather than a faster helper.
