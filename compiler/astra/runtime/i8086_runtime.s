@@ -1401,6 +1401,8 @@ heap_end: .long 0x8F000
 .Ldf_none:
     movl $0xFFFFFFFF, %eax
 .Ldf_out:
+    movl -8(%ebp), %edi         # restore saved regs (movl %ebp,%esp alone
+    movl -4(%ebp), %esi         # would leave .Leqkey scratch in esi/edi)
     movl %ebp, %esp
     popl %ebp
     ret
@@ -1780,23 +1782,11 @@ a_dict_set:
     # key flat ptr = ebp + 0x90000 + 16
     movl %ebp, %edi
     addl $0x90010, %edi
-    pushl %eax
-    movl $'S', %eax
-    call .Lputc
-    popl %eax
     call .Ldict_find          # esi preserved, eax = idx/-1
-    pushl %eax
-    movl $'F', %eax
-    call .Lputc
-    popl %eax
     testl %eax, %eax
     jns .Lds_replace
     # append: ensure cap
     call .Ldict_ensure
-    pushl %eax
-    movl $'E', %eax
-    call .Lputc
-    popl %eax
     testl %eax, %eax
     jz .Lds_none
     movl 4(%esi), %ecx        # len = pair index
@@ -2313,16 +2303,17 @@ a_setitem:
     movl 28(%ebp), %edx
     jmp .Lsi_out
 .Lsi_dict:
-    movl %esi, %ebx
-    movl %ebx, %esi
+    pushl %esi                  # [ebp-4] dict (.Leqkey/.Ldict_ensure clobber ebx)
     movl %ebp, %edi
     addl $0x90010, %edi         # &k
     call .Ldict_find
     testl %eax, %eax
     jns .Lsi_drepl
+    movl -4(%ebp), %esi         # dict for ensure (esi preserved anyway)
     call .Ldict_ensure
     testl %eax, %eax
-    jz .Lsi_none
+    jz .Lsi_dnone
+    movl -4(%ebp), %ebx         # dict
     movl 4(%ebx), %ecx
     movl 16(%ebx), %edx
     shll $4, %ecx
@@ -2338,8 +2329,10 @@ a_setitem:
     incl 4(%ebx)
     movl 24(%ebp), %eax
     movl 28(%ebp), %edx
+    addl $4, %esp
     jmp .Lsi_out
 .Lsi_drepl:
+    movl -4(%ebp), %ebx         # dict
     movl 16(%ebx), %ecx
     shll $4, %eax
     addl %eax, %ecx
@@ -2349,9 +2342,12 @@ a_setitem:
     movl %eax, 12(%ecx)
     movl 24(%ebp), %eax
     movl 28(%ebp), %edx
+    addl $4, %esp
 .Lsi_out:
     popl %ebp
     ret
+.Lsi_dnone:
+    addl $4, %esp
 .Lsi_none:
     movl $0x00000002, %eax
     movl $0xFFFF0000, %edx
