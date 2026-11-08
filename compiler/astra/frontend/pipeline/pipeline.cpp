@@ -1213,6 +1213,15 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
       if(std::filesystem::exists(preBin, ec)){
         std::string diag;
         if(run_cache::readFileText(preBin + ".diag", diag) && !diag.empty()) err << diag;
+#ifndef _WIN32
+        // Fast handoff: replace this process with the cached binary. The
+        // shell observes the target's own exit code (and signals) exactly
+        // as with fork+wait, minus a second process lifecycle; stdin and
+        // stdout/stderr are inherited across execve. On execve failure
+        // (e.g. a noexec cache mount) fall through to the fork path.
+        err.flush();
+        ::execl(preBin.c_str(), preBin.c_str(), static_cast<char*>(nullptr));
+#endif
         int hit = runBinary(preBin);
         if(hit != 127) return hit < 0 ? kCErr : hit;
         std::filesystem::remove(preBin, ec);
