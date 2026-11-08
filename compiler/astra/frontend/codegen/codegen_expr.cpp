@@ -24,6 +24,7 @@ namespace a::detail {
 // `obj?.field`: None propagates; Some(v) -> Some(v.field) (or v.field when
 // the field itself is optional). Mirrors the old C emitter.
 void AsmEmitter::emitSafeNav(const SafeNavExpr& x, const Expr* e) {
+    (void)e;
     int os = evalSlot(x.object.get());
     int otS = allocSlot(), resS = allocSlot();
     loadSlot(os);
@@ -39,11 +40,19 @@ void AsmEmitter::emitSafeNav(const SafeNavExpr& x, const Expr* e) {
     loadSlot(innerS, "%rdi");
     std::string fl = emitStrData(x.field, true);
     emit("    lea " + fl + "(%rip), %rsi\n    call a_getattr\n");
-    TypePtr t = resolveType(e->inferredType);
-    TypePtr elem = t && t->kind == TypeKind::Optional ? resolveType(t->elem) : nullptr;
-    bool fieldOptional = elem && elem->kind == TypeKind::Optional;
-    if (!fieldOptional) {
+    // If the field is itself optional its value already is None/Some, so do not
+    // wrap it again (that would produce Some(None) and break short-circuiting).
+    // For non-optional (or dynamically typed) fields, flatten a None so chains
+    // like `a?.b?.c` short-circuit instead of yielding Some(None).
+    if (!x.fieldOptional) {
+      std::string vnone = newLabel("safevn"), vdone = newLabel("safevd");
+      movImm(kNone, "%rcx");
+      emit("    cmp %rcx, %rax\n    je " + vnone + "\n");
       emit("    mov %rax, %rdi\n    call a_some_new\n");
+      emit("    jmp " + vdone + "\n");
+      emitLabel(vnone);
+      movImm(kNone);
+      emitLabel(vdone);
     }
     storeRax(resS);
     emit("    jmp " + doneL + "\n");

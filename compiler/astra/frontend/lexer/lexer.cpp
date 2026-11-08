@@ -296,6 +296,7 @@ void Lexer::finalize() {
     eof.span.col = col_;
     eof.span.endLine = line_;
     eof.span.endCol = col_;
+    eof.span.fileId = fileId_;
     tokens_.push_back(std::move(eof));
     return;
   }
@@ -308,6 +309,7 @@ void Lexer::finalize() {
     token.span.col = col_;
     token.span.endLine = line_;
     token.span.endCol = col_ + 1;
+    token.span.fileId = fileId_;
     tokens_.push_back(std::move(token));
   }
   while (indentStack_.size() > 1) {
@@ -318,6 +320,7 @@ void Lexer::finalize() {
     token.span.col = col_;
     token.span.endLine = line_;
     token.span.endCol = col_ + 1;
+    token.span.fileId = fileId_;
     tokens_.push_back(std::move(token));
   }
   Token eof;
@@ -326,6 +329,7 @@ void Lexer::finalize() {
   eof.span.col = col_;
   eof.span.endLine = line_;
   eof.span.endCol = col_;
+  eof.span.fileId = fileId_;
   tokens_.push_back(std::move(eof));
 }
 
@@ -521,6 +525,7 @@ std::vector<Token> Lexer::tokenize() {
     eof.span.col = col_;
     eof.span.endLine = line_;
     eof.span.endCol = col_;
+    eof.span.fileId = fileId_;
     tokens_.push_back(std::move(eof));
     return tokens_;
   }

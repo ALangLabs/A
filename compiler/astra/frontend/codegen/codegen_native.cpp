@@ -2950,7 +2950,19 @@ class NativeEmitter {
         rodata_ << "0\n";
         leaSym(lbl, A(1));
         callSym("a_getattr");
-        callSym("a_some_new");
+        // Already-optional field values are returned as-is so `a?.b` flattens
+        // to None instead of Some(None); for non-optional/dynamic fields wrap a
+        // present value in Some but flatten a None.
+        if (!x.fieldOptional) {
+          std::string vnone = newLabel("safevn");
+          std::string vdone = newLabel("safevd");
+          jmpIfNone(vnone);
+          callSym("a_some_new");
+          jmp(vdone);
+          emitLabel(vnone);
+          movImm(kTag | 0x2ULL, acc());
+          emitLabel(vdone);
+        }
         storeAcc(rs);
         emitLabel(endL);
         loadSlot(rs, acc());

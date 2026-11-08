@@ -374,8 +374,14 @@ void Sema::requireBool(TypePtr type, Span span, const std::string& what) {
     }
 
     void Sema::requireInteger(TypePtr type, Span span, const std::string& what) {
-  (void)type; (void)span; (void)what;
-  // Dynamic: runtime validates/coerces.
+  TypePtr resolved = resolveType(type);
+  if (resolved->kind == TypeKind::Int) return;
+  if (resolved->kind == TypeKind::Var) {
+    if (constrainVar(type, Constraint::Integer)) return;
+    return;
+  }
+  if (resolved->kind == TypeKind::Error) return;
+  sink_.error(span, what + " must be an integer, found " + typePhrase(type) + ".");
 }
 
 TypePtr Sema::requireNumeric(TypePtr type, Span span, const std::string& what) {
@@ -393,9 +399,58 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
       return true;
     }
 
+    namespace {
+    // True when a type still carries an unresolved inference variable anywhere
+    // in its structure. Such a mismatch is not conclusive yet: the variable may
+    // be bound later (e.g. by another branch or a later assignment), so we stay
+    // quiet instead of rejecting code that is merely not fully inferred.
+    bool containsUnresolvedVar(const TypePtr& raw) {
+      TypePtr t = resolveType(raw);
+      if (!t) return true;
+      switch (t->kind) {
+        case TypeKind::Var: return true;
+        case TypeKind::Error: return false;
+        case TypeKind::Array:
+        case TypeKind::Range:
+        case TypeKind::Optional:
+        case TypeKind::Set:
+        case TypeKind::Bytes:
+        case TypeKind::Pointer:
+          return containsUnresolvedVar(t->elem);
+        case TypeKind::Result:
+          return containsUnresolvedVar(t->elem) || containsUnresolvedVar(t->errorType);
+        case TypeKind::Map:
+          if (containsUnresolvedVar(t->elem)) return true;
+          for (const auto& p : t->params) if (containsUnresolvedVar(p)) return true;
+          return false;
+        case TypeKind::Tuple:
+        case TypeKind::Function:
+          for (const auto& p : t->params) if (containsUnresolvedVar(p)) return true;
+          return t->kind == TypeKind::Function && containsUnresolvedVar(t->ret);
+        default:
+          return false;
+      }
+    }
+    }  // namespace
+
     void Sema::reportMismatch(TypePtr actual, TypePtr expected, Span span,
                               const std::string& context) {
-      (void)actual; (void)expected; (void)span; (void)context;
+      TypePtr actualResolved = resolveType(actual);
+      TypePtr expectedResolved = resolveType(expected);
+      // Never complain about an already-failed check or a type that still has
+      // unresolved inference variables: unannotated expressions legitimately
+      // infer as Var and bind later.
+      if (actualResolved->kind == TypeKind::Error || expectedResolved->kind == TypeKind::Error)
+        return;
+      // Only enforce types the programmer wrote down. Element/return types that
+      // were merely inferred (e.g. a list element type from its first append)
+      // stay dynamic, matching the language's Python-style collection behavior.
+      if (!expectedResolved->fromAnnotation) return;
+      if (containsUnresolvedVar(actual) || containsUnresolvedVar(expected)) return;
+      std::string message = "Expected " + typePhrase(expected) + ", found " + typePhrase(actual);
+      if (!context.empty()) message += " " + context;
+      message += ".";
+      sink_.error(span, message);
     }
 
     std::string Sema::typePhrase(const TypePtr& type) const {

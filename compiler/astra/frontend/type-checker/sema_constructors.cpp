@@ -90,6 +90,13 @@ TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
     TypePtr rt = resolveType(effective.paramTypes.back());
     if (rt && rt->kind == TypeKind::Array) varElem = rt->elem;
   }
+  // A parameter written without a type annotation is dynamically typed: the
+  // shared signature variable is inferred from the first call site, so it must
+  // not turn into a hard constraint for later call sites. Only enforce
+  // arguments where the declaration actually names a type.
+  auto declaredParamTyped = [&](std::size_t i) -> bool {
+    return sig.decl && i < sig.decl->params.size() && sig.decl->params[i].type != nullptr;
+  };
   for (std::size_t i = 0; i < call.args.size(); ++i) {
     if (effective.variadic && i + 1 >= total) {
       if (varElem) {
@@ -98,6 +105,12 @@ TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
       } else {
         inferExpr(*call.args[i].value);
       }
+      continue;
+    }
+    if (!declaredParamTyped(i)) {
+      // Dynamically typed parameter: refine its inferred type from the value but
+      // do not turn the shared signature variable into a hard constraint.
+      unify(inferExpr(*call.args[i].value), effective.paramTypes[i]);
       continue;
     }
     checkArgAgainst(*call.args[i].value, effective.paramTypes[i],

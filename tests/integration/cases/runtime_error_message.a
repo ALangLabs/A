@@ -1,0 +1,6 @@
+# Runtime type errors use A wording, not Python-style "'NoneType' object...".
+fn get_field(v):
+    return v.foo
+
+fn main():
+    print(get_field(None))

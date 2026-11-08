@@ -273,7 +273,7 @@ aval a_setattr(aval obj, const char *name, aval v) {
         a_dict_set(obj, k, v);
         return v;
     }
-    panicf("'%s' object has no attribute '%s'", type_name_cstr(obj), name);
+    panicf("Values of type '%s' have no field '%s'.", type_name_error_cstr(obj), name);
     return A_NONE;
 }
 
@@ -359,6 +359,10 @@ static void test_report(const char *name, const char *msg, int ok,
        section is noise in the one-line test report. */
     char *tb = strstr(p, "\nTraceback");
     if (tb) *tb = 0;
+    /* Drop the source-location line (`  --> file:line`) too: the test report
+       is a single line and must not embed machine-specific absolute paths. */
+    char *loc = strstr(p, "\n  --> ");
+    if (loc) *loc = 0;
     ml = strlen(p);
     while (ml > 0 && (p[ml - 1] == '\n' || p[ml - 1] == '\r')) p[--ml] = 0;
     printf("FAILED %s: %s\n", name, p);

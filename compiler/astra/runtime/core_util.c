@@ -23,7 +23,88 @@ static A_RT_TLS AFrame *g_frames;
 static A_RT_TLS size_t g_nframes;
 static A_RT_TLS size_t g_capframes;
 
+/* --------------------------------------------------------------- */
+/* native stack-overflow guard                                     */
+/*                                                                 */
+/* Deep or unbounded recursion used to die with a bare SIGSEGV (exit */
+/* 139) and no message. We watch the native stack from a_frame_push */
+/* (emitted in every function prologue) and abort with a clean A     */
+/* error before the guard page is reached.                          */
+/* --------------------------------------------------------------- */
+#ifndef A_STACK_GUARD_MARGIN
+#define A_STACK_GUARD_MARGIN (128u * 1024u)
+#endif
+#ifndef A_STACK_GUARD_BUDGET
+#define A_STACK_GUARD_BUDGET (512u * 1024u)
+#endif
+
+#if defined(__linux__) && !defined(__TINYC__)
+static A_RT_TLS char *g_stack_lo;      /* lowest usable address */
+static A_RT_TLS size_t g_stack_size;   /* usable size in bytes */
+static A_RT_TLS int g_stack_have_bounds;
+#endif
+static A_RT_TLS int g_stack_guard_init;
+static A_RT_TLS char *g_stack_probe;   /* shallowest observed SP */
+
+static void print_frame_line(const AFrame *f) {
+    const char *file = f->file && *f->file ? f->file : "?";
+    const char *name = f->name && *f->name ? f->name : "?";
+    if (f->line > 0)
+        fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, f->line, name);
+    else
+        fprintf(stderr, "  File \"%s\", in %s\n", file, name);
+}
+
+static void stack_overflow_error(uintptr_t sp) {
+    (void)sp;
+    fputs("error: stack overflow (possible infinite recursion)\n", stderr);
+    if (g_nframes) {
+        /* Print only the most recent frames: the deepest recursion is the
+           useful part of the trace and avoids a multi-megabyte dump. */
+        size_t start = g_nframes > 24 ? g_nframes - 24 : 0;
+        fputs("Traceback (most recent call last):\n", stderr);
+        if (start > 0) fprintf(stderr, "  ... %zu earlier frames ...\n", start);
+        for (size_t i = start; i < g_nframes; ++i) print_frame_line(&g_frames[i]);
+    }
+    fflush(stderr);
+    exit(2);
+}
+
+static void stack_guard_check(void) {
+    uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+    if (!g_stack_guard_init) {
+        g_stack_guard_init = 1;
+        g_stack_probe = (char *)sp;
+#if defined(__linux__) && !defined(__TINYC__)
+        pthread_attr_t attr;
+        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+            void *base = NULL;
+            size_t size = 0;
+            if (pthread_attr_getstack(&attr, &base, &size) == 0 && base && size) {
+                g_stack_lo = (char *)base;
+                g_stack_size = size;
+                g_stack_have_bounds = 1;
+            }
+            pthread_attr_destroy(&attr);
+        }
+#endif
+    }
+#if defined(__linux__) && !defined(__TINYC__)
+    if (g_stack_have_bounds) {
+        uintptr_t lo = (uintptr_t)g_stack_lo;
+        if (sp < lo + A_STACK_GUARD_MARGIN) stack_overflow_error(sp);
+        return;
+    }
+#endif
+    if ((uintptr_t)g_stack_probe > sp) {
+        if ((uintptr_t)g_stack_probe - sp > A_STACK_GUARD_BUDGET) stack_overflow_error(sp);
+    } else {
+        g_stack_probe = (char *)sp;
+    }
+}
+
 void a_frame_push(const char *name, const char *file, int line) {
+    stack_guard_check();
     if (g_nframes == g_capframes) {
         size_t ncap = g_capframes ? g_capframes * 2 : 64;
         AFrame *nf = (AFrame *)xrealloc(g_frames, ncap * sizeof(AFrame));
@@ -43,15 +124,13 @@ void a_frame_pop(void) {
 static void print_traceback(void) {
     if (!g_nframes) return;
     fputs("Traceback (most recent call last):\n", stderr);
-    for (size_t i = 0; i < g_nframes; ++i) {
-        const AFrame *f = &g_frames[i];
-        const char *file = f->file && *f->file ? f->file : "?";
-        const char *name = f->name && *f->name ? f->name : "?";
-        if (f->line > 0)
-            fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, f->line, name);
-        else
-            fprintf(stderr, "  File \"%s\", in %s\n", file, name);
+    /* Cap the dump so a deep recursion does not flood the terminal. */
+    size_t start = 0;
+    if (g_nframes > 64) {
+        start = g_nframes - 64;
+        fprintf(stderr, "  ... %zu earlier frames ...\n", start);
     }
+    for (size_t i = start; i < g_nframes; ++i) print_frame_line(&g_frames[i]);
 }
 
 void panicf(const char *fmt, ...) {
@@ -61,6 +140,15 @@ void panicf(const char *fmt, ...) {
     vfprintf(stderr, fmt, ap);
     fputc('\n', stderr);
     va_end(ap);
+    // Point at the innermost A frame so the message carries a source location
+    // even before the full traceback (and when a builder only shows one line).
+    for (size_t i = g_nframes; i-- > 0;) {
+        const AFrame *f = &g_frames[i];
+        if (f->file && *f->file && f->line > 0) {
+            fprintf(stderr, "  --> %s:%d\n", f->file, f->line);
+            break;
+        }
+    }
     print_traceback();
     exit(2);
 }

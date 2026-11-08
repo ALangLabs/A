@@ -102,7 +102,7 @@ aval a_getattr(aval obj, const char *name) {
     }
     AObj *o = obj_of(obj);
     if (o && o->type == T_PYOBJ) return a_py_getattr(obj, name);
-    panicf("'%s' object has no attribute '%s'", type_name_cstr(obj), name);
+    panicf("Values of type '%s' have no field '%s'.", type_name_error_cstr(obj), name);
     return A_NONE;
 }
 

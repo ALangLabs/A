@@ -72,6 +72,25 @@ aval a_type_name(aval v) {
     return a_str_new(s, strlen(s));
 }
 
+/* Type name used in error messages: the A spelling, not the Python-style
+   historical `type()` names (NoneType/list/dict/str). */
+const char *type_name_error_cstr(aval v) {
+    switch (kind_of(v)) {
+        case K_NONE: return "None";
+        case K_STR: return "String";
+        case K_LIST: return "array";
+        case K_DICT: return "map";
+        case K_SET: return "set";
+        case K_RANGE: return "range";
+        case K_ITER: return "iterator";
+        case K_FNON: return "function";
+        case K_ENV: return "closure";
+        case K_RESULT: return "Result";
+        case K_VIEW: return "view";
+        default: return type_name_cstr(v);
+    }
+}
+
 int a_obj_is_instance(aval v, const char *type_name) {
     if (!type_name) return 0;
     return strcmp(type_name_cstr(v), type_name) == 0;

@@ -400,7 +400,9 @@ TypePtr Sema::inferSafeNav(SafeNavExpr& expr) {
   if (structIt == structs_.end()) return typeError();
   for (const auto& field : structIt->second.fields) {
     if (field.first != expr.field) continue;
-    if (resolveType(field.second)->kind == TypeKind::Optional) return field.second;
+    bool isOptional = resolveType(field.second)->kind == TypeKind::Optional;
+    expr.fieldOptional = isOptional;
+    if (isOptional) return field.second;
     return typeOptional(field.second);
   }
   sink_.error(expr.fieldSpan,

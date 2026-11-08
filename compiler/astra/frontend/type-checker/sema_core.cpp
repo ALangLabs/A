@@ -313,6 +313,14 @@ bool Sema::unify(TypePtr a, TypePtr b) {
   if (a->kind == TypeKind::Var) return bindVar(a, b);
   if (b->kind == TypeKind::Var) return bindVar(b, a);
   if (isNumericType(a) && isNumericType(b)) return true;
+  // `Json` is the dynamic payload type produced by the json/binary modules; a
+  // value of any type may flow in and out of it (the runtime validates on use).
+  if (a->kind == TypeKind::Json || b->kind == TypeKind::Json) return true;
+  // Implicit optional wrapping: a `T` is accepted where a `T?` is expected
+  // (and an optional value where its payload type is expected), mirroring the
+  // way `return x` satisfies `-> T?` and `f(point)` satisfies `p: Point?`.
+  if (a->kind == TypeKind::Optional && b->kind != TypeKind::Optional) return unify(a->elem, b);
+  if (b->kind == TypeKind::Optional && a->kind != TypeKind::Optional) return unify(a, b->elem);
   if (a->kind != b->kind) return false;
 
   switch (a->kind) {
@@ -393,7 +401,26 @@ bool Sema::constrainVar(TypePtr var, Constraint constraint) {
   return false;
 }
 
+namespace {
+// Mark a type tree (and everything nested in it) as written explicitly in
+// source, so the checker knows which mismatches are annotation violations.
+void markFromAnnotation(const TypePtr& t) {
+  if (!t) return;
+  t->fromAnnotation = true;
+  markFromAnnotation(t->elem);
+  markFromAnnotation(t->errorType);
+  markFromAnnotation(t->ret);
+  for (const auto& p : t->params) markFromAnnotation(p);
+}
+}  // namespace
+
 TypePtr Sema::resolveTypeExpr(TypeExpr& expr) {
+  TypePtr type = resolveTypeExprImpl(expr);
+  markFromAnnotation(type);
+  return type;
+}
+
+TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
   if (auto* array = dynamic_cast<ArrayTypeExpr*>(&expr)) {
     return typeArray(resolveTypeExpr(*array->element), array->length);
   }
@@ -514,6 +541,7 @@ TypePtr Sema::instantiateType(TypePtr type, const std::unordered_map<TypePtr, Ty
     fresh->constraint = type->constraint;
     fresh->allowDefault = type->allowDefault;
     fresh->allowUnresolved = type->allowUnresolved;
+    fresh->fromAnnotation = type->fromAnnotation;
     fresh->varDescription = type->varDescription;
     fresh->varSpan = type->varSpan;
     return fresh;
@@ -524,6 +552,7 @@ TypePtr Sema::instantiateType(TypePtr type, const std::unordered_map<TypePtr, Ty
   result->structName = type->structName;
   result->moduleId = type->moduleId;
   result->length = type->length;
+  result->fromAnnotation = type->fromAnnotation;
   if (type->elem) result->elem = instantiateType(type->elem, mapping);
   if (type->errorType) result->errorType = instantiateType(type->errorType, mapping);
   if (type->ret) result->ret = instantiateType(type->ret, mapping);

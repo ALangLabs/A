@@ -1,0 +1,13 @@
+# `a?.b` flattens: an optional field yields None (not Some(None)), and chained
+# safe navigation short-circuits instead of dereferencing None.
+class Node:
+    v
+    next
+
+fn main():
+    inner = Node(2, None)
+    n = Node(1, inner)
+    r = n.next?.next
+    print(r)
+    print(r == None)
+    print(r?.v)

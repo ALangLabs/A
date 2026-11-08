@@ -432,8 +432,12 @@ void Sema::checkReturn(ReturnStmt& stmt) {
       return;
     }
     if (!unify(valueType, expected)) {
-      reportMismatch(valueType, expected, stmt.value->span,
-                     "in the return value of '" + currentFunction_->name + "'");
+      // A function with no declared return type has its return inferred (and is
+      // dynamically typed in practice), so do not hard-fail later `return`s
+      // that disagree with the first one; only enforce an explicit `-> T`.
+      if (currentFunction_->returnType)
+        reportMismatch(valueType, expected, stmt.value->span,
+                       "in the return value of '" + currentFunction_->name + "'");
     } else {
       checkFixedArrayLength(*stmt.value, expected);
     }

@@ -171,6 +171,10 @@ struct SafeNavExpr : Expr {
   ExprPtr object;
   std::string field;
   Span fieldSpan;
+  // Set by sema: true when the accessed field is itself optional (so the
+  // attribute value already is `None`/`Some(...)` and must not be wrapped
+  // again). Keeps `a?.b` flattening instead of producing `Some(None)`.
+  bool fieldOptional = false;
 };
 
 struct ArrayLitExpr : Expr {

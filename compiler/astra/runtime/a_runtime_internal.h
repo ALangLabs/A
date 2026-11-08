@@ -369,6 +369,7 @@ void dict_clear(ADict *d);
 int set_contains(AArr *s, aval v);
 int kind_of(aval v);
 const char *type_name_cstr(aval v);
+const char *type_name_error_cstr(aval v);
 aval a_type_name(aval v);
 int a_obj_is_instance(aval v, const char *type_name);
 void format_into(Buf *b, aval v, int quote);

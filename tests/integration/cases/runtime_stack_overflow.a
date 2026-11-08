@@ -1,0 +1,6 @@
+# Unbounded recursion reports a clean stack-overflow error instead of SIGSEGV.
+fn spin(n: int) -> int:
+    return spin(n + 1)
+
+fn main():
+    print(spin(0))

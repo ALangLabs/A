@@ -204,6 +204,7 @@ class Sema {
   bool occursIn(TypePtr var, TypePtr type);
   bool constrainVar(TypePtr var, Constraint constraint);
   TypePtr resolveTypeExpr(TypeExpr& expr);
+  TypePtr resolveTypeExprImpl(TypeExpr& expr);
   TypePtr instantiateType(TypePtr type, const std::unordered_map<TypePtr, TypePtr>& mapping);
   TypePtr makeSignatureTypes(FnDecl& decl, TypePtr selfType, FnSig& sig);
 
