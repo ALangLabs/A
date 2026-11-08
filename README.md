@@ -163,7 +163,7 @@ operating systems):
 | `arm` (ARMv7 hard-float) | native ARM asm emitter (C fallback) → `astra-arm` | verified under qemu-armhf |
 | `aarch64` / `arm64` | native AArch64 asm emitter (C fallback) → `astra-arm64` | needs AArch64 sysroot |
 | `riscv64` | native RISC-V64 asm emitter (C fallback) → `astra-riscv64` | needs RISC-V64 sysroot |
-| `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc, no sysroot, no `a run`/`a test` |
+| `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc/sysroot; `a run` via qemu-system-i386, `a test` unsupported |
 
 `a run`, `a test` and `a repl` always execute natively and reject non-host
 targets. Linking a cross binary requires the target C library: install the
@@ -188,12 +188,14 @@ arithmetic/comparisons and decimal `print` of ints; other builtins are
 stubs returning `none` (non-int `print` args show `?`). Real-mode CS:IP is
 16-bit, so `.text` must fit in a single 64 KiB code segment at 0x10000 —
 the emitter dead-strips unreachable functions to stay under it. The astra
-i8086 driver is built on Linux hosts only, `a run`/`a test`/`a repl`
-reject it (nothing to execute natively), and there is no automated harness
-yet — run the image manually, e.g.
-`qemu-system-i386 -drive format=raw,file=img -nographic -device isa-debug-exit,iobase=0xf4`
-(`-nographic` routes COM1 to stdio; the isa-debug-exit device turns the
-port-0xF4 exit write into a QEMU exit code). Windows has a first-pass
+i8086 driver is built on Linux hosts only. `a run --target i8086` builds
+the image and executes it under `qemu-system-i386` (COM1 on stdio,
+isa-debug-exit on port 0xF4); `a test`/`a repl` still reject it.
+`tests/integration/i8086_image.sh` is the automated harness — it builds an
+image and diffs serial output against an expected `.out` file. To run an
+image manually:
+`qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
+Windows has a first-pass
 `_WIN32` port of the driver pipeline
 (`CreateProcess`, `GetTempPath`, `GetModuleFileName` in `pipeline.cpp`)
 but is untested — it still needs a Windows astra driver build, PE link

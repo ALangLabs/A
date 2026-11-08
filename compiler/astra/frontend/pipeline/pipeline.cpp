@@ -365,6 +365,30 @@ int runBinary(const std::string& path){
   if(WIFEXITED(status)) return WEXITSTATUS(status);
   return 128+WTERMSIG(status);
 }
+// i8086 produces a flat boot image, not a host executable. Run it under
+// qemu-system-i386 with COM1 on stdio and isa-debug-exit on port 0xf4.
+// The guest _entry writes 42, which QEMU reports as exit status 85; map
+// that to success and propagate real failures.
+int runI8086Image(const std::string& img){
+  pid_t pid=fork();
+  if(pid<0) return 127;
+  if(pid==0){
+    std::vector<std::string> args={"qemu-system-i386",
+      "-drive", "format=raw,file="+img,
+      "-serial", "stdio",
+      "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+      "-display", "none", "-no-reboot"};
+    std::vector<char*> av;
+    for(auto& s:args) av.push_back(const_cast<char*>(s.c_str()));
+    av.push_back(nullptr);
+    execvp(av[0], av.data());
+    _exit(127);
+  }
+  int status=0;
+  while(waitpid(pid,&status,0)<0){ if(errno!=EINTR) return 127; }
+  if(WIFEXITED(status)){ int rc=WEXITSTATUS(status); return rc==85?0:rc; }
+  return 128+WTERMSIG(status);
+}
 #endif
 
 std::string tempPath(const char* tag,const std::string& name=""){
@@ -775,6 +799,14 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   std::error_code ec;
   std::filesystem::remove(srcPath, ec);
   if (rc != 0) { std::filesystem::remove(runPath, ec); return kCErr; }
+#ifndef _WIN32
+  if (td->arch == "i8086") {
+    int qrc = runI8086Image(runPath);
+    if (!keepBin) std::filesystem::remove(runPath, ec);
+    if (qrc == 127) { err << "error: qemu-system-i386 not found (required for --target i8086 run)\n"; return kCErr; }
+    return qrc;
+  }
+#endif
   if (!td->native) {
     // Cross target: the binary was produced but cannot run on this host.
     if (!keepBin) std::filesystem::remove(runPath, ec);
@@ -802,7 +834,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   // as a child process — host targets only.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
-  if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
+  if(!td.native && !(td.arch=="i8086" && hostOs()=="linux")){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
   return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td);
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){

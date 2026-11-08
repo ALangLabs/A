@@ -34,13 +34,14 @@ language server; the VS Code extension wraps both.
   `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
   anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
   paths that must be rewritten relative to the sysroot lib dir).
-  `a run`/`a test`/`a repl` always execute natively and reject other targets.
+  `a run` executes natively (i8086 via qemu-system-i386); `a test`/`a repl`
+  reject non-host targets.
 
 ### `i8086` bare-metal target
 
 `--target i8086` (aliases `i86`, `8086`, `8088`) emits a flat real-mode
-boot image instead of an executable — no libc, no sysroot, no `a run`/
-`a test`. Details:
+boot image instead of an executable — no libc, no sysroot, no `a test`;
+`a run` executes the image under qemu-system-i386. Details:
 
 - The output is a BIOS boot sector at 0x7C00 with an `int 13h` CHS loader
   (AH=08h drive geometry + AH=02h reads) that pulls the remaining sectors
@@ -54,11 +55,10 @@ boot image instead of an executable — no libc, no sysroot, no `a run`/
   comparisons plus decimal `print` of ints. `print` writes to COM1
   (0x3F8); other builtins are stubs returning `none` (non-int `print`
   args show `?`).
-- Program exit writes 42 to port 0xF4 and halts. There is no automated
-  harness yet; run manually, e.g.
-  `qemu-system-i386 -drive format=raw,file=img -nographic -device isa-debug-exit,iobase=0xf4`
-  (`-nographic` routes COM1 to stdio; isa-debug-exit turns the port write
-  into a QEMU exit code).
+- Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
+  wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
+  `tests/integration/i8086_image.sh` is the automated harness. Manual run:
+  `qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
 - The `astra-i8086` driver is built on Linux hosts only. The astra i8086
   backend is assembler-only, so if the native emitter declines a program
   the portable-C fallback cannot rescue it — the build fails at the astra
