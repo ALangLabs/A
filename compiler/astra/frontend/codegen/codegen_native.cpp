@@ -258,7 +258,7 @@ int builtinRuntimeId(const std::string& name) {
       {"net_tls_wrap", 216}, {"net_inflate_bytes", 217},
             {"net_inflate_available", 218},
       {"bytes_decode_utf8", 222}, {"str_encode_utf8", 223},
-      {"net_recv_exact", 224},
+      {"net_recv_exact", 224}, {"net_recv_body", 225}, {"net_recv_body_all", 226},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -4068,6 +4068,252 @@ struct I8086Target : I386Target {
   }
 };
 
+// ------------------------------------------------------------- Win64 -----
+// Windows x86-64 (MS ABI): retval/acc = rax, integer arg regs
+// rcx,rdx,r8,r9; args 5+ go on the stack at [rsp+0x20+8*(i-4)]. Every call
+// needs a 32-byte shadow space, so the frame reserves kOut bytes at
+// [rsp+0): [0,0x20) shadow, [0x20,kOut) outgoing stack args, then the
+// emitter's 8-byte slots. Only volatile regs are used (rax,rcx,rdx,r8,r9,
+// r10,r11) so prologue/epilogue just adjust rsp; rbp is never touched on
+// the small-frame path.
+//
+// Stack probing: frames whose total allocation exceeds 4KiB must go
+// through __chkstk (win32/lib/chkstk.S inside libastra1.a). That helper
+// is passed the slot-region size in eax and performs the subtraction
+// itself: it leaves rsp at entry-8-eax — exactly where
+// `sub rsp, frameBytes+8` would put it — but also leaves rbp holding a
+// frame pointer, with the caller's rbp saved at [rsp+frameBytes]; we
+// restore it explicitly. chkstk clobbers rax/rcx (both volatile).
+//
+// Known gaps: no .pdata/.xdata unwind info is emitted (the astra C
+// emitter generates it via pe_add_unwind_data; asm has no equivalent),
+// so SEH cannot unwind through these frames — fine until an exception
+// or stack walk crosses them. No xmm/float regs are needed: avals are
+// integer words and all semantics go through a_* runtime calls.
+struct Win64Target : NatTarget {
+  static constexpr int kShadow = 0x20;
+  static constexpr int kStackArgs = 4;
+  static constexpr int kOut = kShadow + 8 * kStackArgs;  // 0x40
+
+  int frameReserve() const override { return kOut; }
+  int nArgRegs() const override { return 4 + kStackArgs; }
+  std::string acc() const override { return "rax"; }
+  std::string argReg(int i) const override {
+    static const char* k[] = {"rcx", "rdx", "r8", "r9"};
+    if (i >= 0 && i < 4) return k[i];
+    // "@sN" pseudo-register: outgoing stack-arg slot N (arg index 4+N).
+    return "@s" + std::to_string(i - 4);
+  }
+  std::string tmpReg(int i) const override {
+    return i == 0 ? "r10" : "r11";
+  }
+
+  // "@sN" -> stack-arg slot index, else -1.
+  static int stackArg(const std::string& r) {
+    if (r.size() >= 3 && r[0] == '@' && r[1] == 's' &&
+        r[2] >= '0' && r[2] <= '3' && r.size() == 3)
+      return r[2] - '0';
+    return -1;
+  }
+  static std::string sref(int i) {
+    return std::to_string(kShadow + 8 * i) + "(%rsp)";
+  }
+  static std::string slotMem(int i) {
+    return std::to_string(kOut + 8 * (int64_t)i) + "(%rsp)";
+  }
+  static std::string pct(const std::string& r) { return "%" + r; }
+
+  void prologue(std::string& o, int frameBytes) const override {
+    int total = frameBytes + 8;  // entry rsp%16==8 -> body rsp%16==0
+    char buf[96];
+    if (total >= 4096) {
+      std::snprintf(buf, sizeof buf,
+                    "    mov $0x%x, %%eax\n    call __chkstk\n"
+                    "    mov %d(%%rsp), %%rbp\n",
+                    frameBytes, frameBytes);
+      o += buf;
+    } else {
+      std::snprintf(buf, sizeof buf, "    sub $0x%x, %%rsp\n", total);
+      o += buf;
+    }
+  }
+  void epilogue(std::string& o, int frameBytes) const override {
+    char buf[64];
+    std::snprintf(buf, sizeof buf, "    add $0x%x, %%rsp\n    ret\n",
+                  frameBytes + 8);
+    o += buf;
+  }
+  std::string slotRef(int i) const override { return slotMem(i); }
+  void movImm(std::string& o, uint64_t v, const std::string& r) const override {
+    char buf[80];
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      std::snprintf(buf, sizeof buf, "    mov $0x%llx, %%r11\n    mov %%r11, %s\n",
+                    (unsigned long long)v, sref(sa).c_str());
+    } else {
+      std::snprintf(buf, sizeof buf, "    mov $0x%llx, %%%s\n",
+                    (unsigned long long)v, r.c_str());
+    }
+    o += buf;
+  }
+  void movReg(std::string& o, const std::string& d,
+              const std::string& s) const override {
+    if (d == s) return;
+    int dd = stackArg(d), ds = stackArg(s);
+    if (dd >= 0) {
+      if (ds >= 0)
+        o += "    mov " + sref(ds) + ", %r11\n";
+      else
+        o += "    mov " + pct(s) + ", %r11\n";
+      o += "    mov %r11, " + sref(dd) + "\n";
+    } else if (ds >= 0) {
+      o += "    mov " + sref(ds) + ", " + pct(d) + "\n";
+    } else {
+      o += "    mov " + pct(s) + ", " + pct(d) + "\n";
+    }
+  }
+  void loadSlot(std::string& o, int slot, const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + slotMem(slot) + ", %r11\n    mov %r11, " +
+           sref(sa) + "\n";
+    } else {
+      o += "    mov " + slotMem(slot) + ", " + pct(r) + "\n";
+    }
+  }
+  void storeSlot(std::string& o, const std::string& r, int slot) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r11\n    mov %r11, " +
+           slotMem(slot) + "\n";
+    } else {
+      o += "    mov " + pct(r) + ", " + slotMem(slot) + "\n";
+    }
+  }
+  void loadSlotAt(std::string& o, const std::string& baseReg,
+                  int64_t byteOff, const std::string& dstReg) const override {
+    int sa = stackArg(dstReg);
+    if (sa >= 0) {
+      o += "    mov " + std::to_string(byteOff) + "(%" + baseReg +
+           "), %r11\n    mov %r11, " + sref(sa) + "\n";
+    } else {
+      o += "    mov " + std::to_string(byteOff) + "(%" + baseReg + "), " +
+           pct(dstReg) + "\n";
+    }
+  }
+  void copySlot(std::string& o, int from, int to) const override {
+    o += "    mov " + slotMem(from) + ", %r11\n    mov %r11, " +
+         slotMem(to) + "\n";
+  }
+  void leaSlot(std::string& o, int slot, const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    lea " + slotMem(slot) + ", %r11\n    mov %r11, " +
+           sref(sa) + "\n";
+    } else {
+      o += "    lea " + slotMem(slot) + ", " + pct(r) + "\n";
+    }
+  }
+  void leaSym(std::string& o, const std::string& sym,
+              const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    lea " + sym + "(%rip), %%r11\n    mov %%r11, " +
+           sref(sa) + "\n";
+    } else {
+      o += "    lea " + sym + "(%rip), " + pct(r) + "\n";
+    }
+  }
+  void loadSym(std::string& o, const std::string& sym,
+               const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sym + "(%rip), %%r11\n    mov %%r11, " +
+           sref(sa) + "\n";
+    } else {
+      o += "    mov " + sym + "(%rip), " + pct(r) + "\n";
+    }
+  }
+  void storeSym(std::string& o, const std::string& sym,
+                const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r11\n    mov %r11, " + sym +
+           "(%rip)\n";
+    } else {
+      o += "    mov " + pct(r) + ", " + sym + "(%rip)\n";
+    }
+  }
+  void callSym(std::string& o, const std::string& sym) const override {
+    o += "    call " + sym + "\n";
+  }
+  void jmp(std::string& o, const std::string& l) const override {
+    o += "    jmp " + l + "\n";
+  }
+  void jcc(std::string& o, const std::string& cc,
+           const std::string& l) const override {
+    static const std::unordered_map<std::string, std::string> m = {
+        {"eq", "je"}, {"ne", "jne"}, {"lt", "jl"}, {"le", "jle"},
+        {"gt", "jg"}, {"ge", "jge"}};
+    o += "    " + m.at(cc) + " " + l + "\n";
+  }
+  void jz(std::string& o, const std::string& r,
+          const std::string& l) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r11\n    test %r11, %r11\n";
+    } else {
+      o += "    test " + pct(r) + ", " + pct(r) + "\n";
+    }
+    o += "    jz " + l + "\n";
+  }
+  void jnz(std::string& o, const std::string& r,
+           const std::string& l) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r11\n    test %r11, %r11\n";
+    } else {
+      o += "    test " + pct(r) + ", " + pct(r) + "\n";
+    }
+    o += "    jnz " + l + "\n";
+  }
+  // cmpRegs(a,b) emits `cmp %b, %a` (computes a-b); jcc maps signed cc.
+  // Stack-arg operands are rare (never used by the emitter today); they
+  // are materialized through r10/r11 scratch.
+  void cmpRegs(std::string& o, const std::string& a,
+               const std::string& b) const override {
+    int sa = stackArg(a), sb = stackArg(b);
+    if (sa >= 0 && sb >= 0) {
+      o += "    mov " + sref(sa) + ", %r10\n    mov " + sref(sb) +
+           ", %r11\n    cmp %r11, %r10\n";
+    } else if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r10\n    cmp " + pct(b) + ", %r10\n";
+    } else if (sb >= 0) {
+      o += "    mov " + sref(sb) + ", %r11\n    cmp %r11, " + pct(a) + "\n";
+    } else {
+      o += "    cmp " + pct(b) + ", " + pct(a) + "\n";
+    }
+  }
+  void addImm(std::string& o, const std::string& r, int64_t v) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    mov " + sref(sa) + ", %r11\n    add $" +
+           std::to_string(v) + ", %r11\n    mov %r11, " + sref(sa) + "\n";
+    } else {
+      o += "    add $" + std::to_string(v) + ", " + pct(r) + "\n";
+    }
+  }
+  void zeroReg(std::string& o, const std::string& r) const override {
+    int sa = stackArg(r);
+    if (sa >= 0) {
+      o += "    xor %r11, %r11\n    mov %r11, " + sref(sa) + "\n";
+    } else {
+      o += "    xor " + pct(r) + ", " + pct(r) + "\n";
+    }
+  }
+  void ret(std::string& o) const override { o += "    ret\n"; }
+};
+
 // Dead-function elimination for bare-metal targets: real-mode CS:IP is
 // 16-bit so .text must stay under 64KB, and the boot sector only loads
 // 512 bytes. The emitter produces every function in the module graph;
@@ -4227,11 +4473,24 @@ void gcAsmFunctions(std::string& src) {
 }  // namespace
 
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
-                const std::string& arch, std::string& out,
-                std::string& error, bool testMode) {
+                const std::string& arch, const std::string& os,
+                std::string& out, std::string& error, bool testMode) {
   if (const char* forced = std::getenv("A_CODEGEN");
       forced && std::string(forced) == "c") {
     error = "native backend: disabled by A_CODEGEN=c";
+    return false;
+  }
+  // Windows x86-64 uses the MS ABI (Win64Target); every other OS/arch
+  // combination keeps its existing target (or declines for emitC).
+  if (arch == "x86_64" && os == "windows") {
+    Win64Target t;
+    NativeEmitter e(graph, sema, t, testMode);
+    return e.run(out, error);
+  }
+  // The remaining NatTargets emit SysV-style assembly only; on Windows
+  // they would produce the wrong ABI, so decline to emitC instead.
+  if (os == "windows") {
+    error = "native backend: no native target for '" + arch + "' on windows";
     return false;
   }
   if (arch == "arm64" || arch == "aarch64") {

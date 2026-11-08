@@ -37,22 +37,17 @@ bool emitC(const ModuleGraph& graph, const SemaResult& sema, std::string& out,
            std::string& error, bool testMode = false);
 
 // Emits target-native assembly (A -> .s -> astra -> machine code) for the
-// given arch ("arm64"/"aarch64", "riscv64", "i386", "arm", "i8086" today;
-// more targets plug into the same NatTarget layer). No C intermediate:
-// values are aval words in frame slots, all semantics via a_*_slow runtime
-// calls. Returns false and fills `error` for unimplemented arches or
-// uncovered constructs so the pipeline can fall back to emitC.
+// given arch ("arm64"/"aarch64", "riscv64", "i386", "arm", "i8086", and
+// "x86_64"+os=="windows" today; more targets plug into the same NatTarget
+// layer). No C intermediate: values are aval words in frame slots, all
+// semantics via a_*_slow runtime calls. Returns false and fills `error`
+// for unimplemented arches or uncovered constructs so the pipeline can
+// fall back to emitC.
 //
-// Known gap: there is no x86-64 Windows (MS-ABI/PE) target. The astra
-// backend itself supports it (ASTRA_TARGET_X86_64 + ASTRA_TARGET_PE,
-// astrape.c/astracoff.c, win32/lib import libs), but emitNative has no
-// Win64 NatTarget and emitAsm is SysV-only, so Windows x86-64 hosts always
-// take the emitC path. A Windows native backend needs a Win64 calling
-// convention (RCX/RDX/R8/R9 args, 32-byte shadow space, chkstk probing),
-// SEH/.pdata-.xdata unwinding instead of SysV CFI, COFF/PE relocations,
-// and the crt1.c/_runmain entry — all of which the astra side already
-// provides for the C emitter.
+// x86_64+windows uses the Win64 MS ABI (rcx/rdx/r8/r9 args, 32-byte
+// shadow space, __chkstk probing for >4KiB frames). Gap: no SEH
+// .pdata/.xdata unwind info is emitted for asm functions.
 bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
-                const std::string& arch, std::string& out,
-                std::string& error, bool testMode = false);
+                const std::string& arch, const std::string& os,
+                std::string& out, std::string& error, bool testMode = false);
 }  // namespace a
