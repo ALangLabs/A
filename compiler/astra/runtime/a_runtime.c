@@ -263,53 +263,180 @@ aval a_setattr(aval obj, const char *name, aval v) {
 
 #if !defined(_WIN32)
 /* `a test` harness: fork per test so assertion panics don't stop the suite.
-   Mirrors the protocol the C codegen used to emit inline. */
+   Tests run in concurrent batches of up to `concurrency` children — each
+   child has its own address space, so there is no shared-heap hazard, and
+   results are printed in declaration order after each batch drains. A
+   child's stderr (where panicf writes) is captured through a pipe exactly
+   like the serial harness; pipes are drained with poll() while children
+   run so a noisy test cannot deadlock on a full pipe buffer.
+   A_TEST_JOBS=N overrides the batch size (1 = old serial behavior);
+   the default is min(online CPUs, 32, n). */
+
+typedef struct {
+    pid_t pid;
+    int fd;          /* read end of the child's stderr pipe */
+    char *buf;       /* captured stderr (first A_TEST_CAPTURE bytes) */
+    size_t len;
+    int done;
+    int status;
+} ATestSlot;
+
+#define A_TEST_CAPTURE 65536
+#define A_TEST_MAX_JOBS 32
+
+static int test_concurrency(uint64_t n) {
+    long k;
+    const char *e = getenv("A_TEST_JOBS");
+    if (e && *e) {
+        k = strtol(e, NULL, 10);
+        if (k < 1) k = 1;
+        if (k > A_TEST_MAX_JOBS) k = A_TEST_MAX_JOBS;
+    } else {
+        k = sysconf(_SC_NPROCESSORS_ONLN);
+        if (k < 1) k = 1;
+        if (k > A_TEST_MAX_JOBS) k = A_TEST_MAX_JOBS;
+    }
+    if ((uint64_t)k > n) k = (long)n;
+    return (int)k;
+}
+
+static void slot_capture(ATestSlot *s, const char *data, ssize_t r) {
+    /* Keep the first A_TEST_CAPTURE bytes; keep draining past that so the
+       child never blocks on a full pipe. */
+    if (s->len < A_TEST_CAPTURE) {
+        size_t room = A_TEST_CAPTURE - s->len;
+        size_t take = (size_t)r < room ? (size_t)r : room;
+        memcpy(s->buf + s->len, data, take);
+        s->len += take;
+    }
+}
+
+/* Returns 1 on EOF (or a hard read error — treat the child as finished),
+   0 when the pipe is drained for now (EAGAIN) and the child may live. */
+static int slot_drain(ATestSlot *s) {
+    char tmp[16384];
+    for (;;) {
+        ssize_t r = read(s->fd, tmp, sizeof(tmp));
+        if (r > 0) { slot_capture(s, tmp, r); continue; }
+        if (r == 0) return 1; /* EOF: every write end is closed */
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        return 1; /* other errors: stop reading, reap the child */
+    }
+}
+
+static void test_report(const char *name, const char *msg, int ok,
+                        int *passed, int *failed) {
+    if (ok) {
+        printf("ok %s\n", name);
+        ++*passed;
+        return;
+    }
+    char m[8192];
+    size_t ml = msg ? strlen(msg) : 0;
+    if (ml >= sizeof(m)) ml = sizeof(m) - 1;
+    if (msg && ml) memcpy(m, msg, ml);
+    m[ml] = 0;
+    char *p = m;
+    if (strncmp(p, "error: ", 7) == 0) p += 7;
+    /* Keep the FAILED summary to the panic message itself; the traceback
+       section is noise in the one-line test report. */
+    char *tb = strstr(p, "\nTraceback");
+    if (tb) *tb = 0;
+    ml = strlen(p);
+    while (ml > 0 && (p[ml - 1] == '\n' || p[ml - 1] == '\r')) p[--ml] = 0;
+    printf("FAILED %s: %s\n", name, p);
+    ++*failed;
+}
+
 int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
     int passed = 0, failed = 0;
-    for (uint64_t i = 0; i < n; ++i) {
-        int pfd[2];
-        if (pipe(pfd) != 0) { perror("pipe"); return 1; }
-        fflush(stdout);
-        pid_t pid = fork();
-        if (pid == 0) {
-            close(pfd[0]); dup2(pfd[1], 2); close(pfd[1]);
-            int dn = open("/dev/null", 1);
-            if (dn >= 0) { dup2(dn, 1); close(dn); }
-            aval argv[1]; argv[0] = A_NONE;
-            fns[i](argv);
-            fflush(stdout); fflush(stderr); _exit(0);
+    int K = test_concurrency(n);
+    if (K < 1) K = 1;
+    fflush(stdout);
+    for (uint64_t base = 0; base < n; base += (uint64_t)K) {
+        int m = (int)((n - base) < (uint64_t)K ? (n - base) : (uint64_t)K);
+        ATestSlot *slots = (ATestSlot *)calloc((size_t)m, sizeof(ATestSlot));
+        if (!slots) { perror("calloc"); return 1; }
+        int launched = 0;
+        for (int j = 0; j < m; ++j) {
+            int pfd[2];
+            if (pipe(pfd) != 0) { perror("pipe"); break; }
+            /* Non-blocking read side: drain loops must never stall. */
+            fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
+            pid_t pid = fork();
+            if (pid == 0) {
+                close(pfd[0]); dup2(pfd[1], 2); close(pfd[1]);
+                int dn = open("/dev/null", 1);
+                if (dn >= 0) { dup2(dn, 1); close(dn); }
+                aval argv[1]; argv[0] = A_NONE;
+                fns[base + (uint64_t)j](argv);
+                fflush(stdout); fflush(stderr); _exit(0);
+            }
+            if (pid < 0) { perror("fork"); close(pfd[0]); close(pfd[1]); break; }
+            close(pfd[1]);
+            slots[j].pid = pid;
+            slots[j].fd = pfd[0];
+            slots[j].buf = (char *)malloc(A_TEST_CAPTURE + 1);
+            if (!slots[j].buf) { perror("malloc"); close(pfd[0]); break; }
+            ++launched;
         }
-        close(pfd[1]);
-        char msg[4096];
-        /* panicf emits the error line and traceback in several small
-           writes; a single read() can return after just "error: ". Drain
-           the pipe until EOF so the FAILED summary sees the full message. */
-        ssize_t rn = 0;
-        while (rn < (ssize_t)sizeof(msg) - 1) {
-            ssize_t r = read(pfd[0], msg + rn, sizeof(msg) - 1 - (size_t)rn);
-            if (r <= 0) break;
-            rn += r;
+        /* Drain every live child's pipe until EOF, reaping as they exit. */
+        int remaining = launched;
+        while (remaining > 0) {
+            struct pollfd pf[A_TEST_MAX_JOBS];
+            ATestSlot *map[A_TEST_MAX_JOBS];
+            nfds_t nf = 0;
+            for (int j = 0; j < launched; ++j) {
+                if (slots[j].done || slots[j].fd < 0) continue;
+                pf[nf].fd = slots[j].fd;
+                pf[nf].events = POLLIN;
+                pf[nf].revents = 0;
+                map[nf] = &slots[j];
+                ++nf;
+            }
+            if (nf == 0) break;
+            int pr = poll(pf, nf, -1);
+            if (pr < 0) { if (errno == EINTR) continue; break; }
+            for (nfds_t i = 0; i < nf; ++i) {
+                ATestSlot *s = map[i];
+                if (s->done) continue;
+                if (pf[i].revents & (POLLIN | POLLHUP | POLLERR | POLLNVAL)) {
+                    int eof = slot_drain(s);
+                    if (eof || (pf[i].revents & POLLNVAL)) {
+                        if (s->fd >= 0) { close(s->fd); s->fd = -1; }
+                        int st = 0;
+                        pid_t w;
+                        do { w = waitpid(s->pid, &st, 0); }
+                        while (w < 0 && errno == EINTR);
+                        s->status = (w == s->pid) ? st : -1;
+                        s->done = 1;
+                        --remaining;
+                    }
+                }
+            }
         }
-        if (rn < 0) rn = 0;
-        msg[rn] = 0;
-        close(pfd[0]);
-        int st = 0;
-        waitpid(pid, &st, 0);
-        if (WIFEXITED(st) && WEXITSTATUS(st) == 0) {
-            printf("ok %s\n", names[i]);
-            ++passed;
-        } else {
-            char *m = (char *)msg;
-            if (strncmp(m, "error: ", 7) == 0) m += 7;
-            /* Keep the FAILED summary to the panic message itself; the
-               traceback section is noise in the one-line test report. */
-            char *tb = strstr(m, "\nTraceback");
-            if (tb) *tb = 0;
-            size_t ml = strlen(m);
-            while (ml > 0 && (m[ml-1] == '\n' || m[ml-1] == '\r')) m[--ml] = 0;
-            printf("FAILED %s: %s\n", names[i], m);
-            ++failed;
+        /* Reap/report in declaration order. */
+        for (int j = 0; j < launched; ++j) {
+            ATestSlot *s = &slots[j];
+            if (!s->done) {
+                /* Drain broke early (poll error): finish the child anyway. */
+                slot_drain(s);
+                if (s->fd >= 0) { close(s->fd); s->fd = -1; }
+                int st = 0;
+                pid_t w;
+                do { w = waitpid(s->pid, &st, 0); }
+                while (w < 0 && errno == EINTR);
+                s->status = (w == s->pid) ? st : -1;
+                s->done = 1;
+            }
+            int ok = WIFEXITED(s->status) && WEXITSTATUS(s->status) == 0;
+            s->buf[s->len < A_TEST_CAPTURE ? s->len : A_TEST_CAPTURE] = 0;
+            test_report(names[base + (uint64_t)j], s->buf, ok, &passed, &failed);
+            free(s->buf);
         }
+        free(slots);
+        if (launched < m) break; /* fork/pipe failure: stop launching */
     }
     printf("\n%d passed, %d failed\n", passed, failed);
     return failed ? 1 : 0;

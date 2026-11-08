@@ -21,6 +21,20 @@ Core builtin functions are available without imports (verified against
 
 Note: `range(5)` is **not** a function — write `0..5` range literals instead.
 
+### Implicit parallelism
+
+The runtime parallelizes eligible work automatically (no async syntax):
+`sum()` over large all-integer lists, `map()`/`filter()` over large lists
+when the callable is a whitelisted pure builtin, and the `linalg_*` kernels
+(`matmul`, `matvec_t`, `attention` score phase, `softmax` exp fill) above
+~1M multiply-adds. Arbitrary closures stay serial because generated code is
+not thread-safe. All parallel paths produce bit-identical results to the
+serial loops. `a test` runs test functions in concurrent forked batches.
+Tuning/kill-switches: `A_PAR=0` disables the thread pool, `A_PAR_THREADS=N`
+sizes it, `A_TEST_JOBS=N` sizes the test batch (1 = serial). Parallelism
+requires the system-C runtime build (POSIX); astra-compiled and Windows
+runtimes always take the serial path.
+
 ## Native modules
 
 `import <name>` binds a namespace of builtins (table in

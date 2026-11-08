@@ -157,7 +157,17 @@ static size_t g_intbox_left = 0;
    is sizeof(AInt64) rounded up to 16. */
 #define INT_BOX_STEP (((sizeof(AInt64) + 15u) / 16u) * 16u)
 
+#if A_PAR_REAL
+/* The bump allocator is process-global; pool workers boxing out-of-range
+   ints concurrently would race on the cursor. One mutex around the whole
+   carve keeps it correct (contended only by >2^46 integer arithmetic). */
+static pthread_mutex_t g_intbox_mu = PTHREAD_MUTEX_INITIALIZER;
+#endif
+
 static AInt64 *intbox_alloc(void) {
+#if A_PAR_REAL
+    pthread_mutex_lock(&g_intbox_mu);
+#endif
     if (g_intbox_left < INT_BOX_STEP) {
         g_intbox_cursor = (char *)xmalloc(INT_BOX_CHUNK);
         g_intbox_left = INT_BOX_CHUNK;
@@ -165,6 +175,9 @@ static AInt64 *intbox_alloc(void) {
     AInt64 *p = (AInt64 *)g_intbox_cursor;
     g_intbox_cursor += INT_BOX_STEP;
     g_intbox_left -= INT_BOX_STEP;
+#if A_PAR_REAL
+    pthread_mutex_unlock(&g_intbox_mu);
+#endif
     return p;
 }
 

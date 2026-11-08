@@ -76,6 +76,128 @@ static const double *as_f64(const AArr *a, uint64_t need, double **tmp,
  * 32 B-rows it touches stay hot in L1 while the k loop streams). */
 #define LINALG_TILE 32
 
+/* ------------------------------------------------------------------ */
+/* implicit parallelism (rt_pool.c)                                    */
+/* ------------------------------------------------------------------ */
+/* The kernels below parallelize only across *independent output
+   elements*: each worker owns disjoint rows/columns and runs the exact
+   same per-element instruction sequence as the serial loop, so results
+   are bit-identical. Reduction loops (dot, matvec's i-accumulation,
+   attention's value-mix, softmax's total) stay serial to preserve FP
+   ordering. Work below ~1M multiply-adds stays serial: dispatch costs
+   more than it saves. */
+#define LINALG_PAR_MIN ((int64_t)1 << 20)
+
+static int lpar_ok(double work) {
+    return work >= (double)LINALG_PAR_MIN && a_par_workers() > 1;
+}
+
+typedef struct {
+    const double *ad, *bd;
+    double *out;
+    int64_t k, cols;
+} AMatmulCtx;
+
+static void matmul_rows(void *vctx, int64_t lo, int64_t hi) {
+    AMatmulCtx *c = (AMatmulCtx *)vctx;
+    for (int64_t i = lo; i < hi; i++) {
+        double *orow = c->out + (uint64_t)i * (uint64_t)c->cols;
+        const double *arow = c->ad + (uint64_t)i * (uint64_t)c->k;
+        for (int64_t jj = 0; jj < c->cols; jj += LINALG_TILE) {
+            int64_t jend = jj + LINALG_TILE < c->cols ? jj + LINALG_TILE : c->cols;
+            for (int64_t t = 0; t < c->k; t++) {
+                double a = arow[t];
+                const double *brow = c->bd + (uint64_t)t * (uint64_t)c->cols;
+                for (int64_t j = jj; j < jend; j++)
+                    orow[j] = fma(a, brow[j], orow[j]);
+            }
+        }
+    }
+}
+
+typedef struct {
+    const double *x;
+    const double *wf;      /* verified all-double view, or NULL */
+    const int64_t *wi;     /* packed int view, or NULL */
+    const aval *wa;        /* aval view, or NULL */
+    const double *bias;    /* NULL when absent (zeros) */
+    double *out;
+    int64_t nin;
+} AMatvecTCtx;
+
+static void matvec_t_rows(void *vctx, int64_t lo, int64_t hi) {
+    AMatvecTCtx *c = (AMatvecTCtx *)vctx;
+    for (int64_t i = lo; i < hi; i++) {
+        uint64_t base = (uint64_t)i * (uint64_t)c->nin;
+        double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+        int64_t j = 0;
+        if (c->wf) {
+            const double *wr = c->wf + base;
+            for (; j + 4 <= c->nin; j += 4) {
+                acc0 = fma(wr[j], c->x[j], acc0);
+                acc1 = fma(wr[j + 1], c->x[j + 1], acc1);
+                acc2 = fma(wr[j + 2], c->x[j + 2], acc2);
+                acc3 = fma(wr[j + 3], c->x[j + 3], acc3);
+            }
+            for (; j < c->nin; j++) acc0 = fma(wr[j], c->x[j], acc0);
+        } else if (c->wi) {
+            const int64_t *wr = c->wi + base;
+            for (; j + 4 <= c->nin; j += 4) {
+                acc0 = fma((double)wr[j], c->x[j], acc0);
+                acc1 = fma((double)wr[j + 1], c->x[j + 1], acc1);
+                acc2 = fma((double)wr[j + 2], c->x[j + 2], acc2);
+                acc3 = fma((double)wr[j + 3], c->x[j + 3], acc3);
+            }
+            for (; j < c->nin; j++) acc0 = fma((double)wr[j], c->x[j], acc0);
+        } else {
+            const aval *wr = c->wa + base;
+            for (; j + 4 <= c->nin; j += 4) {
+                acc0 = fma(aval_num(wr[j]), c->x[j], acc0);
+                acc1 = fma(aval_num(wr[j + 1]), c->x[j + 1], acc1);
+                acc2 = fma(aval_num(wr[j + 2]), c->x[j + 2], acc2);
+                acc3 = fma(aval_num(wr[j + 3]), c->x[j + 3], acc3);
+            }
+            for (; j < c->nin; j++) acc0 = fma(aval_num(wr[j]), c->x[j], acc0);
+        }
+        double bias = c->bias ? c->bias[i] : 0.0;
+        c->out[i] = ((acc0 + acc1) + (acc2 + acc3)) + bias;
+    }
+}
+
+typedef struct {
+    const double *qp, *kp;
+    double *scores;
+    int64_t dk;
+} AAttnCtx;
+
+static void attn_scores(void *vctx, int64_t lo, int64_t hi) {
+    AAttnCtx *c = (AAttnCtx *)vctx;
+    for (int64_t r = lo; r < hi; r++) {
+        const double *krow = c->kp + (uint64_t)r * (uint64_t)c->dk;
+        double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+        int64_t t = 0;
+        for (; t + 4 <= c->dk; t += 4) {
+            acc0 = fma(c->qp[t], krow[t], acc0);
+            acc1 = fma(c->qp[t + 1], krow[t + 1], acc1);
+            acc2 = fma(c->qp[t + 2], krow[t + 2], acc2);
+            acc3 = fma(c->qp[t + 3], krow[t + 3], acc3);
+        }
+        for (; t < c->dk; t++) acc0 = fma(c->qp[t], krow[t], acc0);
+        c->scores[r] = ((acc0 + acc1) + (acc2 + acc3));
+    }
+}
+
+typedef struct {
+    const double *xp;
+    double *out;
+    double shift;
+} AExpCtx;
+
+static void exp_fill(void *vctx, int64_t lo, int64_t hi) {
+    AExpCtx *c = (AExpCtx *)vctx;
+    for (int64_t i = lo; i < hi; i++) c->out[i] = exp(c->xp[i] - c->shift);
+}
+
 static aval f64_list(uint64_t n, const double *src) {
     AArr *a = (AArr *)xmalloc(sizeof(AArr));
     a->h.type = T_LIST;
@@ -183,6 +305,19 @@ aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
     const double *wf = f64_ptr(wa);
     int wp = wf ? 0 : arr_packed(wa);
     int has_bias = ba && (int64_t)ba->h.len >= nout;
+    int par = lpar_ok((double)nout * (double)nin);
+    double *biasv = NULL;
+    if (par && has_bias) biasv = to_f64(ba, (uint64_t)nout, "matvec_t() bias");
+    if (par) {
+        /* Row-parallel over output rows: identical per-row dot order. */
+        AMatvecTCtx mc;
+        mc.x = x; mc.out = out; mc.nin = nin;
+        mc.wf = wf;
+        mc.wi = wp ? wa->iitems : NULL;
+        mc.wa = (!wf && !wp) ? wa->items : NULL;
+        mc.bias = biasv;
+        a_par_for(nout, 1, matvec_t_rows, &mc);
+    } else {
     for (int64_t i = 0; i < nout; i++) {
         uint64_t base = (uint64_t)i * (uint64_t)nin;
         double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
@@ -218,9 +353,11 @@ aval bi_linalg_matvec_t(uint64_t n, aval *argv) {
         double bias = has_bias ? arr_num(ba, (uint64_t)i) : 0.0;
         out[i] = ((acc0 + acc1) + (acc2 + acc3)) + bias;
     }
+    }
     aval r = f64_list((uint64_t)nout, out);
     free(out);
     free(x);
+    free(biasv);
     return r;
 }
 
@@ -245,16 +382,23 @@ aval bi_linalg_matmul(uint64_t n, aval *argv) {
     double *out = (double *)malloc((size_t)(m * cols) * sizeof(double));
     if (!out) panicf("out of memory");
     memset(out, 0, (size_t)(m * cols) * sizeof(double));
-    for (int64_t i = 0; i < m; i++) {
-        double *orow = out + (uint64_t)i * (uint64_t)cols;
-        const double *arow = ad + (uint64_t)i * (uint64_t)k;
-        for (int64_t jj = 0; jj < cols; jj += LINALG_TILE) {
-            int64_t jend = jj + LINALG_TILE < cols ? jj + LINALG_TILE : cols;
-            for (int64_t t = 0; t < k; t++) {
-                double a = arow[t];
-                const double *brow = bd + (uint64_t)t * (uint64_t)cols;
-                for (int64_t j = jj; j < jend; j++)
-                    orow[j] = fma(a, brow[j], orow[j]);
+    if (lpar_ok((double)m * (double)k * (double)cols)) {
+        /* Row-parallel: each output row is computed by exactly one worker
+           with the identical ikj sequence, so results are bit-identical. */
+        AMatmulCtx mc = { ad, bd, out, k, cols };
+        a_par_for(m, 1, matmul_rows, &mc);
+    } else {
+        for (int64_t i = 0; i < m; i++) {
+            double *orow = out + (uint64_t)i * (uint64_t)cols;
+            const double *arow = ad + (uint64_t)i * (uint64_t)k;
+            for (int64_t jj = 0; jj < cols; jj += LINALG_TILE) {
+                int64_t jend = jj + LINALG_TILE < cols ? jj + LINALG_TILE : cols;
+                for (int64_t t = 0; t < k; t++) {
+                    double a = arow[t];
+                    const double *brow = bd + (uint64_t)t * (uint64_t)cols;
+                    for (int64_t j = jj; j < jend; j++)
+                        orow[j] = fma(a, brow[j], orow[j]);
+                }
             }
         }
     }
@@ -278,11 +422,18 @@ aval bi_linalg_softmax(uint64_t n, aval *argv) {
     if (!out) panicf("out of memory");
     double top = xp[0];
     for (uint64_t i = 1; i < len; i++) if (xp[i] > top) top = xp[i];
-    double total = 0.0;
-    for (uint64_t i = 0; i < len; i++) {
-        out[i] = exp(xp[i] - top);
-        total += out[i];
+    /* exp() dominates the cost and is element-independent: fill in
+       parallel (identical values), keep the max/sum reductions serial so
+       FP ordering — and the result — is unchanged. exp() is ~20x a
+       multiply-add, so the work threshold is correspondingly lower. */
+    if (len >= ((uint64_t)1 << 17) && a_par_workers() > 1) {
+        AExpCtx ec = { xp, out, top };
+        a_par_for((int64_t)len, 16384, exp_fill, &ec);
+    } else {
+        for (uint64_t i = 0; i < len; i++) out[i] = exp(xp[i] - top);
     }
+    double total = 0.0;
+    for (uint64_t i = 0; i < len; i++) total += out[i];
     for (uint64_t i = 0; i < len; i++) out[i] /= total;
     aval r = f64_list(len, out);
     free(out);
@@ -316,6 +467,14 @@ aval bi_linalg_attention(uint64_t n, aval *argv) {
     double *out = (double *)malloc((size_t)dv * sizeof(double));
     if (!scores || !out) panicf("out of memory");
     const double scale = 1.0 / sqrt((double)dk);
+    if (lpar_ok((double)nk * (double)dk)) {
+        /* Score rows are independent dot products: parallel over r with
+           the identical accumulation order per row (bit-identical). The
+           softmax reduction and value-mix below stay serial. */
+        AAttnCtx ac = { qp, kp, scores, dk };
+        a_par_for(nk, 1, attn_scores, &ac);
+        for (int64_t r = 0; r < nk; r++) scores[r] *= scale;
+    } else {
     for (int64_t r = 0; r < nk; r++) {
         const double *krow = kp + (uint64_t)r * (uint64_t)dk;
         double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
@@ -328,6 +487,7 @@ aval bi_linalg_attention(uint64_t n, aval *argv) {
         }
         for (; t < dk; t++) acc0 = fma(qp[t], krow[t], acc0);
         scores[r] = ((acc0 + acc1) + (acc2 + acc3)) * scale;
+    }
     }
     double top = scores[0];
     for (int64_t r = 1; r < nk; r++) if (scores[r] > top) top = scores[r];

@@ -1,0 +1,40 @@
+# Implicit parallelism demo.
+#
+# The A runtime parallelizes eligible work automatically — no async/await
+# or spawn syntax. Run with `./build/a run examples/advanced/implicit_parallel.a`.
+# Set A_PAR=0 to force the serial path and compare timings.
+#
+# What parallelizes today (all results bit-identical to serial):
+#   * sum(xs) over large all-integer lists (chunked partial sums)
+#   * map(xs, f) / filter(xs, f) for large lists when f is a whitelisted
+#     pure builtin (sqrt, abs, sin, ...); arbitrary closures stay serial
+#   * linalg_matmul / linalg_matvec_t / linalg_attention score phase /
+#     linalg_softmax exp fill, above ~1M multiply-adds
+# `a test` also runs test functions in concurrent forked batches
+# (A_TEST_JOBS=N to tune, 1 = serial).
+
+fn main():
+    n = 1000000
+    xs = []
+    for i in range(n):
+        xs.append(i % 1000)
+
+    t0 = now()
+    s = sum(xs)
+    t1 = now()
+    print("sum(xs)      =", s, " in", t1 - t0, "ms")
+
+    # Dense matmul: 300x300x300 ~ 54M fused multiply-adds.
+    m = 300
+    k = 300
+    cols = 300
+    a = []
+    b = []
+    for i in range(m * k):
+        a.append((i * 7 + 3) % 97)
+    for i in range(k * cols):
+        b.append((i * 13 + 5) % 89)
+    t2 = now()
+    c = matmul(a, b, m, k, cols)
+    t3 = now()
+    print("matmul       done in", t3 - t2, "ms; c[0] =", c[0])

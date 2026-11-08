@@ -15,6 +15,16 @@
 #include <time.h>
 #if !defined(_WIN32)
 #include <dirent.h>
+/* Real thread pool (rt_pool.c) is only enabled when the runtime archive is
+   built by a system C compiler: the astra-compiled fallback (cross targets,
+   A_RUNTIME_CC=off, 16-bit) defines __TINYC__ and gets the serial path, as
+   does Windows. pthread.h is only pulled in on the threaded configuration. */
+#if !defined(__TINYC__)
+#include <pthread.h>
+#define A_PAR_REAL 1
+#else
+#define A_PAR_REAL 0
+#endif
 #include <fcntl.h>
 #include <poll.h>
 #include <sys/ioctl.h>
@@ -29,6 +39,9 @@
 #include <sys/socket.h>
 #endif
 
+#if defined(_WIN32) || defined(__TINYC__)
+#define A_PAR_REAL 0
+#endif
 #if defined(_WIN32) && !defined(_WIN64)
 /* 32-bit Windows CRT malloc only guarantees 8-byte alignment, but heap
    objects must be 16-byte aligned for NaN-boxing (mkobj panics otherwise).
@@ -573,5 +586,21 @@ aval bi_terminal_unsupported(uint64_t n, aval *argv);
 #define bi_terminal_home bi_terminal_unsupported
 #endif
 int a_rt_repl_quiet(void);
+
+/* ------------------------------------------------------------------ */
+/* implicit parallelism (rt_pool.c)                                    */
+/* ------------------------------------------------------------------ */
+/* Splits [0,n) into chunks of ~`grain` elements and runs fn(ctx,lo,hi) on
+   each chunk across the worker pool. Falls back to an inline serial loop
+   when the pool is unavailable (Windows, astra-compiled runtime, A_PAR=0,
+   single CPU, or when called from a pool worker). Results must be written
+   to disjoint per-index storage by fn; fn must not call back into
+   a_par_for (nested calls run serially). */
+typedef void (*AParFn)(void *ctx, int64_t lo, int64_t hi);
+void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx);
+/* Number of pool workers (>=1); useful for sizing chunk counts. */
+int a_par_workers(void);
+/* Threshold below which parallel collection paths stay serial. */
+#define A_PAR_MIN_ELEMS ((int64_t)1 << 15)
 
 #endif /* A_RUNTIME_INTERNAL_H */
