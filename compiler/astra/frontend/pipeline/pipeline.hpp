@@ -14,7 +14,7 @@ namespace a {
 class DiagnosticSink; struct ModuleGraph; struct SemaResult; namespace ir { struct Program; }
 struct PipelineConfig {
   bool checkOnly = false, jsonDiagnostics = false, useColor = false, optimize = false;
-  int optimizationLevel = 2;
+  int optimizationLevel = 3;
   int jobs = 1;  // 1 = serial; >1 = parallel module checking (ty/pyrefly style)
   std::vector<std::string> modulePaths;
   std::string stdlibRoot;

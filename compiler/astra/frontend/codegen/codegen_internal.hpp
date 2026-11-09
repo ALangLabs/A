@@ -116,6 +116,10 @@ inline int builtinRuntimeId(const std::string& name) {
       {"os_mkdir", 254}, {"os_rmdir", 255}, {"os_truncate", 256},
       {"os_environ", 257}, {"os_getenv", 262}, {"os_setenv", 258},
       {"os_unsetenv", 259}, {"os_system", 260}, {"os_urandom", 261},
+      {"os_getloadavg", 263}, {"os_gethostname", 264}, {"os_umask", 265},
+      {"os_getpagesize", 266}, {"os_chown", 267}, {"os_ismount", 268},
+      {"os_disk_usage", 269}, {"os_popen", 270}, {"os_kill", 271},
+      {"os_exit", 272},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

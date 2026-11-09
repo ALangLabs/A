@@ -109,6 +109,11 @@ void AsmEmitter::emitBody(const std::vector<StmtPtr>& stmts, bool topLevel) {
 
 void AsmEmitter::emitStmt(const Stmt* s, bool topLevel) {
     if (failed_ || !s) return;
+    // Record the statement's source line for panic/panic-traceback locations:
+    // `<module>` frames carry no line of their own, so the runtime falls back
+    // to this slot (~1 store per statement, no call, no branch).
+    if (s->span.line > 0)
+      emit("    movl $" + std::to_string(s->span.line) + ", a_stmt_line(%rip)\n");
     switch (s->kind) {
       case StmtKind::Let: {
         const LetStmt& st = static_cast<const LetStmt&>(*s);
@@ -201,6 +206,7 @@ void AsmEmitter::emitStmt(const Stmt* s, bool topLevel) {
           return;
         }
         emitDeferredPeekAll();
+        call1slot("a_promote", rvS);  // region escape: promote return value
         emitFramePop();
         loadSlot(rvS);
         if (inFunction_) {
@@ -962,6 +968,33 @@ void AsmEmitter::emitWhileFloatAdd(ABinding* b, const Expr* v) {
     emitLabel(doneL);
   }
 
+// `acc = v` for a tryEmitWhileFloat resident accumulator: v -> xmm0 (raw
+// double bits; self reads see the resident register's pre-write value),
+// the result replaces the register, NaN canonicalized exactly like the
+// aval path. Folding the whole RHS into xmm0 and canonicalizing once is
+// bit-identical to the per-op aval canonicalization: every NaN maps to
+// kCanonNaN either way, and non-NaN results are untouched.
+void AsmEmitter::emitWhileFloatSet(ABinding* b, const Expr* v) {
+    auto it = loopXmm_.find(b->slot);
+    if (it == loopXmm_.end()) {
+      fail("float accumulator lost xmm residency");
+      return;
+    }
+    const std::string xr = "%xmm" + std::to_string(it->second);
+    if (!emitFloatXmm(v, "%xmm0")) {
+      int vs = evalSlot(v);
+      emit("    movsd " + slotRef(vs) + ", %xmm0\n");
+    }
+    emit("    movapd %xmm0, " + xr + "\n");
+    std::string nanL = newLabel("whsnan"), doneL = newLabel("whsdone");
+    emit("    ucomisd " + xr + ", " + xr + "\n    jp " + nanL +
+         "\n    jmp " + doneL + "\n");
+    emitLabel(nanL);
+    movImm(kCanonNaN);
+    emit("    movq %rax, " + xr + "\n");
+    emitLabel(doneL);
+  }
+
 // `while cond: <stmts>` where top-level `acc += <float>` assigns keep a
 // plain float local in an XMM register for the whole loop. The loop is
 // rotated (cond -> promote -> body -> cond) so the int->double promote
@@ -982,12 +1015,27 @@ bool AsmEmitter::tryEmitWhileFloat(const WhileStmt& st) {
     auto isCandAssign = [&](const Stmt* s, const AssignStmt** out) {
       if (!s || s->kind != StmtKind::Assign) return false;
       const AssignStmt& as = static_cast<const AssignStmt&>(*s);
-      if (as.op != "+=" || !as.target || !as.value ||
-          as.target->kind != ExprKind::Ident ||
-          !floatXmmOk(as.value.get()))
+      if (!as.target || as.target->kind != ExprKind::Ident || !as.value)
         return false;
       const std::string& nm =
           static_cast<const IdentExpr*>(as.target.get())->name;
+      if (as.op == "+=") {
+        if (!floatXmmOk(as.value.get())) return false;
+      } else if (as.op == "=") {
+        // `acc = <float expr>` accumulator update (e.g. `x = x*m + a`):
+        // the value must be float-xmm shaped AND read the accumulator —
+        // a self-read makes the result double-typed, which keeps the
+        // int->double promote trampoline unobservable (same argument as
+        // the += form). Bare `x = x` and non-self assigns stay generic.
+        if (!floatXmmOk(as.value.get()) ||
+            as.value->kind == ExprKind::Ident)
+          return false;
+        std::set<std::string> ids;
+        collectIdents(as.value.get(), ids);
+        if (!ids.count(nm)) return false;
+      } else {
+        return false;
+      }
       auto it = accByName.find(nm);
       if (it != accByName.end()) {
         *out = &as;
@@ -1097,9 +1145,10 @@ bool AsmEmitter::tryEmitWhileFloat(const WhileStmt& st) {
       if (failed_) break;
       const AssignStmt* as = nullptr;
       if (isCandAssign(sp.get(), &as)) {
-        emitWhileFloatAdd(accByName[
-            static_cast<const IdentExpr*>(as->target.get())->name],
-            as->value.get());
+        ABinding* cb = accByName[
+            static_cast<const IdentExpr*>(as->target.get())->name];
+        if (as->op == "+=") emitWhileFloatAdd(cb, as->value.get());
+        else emitWhileFloatSet(cb, as->value.get());
       } else {
         emitStmt(sp.get());
       }
@@ -1558,9 +1607,17 @@ void AsmEmitter::emitSpecAssign(ABinding* b, const AssignStmt& st) {
       baseOp = st.op.substr(0, st.op.size() - 1);
     } else if (st.value && st.value->kind == ExprKind::Binary) {
       const BinaryExpr& bb = static_cast<const BinaryExpr&>(*st.value);
+      // `v = v <op> e` self-assigns: reads of the target itself are
+      // supplied by this binding's specRaw slot/flag (mirrors
+      // specWriteOk / promoteCoverStmt).
+      const std::string self =
+          st.target->kind == ExprKind::Ident
+              ? static_cast<const IdentExpr&>(*st.target).name
+              : std::string();
       if ((bb.op == "+" || bb.op == "-" || bb.op == "*") &&
           exprIsInt(bb.lhs.get()) && exprIsInt(bb.rhs.get()) &&
-          rawSafeExpr(bb.lhs.get()) && rawSafeExpr(bb.rhs.get()) &&
+          rawSafeExprSelf(bb.lhs.get(), self) &&
+          rawSafeExprSelf(bb.rhs.get(), self) &&
           !rawSafeExpr(st.value.get()))
         topArith = &bb;
     }
@@ -1578,8 +1635,21 @@ void AsmEmitter::emitSpecAssign(ABinding* b, const AssignStmt& st) {
       loadSlot(flagS);
       emit("    test %rax, %rax\n    jnz " + setL + "\n");
       int ls = allocSlot(), rs = allocSlot();
-      emitRawExpr(topArith->lhs.get(), ls);
-      emitRawExpr(topArith->rhs.get(), rs);
+      // flag==0 is proven on this path, so a bare self-ident operand can
+      // copy the raw slot directly instead of re-running emitRawExpr's
+      // specRaw flag check.
+      const std::string selfNm =
+          static_cast<const IdentExpr&>(*st.target).name;
+      auto specOperand = [&](const Expr* op, int os) {
+        if (op->kind == ExprKind::Ident &&
+            static_cast<const IdentExpr&>(*op).name == selfNm) {
+          copySlot(rawS, os);
+        } else {
+          emitRawExpr(op, os);
+        }
+      };
+      specOperand(topArith->lhs.get(), ls);
+      specOperand(topArith->rhs.get(), rs);
       loadSlot(ls);
       loadSlot(rs, "%rcx");
       emit(std::string("    ") +

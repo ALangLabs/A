@@ -134,7 +134,7 @@ DocItem structItem(const StructDecl& decl, const SourceText& source,
     DocMember member;
     member.name = field.name;
     member.type = typeText(field.type.get());
-    member.signature = field.name + ": " + member.type;
+    member.signature = member.type.empty() ? field.name : field.name + ": " + member.type;
     member.doc = pickDoc({field.doc});
     item.fields.push_back(std::move(member));
   }

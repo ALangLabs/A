@@ -345,6 +345,53 @@ bool AsmEmitter::rawSafeExpr(const Expr* e) {
     }
   }
 
+// rawSafeExpr variant for speculative self-assigns (`acc = acc + i`):
+// mirrors rawSafeExpr but a bare Ident naming `self` is accepted — the
+// specRaw protocol keeps that name's current int64 in its raw slot while
+// the demotion flag is 0, and emitSpecAssign handles the demoted state.
+// Only the leaf is relaxed: +- * subtrees still need arithFits (their
+// raw ops have no jo-deopt point inside emitRawExpr).
+bool AsmEmitter::rawSafeExprSelf(const Expr* e, const std::string& self) {
+    if (!e || failed_) return false;
+    if (e->kind == ExprKind::Ident) {
+      const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+      if (nm == self) return true;
+      return rawSafeExpr(e);
+    }
+    if (e->kind == ExprKind::IntLit) return true;
+    if (e->kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
+      if (u.op == "~") return rawSafeExprSelf(u.operand.get(), self);
+      if (u.op == "-" && !u.postfix && exprIsInt(e) &&
+          rawSafeExprSelf(u.operand.get(), self)) {
+        ARange o = exprRangeFlat(u.operand.get());
+        return o.known && o.lo > rngI64Min();
+      }
+      return false;
+    }
+    if (e->kind == ExprKind::Binary) {
+      const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
+      if (rawSafeBinOp(b.op))
+        return rawSafeExprSelf(b.lhs.get(), self) &&
+               rawSafeExprSelf(b.rhs.get(), self);
+      if ((b.op == "+" || b.op == "-" || b.op == "*") &&
+          exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
+          rawSafeExprSelf(b.lhs.get(), self) &&
+          rawSafeExprSelf(b.rhs.get(), self))
+        return arithFits(exprRangeFlat(b.lhs.get()),
+                         exprRangeFlat(b.rhs.get()), b.op);
+      return false;
+    }
+    if (e->kind == ExprKind::Call) {
+      const CallExpr& c = static_cast<const CallExpr&>(*e);
+      if (!rawCallTarget(c)) return false;
+      for (const CallArg& a : c.args)
+        if (!rawSafeExprSelf(a.value.get(), self)) return false;
+      return true;
+    }
+    return false;
+  }
+
 // emitBinary fast-path gate: a safe-op binary whose operands are all raw
 // int64 materializable. Kept in sync with the emitBinary call site and the
 // promotion coverage scan.
@@ -1136,9 +1183,16 @@ bool AsmEmitter::specWriteOk(const AssignStmt& st) {
     }
     if (st.op == "=" && st.value->kind == ExprKind::Binary) {
       const BinaryExpr& b = static_cast<const BinaryExpr&>(*st.value);
-      return (b.op == "+" || b.op == "-" || b.op == "*") &&
-             exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
-             rawSafeExpr(b.lhs.get()) && rawSafeExpr(b.rhs.get());
+      if (!(b.op == "+" || b.op == "-" || b.op == "*")) return false;
+      // `acc = acc <op> e` is the spelled-out accumulator idiom: reads of
+      // the target itself are supplied by the specRaw slot/flag protocol.
+      const std::string self =
+          st.target->kind == ExprKind::Ident
+              ? static_cast<const IdentExpr&>(*st.target).name
+              : std::string();
+      return exprIsInt(b.lhs.get()) && exprIsInt(b.rhs.get()) &&
+             rawSafeExprSelf(b.lhs.get(), self) &&
+             rawSafeExprSelf(b.rhs.get(), self);
     }
     return false;
   }
@@ -2357,9 +2411,12 @@ void AsmEmitter::promoteCoverStmt(const Stmt* s, AsmEmitter::PromoteScan& ps) {
             } else if (st.value->kind == ExprKind::Binary) {
               const BinaryExpr& bb =
                   static_cast<const BinaryExpr&>(*st.value);
+              // Self-referential `acc = acc <op> e` writes stay raw via
+              // the specRaw protocol (mirrors specWriteOk).
               if ((bb.op == "+" || bb.op == "-" || bb.op == "*") &&
                   exprIsInt(bb.lhs.get()) && exprIsInt(bb.rhs.get()) &&
-                  rawSafeExpr(bb.lhs.get()) && rawSafeExpr(bb.rhs.get()))
+                  rawSafeExprSelf(bb.lhs.get(), nm) &&
+                  rawSafeExprSelf(bb.rhs.get(), nm))
                 rhsRaw = true;
             }
           }

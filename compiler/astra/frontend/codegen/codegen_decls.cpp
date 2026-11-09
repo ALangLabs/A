@@ -535,7 +535,7 @@ void AsmEmitter::emitStructCtor(StructInfo* st) {
     int nm = (int)st->methods.size();
     int need = methTmpS + 2 * nm;
     slotCounter_ = need;
-    emit("    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
+    emit("    .p2align 4\n    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
     emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frameBytes()) + ", %rsp\n");
     emit("    mov %rdi, " + slotRef(0) + "\n");
     // class display name: strip any module qualifier ("mod::Point" -> "Point")
@@ -604,6 +604,10 @@ void AsmEmitter::emitStructCtor(StructInfo* st) {
       emit("    mov " + std::to_string(8 * (i + 1)) + "(%rax), %rax\n    mov %rax, " + slotRef(vs) + "\n");
       call3slot("a_dict_set", 1, ks, vs);
     }
+    // The ctor has no frame/region of its own: its allocations live in the
+    // caller's young region, so the returned struct must be promoted or
+    // the caller's region sweep would free it (and its fields).
+    call1slot("a_promote", 1);
     loadSlot(1);
     emit("    leave\n    ret\n");
     slotCounter_ = 0;
@@ -687,7 +691,7 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     std::ostringstream emitted;
     emitted.swap(text_);
     text_.swap(saved);
-    emit("    .text\n    .globl " + f->cname + "\n" + f->cname + ":\n");
+    emit("    .p2align 4\n    .text\n    .globl " + f->cname + "\n" + f->cname + ":\n");
     emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
     text_ << emitted.str();
     scopes_.clear();
@@ -870,6 +874,15 @@ void AsmEmitter::emitMain() {
       for (FnInfo* f : fnList_) {
         if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
           std::vector<int> ps(f->paramNames.size(), -1);
+          if (f->variadic && !ps.empty()) {
+            // main is invoked with no arguments: *args collects an empty list
+            // (kMissing would leave the slot unreadable and crash len(args)).
+            movImm(0, "%rdi");
+            emit("    xor %esi, %esi\n    call a_list_new\n");
+            int ls = allocSlot();
+            storeRax(ls);
+            ps.back() = ls;
+          }
           emitDirectCall(f->cname.c_str(), ps);
           break;
         }
@@ -881,13 +894,14 @@ void AsmEmitter::emitMain() {
     std::ostringstream body;
     body.swap(text_);
     text_.swap(saved);
-    emit("    .text\n    .globl main\nmain:\n");
+    emit("    .p2align 4\n    .text\n    .globl main\nmain:\n");
     emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
     text_ << body.str();
-    for (const std::string& g : globals_) bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .byte 0,0,0,0,0,0,0,0\n";
-    for (FnInfo* f : fnList_) if (!f->isMethod) bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
-    for (StructInfo* st : structList_) bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
-    for (auto& kv : enums_) if (!kv.second.algebraic) bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    for (const std::string& g : globals_) bss_ << "    .section .bss\n    .balign 8\n    .globl " << g << "\n" << g << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    for (FnInfo* f : fnList_) if (!f->isMethod) bss_ << "    .section .bss\n    .balign 8\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    for (StructInfo* st : structList_) bss_ << "    .section .bss\n    .balign 8\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    for (auto& kv : enums_) if (!kv.second.algebraic) bss_ << "    .section .bss\n    .balign 8\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    emitGcRootsTable();
     scopes_.clear();
   }
 
@@ -929,16 +943,39 @@ void AsmEmitter::emitModuleBss(int moduleId) {
   // Deterministic: dedupe in case two names share one symbol.
   tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
   for (const std::string& g : tops)
-    bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+    bss_ << "    .section .bss\n    .balign 8\n    .globl " << g << "\n" << g << ":\n    .byte 0,0,0,0,0,0,0,0\n";
   for (FnInfo* f : fnList_)
     if (!f->isMethod && f->moduleId == moduleId)
-      bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << f->globalVar << "\n" << f->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
   for (StructInfo* st : structList_)
     if (st->moduleId == moduleId)
-      bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << st->globalVar << "\n" << st->globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
   for (auto& kv : enums_)
     if (!kv.second.algebraic && kv.second.moduleId == moduleId)
-      bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << kv.second.globalVar << "\n" << kv.second.globalVar << ":\n    .byte 0,0,0,0,0,0,0,0\n";
+}
+
+// GC roots: one .data table of pointers to every aval-holding global slot.
+// The symbol set mirrors what emitModuleBss/emitMain define in .bss across
+// ALL modules: top-level globals (__a_top_*), non-method fn-value slots
+// (__a_gf_*), struct ctor values (__a_gs_*) and non-algebraic enum values
+// (__a_ev_*). Method globalVars and algebraic enums never get .bss slots,
+// so they are excluded (over-inclusion would reference undefined symbols).
+// Always emitted — even with zero globals — so the runtime's weak externs
+// always resolve.
+void AsmEmitter::emitGcRootsTable() {
+  std::set<std::string> roots;
+  for (const auto& kv : topLevelGlobals_) roots.insert(kv.second);
+  for (FnInfo* f : fnList_)
+    if (!f->isMethod) roots.insert(f->globalVar);
+  for (StructInfo* st : structList_) roots.insert(st->globalVar);
+  for (auto& kv : enums_)
+    if (!kv.second.algebraic) roots.insert(kv.second.globalVar);
+  bss_ << "    .section .data\n    .align 8\n"
+          "    .globl __a_gc_roots\n__a_gc_roots:\n";
+  for (const std::string& s : roots) bss_ << "    .quad " << s << "\n";
+  bss_ << "    .globl __a_gc_nroots\n__a_gc_nroots:\n"
+          "    .quad " << roots.size() << "\n";
 }
 
 void AsmEmitter::drainLambdasFor(int moduleId) {
@@ -1027,7 +1064,7 @@ void AsmEmitter::emitModuleInitBody(int moduleId) {
   body.swap(text_);
   text_.swap(saved);
   std::string sym = modInitSym(moduleId);
-  emit("    .text\n    .globl " + sym + "\n" + sym + ":\n");
+  emit("    .p2align 4\n    .text\n    .globl " + sym + "\n" + sym + ":\n");
   emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
   text_ << body.str();
   scopes_.clear();
@@ -1123,6 +1160,13 @@ void AsmEmitter::emitMainShared() {
     for (FnInfo* f : fnList_) {
       if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
         std::vector<int> ps(f->paramNames.size(), -1);
+        if (f->variadic && !ps.empty()) {
+          movImm(0, "%rdi");
+          emit("    xor %esi, %esi\n    call a_list_new\n");
+          int ls = allocSlot();
+          storeRax(ls);
+          ps.back() = ls;
+        }
         emitDirectCall(f->cname.c_str(), ps);
         break;
       }
@@ -1134,7 +1178,7 @@ void AsmEmitter::emitMainShared() {
   std::ostringstream body;
   body.swap(text_);
   text_.swap(saved);
-  emit("    .text\n    .globl main\nmain:\n");
+  emit("    .p2align 4\n    .text\n    .globl main\nmain:\n");
   emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frame) + ", %rsp\n");
   text_ << body.str();
   scopes_.clear();
@@ -1158,6 +1202,10 @@ void AsmEmitter::emitUnit(int moduleId, std::string& out) {
   if (!failed_) drainLambdasFor(moduleId);
   if (failed_) return;
   emitModuleBss(moduleId);
+  // The GC roots table is emitted once, in the entry unit: it references
+  // every module's global slots as extern .globl symbols, resolved when
+  // the per-module objects are linked together.
+  if (moduleId == graph_.entry) emitGcRootsTable();
   out = bss_.str() + rodata_.str() + text_.str();
 }
 

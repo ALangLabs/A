@@ -415,6 +415,7 @@ void AsmEmitter::emitLambdaFn(const AsmEmitter::PendingLambda& pl) {
     emitExpr(x.body.get());
     int lamRet = allocSlot();
     storeRax(lamRet);
+    call1slot("a_promote", lamRet);  // region escape: promote lambda result
     emitFramePop();
     loadSlot(lamRet);
     emit("    leave\n    ret\n");
@@ -729,6 +730,7 @@ void AsmEmitter::emitTry(const TryExpr& x) {
         jmp(inlineReturnLabel_);
       } else {
         emitDeferredPeekAll();
+        call1slot("a_promote", tS);  // region escape: propagating value returns
         emitFramePop();
         loadSlot(tS);
         emit("    leave\n    ret\n");

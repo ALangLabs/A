@@ -187,7 +187,7 @@ void ModuleLoader::loadImports(Module& module) {
     int id = resolveBare(bareName, span, nativeOut, found);
     if (!found) {
       sink_.error(span, "Cannot find module '" + bareName + "'.",
-                  "Native modules are math, io, fs, strings, collections, core, and time. "
+                  "Native modules are " + nativeModuleNames() + ". "
                   "A-file modules are searched in the stdlib directory.");
     }
     return id;

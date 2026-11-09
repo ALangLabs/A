@@ -103,7 +103,7 @@ struct Options {
   bool optimize = false;
   bool optnone = false;
   bool optFlagSet = false;
-  int optimizationLevel = 2;  // 0..3 (Os/Oz map to 1, Ofast to 3)
+  int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;
 };

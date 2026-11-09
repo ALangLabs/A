@@ -337,6 +337,8 @@ void AsmEmitter::storeBinding(const ABinding& b, int vs) {
       copySlot(vs, b.slot);
     } else if (b.kind == BKind::Global || b.kind == BKind::FnValue ||
                b.kind == BKind::StructCtor || b.kind == BKind::EnumValue) {
+      // Region escape: the value outlives this frame in a .bss global.
+      call1slot("a_promote", vs);
       loadSlot(vs);
       emit("    mov %rax, " + b.sym + "(%rip)");
     } else {
@@ -464,7 +466,7 @@ void AsmEmitter::call1slot(const char* sym, int a) {
 // integer. Clobbers %rax, %rcx and `dst`; preserves %rdx, %rsi.
 void AsmEmitter::emitUnboxInt(const char* dst, const std::string& slowL) {
     std::string inlL = newLabel("ubi"), doneL = newLabel("ubd");
-    emit("    mov %rdi, %rax\n    mov %rdi, %rcx\n    and %rdx, %rcx\n"
+    emit("    mov %rdi, %rcx\n    and %rdx, %rcx\n"
          "    cmp %rdx, %rcx\n    je " + inlL + "\n");
     // Boxed T_INT64: tagged pointer (top16 == 0xFFFF, payload 16-aligned and
     // nonzero) to an object whose AObj.type == T_INT64 (11); value at +16.
@@ -491,7 +493,7 @@ void AsmEmitter::emitAvalToI64() {
     emitUnboxInt("%rax", slowL);
     jmp(doneL);
     emitLabel(slowL);
-    emit("    mov %rdi, %rax\n    call a_int_full\n");
+    emit("    call a_int_full\n");
     emitLabel(doneL);
   }
 
@@ -606,6 +608,14 @@ bool AsmEmitter::emitFloatXmm(const Expr* e, const char* dst) {
       if (!b) return false;
       if (b->kind == BKind::Local || b->kind == BKind::Param) {
         if (b->slot < 0) return false;
+        // Loop-resident slot: the xmm register already holds the aval
+        // bits — one movapd instead of the rax round-trip.
+        auto xr = loopXmm_.find(b->slot);
+        if (xr != loopXmm_.end()) {
+          emit(std::string("    movapd %xmm") +
+               std::to_string(xr->second) + ", " + d + "\n");
+          return true;
+        }
         loadSlot(b->slot);  // rax = aval bits (xmm-forwarded if resident)
       } else if (b->kind == BKind::Global || b->kind == BKind::FnValue ||
                  b->kind == BKind::StructCtor) {
@@ -653,14 +663,23 @@ bool AsmEmitter::emitFloatXmm(const Expr* e, const char* dst) {
       const BinaryExpr& b = static_cast<const BinaryExpr&>(*e);
       if (b.op != "+" && b.op != "-" && b.op != "*") return false;
       const char* other = d == "%xmm0" ? "%xmm1" : "%xmm0";
-      // Evaluate the left operand first, then spill it: evaluating the right
-      // operand may be compound and recursively clobber the partner scratch
-      // register, which previously corrupted the left operand.
-      int lhsTmp = allocSlot();
+      // Leaf rhs (literal/ident) cannot clobber `d`: literals go through
+      // rax and idents through rax/slot loads, so the lhs spill+reload
+      // is only needed for compound rhs (Binary recursion uses `d` as
+      // its own partner scratch) or calls.
+      const bool rhsLeaf =
+          b.rhs->kind == ExprKind::FloatLit ||
+          b.rhs->kind == ExprKind::IntLit ||
+          b.rhs->kind == ExprKind::Ident;
+      int lhsTmp = -1;
       if (!emitFloatXmm(b.lhs.get(), dst)) return false;
-      emit("    movsd " + d + ", " + slotRef(lhsTmp) + "\n");
+      if (!rhsLeaf) {
+        lhsTmp = allocSlot();
+        emit("    movsd " + d + ", " + slotRef(lhsTmp) + "\n");
+      }
       if (!emitFloatXmm(b.rhs.get(), other)) return false;
-      emit("    movsd " + slotRef(lhsTmp) + ", " + d + "\n");
+      if (lhsTmp >= 0)
+        emit("    movsd " + slotRef(lhsTmp) + ", " + d + "\n");
       emit(std::string("    ") +
            (b.op == "+" ? "addsd" : b.op == "-" ? "subsd" : "mulsd") + " " +
            std::string(other) + ", " + d + "\n");

@@ -1,9 +1,11 @@
 // Native per-arch assembly backend (A -> .s -> astra -> machine code).
-// Unlike emitC, this emits target assembly directly: every A value is an
+// Unlike the x86-64 asm emitter (AsmEmitter, codegen_*.cpp), this emits
+// target assembly directly: every A value is an
 // aval word held in an 8-byte frame slot; expressions evaluate into a
 // single accumulator register; all semantics go through the a_*_slow
 // runtime externs (the header fast paths are C-only). Unsupported
-// constructs fail emission so the pipeline can fall back to emitC.
+// constructs fail emission, which the pipeline reports as a hard error
+// (there is no C emitter to fall back to).
 //
 // The NatTarget interface abstracts the per-arch primitives (frame layout,
 // slot addressing, constant materialization, symbol access, calls, and
@@ -49,6 +51,18 @@ struct NatTarget {
   // Bare-metal targets (i8086): no libc, tiny address space — skip
   // function-name/struct registration metadata and GC dead functions.
   virtual bool bareMetal() const { return false; }
+  // GC roots table: emit __a_gc_roots (pointer array of aval global-slot
+  // addresses) + __a_gc_nroots (count) into `o`. Default is the 64-bit
+  // GNU-as form (.quad relocations in .data); 32-bit targets override
+  // with pointer-sized .long entries.
+  virtual void gcRootsTable(std::string& o,
+                            const std::vector<std::string>& syms) const {
+    o += "    .section .data\n    .align 8\n"
+         "    .globl __a_gc_roots\n__a_gc_roots:\n";
+    for (const std::string& s : syms) o += "    .quad " + s + "\n";
+    o += "    .globl __a_gc_nroots\n__a_gc_nroots:\n"
+         "    .quad " + std::to_string(syms.size()) + "\n";
+  }
   virtual void prologue(std::string& o, int frameBytes) const = 0;
   virtual void epilogue(std::string& o, int frameBytes) const = 0;
   virtual std::string slotRef(int i) const = 0;   // e.g. "[sp, #8]"
@@ -272,6 +286,10 @@ int builtinRuntimeId(const std::string& name) {
       {"os_mkdir", 254}, {"os_rmdir", 255}, {"os_truncate", 256},
       {"os_environ", 257}, {"os_getenv", 262}, {"os_setenv", 258},
       {"os_unsetenv", 259}, {"os_system", 260}, {"os_urandom", 261},
+      {"os_getloadavg", 263}, {"os_gethostname", 264}, {"os_umask", 265},
+      {"os_getpagesize", 266}, {"os_chown", 267}, {"os_ismount", 268},
+      {"os_disk_usage", 269}, {"os_popen", 270}, {"os_kill", 271},
+      {"os_exit", 272},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -339,12 +357,19 @@ class NativeEmitter {
                 const std::string* testFilter = nullptr)
       : graph_(graph), sema_(sema), t_(target), testMode_(testMode),
         testFilter_(testFilter ? *testFilter : "") {}
+  ~NativeEmitter() {
+    // collectGlobals() heap-allocates one FnInfo/StructInfo per fn/struct/
+    // method; fnList_/structList_ own them (mirrors ~AsmEmitter).
+    for (FnInfo* f : fnList_) delete f;
+    for (StructInfo* s : structList_) delete s;
+  }
 
   bool isStdlibModule(int moduleId) const {
     // Stdlib/prelude bodies are emitted for real: stubbing them to A_NONE
     // produced silently wrong values (e.g. stdlib/std/simd). If a stdlib
     // body hits an unsupported construct, emitNative fails and the pipeline
-    // falls back to emitC — always correct, never a silent None.
+    // fails emission, which the pipeline reports as a hard error — never a
+    // silent None.
     (void)moduleId;
     return false;
   }
@@ -360,6 +385,7 @@ class NativeEmitter {
     emitMain();
     emitLambdas();
     if (failed_) return false;
+    emitGcRootsTable();
     out = bss_.str() + rodata_.str() + t_.extraRodata() + text_.str();
     return true;
   }
@@ -417,6 +443,9 @@ class NativeEmitter {
     if (!failed_) drainLambdasFor(moduleId);
     if (failed_) return;
     emitModuleBss(moduleId);
+    // GC roots table lives once, in the entry unit: it references every
+    // module's global slots as extern symbols resolved at link time.
+    if (moduleId == graph_.entry) emitGcRootsTable();
     out = bss_.str() + rodata_.str() + t_.extraRodata() + text_.str();
   }
   void drainLambdasFor(int moduleId) {
@@ -447,19 +476,43 @@ class NativeEmitter {
     std::sort(tops.begin(), tops.end());
     tops.erase(std::unique(tops.begin(), tops.end()), tops.end());
     for (const std::string& g : tops)
-      bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
     for (FnInfo* f : fnList_)
       if (!f->isMethod && f->moduleId == moduleId)
-        bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n"
+        bss_ << "    .section .bss\n    .balign 8\n    .globl " << f->globalVar << "\n"
              << f->globalVar << ":\n    .space 8\n";
     for (StructInfo* st : structList_)
       if (st->moduleId == moduleId)
-        bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n"
+        bss_ << "    .section .bss\n    .balign 8\n    .globl " << st->globalVar << "\n"
              << st->globalVar << ":\n    .space 8\n";
     for (auto& kv : enums_)
       if (!kv.second.algebraic && kv.second.moduleId == moduleId)
-        bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
+        bss_ << "    .section .bss\n    .balign 8\n    .globl " << kv.second.globalVar << "\n"
              << kv.second.globalVar << ":\n    .space 8\n";
+  }
+
+  // GC roots: one pointer table covering every aval-holding global slot in
+  // the program. The symbol set mirrors what emitModuleBss/emitMain define
+  // in .bss across ALL modules (__na_top_*, non-method __na_gf_*,
+  // __na_gs_*, non-algebraic __na_ev_*; method globalVars and algebraic
+  // enums never get .bss slots). Emitted once — by run() directly, or by
+  // the entry unit of runPerUnit, whose object references every other
+  // unit's slots as externs resolved at link time. Always emitted (even
+  // when empty) so the runtime's weak externs resolve. i8086 is bare-metal
+  // with no GC/runtime heap: skipped.
+  void emitGcRootsTable() {
+    if (t_.bareMetal()) return;
+    std::set<std::string> roots;
+    for (const auto& kv : topLevelGlobals_) roots.insert(kv.second);
+    for (FnInfo* f : fnList_)
+      if (!f->isMethod) roots.insert(f->globalVar);
+    for (StructInfo* st : structList_) roots.insert(st->globalVar);
+    for (auto& kv : enums_)
+      if (!kv.second.algebraic) roots.insert(kv.second.globalVar);
+    std::vector<std::string> syms(roots.begin(), roots.end());
+    std::string tbl;
+    t_.gcRootsTable(tbl, syms);
+    bss_ << tbl;
   }
 
  private:
@@ -496,7 +549,8 @@ class NativeEmitter {
   int curModuleId_ = -1;
   std::string retLabel_;  // per-function return target ("" outside functions)
   // defer: stack of frames; each frame is a list of deferred stmt bodies.
-  // A frame is pushed per function and per for-loop body (matching emitC).
+  // A frame is pushed per function and per for-loop body (matching the
+  // AsmEmitter).
   std::vector<std::vector<const Stmt*>> deferStack_;
   std::vector<int> loopDeferDepth_;
   // lambdas queued for emission as separate functions.
@@ -665,7 +719,7 @@ class NativeEmitter {
     if (!scopeDeclOrder_.empty()) scopeDeclOrder_.back().push_back(name);
   }
 
-  // ---- RAII drops (mirrors emitC) -------------------------------------------
+  // ---- RAII drops (mirrors AsmEmitter) ---------------------------------------
   FnInfo* findDrop(const Expr* init) {
     if (!init) return nullptr;
     TypePtr ty = resolveType(init->inferredType);
@@ -745,14 +799,14 @@ class NativeEmitter {
     movImm(bits, acc());
   }
   // Native module constant (PI, E) -> boxed double aval. Same lowering as
-  // emitC's NativeConst binding.
+  // the AsmEmitter's NativeConst binding.
   void emitNativeConst(const std::string& name) {
     emitDoubleLit(name == "PI"   ? 3.14159265358979323846
                  : name == "E"    ? 2.71828182845904523536
                                    : 0.0);
   }
   // Enum variant as a value: simple variants load their global aval;
-  // algebraic variants build {__tag, __name} (mirrors emitC).
+  // algebraic variants build {__tag, __name} (mirrors AsmEmitter).
   void emitEnumVariantValue(const EnumVariantInfo& ev,
                             const std::string& fieldName) {
     if (!ev.algebraic) {
@@ -887,7 +941,7 @@ class NativeEmitter {
   // py_call(module, member, nkw, pos..., (kname, kval)*nkw): argv[0..1] are
   // the module/member strings, argv[2] the kwargs count, then positional
   // args, then name/value pairs. The runtime resolves libpython. Mirrors
-  // emitAsm's emitPyCall / emitC's emitPyCall.
+  // Same shape as AsmEmitter::emitPyCall.
   void emitPyCall(const std::string& module, const std::string& member,
                   const CallExpr& call) {
     int ms = strLitSlot(module);
@@ -1000,7 +1054,7 @@ class NativeEmitter {
   // acc holds aval; call a_truthy_raw_slow -> plain 0/1 in acc.
   void truthyAcc() { callSym("a_truthy_raw_slow"); }
 
-  // Mirror of emitC orderArgs: named args matched to paramNames, positionals
+  // Mirror of AsmEmitter orderArgs: named args matched to paramNames, positionals
   // fill in order, trailing *args packed into a list, unfilled params get the
   // missing sentinel (A_TAG for fns so callees apply defaults, A_NONE for
   // struct ctors). Returns slot indices aligned with paramNames.
@@ -1103,7 +1157,7 @@ class NativeEmitter {
 
   // Follow `from "x.a" import name` re-exports (package __init__ modules) to
   // the module that actually declares `name`. Returns {moduleId, name};
-  // unchanged when there is no re-export. Mirrors emitC's
+  // unchanged when there is no re-export. Mirrors AsmEmitter's
   // resolveModuleMember; native/python re-exports are not followed.
   std::pair<int, std::string> resolveModuleMember(int moduleId,
                                                   const std::string& name) {
@@ -1313,7 +1367,7 @@ class NativeEmitter {
     }
     return fallback;
   }
-  // ---- registration (mirrors emitC) -----------------------------------------
+  // ---- registration (mirrors AsmEmitter) -------------------------------------
   void collectGlobals() {
     std::unordered_map<std::string, int> seenSym;
     auto symWithSuffix = [&](const std::string& base) -> std::string {
@@ -1544,7 +1598,7 @@ class NativeEmitter {
 
   // Register a module's import aliases (import x / from x import y,
   // including native `std:` modules and `python:` modules) into the
-  // current scope. Mirrors emitC's bindModuleImportStmts.
+  // current scope. Mirrors AsmEmitter's bindModuleImportStmts.
   void bindModuleImports(const Module& mod) {
     if (!mod.program) return;
     for (const StmtPtr& s : mod.program->statements) {
@@ -1624,7 +1678,7 @@ class NativeEmitter {
                 b.kind = BKind::Global;
                 b.sym = gsym;
               } else {
-                // Unresolved member: leave unbound; use fails -> emitC fallback.
+                // Unresolved member: leave unbound; use fails -> hard error.
                 continue;
               }
             }
@@ -1685,6 +1739,7 @@ class NativeEmitter {
     std::ostringstream body;
     body.swap(text_);
     text_.swap(saved);
+    if (!t_.bareMetal()) emit("    .p2align 4\n");
     emit("    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
     std::string pro;
     t_.prologue(pro, frame);
@@ -1781,6 +1836,7 @@ class NativeEmitter {
     std::ostringstream body;
     body.swap(text_);
     text_.swap(saved);
+    if (!t_.bareMetal()) emit("    .p2align 4\n");
     emit("    .text\n    .globl " + f->cname + "\n" + f->cname + ":\n");
     std::string pro;
     t_.prologue(pro, frame);
@@ -1867,6 +1923,7 @@ class NativeEmitter {
     std::ostringstream body;
     body.swap(text_);
     text_.swap(saved);
+    if (!t_.bareMetal()) emit("    .p2align 4\n");
     emit("    .text\n    .globl " + job.cname + "\n" + job.cname + ":\n");
     std::string pro;
     t_.prologue(pro, frame);
@@ -2025,6 +2082,7 @@ class NativeEmitter {
     std::ostringstream body;
     body.swap(text_);
     text_.swap(saved);
+    if (!t_.bareMetal()) emit("    .p2align 4\n");
     emit("    .text\n    .globl main\nmain:\n");
     std::string pro;
     t_.prologue(pro, frame);
@@ -2038,15 +2096,15 @@ class NativeEmitter {
     // emitModuleBss to avoid duplicate definitions across objects).
     if (!perUnitMode_) {
     for (const std::string& g : globals_) {
-      bss_ << "    .section .bss\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << g << "\n" << g << ":\n    .space 8\n";
     }
     for (FnInfo* f : fnList_) {
       if (!f->isMethod)
-        bss_ << "    .section .bss\n    .globl " << f->globalVar << "\n"
+        bss_ << "    .section .bss\n    .balign 8\n    .globl " << f->globalVar << "\n"
              << f->globalVar << ":\n    .space 8\n";
     }
     for (StructInfo* st : structList_) {
-      bss_ << "    .section .bss\n    .globl " << st->globalVar << "\n"
+      bss_ << "    .section .bss\n    .balign 8\n    .globl " << st->globalVar << "\n"
            << st->globalVar << ":\n    .space 8\n";
     }
     {
@@ -2057,7 +2115,7 @@ class NativeEmitter {
       for (const auto& _ek : _ekeys) {
         auto& kv = *enums_.find(_ek);
         if (!kv.second.algebraic)
-          bss_ << "    .section .bss\n    .globl " << kv.second.globalVar << "\n"
+          bss_ << "    .section .bss\n    .balign 8\n    .globl " << kv.second.globalVar << "\n"
                << kv.second.globalVar << ":\n    .space 8\n";
       }
     }
@@ -2482,7 +2540,7 @@ class NativeEmitter {
     }
   }
   void emitIncDec(const UnaryExpr& x) {
-    // operand must be Ident for store-back (mirrors emitC).
+    // operand must be Ident for store-back (mirrors AsmEmitter).
     int delta = x.op == "++" ? 1 : -1;
     int oldS = allocSlot();
     emitExpr(x.operand.get());
@@ -3777,6 +3835,16 @@ struct I386Target : NatTarget {
   static constexpr int kReserve = 232;
   static constexpr int kOut = 0, kAcc = 128, kTmp = 136, kArg = 168;
   int ptrSize() const override { return 4; }
+  // 32-bit pointers: .long absolute relocations (same dialect as leaSym's
+  // `movl $sym` and the 32-bit a_test_main table).
+  void gcRootsTable(std::string& o,
+                    const std::vector<std::string>& syms) const override {
+    o += "    .section .data\n    .align 4\n"
+         "    .globl __a_gc_roots\n__a_gc_roots:\n";
+    for (const std::string& s : syms) o += "    .long " + s + "\n";
+    o += "    .globl __a_gc_nroots\n__a_gc_nroots:\n"
+         "    .long " + std::to_string(syms.size()) + "\n";
+  }
   mutable std::string lastA, lastB;
   mutable int jcN_ = 0;
   mutable std::set<int> usedArgs_;
@@ -4023,6 +4091,16 @@ struct Arm32Target : NatTarget {
   static constexpr int kReserve = 232;
   static constexpr int kOut = 0, kTmp = 136, kArg = 168;
   int ptrSize() const override { return 4; }
+  // 32-bit pointers: .long entries (same as I386Target; GAS accepts .long
+  // on ARM).
+  void gcRootsTable(std::string& o,
+                    const std::vector<std::string>& syms) const override {
+    o += "    .section .data\n    .align 4\n"
+         "    .globl __a_gc_roots\n__a_gc_roots:\n";
+    for (const std::string& s : syms) o += "    .long " + s + "\n";
+    o += "    .globl __a_gc_nroots\n__a_gc_nroots:\n"
+         "    .long " + std::to_string(syms.size()) + "\n";
+  }
   mutable std::string lastA, lastB;
   mutable int jcN_ = 0;
   mutable std::set<int> usedArgs_;
@@ -4753,14 +4831,14 @@ bool emitNative(const ModuleGraph& graph, const SemaResult& sema,
     return false;
   }
   // Windows x86-64 uses the MS ABI (Win64Target); every other OS/arch
-  // combination keeps its existing target (or declines for emitC).
+  // combination keeps its existing target (or declines to emit).
   if (arch == "x86_64" && os == "windows") {
     Win64Target t;
     NativeEmitter e(graph, sema, t, testMode, testFilter);
     return e.run(out, error);
   }
   // The remaining NatTargets emit SysV-style assembly only; on Windows
-  // they would produce the wrong ABI, so decline to emitC instead.
+  // they would produce the wrong ABI, so decline to emit instead.
   if (os == "windows") {
     error = "native backend: no native target for '" + arch + "' on windows";
     return false;

@@ -116,6 +116,14 @@ std::string lowerStr(std::string s) {
 bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
   t = TargetDesc{};
   t.os = hostOs();
+  // A_CODEGEN=c selected the C emitter, which was removed. Reject it here so
+  // every path fails alike — the split-unit, cache-hit and i8086 paths return
+  // before the single-unit guards below would notice.
+  if (const char* forced = std::getenv("A_CODEGEN"); forced && lowerStr(forced) == "c") {
+    err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
+           "removed — every target compiles A -> assembly -> machine code\n";
+    return false;
+  }
   std::string s = spec;
   // env override for tests / unusual setups
   const char* hostEnv = std::getenv("A_TARGET");
@@ -1592,7 +1600,7 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
 // the host-arch archive.
 int astraBuild(const std::string& arch, const std::string& os,
                const std::string& srcPath, const std::string& outPath,
-               std::ostream& err, int optimizationLevel = 2) {
+               std::ostream& err, int optimizationLevel = 3) {
   std::string astraBin, runtimeC, runtimeDir;
   if (!findRuntime(arch, os, astraBin, runtimeC, runtimeDir)) {
     err << "error: cannot locate A runtime (a_runtime.c) for target '" << arch
@@ -1719,7 +1727,7 @@ int astraBuild(const std::string& arch, const std::string& os,
   // subsequent builds link the archive instead of recompiling ~40 C files
   // per program. The archive is keyed by arch via runtimeDir (astralib-<arch>).
   const std::string rtArchive = runtimeDir + "/libaruntime.a";
-  if (optimizationLevel == 2 && !hasFile(rtArchive) && os != "windows" &&
+  if (optimizationLevel >= 2 && !hasFile(rtArchive) && os != "windows" &&
       !buildRuntimeArchiveCC(arch, runtimeDir, rtSrcs, rtArchive)) {
     std::error_code ec;
     const std::string objDir = runtimeDir + "/rt_obj";
@@ -1749,7 +1757,7 @@ int astraBuild(const std::string& arch, const std::string& os,
   // The staged libaruntime.a is built once (O2); linking it avoids
   // recompiling every runtime module for each program. Non-default opt levels
   // and targets without the archive keep the compile-sources path.
-  if (optimizationLevel == 2 && std::filesystem::exists(rtArchive)) {
+  if (optimizationLevel >= 2 && std::filesystem::exists(rtArchive)) {
     args.push_back(rtArchive);
   } else {
     args.insert(args.end(), rtSrcs.begin(), rtSrcs.end());
@@ -1845,7 +1853,7 @@ bool prepareAstraPlan(const std::string& arch, const std::string& os,
     }
   }
   plan.rtArchive = plan.runtimeDir + "/libaruntime.a";
-  if (optimizationLevel == 2 && !hasFile(plan.rtArchive) && os != "windows" &&
+  if (optimizationLevel >= 2 && !hasFile(plan.rtArchive) && os != "windows" &&
       !buildRuntimeArchiveCC(arch, plan.runtimeDir, plan.rtSrcs, plan.rtArchive)) {
     std::error_code ec;
     const std::string objDir = plan.runtimeDir + "/rt_obj";
@@ -1961,7 +1969,7 @@ int linkUnits(const std::string& arch, const std::string& os,
               std::ostream& err) {
   std::vector<std::string> args = plan.baseArgs;
   for (const auto& o : objs) args.push_back(o);
-  if (optimizationLevel == 2 && std::filesystem::exists(plan.rtArchive))
+  if (optimizationLevel >= 2 && std::filesystem::exists(plan.rtArchive))
     args.push_back(plan.rtArchive);
   else
     args.insert(args.end(), plan.rtSrcs.begin(), plan.rtSrcs.end());
@@ -2285,7 +2293,7 @@ int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
 // `canExecute` is false for cross targets: the link still happens, but no
 // child process is spawned.
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
-                  bool testMode = false, int optimizationLevel = 2,
+                  bool testMode = false, int optimizationLevel = 3,
                   const std::string* keepBin = nullptr,
                   const TargetDesc* td = nullptr,
                   const std::string* entrySource = nullptr,

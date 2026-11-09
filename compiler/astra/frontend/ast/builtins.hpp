@@ -49,6 +49,9 @@ inline BuiltinId builtinIdForName(std::string_view name) {
   if (name == "sqrt") return BuiltinId::Sqrt;
   if (name == "f64") return BuiltinId::F64;
   if (name == "i64") return BuiltinId::I64;
+  // u64 truncates to 64 bits — the identity on A's i64 values, so it shares
+  // the i64 lowering (there is no unsigned-64 aval representation).
+  if (name == "u64") return BuiltinId::I64;
   if (name == "abs") return BuiltinId::Abs;
   if (name == "round") return BuiltinId::Round;
   if (name == "floor") return BuiltinId::Floor;

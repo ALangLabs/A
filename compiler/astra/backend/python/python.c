@@ -49,6 +49,7 @@ struct PyRt {
 
     /* function pointers (all resolved with dlsym) */
     void (*Py_Initialize)(void);
+    void (*Py_Finalize)(void);
     int (*PyGILState_Ensure)(void);
     void (*PyGILState_Release)(int);
     PyObj (*PyImport_ImportModule)(const char *);
@@ -137,6 +138,7 @@ static int py_fill(void *h) {
     p->field = (__typeof__(p->field))dlsym(h, name);                        \
     if (!p->field) return 0
     A_PY_SYM(Py_Initialize, "Py_Initialize");
+    A_PY_SYM(Py_Finalize, "Py_Finalize");
     A_PY_SYM(PyGILState_Ensure, "PyGILState_Ensure");
     A_PY_SYM(PyGILState_Release, "PyGILState_Release");
     A_PY_SYM(PyImport_ImportModule, "PyImport_ImportModule");
@@ -465,6 +467,9 @@ static void py_extra_syspaths(void) {
     }
 }
 
+static void pybuf_release_all(void);
+static void py_finalize(void);
+
 /* One-time interpreter init after a successful dlopen. */
 static void py_init_once(void) {
     if (g_py.initialized) return;
@@ -474,6 +479,7 @@ static void py_init_once(void) {
     if (oldHome) snprintf(savedHome, sizeof savedHome, "%s", oldHome);
     if (g_py.py_home) setenv("PYTHONHOME", g_py.py_home, 1);
     g_py.Py_Initialize();
+    atexit(py_finalize);
     if (g_py.py_home) {
         if (oldHome) setenv("PYTHONHOME", savedHome, 1);
         else unsetenv("PYTHONHOME");
@@ -483,6 +489,12 @@ static void py_init_once(void) {
     py_extra_syspaths();
     g_py.PyGILState_Release(gil);
     g_py.initialized = 1;
+}
+
+static void py_finalize(void) {
+    if (!g_py.Py_Finalize) return;
+    pybuf_release_all();
+    g_py.Py_Finalize();
 }
 
 static int py_ensure_ready(void) {
@@ -832,8 +844,19 @@ aval bi_py_call(uint64_t n, aval *argv) {
     uint64_t mlen = 0, flen = 0;
     const char *modraw = str_data(argv[0], &mlen);
     const char *memraw = str_data(argv[1], &flen);
-    char *mod = xstrndup(modraw, (size_t)mlen);
-    char *mem = xstrndup(memraw, (size_t)flen);
+    /* Scratch copies are raw malloc (untracked by the conservative
+       collector): the collector can never free them under CPython
+       calls, so no explicit roots are needed and they are never
+       mis-flagged as heap objects. Paired free() below is a_gc_free,
+       which raw-frees untracked blocks. */
+    char *mod = (char *)malloc((size_t)mlen + 1);
+    if (!mod) panicf("out of memory");
+    memcpy(mod, modraw, (size_t)mlen);
+    mod[mlen] = '\0';
+    char *mem = (char *)malloc((size_t)flen + 1);
+    if (!mem) { free(mod); panicf("out of memory"); }
+    memcpy(mem, memraw, (size_t)flen);
+    mem[flen] = '\0';
     if (!py_ensure_ready()) {
         free(mod); free(mem);
         panicf("python interop unavailable: %s", g_py.error);
@@ -1217,9 +1240,9 @@ static int pybuf_c_contiguous(PyBufferView *v) {
     return 1;
 }
 
-/* Live views are released at process exit: A objects are never freed, so
-   there is no per-object destroy hook. The exported buffer keeps the
-   Python exporter (and its memory) alive until then. */
+/* Live views hold the exported buffer through a private PyBuffer copy.
+   The GC calls a_py_release_obj() when the A view becomes unreachable,
+   which releases that buffer (and the exporter reference it owns). */
 typedef struct PyBufNode {
     APyBuf *buf;
     struct PyBufNode *next;
@@ -1227,13 +1250,64 @@ typedef struct PyBufNode {
 static PyBufNode *g_pybufs;
 static int g_pybuf_atexit_registered;
 
+/* Bookkeeping (PyBufNode + PyBufferView copy) is raw malloc and
+   INVISIBLE to the conservative collector. Rooting the list would
+   pin every APyBuf alive forever (a leak); tracking it as GC objects
+   would let sweep free the nodes without unlinking (a UAF). Lifetime
+   is explicit: a_py_release_obj unlinks+frees when the A view dies,
+   pybuf_release_all drains the remainder at exit. */
 static void pybuf_release_all(void) {
     if (g_py.state != 1 || !g_py.initialized) return;
+    if (!g_pybufs) return;
     int gil = g_py.PyGILState_Ensure();
-    for (PyBufNode *n = g_pybufs; n; n = n->next) {
-        if (n->buf->state)
-            g_py.PyBuffer_Release((PyBufferView *)n->buf->state);
-        n->buf->state = NULL;
+    PyBufNode *n = g_pybufs;
+    g_pybufs = NULL;
+    while (n) {
+        PyBufNode *next = n->next;
+        APyBuf *b = n->buf;
+        if (b && b->state) {
+            g_py.PyBuffer_Release((PyBufferView *)b->state);
+            free(b->state);
+            b->state = NULL;
+        }
+        free(n);
+        n = next;
+    }
+    g_py.PyGILState_Release(gil);
+}
+
+void a_py_release_obj(void *p) {
+    AObj *o = (AObj *)p;
+    if (!o || (o->type != T_PYOBJ && o->type != T_PYBUF)) return;
+    if (g_py.state != 1 || !g_py.initialized) {
+        if (o->type == T_PYOBJ) ((APyObj *)o)->obj = NULL;
+        else ((APyBuf *)o)->state = NULL;
+        return;
+    }
+    int gil = g_py.PyGILState_Ensure();
+    if (o->type == T_PYOBJ) {
+        APyObj *po = (APyObj *)o;
+        if (po->obj) {
+            g_py.Py_DecRef(po->obj);
+            po->obj = NULL;
+        }
+    } else {
+        APyBuf *b = (APyBuf *)o;
+        PyBufNode **pp = &g_pybufs;
+        while (*pp) {
+            if ((*pp)->buf == b) {
+                PyBufNode *node = *pp;
+                *pp = node->next;
+                free(node);
+                break;
+            }
+            pp = &(*pp)->next;
+        }
+        if (b->state) {
+            g_py.PyBuffer_Release((PyBufferView *)b->state);
+            free(b->state);
+            b->state = NULL;
+        }
     }
     g_py.PyGILState_Release(gil);
 }
@@ -1268,6 +1342,7 @@ aval a_py_buffer_view(aval obj) {
         panicf("py_buffer: buffer is not C-contiguous");
     }
     APyBuf *b = (APyBuf *)xmalloc(sizeof(APyBuf));
+    a_gc_push_root(mkobj((void *)b));
     b->h.type = T_PYBUF;
     b->h.len = 0;
     b->h.cap = 0;
@@ -1277,14 +1352,22 @@ aval a_py_buffer_view(aval obj) {
     b->readonly = bv.readonly != 0;
     b->data = (char *)bv.buf;
     b->owner = bv.obj;
-    if (b->owner) g_py.Py_IncRef((PyObj)b->owner); /* round-trip ref */
+    /* No extra IncRef: the Py_buffer copy kept in `state` already owns a
+       reference on bv.obj until PyBuffer_Release at process exit, which is
+       exactly the view's lifetime. aval_to_py() IncRefs again when handing
+       the owner back to Python. */
     /* Keep a private copy of the Py_buffer for PyBuffer_Release. The
        exporter-owned pointers (shape/strides/format/internal) stay valid
-       until release, which only happens at process exit. */
-    PyBufferView *keep = (PyBufferView *)xmalloc(sizeof(PyBufferView));
+       until release, which happens when a_py_release_obj unlinks the
+       view or at process exit. Raw malloc (untracked): the collector
+       can never free these without unlinking, and the live-view list
+       therefore pins nothing. */
+    PyBufferView *keep = (PyBufferView *)malloc(sizeof(PyBufferView));
+    if (!keep) { g_py.PyBuffer_Release(&bv); g_py.PyGILState_Release(gil); panicf("out of memory"); }
     *keep = bv;
     b->state = keep;
-    PyBufNode *node = (PyBufNode *)xmalloc(sizeof(PyBufNode));
+    PyBufNode *node = (PyBufNode *)malloc(sizeof(PyBufNode));
+    if (!node) { g_py.PyBuffer_Release(keep); free(keep); b->state = NULL; g_py.PyGILState_Release(gil); panicf("out of memory"); }
     node->buf = b;
     node->next = g_pybufs;
     g_pybufs = node;
@@ -1293,6 +1376,7 @@ aval a_py_buffer_view(aval obj) {
         atexit(pybuf_release_all);
     }
     g_py.PyGILState_Release(gil);
+    a_gc_pop_root();
     return mkobj(&b->h);
 }
 
@@ -1748,6 +1832,9 @@ aval a_py_repr(aval obj) { (void)obj; return py_unsupported(); }
 int a_py_truthy(aval obj) { (void)obj; return py_unsupported(), 0; }
 int a_py_equals(aval a, aval b) { (void)a; (void)b; return py_unsupported(), 0; }
 aval a_py_buffer_view(aval obj) { (void)obj; return py_unsupported(); }
+void a_py_release_obj(void *p) { (void)p; }
+static void py_finalize(void) {}
+static void pybuf_release_all(void) {}
 aval a_py_hasattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
 aval a_py_delattr(aval obj, const char *name) { (void)obj; (void)name; return py_unsupported(); }
 aval a_py_delitem(aval obj, aval key) { (void)obj; (void)key; return py_unsupported(); }

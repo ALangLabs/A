@@ -1,9 +1,11 @@
 #pragma once
 
+#include <algorithm>
 #include <initializer_list>
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "collections/transparent_map.hpp"
 
@@ -84,7 +86,17 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                        {"setenv", "os_setenv"},
                        {"unsetenv", "os_unsetenv"},
                        {"system", "os_system"},
-                       {"urandom", "os_urandom"}},
+                       {"urandom", "os_urandom"},
+                       {"getloadavg", "os_getloadavg"},
+                       {"gethostname", "os_gethostname"},
+                       {"umask", "os_umask"},
+                       {"getpagesize", "os_getpagesize"},
+                       {"chown", "os_chown"},
+                       {"ismount", "os_ismount"},
+                       {"disk_usage", "os_disk_usage"},
+                       {"popen", "os_popen"},
+                       {"kill", "os_kill"},
+                       {"exit", "os_exit"}},
                       {})},
       {"strings", makeSpec({{"len", "len"}, {"str", "str"}, {"join", "join"}}, {})},
       {"collections", makeSpec({{"len", "len"},
@@ -333,6 +345,20 @@ inline const NativeModuleSpec* nativeModuleSpec(const std::string& name) {
 }
 
 inline bool isNativeModule(const std::string& name) { return nativeModuleSpec(name) != nullptr; }
+
+// Comma-separated list of every native module name (sorted), for diagnostics.
+inline std::string nativeModuleNames() {
+  std::vector<std::string> names;
+  names.reserve(nativeModules().size());
+  for (const auto& entry : nativeModules()) names.push_back(entry.first);
+  std::sort(names.begin(), names.end());
+  std::string out;
+  for (const std::string& name : names) {
+    if (!out.empty()) out += ", ";
+    out += name;
+  }
+  return out;
+}
 
 inline const std::string* nativeFunction(const std::string& module, const std::string& member) {
   const NativeModuleSpec* spec = nativeModuleSpec(module);

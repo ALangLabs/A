@@ -18,19 +18,38 @@ TypePtr Sema::checkBuiltinSystem(const std::string& name, CallExpr& call) {
     if (name == "os_chdir" || name == "os_chmod" || name == "os_symlink" ||
         name == "os_link" || name == "os_utime" || name == "os_mkdir" ||
         name == "os_rmdir" || name == "os_truncate" || name == "os_setenv" ||
-        name == "os_unsetenv") {
+        name == "os_unsetenv" || name == "os_chown" || name == "os_kill" ||
+        name == "os_exit") {
       inferAll();
       return typeVoid();
     }
     if (name == "os_getpid" || name == "os_getppid" || name == "os_getuid" ||
         name == "os_geteuid" || name == "os_getgid" || name == "os_getegid" ||
-        name == "os_cpu_count" || name == "os_system") {
+        name == "os_cpu_count" || name == "os_system" ||
+        name == "os_umask" || name == "os_getpagesize") {
       inferAll();
       return typeInt(64, true);
     }
-    if (name == "os_getlogin" || name == "os_readlink") {
+    if (name == "os_getlogin" || name == "os_readlink" ||
+        name == "os_gethostname" || name == "os_popen") {
       inferAll();
       return typeString();
+    }
+    if (name == "os_getloadavg") {
+      inferAll();
+      std::vector<TypePtr> parts(3, typeFloat(64));
+      return typeTuple(std::move(parts));
+    }
+    if (name == "os_ismount") {
+      if (!arity(1, 1)) return typeError();
+      inferAll();
+      return typeBool();
+    }
+    if (name == "os_disk_usage") {
+      if (!arity(1, 1)) return typeError();
+      inferAll();
+      std::vector<TypePtr> parts(3, typeInt(64, true));
+      return typeTuple(std::move(parts));
     }
     if (name == "os_uname") {
       inferAll();

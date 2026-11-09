@@ -596,6 +596,12 @@ class AsmEmitter {
     void emitUnit(int moduleId, std::string& out);
     void drainLambdasFor(int moduleId);
     void emitModuleBss(int moduleId);
+    // GC roots table: .data array of pointers to every aval-holding global
+    // slot (the same symbol set emitModuleBss defines in .bss across all
+    // modules). Emitted once per program — run() emits it directly;
+    // runPerUnit emits it only in the entry unit, whose object aggregates
+    // extern references to every other unit's slots.
+    void emitGcRootsTable();
 
   // ---- statements -------------------------------------------------------------
   // Emit deferred statements of frames [depth, size) innermost-first, LIFO
@@ -728,6 +734,12 @@ class AsmEmitter {
   // like the aval add path.
     void emitWhileFloatAdd(ABinding* b, const Expr* v);
 
+  // `acc = v` inside tryEmitWhileFloat (v reads acc and is floatXmmOk):
+  // v -> xmm0 (self reads see the resident register's old bits), then
+  // the result replaces the resident register with the same NaN
+  // canonicalization as emitWhileFloatAdd.
+    void emitWhileFloatSet(ABinding* b, const Expr* v);
+
   // Upper bound on the accumulator's value at the start of the loop:
   // union of the ranges of every `=`-style write to it that textually
   // precedes the loop in the current function body. Returns false when
@@ -827,6 +839,15 @@ class AsmEmitter {
   // accepted: bindings that are not raw-int fall back to aval evaluation +
   // a_int_full (the same unbox the Phase-4 raw path already used).
     bool rawSafeExpr(const Expr* e);
+
+  // rawSafeExpr variant for speculative self-assigns (`acc = acc + i`):
+  // reads of `self` (the assignment target) count as raw-safe because the
+  // specRaw flag protocol supplies the current int64 while flag==0 (and
+  // emitSpecAssign re-checks the flag / falls back to the aval on the
+  // demoted path). Composite nodes keep rawSafeExpr's rules — only bare
+  // self idents are relaxed, so every emitted raw op still has its
+  // overflow proof or its jo-deopt point at the top level.
+    bool rawSafeExprSelf(const Expr* e, const std::string& self);
 
   // emitBinary fast-path gate: a safe-op binary whose operands are all raw
   // int64 materializable. Kept in sync with the emitBinary call site and the
