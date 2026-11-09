@@ -1,0 +1,20 @@
+# Golden test: websearchcli.a pure helpers (no network).
+import json
+from "../../../../websearchcli.a" import _extract_text, _parse_response, _search_payload
+
+fn test_sse_result_text():
+    body = """event: message
+data: {"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"hit one"}]}}
+
+"""
+    assert_eq(_parse_response(body)!, "hit one")
+
+fn test_plain_json_skips_blank_parts():
+    doc = json.parse("""{"result":{"content":[{"text":""},{"text":"a"},{"text":"b"}]}}""")
+    assert_eq(_extract_text(doc)!, "a\nb")
+
+fn test_payload_arguments():
+    doc = json.parse(_search_payload("q", 3, "neural", "never"))
+    args = json.get(json.get(doc, "params")!, "arguments")!
+    assert_eq(json.get(args, "numResults")!, 3)
+    assert_eq(json.get(args, "type")!, "neural")

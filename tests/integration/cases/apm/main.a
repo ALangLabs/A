@@ -1,0 +1,6 @@
+# apm auto-discovery (fixture project under cases/apm/): a plain `a run`
+# must find .apm/packages automatically since apm.json is in this dir.
+import hello_lib
+
+fn main():
+    print(hello_lib.greet("apm"))

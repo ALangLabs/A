@@ -972,7 +972,16 @@ def main() -> int:
         client.request(
             "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
         )
-        async_diag = client.wait_notification("textDocument/publishDiagnostics")
+        # Filter to the main document: pending diagnostics for imp.a
+        # (intentional duplicate `std:json` import) may be delivered first.
+        async_diag = None
+        for _ in range(8):
+            note = client.wait_notification("textDocument/publishDiagnostics")
+            if note["params"]["uri"] == uri:
+                async_diag = note
+                break
+        if async_diag is None:
+            fail("async publishDiagnostics for main document never arrived")
         if async_diag["params"]["diagnostics"]:
             fail(f"async diagnostics unexpected: {async_diag['params']['diagnostics']}")
 

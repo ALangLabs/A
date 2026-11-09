@@ -19,4 +19,8 @@ if(Python3_Interpreter_FOUND)
     COMMAND ${Python3_EXECUTABLE}
       ${CMAKE_SOURCE_DIR}/tools/lsp/smoke_test.py
       $<TARGET_FILE:a-lsp>)
+  add_test(NAME language-server-apm-smoke
+    COMMAND ${Python3_EXECUTABLE}
+      ${CMAKE_SOURCE_DIR}/tools/lsp/apm_smoke_test.py
+      $<TARGET_FILE:a-lsp>)
 endif()

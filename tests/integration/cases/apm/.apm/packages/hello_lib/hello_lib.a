@@ -1,0 +1,5 @@
+# Fixture hello-lib for the apm auto-discovery case (mirrors the seed
+# package in apm/registry/packages/hello-lib/1.0.0).
+
+fn greet(name: String):
+    return "Hello, " + name + "!"

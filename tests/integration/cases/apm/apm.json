@@ -1,0 +1,6 @@
+{
+  "name": "apm-fixture",
+  "version": "0.1.0",
+  "main": "main.a",
+  "dependencies": {"hello-lib": "^1.0.0"}
+}
