@@ -31,7 +31,7 @@ import std:net
 import std:core
 import std:env
 from std:json import parse as parse_json, stringify as stringify_json
-from std:bytes import b2s, utf8_decode
+from std:bytes import b2s, utf8_decode, encode
 from "urls.a" import urlsplit, urlunsplit, urlencode, UrlParts, _default_port, _bracket_host
 
 class Response:
@@ -49,11 +49,104 @@ class Response:
 
     fn json(self):
         return parse_json(self.body)
-    """raise_for_status() -> panics when status >= 400 (requests analogue)."""
 
+    """content() -> Bytes of the response payload (requests analogue)."""
+    fn content(self):
+        if len(self.body_bytes) > 0:
+            return self.body_bytes
+        return encode(self.body, "utf-8")
+
+    """raise_for_status() -> self; panics when status >= 400 (requests analogue)."""
     fn raise_for_status(self):
         if self.status >= 400:
             core.panic("http: {self.status} {self.reason} for url '{self.url}'")
+        return self
+
+    """status_code() -> i64 (requests analogue; same as .status)."""
+    fn status_code(self):
+        return self.status
+
+    """ok() -> bool (requests analogue; true for 2xx/3xx)."""
+    fn ok(self):
+        return self.is_ok
+
+    """is_redirect() -> bool (3xx redirect status)."""
+    fn is_redirect(self):
+        return _is_redirect_status(self.status)
+
+    """is_permanent_redirect() -> bool (301 or 308)."""
+    fn is_permanent_redirect(self):
+        return self.status == 301 or self.status == 308
+
+    """is_client_error() -> bool (4xx)."""
+    fn is_client_error(self):
+        return self.status >= 400 and self.status < 500
+
+    """is_server_error() -> bool (5xx)."""
+    fn is_server_error(self):
+        return self.status >= 500 and self.status < 600
+
+    """cookies() -> {String: String} best-effort from Set-Cookie header."""
+    fn cookies(self):
+        out = {}
+        raw = self.headers.get("set-cookie", "")
+        if raw == "":
+            return out
+        part = raw.split(";")[0].strip()
+        eq = part.find("=")
+        if eq > 0:
+            out[part[0..eq].strip()] = part[eq + 1..].strip()
+        return out
+
+    """iter_lines() -> [String] lines of the text body."""
+    fn iter_lines(self):
+        if self.body == "":
+            return []
+        return self.body.split("\n")
+
+    """iter_content(chunk_size) -> [String] body split into chunks (text form)."""
+    fn iter_content(self, chunk_size = 1024):
+        out: [String] = []
+        if chunk_size <= 0:
+            chunk_size = 1024
+        i = 0
+        n = len(self.body)
+        while i < n:
+            j = i + chunk_size
+            if j > n:
+                j = n
+            out.append(self.body[i..j])
+            i = j
+        return out
+
+    """links() -> {String: {String: String}} parsed from Link header (best-effort)."""
+    fn links(self):
+        out = {}
+        raw = self.headers.get("link", "")
+        if raw == "":
+            return out
+        for part in raw.split(","):
+            p = part.strip()
+            if not p.startswith("<"):
+                continue
+            gt = p.find(">")
+            if gt < 0:
+                continue
+            url = p[1..gt]
+            rel = ""
+            rest = p[gt + 1..]
+            ri = rest.find("rel=")
+            if ri >= 0:
+                rv = rest[ri + 4..].strip()
+                if rv.startswith("\""):
+                    endq = rv.find("\"", 1)
+                    if endq > 1:
+                        rel = rv[1..endq]
+                else:
+                    rel = rv.split(";")[0].strip()
+            if rel != "":
+                out[rel] = {"url": url, "rel": rel}
+        return out
 
 """_headers_map(lines) -> {String: String} lowercased names, last wins."""
 fn _headers_map(lines: [String]):
@@ -896,3 +989,118 @@ fn patch(url: String, data = None, headers = None, params = None, timeout = 0, v
 
 fn head(url: String, headers = None, params = None, timeout = 0, verify = true):
     return request("HEAD", url, None, headers, params, timeout, true, 10, verify)
+
+
+"""codes/status_codes - common HTTP status code names (requests.codes analogue)."""
+fn _build_codes():
+    return {
+        "ok": 200, "created": 201, "accepted": 202, "no_content": 204,
+        "moved_permanently": 301, "moved": 301, "found": 302,
+        "see_other": 303, "not_modified": 304, "temporary_redirect": 307,
+        "permanent_redirect": 308,
+        "bad_request": 400, "unauthorized": 401, "forbidden": 403,
+        "not_found": 404, "method_not_allowed": 405, "conflict": 409,
+        "gone": 410, "unprocessable_entity": 422, "too_many_requests": 429,
+        "internal_server_error": 500, "bad_gateway": 502,
+        "service_unavailable": 503, "gateway_timeout": 504,
+    }
+
+codes = _build_codes()
+status_codes = codes
+
+"""_merge_maps(base, extra) -> merged copy (extra wins); None-safe."""
+fn _merge_maps(base, extra):
+    out = {}
+    if base != None:
+        for k in base.keys():
+            out[k] = base[k]
+    if extra != None:
+        for k in extra.keys():
+            out[k] = extra[k]
+    return out
+
+"""
+Session - requests.Session analogue (persistent default headers/cookies/params).
+
+A has no keyword arguments, so methods take positional optional args.
+timeout=-1 means "use session default". verify=None means "use session default".
+"""
+class Session:
+    headers: {String: String}
+    cookies: {String: String}
+    params: {String: String}
+    verify: bool
+    timeout: i64
+
+    fn _req_headers(self, headers):
+        h = _merge_maps(self.headers, headers)
+        if len(self.cookies) > 0 and h.get("cookie", "") == "":
+            parts: [String] = []
+            for k in self.cookies.keys():
+                parts.append(k + "=" + self.cookies[k])
+            h["cookie"] = "; ".join(parts)
+        return h
+
+    fn _after(self, resp):
+        ck = resp.cookies()
+        for k in ck.keys():
+            self.cookies[k] = ck[k]
+        return resp
+
+    fn request(self, method: String, url: String, body = None, headers = None, params = None, timeout = -1, allow_redirects = true, max_redirects = 10, verify = None, body_bytes = None):
+        h = self._req_headers(headers)
+        p = _merge_maps(self.params, params)
+        t = self.timeout
+        if timeout >= 0:
+            t = timeout
+        v = self.verify
+        if verify != None:
+            v = verify
+        resp = request(method, url, body, h, p, t, allow_redirects, max_redirects, v, body_bytes)
+        return self._after(resp)
+
+    fn get(self, url: String, headers = None, params = None, timeout = -1, allow_redirects = true, verify = None):
+        return self.request("GET", url, None, headers, params, timeout, allow_redirects, 10, verify, None)
+
+    fn options(self, url: String, headers = None, params = None, timeout = -1, allow_redirects = true, verify = None):
+        return self.request("OPTIONS", url, None, headers, params, timeout, allow_redirects, 10, verify, None)
+
+    fn head(self, url: String, headers = None, params = None, timeout = -1, allow_redirects = true, verify = None):
+        return self.request("HEAD", url, None, headers, params, timeout, allow_redirects, 10, verify, None)
+
+    fn post(self, url: String, data = None, json = None, headers = None, params = None, timeout = -1, verify = None):
+        b = data
+        h = headers
+        if json != None:
+            b = stringify_json(json)
+            if h == None:
+                h = {}
+            else:
+                h = _merge_maps(h, None)
+            has_ct = false
+            for k in h.keys():
+                if k.lower() == "content-type":
+                    has_ct = true
+            if not has_ct:
+                h["Content-Type"] = "application/json"
+        return self.request("POST", url, b, h, params, timeout, true, 10, verify, None)
+
+    fn put(self, url: String, data = None, headers = None, params = None, timeout = -1, verify = None):
+        return self.request("PUT", url, data, headers, params, timeout, true, 10, verify, None)
+
+    fn patch(self, url: String, data = None, headers = None, params = None, timeout = -1, verify = None):
+        return self.request("PATCH", url, data, headers, params, timeout, true, 10, verify, None)
+
+    fn delete(self, url: String, headers = None, params = None, timeout = -1, verify = None):
+        return self.request("DELETE", url, None, headers, params, timeout, true, 10, verify, None)
+
+    fn close(self):
+        return None
+
+"""session() -> Session (requests.session() analogue)."""
+fn session():
+    return Session({}, {}, {}, true, 0)
+
+"""options(url, ...) -> Response (HTTP OPTIONS, module-level)."""
+fn options(url: String, headers = None, params = None, timeout = 0, verify = true):
+    return request("OPTIONS", url, None, headers, params, timeout, true, 10, verify)

@@ -8,11 +8,11 @@ from std:http import urlsplit, urlunsplit, quote, urlencode
 
 fn describe(resp: Response) -> i64:
     if resp.is_ok:
-        print(resp.status, resp.text())
+        print(resp.status, resp.text(), len(resp.content()))
     return resp.status
 
 
-fn main():
+entry main():
     parts = urlsplit("http://example.com/a?b=1")
     print(urlunsplit(parts), quote("a b"), urlencode({"a": "b"}))
     resp: Response = get("http://example.com/")
