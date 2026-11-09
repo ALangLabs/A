@@ -38,6 +38,7 @@ const char* tokName(Tok kind) {
     case Tok::KwFalse: return "'false'";
     case Tok::KwAnd: return "'and'";
     case Tok::KwOr: return "'or'";
+    case Tok::KwIs: return "'is'";
     case Tok::KwNot: return "'not'";
     case Tok::KwImport: return "'import'";
     case Tok::KwFrom: return "'from'";
@@ -511,6 +512,10 @@ std::vector<Token> Lexer::tokenize() {
         break;
       case '.':
         peek(1) == '.' ? emit2(Tok::DotDot) : emit1(Tok::Dot);
+        break;
+      case ';':
+        advance();
+        emitNewline();
         break;
       default: {
         advance();

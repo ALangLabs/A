@@ -52,6 +52,7 @@ enum class Tok {
   KwWhere,
   KwComptime,
   KwImpl,
+  KwIs,
 
   LParen,
   RParen,

@@ -16,7 +16,8 @@ int Parser::binaryPrecedence(Tok kind) {
     case Tok::Lt:
     case Tok::Gt:
     case Tok::Le:
-    case Tok::Ge: return 7;
+    case Tok::Ge:
+    case Tok::KwIs: return 7;
     case Tok::DotDot: return 8;
     case Tok::Bar: return 9;
     case Tok::Caret: return 10;
@@ -42,6 +43,7 @@ const char* Parser::opName(Tok kind) {
     case Tok::KwOr: return "or";
     case Tok::KwAnd: return "and";
     case Tok::KwIn: return "in";
+    case Tok::KwIs: return "==";
     case Tok::EqEq: return "==";
     case Tok::NotEq: return "!=";
     case Tok::Lt: return "<";
@@ -110,6 +112,7 @@ BinOp Parser::binOp(Tok kind) {
     case Tok::KwAnd: return BinOp::And;
     case Tok::KwOr: return BinOp::Or;
     case Tok::KwIn: return BinOp::In;
+    case Tok::KwIs: return BinOp::Eq;
     case Tok::QuestionQuestion: return BinOp::Coalesce;
     case Tok::DotDot: return BinOp::Range;
     default: return BinOp::Invalid;
@@ -148,6 +151,20 @@ ExprPtr Parser::parseExpression(int minPrec) {
       binary->opSpan = Span::join(notSpan, inSpan);
       binary->op = "not in";
       binary->binop = BinOp::NotIn;
+      binary->lhs = std::move(left);
+      binary->rhs = std::move(right);
+      left = std::move(binary);
+      continue;
+    }
+    if (cur().kind == Tok::KwIs && peek(1).kind == Tok::KwNot) {
+      Span isSpan = advance().span;   // 'is'
+      Span notSpan = advance().span;  // 'not'
+      auto right = parseExpression(8);
+      auto binary = std::make_unique<BinaryExpr>();
+      binary->span = Span::join(left->span, right->span);
+      binary->opSpan = Span::join(isSpan, notSpan);
+      binary->op = "!=";
+      binary->binop = BinOp::Ne;
       binary->lhs = std::move(left);
       binary->rhs = std::move(right);
       left = std::move(binary);

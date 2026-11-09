@@ -714,7 +714,7 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   std::string dir = cacheDir(near);
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
-  p.file = dir + "/run." + hex;
+  p.file = dir + (cacheDirOverridden() ? "/" : "/run.") + hex;
   return p;
 }
 
@@ -967,7 +967,7 @@ inline std::string precheckKey(const std::string& path,
   std::string dir = cacheDir(path);
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
-  return dir + "/pre." + hex;
+  return dir + (cacheDirOverridden() ? "/pre-" : "/pre.") + hex;
 }
 
 }  // namespace run_cache
@@ -992,25 +992,26 @@ inline bool debugUnits() {
   const char* v = std::getenv("A_DEBUG_UNITS");
   return v && *v && lowerStr(v) != "0";
 }
+// A_CACHE_DIR overrides with a central obj dir (tests/CI). By default, cached
+// artifacts live in `_acache_` next to each source module, like Python's
+// __pycache__.
 inline std::string objCacheDir() {
   if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) {
     std::error_code ec;
     std::filesystem::path parent = std::filesystem::path(d).parent_path();
     return (parent.empty() ? std::filesystem::path(d) : parent / "obj").string();
   }
-  std::string base;
-#ifdef _WIN32
-  char tmp[MAX_PATH];
-  DWORD n = GetTempPathA(MAX_PATH, tmp);
-  base = std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "a_cache";
-#else
-  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
-    base = std::string(x) + "/a";
-  else if (const char* home = std::getenv("HOME"); home && *home)
-    base = std::string(home) + "/.cache/a";
-  else base = "/tmp/a_cache";
-#endif
-  return base + "/obj";
+  return "";  // per-module _acache_ dirs used by default
+}
+inline std::string acacheDirForModule(const std::string& modulePath) {
+  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return objCacheDir();
+  std::error_code ec;
+  std::filesystem::path p = modulePath.empty()
+                                ? std::filesystem::current_path(ec)
+                                : std::filesystem::absolute(modulePath, ec);
+  std::filesystem::path dir = p.parent_path();
+  if (dir.empty()) dir = ".";
+  return (dir / "_acache_").string();
 }
 inline std::string hex64(std::uint64_t h) {
   char b[17];
@@ -1445,6 +1446,10 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
     if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
   }
   return hex64(h);
+}
+inline std::string unitCachePathFor(const std::string& modulePath,
+                                     const std::string& key) {
+  return acacheDirForModule(modulePath) + "/" + key + ".o";
 }
 inline std::string unitCachePath(const std::string& key) {
   return objCacheDir() + "/" + key + ".o";
@@ -2124,14 +2129,17 @@ int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
       if (!inOrder.count(mod.id)) order.push_back(mod.id);
   }
   bool useObjCache = objcache::objCacheEnabled();  // per-target key; cross .o safe
-  std::string cacheDir = objcache::objCacheDir();
   std::error_code ec;
-  if (useObjCache) std::filesystem::create_directories(cacheDir, ec);
+  if (useObjCache) {
+    std::string central = objcache::objCacheDir();
+    if (!central.empty()) std::filesystem::create_directories(central, ec);
+  }
   struct UnitPlan {
     int moduleId = -1;
     std::uint64_t sigh = 0;
     std::string key;
     std::string cacheObj;
+    std::string cacheDir;
     bool hit = false;
   };
   objcache::KeyContext keyCtx = objcache::makeKeyContext(m, td, optimizationLevel, entrySource);
@@ -2149,7 +2157,8 @@ int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
       deps.erase(mid);
     }
     up.key = objcache::unitKeyWithCtx(m, keyCtx, testMode, testFilter, mid, deps);
-    up.cacheObj = objcache::unitCachePath(up.key);
+    up.cacheDir = objcache::acacheDirForModule(g.at(mid).path);
+    up.cacheObj = up.cacheDir + "/" + up.key + ".o";
     if (useObjCache && std::filesystem::is_regular_file(up.cacheObj, ec))
       up.hit = true;
     plans.push_back(up);
@@ -2228,7 +2237,11 @@ int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
         stagedSrcs.push_back(srcPath);
         std::string tmpObj;
         if (useObjCache) {
-          tmpObj = cacheDir + "/tmp-" + std::to_string(::getpid()) + "-" + std::to_string(::rand()) + ".o";
+          std::string tdir;
+          for (const auto& u2 : plans) if (u2.moduleId == up.moduleId) tdir = u2.cacheDir;
+          if (tdir.empty()) tdir = objcache::acacheDirForModule(g.at(up.moduleId).path);
+          std::filesystem::create_directories(tdir, ec);
+          tmpObj = tdir + "/tmp-" + std::to_string(::getpid()) + "-" + std::to_string(::rand()) + ".o";
         } else {
           tmpObj = tempPath("obj", "x.o");
         }
@@ -2281,21 +2294,20 @@ int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
     if (useObjCache) {
       const std::string& dest = mj.mergedObj;
       int mid = mj.moduleId;
-      std::string finalObj;
-      for (const auto& u2 : plans) if (u2.moduleId == mid) finalObj = u2.cacheObj;
-      std::error_code rec;
+      std::string finalObj, finalKey, finalDir;
+      std::uint64_t sigh = 0;
+      for (const auto& u2 : plans) if (u2.moduleId == mid) {
+        finalObj = u2.cacheObj; finalKey = u2.key; finalDir = u2.cacheDir; sigh = u2.sigh;
+      }
+      std::error_code rec, dec;
+      std::filesystem::create_directories(finalDir, dec);
       std::filesystem::rename(dest, finalObj, rec);
       if (rec) {
         std::error_code cec;
         std::filesystem::copy_file(dest, finalObj, std::filesystem::copy_options::overwrite_existing, cec);
         std::filesystem::remove(dest, ec);
       }
-      std::uint64_t sigh = 0;
-      for (const auto& u2 : plans) if (u2.moduleId == mid) sigh = u2.sigh;
-      std::ofstream sf(objcache::objCacheDir() + "/" + [&] {
-        for (const auto& u2 : plans) if (u2.moduleId == mid) return u2.key;
-        return std::string();
-      }() + ".sym", std::ios::binary | std::ios::trunc);
+      std::ofstream sf(finalDir + "/" + finalKey + ".sym", std::ios::binary | std::ios::trunc);
       if (sf) sf << objcache::hex64(sigh) << "\n";
     }
   }
@@ -2495,7 +2507,8 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
         std::filesystem::remove(preBin, ec);
         std::filesystem::remove(preBin + ".diag", ec);
       }
-      std::filesystem::create_directories(run_cache::cacheDir(), ec);
+      std::error_code ec2;
+      std::filesystem::create_directories(std::filesystem::path(preBin).parent_path(), ec2);
     }
   }
   std::string diagCapture;
