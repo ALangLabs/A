@@ -152,12 +152,16 @@ void Lexer::scanNumber() {
   } else {
     errno = 0;
     char* end = nullptr;
-    long long value = std::strtoll(cleaned.c_str(), &end, 10);
-    if (errno == ERANGE) {
+    /* Parse as unsigned so the magnitude 2^63 (i.e. -INT64_MIN written
+       without the sign, e.g. `9223372036854775808` in `-9223372036854775808`)
+       is representable; it wraps to INT64_MIN like the hex literal
+       0x8000000000000000 already does. */
+    unsigned long long u = std::strtoull(cleaned.c_str(), &end, 10);
+    if (errno == ERANGE || u > 9223372036854775808ULL) {
       error(token.span, "Integer literal is too large.", "Integer literals must fit in 64 bits.");
-      value = 0;
+      u = 0;
     }
-    token.intValue = value;
+    token.intValue = static_cast<std::int64_t>(u);
   }
   tokens_.push_back(std::move(token));
 }

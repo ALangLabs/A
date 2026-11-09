@@ -138,6 +138,16 @@ Lexer::Lexer(std::string text, DiagnosticSink& sink, int fileId, int baseLine, i
   line_ = baseLine_;
   col_ = baseCol_;
   if (inlineMode_) atLineStart_ = false;
+  // Skip a UTF-8 byte-order mark at the start of a file; its three bytes
+  // would otherwise lex as "Unexpected character" errors. Inline-mode
+  // fragments (string interpolations) keep their bytes verbatim.
+  if (!inlineMode_ && text_.size() >= 3 &&
+      static_cast<unsigned char>(text_[0]) == 0xEF &&
+      static_cast<unsigned char>(text_[1]) == 0xBB &&
+      static_cast<unsigned char>(text_[2]) == 0xBF) {
+    pos_ = 3;
+    col_ += 3;
+  }
 }
 
 char Lexer::peek(std::size_t ahead) const {
@@ -168,6 +178,7 @@ Span Lexer::makeSpan(std::size_t start, int startLine, int startCol) const {
   span.col = startCol;
   span.endLine = line_;
   span.endCol = col_;
+  span.fileId = fileId_;
   if (start >= text_.size()) {
     span.endLine = startLine;
     span.endCol = startCol;

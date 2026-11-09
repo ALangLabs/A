@@ -62,7 +62,7 @@ const SourceFile* DiagnosticSink::file(FileId id) const {
 
 const SourceFile* DiagnosticSink::fileLocked(FileId id) const {
   if (id >= 0 && static_cast<std::size_t>(id) < files_.size()) return files_[id].get();
-  return files_.empty() ? nullptr : files_.front().get();
+  return nullptr;
 }
 
 void DiagnosticSink::error(Span span, std::string message, std::string help) {

@@ -106,9 +106,10 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     else if (value.rfind("--opt-level=", 0) == 0) {
       try {
         int n = std::stoi(value.substr(12));
-        if (n < 0) n = 0;
-        if (n > 3) n = 3;
-        options.optimizationLevel = n;
+        // Documented range is 0..3; reject out-of-range values like -O99
+        // does instead of silently clamping.
+        if (n < 0 || n > 3) { ok = false; }
+        else options.optimizationLevel = n;
       } catch (...) { ok = false; }
     } else if (value == "--opt-level") {
       ok = false;  // requires =N form

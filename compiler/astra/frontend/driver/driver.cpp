@@ -6,6 +6,7 @@
 #include <sstream>
 #include <utility>
 #include <vector>
+#include <memory>
 #include <iostream>
 #include <algorithm>
 #include <cerrno>
@@ -28,7 +29,11 @@
 namespace a {
 namespace {
 PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; return p; }
-bool readAll(const std::string& path,std::string& t,std::ostream& e){ std::ifstream f(path,std::ios::binary); if(!f){e<<"error: cannot open '"<<path<<"'\n"; return false;} std::ostringstream b; b<<f.rdbuf(); t=b.str(); return true; }
+bool readAll(const std::string& path,std::string& t,std::ostream& e){
+  std::error_code ec;
+  if(std::filesystem::is_directory(path,ec)){ e<<"error: '"<<path<<"' is a directory, not a source file\n"; return false; }
+  std::ifstream f(path,std::ios::binary); if(!f){e<<"error: cannot open '"<<path<<"'\n"; return false;} std::ostringstream b; b<<f.rdbuf(); t=b.str(); return true;
+}
 }
 int runSource(const std::string& n,std::string s,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return executePipeline(n,std::move(s),toP(c),i,o,e); }
 int runFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ std::string s; if(!readAll(p,s,e)) return 66; return executePipeline(p,std::move(s),toP(c),i,o,e); }
@@ -132,14 +137,20 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
 int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,const std::string& /*backend*/,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
 int emitIRFile(const std::string& p,const DriverConfig& c,bool opt,std::ostream& o,std::ostream& e){ return emitIRPipeline(p,toP(c),opt,o,e); }
 int formatFile(const std::string& p,const FormatFileOptions& opt,std::ostream& o,std::ostream& e){
-  std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink; tooling::FormatOptions f; f.indentWidth=opt.indentWidth;
+  std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink;
+  // formatSource lexes/parses with fileId 0; register the file so parse
+  // errors carry `path:line:col` like `a check` instead of a bare message.
+  sink.addFile(std::make_shared<SourceFile>(p,s));
+  tooling::FormatOptions f; f.indentWidth=opt.indentWidth;
   auto r=tooling::formatSource(s,sink,f); sink.flush(e,opt.useColor); if(!r.ok) return 1;
   if(opt.checkOnly){ if(r.text==s) return 0; e<<"error: file needs formatting: "<<p<<"\n"; return 1; }
   if(opt.writeInPlace){ std::ofstream w(p,std::ios::binary|std::ios::trunc); if(!w){e<<"error: cannot write '"<<p<<"'\n"; return 1;} w<<r.text; return 0; }
   o<<r.text; return 0;
 }
 int documentFile(const std::string& p,const DocFileOptions& opt,std::ostream& o,std::ostream& e){
-  std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink; tooling::DocOptions d; d.sourceName=p;
+  std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink;
+  sink.addFile(std::make_shared<SourceFile>(p,s));  // fileId 0, see formatFile
+  tooling::DocOptions d; d.sourceName=p;
   auto r=tooling::extractDocs(s,sink,d); sink.flush(e,opt.useColor); if(!r.ok) return 1;
   auto txt=opt.json?tooling::renderJson(r.module):tooling::renderMarkdown(r.module);
   if(!opt.outputPath.empty()){ std::ofstream w(opt.outputPath,std::ios::binary|std::ios::trunc); if(!w){e<<"error: cannot write '"<<opt.outputPath<<"'\n"; return 1;} w<<txt; return 0; }

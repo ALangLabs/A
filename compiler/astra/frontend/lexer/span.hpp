@@ -10,7 +10,7 @@ struct Span {
   int col = 0;
   int endLine = 0;
   int endCol = 0;
-  int fileId = 0;
+  int fileId = -1;  // -1 = unknown; never aliases file 0
 
   bool valid() const { return line > 0; }
 
