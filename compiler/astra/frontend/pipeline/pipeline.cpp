@@ -964,7 +964,10 @@ inline std::string precheckKey(const std::string& path,
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
                 static_cast<unsigned long long>(h2));
-  return cacheDir() + "/pre-" + hex;
+  std::string dir = cacheDir(path);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  return dir + "/pre." + hex;
 }
 
 }  // namespace run_cache
@@ -2343,8 +2346,9 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
     std::string runPathS = (keepBin && !keepBin->empty()) ? *keepBin : tmpBinS;
     if (cache.active) {
       std::error_code ec2;
-      std::filesystem::create_directories(run_cache::cacheDir(), ec2);
-      runPathS = run_cache::cacheDir() + "/tmp-" +
+      std::string cdir = std::filesystem::path(cache.file).parent_path().string();
+      std::filesystem::create_directories(cdir, ec2);
+      runPathS = cdir + "/tmp-" +
                  std::to_string(::getpid()) + "-" + std::to_string(::rand());
     }
     int src2 = buildSplitUnits(m, *td, runPathS, err, optimizationLevel,
@@ -2407,8 +2411,9 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   // below is atomic and same-filesystem.
   if (cache.active) {
     std::error_code ec;
-    std::filesystem::create_directories(run_cache::cacheDir(), ec);
-    runPath = run_cache::cacheDir() + "/tmp-" +
+    std::string cdir = std::filesystem::path(cache.file).parent_path().string();
+    std::filesystem::create_directories(cdir, ec);
+    runPath = cdir + "/tmp-" +
               std::to_string(::getpid()) + "-" + std::to_string(::rand());
   }
   int rc = astraBuild(td->arch, td->os, srcPath, runPath, err, optimizationLevel);

@@ -113,19 +113,19 @@ fn fib(n: int) -> int:
         return n
     return fib(n - 1) + fib(n - 2)
 
-fn main():
+entry main():
     p = Point(3.0, 4.0)
     print("length:", p.length())          # 5.0
     print("fib(20):", fib(20))            # 6765
     print("squares:", [x * x for x in 0..5])
 ```
 
-`fn main()` is invoked automatically once the entry file's top-level statements
-finish — no explicit `main()` call needed. It runs only for the file you pass
-to `a run`/`a build`, never for imported modules, and is skipped by `a test`
-(which discovers `fn test_*()` instead). Top-level statements still run on
-import, so keep library modules declaration-only; put program logic in
-`fn main()`.
+`entry name():` is the program entry point — invoked once after the entry
+file's top-level statements and imports initialize. It runs only for the
+file you pass to `a run`/`a build`, never for imported modules, and is
+skipped by `a test` (which discovers `fn test_*()` instead). Top-level
+statements still run on import, so keep library modules declaration-only;
+put program logic in `entry`.
 
 Highlights: `class` types with fields, methods, and inheritance, `enum` (plain and
 algebraic), `trait` + `impl` conformance, generics and `comptime` params,

@@ -8,15 +8,15 @@ compiles and executes it, `a check` type-checks without codegen.
 ## First program
 
 ```python
-fn main():
+entry main():
     name = "World"
     print("Hello, {name}!")   # string interpolation with {expr}
     for i in 0..5:
         print(i)
 ```
 
-`fn main()` is called automatically after the file's top-level statements —
-no explicit `main()` call needed. Save as `hello.a` and run
+Top-level statements run first; `entry name():` marks the function the
+compiler invokes once after imports initialize. Save as `hello.a` and run
 `./build/a run hello.a`.
 
 ## Headline features

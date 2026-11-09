@@ -49,26 +49,28 @@ from python:json import loads
 Any `.a` file is a module; `examples/modules/lib/mathx.a` shows a typical
 fixture. Top-level statements run once at import.
 
-## Entry point: `fn main()`
+## Entry point: `entry name()`
 
-If the entry file (the one passed to `a run`/`a build`) declares `fn main()`,
-it is invoked automatically once all module top-level statements have run —
-imports initialize first, then `main()`. No explicit `main()` call is needed,
-and calling it yourself runs it twice.
+Declare the program entry point with the `entry` keyword — an ordinary
+function the compiler invokes once after all module top-level statements
+have run (imports initialize first, then `entry`). At most one `entry`
+function per module; multiple in the entry file is a compile error.
 
-`fn main` is never invoked for imported modules: a library that happens to
-define `main` stays inert when imported. `a test` skips `main` entirely and
-drives `fn test_*()` instead (see [testing](testing.md)).
+```python
+entry main():
+    ...
+```
 
-`fn main` may declare parameters, but the harness never supplies arguments:
-default values are honored (`fn main(x = 5)` sees `x == 5`), while parameters
-without defaults are left uninitialized — unlike a normal call, which would
-be an arity error. Do not rely on non-defaulted `main` parameters (a
-trailing `*args` likewise does not collect an empty list).
+`entry` functions in imported modules are never invoked — a library that
+happens to define one stays inert when imported, and the same file still
+works when run directly. Top-level statements always run, so script-style
+files need no `entry` at all. `a test` skips `entry` and drives
+`fn test_*()` instead (see [testing](testing.md)).
 
-An entry file without `fn main` is still valid: its top-level statements
-run as the program, and the compiler prints a warning first —
-`warning: '<file>' has no 'fn main'; only top-level statements will run`.
-That warning is expected for script-style programs and for `a run -c`
-snippets; declaring `fn main()` silences it. The warning is only emitted
-for the entry file, never for imported modules.
+`fn main` is just an ordinary function now — nothing calls it implicitly.
+An entry file without `entry` is still valid: its top-level statements run
+as the program, and the compiler prints a warning first —
+`warning: '<file>' has no 'entry' function; only top-level statements will
+run`. That warning is expected for script-style programs and for
+`a run -c` snippets; declaring `entry` silences it. It is only emitted for
+the entry file, never for imported modules.
