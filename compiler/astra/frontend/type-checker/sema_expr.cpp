@@ -520,7 +520,7 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     }
   }
 
-  if (op == "-" || op == "*" || op == "/" || op == "%" || op == "**") {
+  if (op == "-" || op == "*" || op == "/" || op == "//" || op == "%" || op == "**") {
     // Arithmetic other than '+' requires numeric operands; the runtime
     // panics on anything else (e.g. "a" - "b", true + 1 handled above).
     TypePtr ln = resolveType(lhs)->kind == TypeKind::Error

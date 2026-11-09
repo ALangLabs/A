@@ -240,6 +240,25 @@ aval a_add_slow(aval l, aval r) { return binary_arith(l, r, '+', "+"); }
 aval a_sub_slow(aval l, aval r) { return binary_arith(l, r, '-', "-"); }
 aval a_mul_slow(aval l, aval r) { return binary_arith(l, r, '*', "*"); }
 aval a_div_slow(aval l, aval r) { return binary_arith(l, r, '/', "/"); }
+aval a_floordiv_slow(aval l, aval r) {
+    int li = is_int_val(l), ri = is_int_val(r);
+    if (li && ri) {
+        int64_t a = int_val_full(l), b = int_val_full(r);
+        if (b == 0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
+        if (a == INT64_MIN && b == -1) return mkdouble(-9223372036854775808.0);
+        int64_t q = a / b;
+        if (a % b != 0 && ((a < 0) != (b < 0))) --q;
+        return mkint_full(q);
+    }
+    int ld = a_is_double(l), rd = a_is_double(r);
+    if (ld || rd) {
+        double a = num_to_double(l), b = num_to_double(r);
+        if (b == 0.0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
+        return mkdouble(floor(a / b));
+    }
+    panic_binop("//", l, r);
+    return A_NONE;
+}
 aval a_mod_slow(aval l, aval r) { return binary_arith(l, r, '%', "%"); }
 aval a_pow(aval l, aval r) { return binary_arith(l, r, '^', "**"); }
 

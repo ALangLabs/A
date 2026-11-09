@@ -66,6 +66,7 @@ enum class BinOp : std::uint8_t {
   Sub,
   Mul,
   Div,
+  FloorDiv,
   Mod,
   Pow,
   Eq,

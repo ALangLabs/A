@@ -1004,7 +1004,8 @@ class NativeEmitter {
   static const char* binopSlow(const std::string& op) {
     static const std::unordered_map<std::string, const char*> kMap = {
         {"+", "a_add_slow"}, {"-", "a_sub_slow"}, {"*", "a_mul_slow"},
-        {"/", "a_div_slow"}, {"%", "a_mod_slow"}, {"**", "a_pow"},
+        {"/", "a_div_slow"}, {"//", "a_floordiv_slow"}, {"%", "a_mod_slow"},
+        {"**", "a_pow"},
         {"==", "a_eq_slow"}, {"!=", "a_ne_slow"}, {"<", "a_lt_slow"},
         {"<=", "a_le_slow"}, {">", "a_gt_slow"}, {">=", "a_ge_slow"},
         {"&", "a_band_slow"}, {"|", "a_bor_slow"}, {"^", "a_bxor_slow"},

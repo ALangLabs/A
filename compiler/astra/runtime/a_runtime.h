@@ -258,6 +258,7 @@ aval a_add_slow(aval l, aval r);
 aval a_sub_slow(aval l, aval r);
 aval a_mul_slow(aval l, aval r);
 aval a_div_slow(aval l, aval r);
+aval a_floordiv_slow(aval l, aval r);
 aval a_mod_slow(aval l, aval r);
 aval a_pow(aval l, aval r);
 aval a_eq_slow(aval l, aval r);

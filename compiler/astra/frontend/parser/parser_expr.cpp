@@ -29,6 +29,7 @@ int Parser::binaryPrecedence(Tok kind) {
     case Tok::Minus: return 13;
     case Tok::Star:
     case Tok::Slash:
+    case Tok::SlashSlash:
     case Tok::Percent: return 14;
     case Tok::StarStar: return 16;
     default: return -1;
@@ -58,6 +59,7 @@ const char* Parser::opName(Tok kind) {
     case Tok::Minus: return "-";
     case Tok::Star: return "*";
     case Tok::Slash: return "/";
+    case Tok::SlashSlash: return "//";
     case Tok::Percent: return "%";
     case Tok::StarStar: return "**";
     case Tok::Amp: return "&";
@@ -71,6 +73,7 @@ const char* Parser::opName(Tok kind) {
     case Tok::MinusEq: return "-=";
     case Tok::StarEq: return "*=";
     case Tok::SlashEq: return "/=";
+    case Tok::SlashSlashEq: return "//=";
     case Tok::PercentEq: return "%=";
     case Tok::AmpEq: return "&=";
     case Tok::BarEq: return "|=";
@@ -91,6 +94,8 @@ BinOp Parser::binOp(Tok kind) {
     case Tok::StarEq: return BinOp::Mul;
     case Tok::Slash: return BinOp::Div;
     case Tok::SlashEq: return BinOp::Div;
+    case Tok::SlashSlash: return BinOp::FloorDiv;
+    case Tok::SlashSlashEq: return BinOp::FloorDiv;
     case Tok::Percent: return BinOp::Mod;
     case Tok::PercentEq: return BinOp::Mod;
     case Tok::StarStar: return BinOp::Pow;
@@ -127,6 +132,7 @@ bool Parser::isAssignmentOp(Tok kind) {
     case Tok::MinusEq:
     case Tok::StarEq:
     case Tok::SlashEq:
+    case Tok::SlashSlashEq:
     case Tok::PercentEq:
     case Tok::AmpEq:
     case Tok::BarEq:

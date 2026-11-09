@@ -81,6 +81,7 @@ const char* tokName(Tok kind) {
     case Tok::Minus: return "'-'";
     case Tok::Star: return "'*'";
     case Tok::Slash: return "'/'";
+    case Tok::SlashSlash: return "'//'";
     case Tok::Percent: return "'%'";
     case Tok::StarStar: return "'**'";
     case Tok::Eq: return "'='";
@@ -88,6 +89,7 @@ const char* tokName(Tok kind) {
     case Tok::MinusEq: return "'-='";
     case Tok::StarEq: return "'*='";
     case Tok::SlashEq: return "'/='";
+    case Tok::SlashSlashEq: return "'//='";
     case Tok::PercentEq: return "'%='";
     case Tok::AmpEq: return "'&='";
     case Tok::BarEq: return "'|='";
@@ -462,7 +464,11 @@ std::vector<Token> Lexer::tokenize() {
                        : peek(1) == '=' ? emit2(Tok::StarEq) : emit1(Tok::Star);
         break;
       case '/':
-        peek(1) == '=' ? emit2(Tok::SlashEq) : emit1(Tok::Slash);
+        if (peek(1) == '/') {
+          peek(2) == '=' ? emit3(Tok::SlashSlashEq) : emit2(Tok::SlashSlash);
+        } else {
+          peek(1) == '=' ? emit2(Tok::SlashEq) : emit1(Tok::Slash);
+        }
         break;
       case '%':
         peek(1) == '=' ? emit2(Tok::PercentEq) : emit1(Tok::Percent);
