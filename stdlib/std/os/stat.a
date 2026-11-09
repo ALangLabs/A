@@ -1,0 +1,151 @@
+# std.os.stat — stat(2) results and metadata probes.
+#
+# Python's os.stat raises OSError when the path is missing; this module matches
+# that with core.panic(). Use try_stat()/try_lstat() when you want None back
+# instead of an error.
+
+import std:fs
+import std:core
+
+# S_IF* masks from the host <sys/stat.h>.
+_S_IFMT = 0o170000
+_S_IFREG = 0o100000
+_S_IFDIR = 0o040000
+_S_IFLNK = 0o120000
+
+"""StatResult -> the record returned by os.stat()/os.lstat()."""
+class StatResult:
+    st_mode: int
+    st_ino: int
+    st_dev: int
+    st_nlink: int
+    st_uid: int
+    st_gid: int
+    st_size: int
+    st_atime: float
+    st_mtime: float
+    st_ctime: float
+
+    fn is_file(self) -> bool:
+        return (self.st_mode & _S_IFMT) == _S_IFREG
+
+    fn is_dir(self) -> bool:
+        return (self.st_mode & _S_IFMT) == _S_IFDIR
+
+    fn is_symlink(self) -> bool:
+        return (self.st_mode & _S_IFMT) == _S_IFLNK
+
+    fn __str__(self):
+        return "os.stat_result(st_mode=" + str(self.st_mode) + ", st_size=" + str(self.st_size) + ", st_mtime=" + str(self.st_mtime) + ")"
+
+fn _from_raw(r):
+    return StatResult(r[0], r[1], r[2], r[3], r[4], r[5], r[6],
+                      r[7], r[8], r[9])
+
+fn _raw_stat(path, follow):
+    if follow:
+        return fs.stat(path)
+    return fs.lstat(path)
+
+"""try_stat(path) -> StatResult, or None when the path cannot be stat'ed."""
+fn try_stat(path):
+    r = fs.stat(path)
+    if len(r) == 0:
+        return None
+    return _from_raw(r)
+
+"""try_lstat(path) -> StatResult without following a final symlink, or None."""
+fn try_lstat(path):
+    r = fs.lstat(path)
+    if len(r) == 0:
+        return None
+    return _from_raw(r)
+
+"""stat(path, dir_fd=None, follow_symlinks=True) -> StatResult (raises)."""
+fn stat(path, dir_fd=None, follow_symlinks=true):
+    r = _raw_stat(path, follow_symlinks)
+    if len(r) == 0:
+        core.panic("os.stat: cannot stat '" + str(path) + "'")
+    return _from_raw(r)
+
+"""lstat(path, dir_fd=None) -> StatResult without following symlinks."""
+fn lstat(path, dir_fd=None):
+    r = fs.lstat(path)
+    if len(r) == 0:
+        core.panic("os.lstat: cannot stat '" + str(path) + "'")
+    return _from_raw(r)
+
+"""exists(path) -> whether the path exists (follows symlinks)."""
+fn exists(path):
+    return len(fs.stat(path)) > 0
+
+"""lexists(path) -> whether the path exists without following symlinks."""
+fn lexists(path):
+    return len(fs.lstat(path)) > 0
+
+"""isfile(path) -> whether the path is a regular file."""
+fn isfile(path):
+    r = fs.stat(path)
+    if len(r) == 0:
+        return false
+    return r[10]
+
+"""isdir(path) -> whether the path is a directory."""
+fn isdir(path):
+    r = fs.stat(path)
+    if len(r) == 0:
+        return false
+    return r[11]
+
+"""islink(path) -> whether the path is a symbolic link."""
+fn islink(path):
+    r = fs.lstat(path)
+    if len(r) == 0:
+        return false
+    return r[12]
+
+"""getsize(path) -> file size in bytes (raises when missing)."""
+fn getsize(path):
+    r = fs.stat(path)
+    if len(r) == 0:
+        core.panic("os.getsize: cannot stat '" + str(path) + "'")
+    return r[6]
+
+"""access(path, mode=F_OK, dir_fd=None, effective_ids=False,
+          follow_symlinks=True) -> whether the process can access path."""
+fn access(path, mode=0, dir_fd=None, effective_ids=false,
+           follow_symlinks=true):
+    return fs.access(path, mode)
+
+"""chmod(path, mode, dir_fd=None, follow_symlinks=True)."""
+fn chmod(path, mode, dir_fd=None, follow_symlinks=true):
+    fs.chmod(path, mode)
+
+"""utime(path, times=None, ns=None, dir_fd=None, follow_symlinks=True).
+
+`times` is (atime, mtime) in seconds (a 2-element list/tuple); `ns` is the
+same pair in nanoseconds. With neither, the current time is used.
+"""
+fn utime(path, times=None, ns=None, dir_fd=None, follow_symlinks=true):
+    if times != None:
+        fs.utime(path, times[0], times[1])
+    elif ns != None:
+        fs.utime(path, ns[0] / 1000000000.0, ns[1] / 1000000000.0)
+    else:
+        fs.utime(path)
+
+"""samestat(a, b) -> whether two StatResult records describe the same file."""
+fn samestat(a, b):
+    return a.st_dev == b.st_dev and a.st_ino == b.st_ino
+
+"""samefile(a, b) -> whether two paths describe the same inode."""
+fn samefile(a, b):
+    return samestat(stat(a), stat(b))
+
+"""ismount(path) -> best-effort mount-point probe.
+
+Without a portable st_dev comparison against the parent this reports True only
+for "/" (the POSIX root). Kept for source compatibility with Python code.
+"""
+fn ismount(path):
+    return path == "/"

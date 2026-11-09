@@ -1,0 +1,17 @@
+# std.os.randbytes — cryptographically strong random bytes.
+#
+# A has no distinct bytes type for os.urandom; like random.randbytes this
+# returns a [i64] list with each element in 0..255 (backed by /dev/urandom).
+
+import std:fs
+import std:core
+
+"""urandom(n) -> n random bytes as a [i64] list."""
+fn urandom(n):
+    if n < 0:
+        core.panic("os.urandom: negative count")
+    return fs.urandom(n)
+
+"""getrandom(n, flags=0) -> alias for urandom()."""
+fn getrandom(n, flags=0):
+    return urandom(n)

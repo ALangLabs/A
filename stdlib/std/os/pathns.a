@@ -1,0 +1,82 @@
+# std.os.path — the os.path namespace object.
+#
+# Python exposes path helpers as `os.path.*`. A has no module-as-value, so this
+# file provides a small class whose methods forward to std:path and to the
+# stat helpers introduced in stat.a.
+
+import std:path as _path
+import "stat.a" as osstat
+
+class PathNamespace:
+    sep: String
+    curdir: String
+    pardir: String
+    extsep: String
+    pathsep: String
+    devnull: String
+
+    """join(parts) -> join a list of path components."""
+    fn join(self, parts):
+        if type(parts) == "list":
+            return _path.join(parts)
+        return str(parts)
+
+    """join2(a, b) -> join exactly two components."""
+    fn join2(self, a, b):
+        return _path.join([a, b])
+
+    fn split(self, p):
+        return _path.split(p)
+
+    fn dirname(self, p):
+        return _path.dirname(p)
+
+    fn basename(self, p):
+        return _path.basename(p)
+
+    fn splitext(self, p):
+        return _path.splitext(p)
+
+    fn splitdrive(self, p):
+        return _path.splitdrive(p)
+
+    fn normpath(self, p):
+        return _path.normpath(p)
+
+    fn abspath(self, p):
+        return _path.abspath(p)
+
+    fn expanduser(self, p):
+        return _path.expanduser(p)
+
+    fn relpath(self, p, start="."):
+        return _path.relpath(p, start)
+
+    fn commonprefix(self, paths):
+        return _path.commonprefix(paths)
+
+    fn commonpath(self, paths):
+        return _path.commonpath(paths)
+
+    fn isabs(self, p):
+        return _path.isabs(p)
+
+    fn exists(self, p):
+        return osstat.exists(p)
+
+    fn lexists(self, p):
+        return osstat.lexists(p)
+
+    fn isfile(self, p):
+        return osstat.isfile(p)
+
+    fn isdir(self, p):
+        return osstat.isdir(p)
+
+    fn islink(self, p):
+        return osstat.islink(p)
+
+    fn getsize(self, p):
+        return osstat.getsize(p)
+
+path = PathNamespace("/", ".", "..", ".", ":", "/dev/null")

@@ -106,6 +106,15 @@ inline int builtinRuntimeId(const std::string& name) {
       {"net_recv_exact", 224}, {"net_recv_body", 225}, {"net_recv_body_all", 226},
       {"bytes_new", 227}, {"Bytes", 227}, {"bytes_append", 228}, {"bytes_to_str", 229},
       {"net_recv_buf", 230}, {"net_recv_buf_all", 231},
+      {"os_chdir", 232}, {"os_getpid", 233}, {"os_getppid", 234},
+      {"os_getuid", 235}, {"os_geteuid", 236}, {"os_getgid", 237},
+      {"os_getegid", 238}, {"os_getlogin", 239}, {"os_cpu_count", 240},
+      {"os_uname", 241}, {"os_stat", 242}, {"os_lstat", 243},
+      {"os_access", 244}, {"os_chmod", 245}, {"os_symlink", 246},
+      {"os_link", 247}, {"os_readlink", 248}, {"os_utime", 249},
+      {"os_mkdir", 250}, {"os_rmdir", 251}, {"os_truncate", 252},
+      {"os_environ", 253}, {"os_getenv", 254}, {"os_setenv", 255},
+      {"os_unsetenv", 256}, {"os_system", 257}, {"os_urandom", 258},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;

@@ -1,0 +1,62 @@
+# std.os.process — process identity, working directory, and host information.
+
+import std:fs
+import std:core
+
+"""Uname -> the five-field record returned by os.uname()."""
+class Uname:
+    sysname: String
+    nodename: String
+    release: String
+    version: String
+    machine: String
+
+"""uname() -> Uname(sysname, nodename, release, version, machine)."""
+fn uname():
+    u = fs.uname()
+    return Uname(u[0], u[1], u[2], u[3], u[4])
+
+"""getcwd() -> current working directory."""
+fn getcwd():
+    return fs.current_dir()
+
+"""getcwdb() -> current working directory (bytes are not distinct in A)."""
+fn getcwdb():
+    return fs.current_dir()
+
+"""chdir(path) -> change the process working directory."""
+fn chdir(path):
+    fs.chdir(path)
+
+fn getpid():
+    return fs.getpid()
+
+fn getppid():
+    return fs.getppid()
+
+fn getuid():
+    return fs.getuid()
+
+fn geteuid():
+    return fs.geteuid()
+
+fn getgid():
+    return fs.getgid()
+
+fn getegid():
+    return fs.getegid()
+
+fn getlogin():
+    return fs.getlogin()
+
+"""cpu_count() -> number of online CPUs."""
+fn cpu_count():
+    return fs.cpu_count()
+
+"""system(command) -> run a shell command, returning its exit status."""
+fn system(command):
+    return fs.system(command)
+
+"""getloadavg() -> not implemented by the runtime; raises."""
+fn getloadavg():
+    core.panic("os.getloadavg() is not supported on this runtime")

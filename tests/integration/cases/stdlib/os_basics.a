@@ -1,0 +1,66 @@
+import std:os
+
+fn _rmtree(p):
+    if os.isdir(p):
+        for n in os.listdir(p):
+            _rmtree(os.path.join([p, n]))
+        os.rmdir(p)
+    elif os.lexists(p):
+        os.remove(p)
+
+fn main():
+    print(os.name, os.sep, os.pathsep, os.curdir, os.pardir, os.extsep, os.devnull)
+    print(os.F_OK, os.R_OK, os.W_OK, os.X_OK)
+    print(os.getcwd().startswith("/"))
+    print(os.getpid() > 0, os.getpid() == os.getpid())
+    u = os.uname()
+    print(u.sysname, u.release != "", u.machine != "")
+    print(os.getenv("__A_GOLDEN_UNSET__"))
+    print(os.getenv("__A_GOLDEN_UNSET__", "fallback"))
+    print(os.getenv_default("__A_GOLDEN_UNSET__", "fallback"))
+    print(os.environ_get("__A_GOLDEN_UNSET__"))
+    print(os.environ.contains("PATH"))
+
+    print(os.path.join(["a", "b", "c"]))
+    print(os.path.join2("a", "b"))
+    print(os.path.dirname("/x/y/z.txt"))
+    print(os.path.basename("/x/y/z.txt"))
+    print(os.path.splitext("a.tar.gz"))
+    print(os.path.normpath("a/./b/../c"))
+    print(os.path.isabs("/x"), os.path.isabs("x"))
+    print(os.path.exists("/"), os.path.exists("/no/such/path"))
+
+    base = "_tmp_os_golden"
+    if os.path.exists(base):
+        _rmtree(base)
+    os.makedirs(os.path.join([base, "d1"]))
+    os.makedirs(os.path.join([base, "d2"]))
+    f = os.path.join([base, "d1", "f.txt"])
+    write_file(f, "hello")
+    s = os.stat(f)
+    print(s.st_size, s.is_file(), s.is_dir(), s.is_symlink())
+    print(os.getsize(f), os.isfile(f), os.isdir(base), os.islink(f))
+    print(os.try_stat("/no/such/path") == None)
+    print(os.access(f, os.R_OK), os.access(f, os.W_OK))
+    os.chmod(f, 0o600)
+    print(os.stat(f).st_mode & 0o777)
+    os.chmod(f, 0o644)
+    os.truncate(f, 2)
+    print(os.getsize(f))
+
+    link = os.path.join([base, "link.txt"])
+    os.symlink(os.path.abspath(f), link)
+    print(os.islink(link), os.lexists(link))
+    print(os.stat(link).is_file(), os.lstat(link).is_symlink())
+    print(os.readlink(link) == os.path.abspath(f))
+
+    print(os.listdir(base))
+    entries = os.scandir(base)
+    print(len(entries), entries[0].name != "")
+    w = os.walk(base)
+    print(len(w), os.path.basename(w[0][0]), w[0][1], w[0][2])
+    print(len(os.urandom(8)))
+    print(os.system("exit 0"))
+
+    _rmtree(base)
+    return 0

@@ -1,0 +1,33 @@
+# std.os.constants — POSIX constants exposed by the os package.
+#
+# Kept in their own module so the public __init__ stays a thin re-export
+# layer and platform-specific values have one obvious home.
+
+# Identity of the host platform (A targets POSIX; kept Python-compatible).
+name = "posix"
+sep = "/"
+pathsep = ":"
+linesep = "\n"
+curdir = "."
+pardir = ".."
+extsep = "."
+devnull = "/dev/null"
+altsep = None
+
+# Feature-probe lists. The A runtime does not expose dir_fd/fd-relative
+# operations, so these stay empty (Python uses them to advertise support).
+supports_dir_fd = []
+supports_effective_ids = []
+supports_fd = []
+supports_follow_symlinks = []
+
+# access(2) mode bits (F_OK / R_OK / W_OK / X_OK).
+F_OK = 0
+R_OK = 4
+W_OK = 2
+X_OK = 1
+
+# whence values shared with lseek/truncate-style APIs.
+SEEK_SET = 0
+SEEK_CUR = 1
+SEEK_END = 2

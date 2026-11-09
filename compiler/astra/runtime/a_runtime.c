@@ -134,7 +134,22 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "bytes_append", bi_bytes_append },
     { "bytes_to_str", bi_bytes_to_str },
     { "net_recv_buf", bi_net_recv_buf },
-    { "net_recv_buf_all", bi_net_recv_buf_all }
+    { "net_recv_buf_all", bi_net_recv_buf_all },
+    /* os module */
+    { "os_chdir", os_chdir }, { "os_getpid", os_getpid },
+    { "os_getppid", os_getppid }, { "os_getuid", os_getuid },
+    { "os_geteuid", os_geteuid }, { "os_getgid", os_getgid },
+    { "os_getegid", os_getegid }, { "os_getlogin", os_getlogin },
+    { "os_cpu_count", os_cpu_count }, { "os_uname", os_uname },
+    { "os_stat", os_stat }, { "os_lstat", os_lstat },
+    { "os_access", os_access }, { "os_chmod", os_chmod },
+    { "os_symlink", os_symlink }, { "os_link", os_link },
+    { "os_readlink", os_readlink }, { "os_utime", os_utime },
+    { "os_mkdir", os_mkdir }, { "os_rmdir", os_rmdir },
+    { "os_truncate", os_truncate }, { "os_environ", os_environ_all },
+    { "os_getenv", os_getenv }, { "os_setenv", os_setenv },
+    { "os_unsetenv", os_unsetenv }, { "os_system", os_system },
+    { "os_urandom", os_urandom }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

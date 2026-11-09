@@ -1,8 +1,9 @@
-# std.os selftest — OS helper wrappers (filesystem-touching parts use a
-# temp dir under the current directory and clean up after themselves).
+# std.os selftest — exercises the Python-compatible os surface against the
+# native fs/env/terminal modules. Filesystem tests use a fixed temp directory
+# under the current directory and remove it before and after each run.
+#
 # Run: ./build/a test stdlib/std/os/selftest.a
 import std:os
-from std:path import join
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -10,47 +11,178 @@ fn assert_eq(a, b):
 fn assert_true(c):
     assert(c)
 
-# NOTE: module-level constants (os.sep, os.name, ...) read as 0.0 inside
-# `a test` test functions (toolchain quirk), so they are not asserted here;
-# they work normally under `a run`/`a build`.
-fn test_getcwd():
-    c = os.getcwd()
-    assert_true(c.startswith("/"))
+fn _rmtree(p):
+    if os.isdir(p):
+        for n in os.listdir(p):
+            _rmtree(os.path.join([p, n]))
+        os.rmdir(p)
+    elif os.lexists(p):
+        os.remove(p)
 
-fn test_getenv():
-    # getenv returns "" for unset variables; defaults fill in.
-    assert_eq(os.getenv("__A_DEFINITELY_UNSET__"), "")
+fn _fresh(p):
+    if os.path.exists(p):
+        _rmtree(p)
+    os.makedirs(p)
+    return p
+
+fn test_constants():
+    assert_eq(os.name, "posix")
+    assert_eq(os.sep, "/")
+    assert_eq(os.pathsep, ":")
+    assert_eq(os.curdir, ".")
+    assert_eq(os.pardir, "..")
+    assert_eq(os.extsep, ".")
+    assert_eq(os.devnull, "/dev/null")
+    assert_eq(os.F_OK, 0)
+    assert_eq(os.R_OK, 4)
+    assert_eq(os.W_OK, 2)
+    assert_eq(os.X_OK, 1)
+
+fn test_platform():
+    assert_true(os.getcwd().startswith("/"))
+    assert_true(os.getpid() > 0)
+    assert_true(os.getppid() > 0)
+    assert_true(os.getuid() >= 0)
+    assert_true(os.cpu_count() >= 1)
+    assert_true(os.getlogin() != "")
+    u = os.uname()
+    assert_eq(u.sysname, "Linux")
+    assert_true(u.release != "")
+    assert_true(u.machine != "")
+
+fn test_environment():
+    assert_eq(os.getenv("__A_DEFINITELY_UNSET__"), None)
+    assert_eq(os.getenv("__A_DEFINITELY_UNSET__", "dflt"), "dflt")
     assert_eq(os.getenv_default("__A_DEFINITELY_UNSET__", "dflt"), "dflt")
     assert_eq(os.environ_get("__A_DEFINITELY_UNSET__"), "")
-    # PATH is effectively always set on POSIX.
+    assert_true(os.getenv("PATH") != None)
     assert_true(os.getenv("PATH") != "")
+    assert_true(os.environ.contains("PATH"))
+    assert_true("PATH" in os.environ.all())
+    os.putenv("A_OS_SELFTEST", "1")
+    assert_eq(os.getenv("A_OS_SELFTEST"), "1")
+    os.unsetenv("A_OS_SELFTEST")
+    assert_eq(os.getenv("A_OS_SELFTEST"), None)
 
-fn test_filesystem_roundtrip():
-    base = "_os_selftest_tmp"
-    f = join([base, "sub", "file.txt"])
-    os.makedirs(join([base, "sub"]))
+fn test_path():
+    assert_eq(os.path.join(["a", "b", "c"]), "a/b/c")
+    assert_eq(os.path.join2("a", "b"), "a/b")
+    assert_eq(os.path.dirname("/x/y/z.txt"), "/x/y")
+    assert_eq(os.path.basename("/x/y/z.txt"), "z.txt")
+    assert_eq(os.path.splitext("a.tar.gz"), ["a.tar", ".gz"])
+    assert_eq(os.path.normpath("a/./b/../c"), "a/c")
+    assert_eq(os.path.isabs("/x"), true)
+    assert_eq(os.path.isabs("x"), false)
+    assert_eq(os.path.exists("/"), true)
+    assert_eq(os.path.exists("/no/such/path"), false)
+
+fn test_stat_and_metadata():
+    base = _fresh("_os_selftest_stat")
+    f = os.path.join([base, "f.txt"])
     write_file(f, "hello")
-    assert_true(file_exists(f))
+    s = os.stat(f)
+    assert_eq(s.st_size, 5)
+    assert_true(s.is_file())
+    assert_true(not s.is_dir())
+    assert_true(not s.is_symlink())
+    assert_true(s.st_mode > 0)
+    assert_true(s.st_mtime > 0)
     assert_eq(os.getsize(f), 5)
     assert_true(os.isfile(f))
-    names = os.listdir(base)
-    assert_eq(len(names), 1)
-    assert_eq(names[0], "sub")
     assert_true(os.isdir(base))
-    # rename is a global builtin (os.rename intentionally not wrapped).
-    g = join([base, "renamed.txt"])
-    rename(f, g)
-    assert_true(file_exists(g))
-    os.remove(g)
-    assert_true(not file_exists(g))
+    assert_true(os.exists(f))
+    assert_true(os.access(f, os.R_OK))
+    assert_true(os.access(f, os.W_OK))
+    assert_eq(os.try_stat("/no/such/path"), None)
+    assert_true(os.samefile(f, f))
+    assert_true(os.samestat(os.stat(f), os.stat(f)))
+    # permissions round-trip
+    os.chmod(f, 0o600)
+    assert_eq(os.stat(f).st_mode & 0o777, 0o600)
+    os.chmod(f, 0o644)
+    assert_eq(os.stat(f).st_mode & 0o777, 0o644)
+    # truncate
+    os.truncate(f, 2)
+    assert_eq(os.getsize(f), 2)
+    os.remove(f)
     os.rmdir(base)
-    # os.isdir probes via list_dir and PANICS on missing paths (no stat
-    # builtin), so verify removal through the parent listing instead.
-    top = os.listdir(".")
-    found = false
+
+fn test_symlinks():
+    base = _fresh("_os_selftest_link")
+    f = os.path.join([base, "target.txt"])
+    write_file(f, "x")
+    l = os.path.join([base, "link.txt"])
+    target = os.path.abspath(f)
+    os.symlink(target, l)
+    assert_true(os.islink(l))
+    assert_true(os.lexists(l))
+    assert_eq(os.readlink(l), target)
+    assert_true(os.stat(l).is_file())
+    assert_true(os.lstat(l).is_symlink())
+    h = os.path.join([base, "hard.txt"])
+    os.link(f, h)
+    assert_eq(os.getsize(h), 1)
+    os.remove(h)
+    os.remove(l)
+    os.remove(f)
+    os.rmdir(base)
+
+fn test_dirs_and_walk():
+    base = _fresh("_os_selftest_walk")
+    os.makedirs(os.path.join([base, "d1"]))
+    os.makedirs(os.path.join([base, "d2"]))
+    write_file(os.path.join([base, "root.txt"]), "r")
+    write_file(os.path.join([base, "d1", "a.txt"]), "a")
+    assert_eq(len(os.listdir(base)), 3)
+    entries = os.scandir(base)
+    assert_eq(len(entries), 3)
+    e0 = entries[0]
+    assert_true(e0.name != "")
+    assert_true(e0.path != "")
+    w = os.walk(base)
+    assert_eq(len(w), 3)
+    assert_eq(w[0][0], base)
+    assert_eq(w[0][1], ["d1", "d2"])
+    assert_eq(w[0][2], ["root.txt"])
+    assert_eq(len(w[1][2]), 1)
+    # bottom-up ordering puts the root last
+    w2 = os.walk(base, false)
+    assert_eq(w2[2][0], base)
+    _rmtree(base)
+
+fn test_files_and_random():
+    base = _fresh("_os_selftest_files")
+    f = os.path.join([base, "a.txt"])
+    g = os.path.join([base, "b.txt"])
+    write_file(f, "abc")
+    os.rename(f, g)
+    assert_true(os.exists(g))
+    assert_true(not os.exists(f))
+    os.replace(g, f)
+    assert_true(os.exists(f))
+    os.unlink(f)
+    assert_true(not os.exists(f))
+    os.rmdir(base)
+    r = os.urandom(8)
+    assert_eq(len(r), 8)
     i = 0
-    while i < len(top):
-        if top[i] == base:
-            found = true
+    while i < len(r):
+        assert_true(r[i] >= 0 and r[i] <= 255)
         i = i + 1
-    assert_true(not found)
+    assert_true(os.getrandom(4) != None)
+
+fn test_system():
+    assert_eq(os.system("exit 0"), 0)
+
+fn main():
+    test_constants()
+    test_platform()
+    test_environment()
+    test_path()
+    test_stat_and_metadata()
+    test_symlinks()
+    test_dirs_and_walk()
+    test_files_and_random()
+    test_system()
+    print("os selftest: OK")
+    return 0

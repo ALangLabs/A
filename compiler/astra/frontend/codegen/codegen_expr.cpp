@@ -380,7 +380,7 @@ void AsmEmitter::emitLambdaFn(const AsmEmitter::PendingLambda& pl) {
     saved.swap(text_);
     slotCounter_ = 0;
     scopes_.clear();
-    buildGlobalScope();
+    buildGlobalScope(pl.moduleId);
     pushScope();
     bindModuleImports(pl.moduleId);
     int argvSlot = allocSlot();

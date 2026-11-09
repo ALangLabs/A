@@ -1,0 +1,32 @@
+posix / : . .. . /dev/null
+0 4 2 1
+true
+true true
+Linux true true
+None
+fallback
+fallback
+
+true
+a/b/c
+a/b
+/x/y
+z.txt
+["a.tar", ".gz"]
+a/c
+true false
+true false
+5 true false false
+5 true true false
+true
+true true
+384
+2
+true true
+true true
+true
+["d1", "d2", "link.txt"]
+3 true
+3 _tmp_os_golden ["d1", "d2"] ["link.txt"]
+8
+0

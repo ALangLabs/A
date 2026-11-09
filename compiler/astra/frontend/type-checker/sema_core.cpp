@@ -103,6 +103,26 @@ std::string Sema::suggestName(const std::string& name) const {
   return bestName;
 }
 
+TypePtr Sema::resolveReexportedValue(int moduleId, const std::string& name, int depth) {
+  if (depth > 16 || moduleId < 0 || moduleId >= (int)graph_.modules.size()) return nullptr;
+  ModuleExports& ex = exportsFor(moduleId);
+  auto it = ex.values.find(name);
+  if (it != ex.values.end() && it->second && it->second->kind != TypeKind::Var)
+    return it->second;
+  const Module& mod = graph_.at(moduleId);
+  if (mod.program) {
+    for (auto& s : mod.program->statements) {
+      auto* im = dynamic_cast<FromImportStmt*>(s.get());
+      if (!im || im->nativeModule || im->pythonModuleImport || im->moduleId < 0) continue;
+      for (const auto& item : im->items) {
+        if (item.name != name && item.alias != name) continue;
+        if (TypePtr t = resolveReexportedValue(im->moduleId, item.name, depth + 1)) return t;
+      }
+    }
+  }
+  return it != ex.values.end() ? it->second : nullptr;
+}
+
 TypePtr Sema::moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
                                bool report) {
   if (alias.python) {
@@ -149,6 +169,11 @@ TypePtr Sema::moduleMemberType(const ModuleAlias& alias, const std::string& memb
     return typeEnum(en->second);
   }
   if (auto value = exports.values.find(member); value != exports.values.end()) {
+    if (value->second && value->second->kind == TypeKind::Var) {
+      if (TypePtr t = resolveReexportedValue(alias.moduleId, member, 0)) {
+        if (t->kind != TypeKind::Var) return t;
+      }
+    }
     return value->second;
   }
   if (report) {

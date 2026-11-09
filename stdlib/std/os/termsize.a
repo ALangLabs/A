@@ -1,0 +1,18 @@
+# std.os.terminal — terminal size query, mirroring shutil/os.get_terminal_size.
+
+import std:terminal
+
+class TerminalSize:
+    columns: int
+    lines: int
+
+    fn __str__(self):
+        return "os.terminal_size(columns=" + str(self.columns) + ", lines=" + str(self.lines) + ")"
+
+"""get_terminal_size(fd=1) -> TerminalSize(columns, lines).
+
+The runtime queries STDOUT and falls back to 80x24 when unattached.
+"""
+fn get_terminal_size(fd=1):
+    s = terminal.size()
+    return TerminalSize(s[0], s[1])

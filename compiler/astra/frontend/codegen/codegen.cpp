@@ -30,7 +30,7 @@ bool AsmEmitter::runPerUnit(std::vector<AsmUnit>& out, std::string& error,
                             const std::vector<int>* only) {
   error_ = &error;
   collectGlobals();
-  buildGlobalScope();
+  buildGlobalScope(graph_.entry);
   std::vector<int> order = graph_.order;
   if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
   // Include any module missing from order (defensive; loader fills order).
@@ -66,7 +66,7 @@ bool AsmEmitter::runPerUnit(std::vector<AsmUnit>& out, std::string& error,
 bool AsmEmitter::run(std::string& out, std::string& error) {
     error_ = &error;
     collectGlobals();
-    buildGlobalScope();
+    buildGlobalScope(graph_.entry);
     for (StructInfo* st : structList_) emitStructCtor(st);
     for (FnInfo* f : fnList_) {
       if (!failed_) emitFunction(f);

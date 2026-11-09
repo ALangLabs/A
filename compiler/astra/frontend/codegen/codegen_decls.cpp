@@ -255,7 +255,7 @@ std::int64_t AsmEmitter::evalConstIntA(const Expr* e, std::int64_t fallback) {
     return fallback;
   }
 
-void AsmEmitter::buildGlobalScope() {
+void AsmEmitter::buildGlobalScope(int preferModule) {
     scopes_.clear();
     scopes_.emplace_back();
     auto& g = scopes_.back();
@@ -334,6 +334,34 @@ void AsmEmitter::buildGlobalScope() {
       b.moduleId = -1;
       b.aux = nm;  // native module name for member lookup
       g[nm] = b;
+    }
+    // Same-named top-level globals from different modules share one flat
+    // scope, so the last module in load order wins. Re-bind the module being
+    // emitted so its own `x = ...` writes its own symbol (e.g. std:os
+    // constants must not resolve to std:path's `sep`).
+    int prefer = preferModule;
+    if (prefer < 0) prefer = curModuleId_;
+    if (prefer >= 0 && prefer < (int)graph_.modules.size()) {
+      const Module& pm = graph_.at(prefer);
+      if (pm.program) {
+        for (const StmtPtr& s : pm.program->statements) {
+          std::string nm;
+          if (s->kind == StmtKind::Let) {
+            nm = static_cast<const LetStmt*>(s.get())->name;
+          } else if (s->kind == StmtKind::Assign) {
+            const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
+            if (as->target->kind == ExprKind::Ident)
+              nm = static_cast<const IdentExpr*>(as->target.get())->name;
+          }
+          if (nm.empty()) continue;
+          auto it = topLevelGlobals_.find(std::to_string(prefer) + ":" + nm);
+          if (it == topLevelGlobals_.end()) continue;
+          ABinding b;
+          b.kind = BKind::Global;
+          b.sym = it->second;
+          g[nm] = b;
+        }
+      }
     }
   }
 
@@ -527,7 +555,7 @@ void AsmEmitter::emitFunction(FnInfo* f) {
     saved.swap(text_);
     slotCounter_ = 0;
     scopes_.clear();
-    buildGlobalScope();
+    buildGlobalScope(f->moduleId);
     pushScope();
     bindModuleImports(f->moduleId);
     int argvSlot = allocSlot();
@@ -646,7 +674,7 @@ void AsmEmitter::emitMain() {
     saved.swap(text_);
     slotCounter_ = 0;
     scopes_.clear();
-    buildGlobalScope();
+    buildGlobalScope(graph_.entry);
     pushScope();
     allocSlot();  // slot 0 reserved (unused scratch)
     emit("    call a_runtime_init\n");
@@ -893,7 +921,7 @@ void AsmEmitter::emitModuleInitBody(int moduleId) {
   saved.swap(text_);
   slotCounter_ = 0;
   scopes_.clear();
-  buildGlobalScope();
+  buildGlobalScope(moduleId);
   pushScope();
   allocSlot();  // slot 0 reserved (mirrors emitMain scratch)
   emitFramePush("<module>", moduleId, 0);
@@ -999,7 +1027,7 @@ void AsmEmitter::emitMainShared() {
   saved.swap(text_);
   slotCounter_ = 0;
   scopes_.clear();
-  buildGlobalScope();
+  buildGlobalScope(graph_.entry);
   pushScope();
   allocSlot();  // slot 0 reserved (unused scratch)
   emit("    call a_runtime_init\n");

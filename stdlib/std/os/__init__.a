@@ -1,161 +1,42 @@
-# std.os — operating-system helpers (Python `os` subset, POSIX only).
+# std.os — a Python-compatible `os` surface for A.
 #
-# Thin ergonomic wrappers over the native fs/env builtins plus a few
-# composed helpers. There is no process control, no `os.environ` mapping
-# (the runtime exposes single-variable lookup only), and no signal/pty
-# support.
+# This package is a thin facade over the native `fs`, `env`, and `terminal`
+# modules plus small pure-A helpers. It is split into focused modules so each
+# part can be extended on its own:
 #
-#   import std:os
-#   os.getcwd()          # current_dir()
-#   os.listdir(".")      # sorted names (runtime sorts)
-#   os.makedirs("a/b/c") # create_dir (already recursive)
-#   os.removedirs?       # see rmdir note below
-#   os.getenv("HOME")    # env.get -> "" when unset (not Optional!)
-#   os.getenv("X", "d")  # with default
-#   os.path -> use std:path for manipulation (os.path.join etc. live there)
+#   constants.a    platform constants (name, sep, F_OK, SEEK_*, ...)
+#   environment.a  getenv/environ/putenv
+#   process.a      pid/uid/gid, cwd, uname, cpu_count, system
+#   stat.a         StatResult, stat/lstat, exists/isfile/isdir, chmod/utime
+#   dirs.a         listdir/scandir, mkdir/makedirs/rmdir, walk
+#   files.a        remove/rename/truncate, symlink/link/readlink
+#   pathns.a       the os.path namespace object
+#   randbytes.a    urandom/getrandom
+#   termsize.a     get_terminal_size
 #
-# Deviations from Python:
-#   * getenv returns "" for unset variables (env.get contract); use
-#     getenv_default / `os.getenv("X", default)` when "" is meaningful.
-#   * `environ` is NOT provided — the runtime cannot enumerate variables.
-#   * rmdir() wraps remove_dir which is RECURSIVE (rmtree semantics), not
-#     the single-directory os.rmdir; removedirs() is an alias. Documented.
-#   * remove()/unlink() wrap remove_file; on directories it removes empty
-#     dirs only where the C remove() allows (platform-dependent).
-#   * rename() is NOT wrapped: the global builtin `rename(old, new)` is
-#     already the os.rename equivalent (panics on failure). A module-level
-#     `fn rename` would shadow it and recurse forever, so call the builtin
-#     directly.
-#   * exists() uses file_exists which only detects regular files — a
-#     directory returns false. Use listdir/getcwd probing for dirs.
-#   * No os.fork/exec/wait/spawn, no os.cpu_count, no os.getpid.
-import std:env
-import std:core
-import std:random
+# Differences from CPython that are inherent to the A runtime:
+#   * Paths are UTF-8 strings; there is no separate bytes path type.
+#   * There is no file-descriptor-based API (open/read/write/fdopen, dir_fd=,
+#     os.stat_result.st_*_ns). `fwalk`, `getloadavg`, and `sameopenfile`
+#     raise instead of returning partial data.
+#   * os.urandom returns a [i64] list of byte values (as random.randbytes does)
+#     because A has no first-class `bytes` for this API.
+#   * os.chmod/utime on Windows are no-ops or unsupported, as in the runtime.
 
-# -- constants ----------------------------------------------------------------
+from "constants.a" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END
 
-name = "posix"
-sep = "/"
-pathsep = ":"
-linesep = "\n"
-curdir = "."
-pardir = ".."
-extsep = "."
-devnull = "/dev/null"
+from "environment.a" import getenv, getenv_default, getenvb, environ_get, environ_all, putenv, unsetenv, environ, Environ
 
-# -- environment ---------------------------------------------------------------
+from "process.a" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg
 
-"""
-getenv(name) -> String value of the variable, or "" when unset.
-NOTE: cannot distinguish "unset" from "set to empty" (env.get contract).
-"""
-fn getenv(name):
-    return env.get(name)
+from "stat.a" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, utime, samefile, samestat, ismount
 
-"""
-getenv_default(name, default) -> value of the variable, or `default` when
-unset OR empty. For a true unset check see environ_get below.
-"""
-fn getenv_default(name, default):
-    v = env.get(name)
-    if v == "":
-        return default
-    return v
+from "dirs.a" import DirEntry, listdir, scandir, mkdir, makedirs, rmdir, removedirs, walk, fwalk
 
-"""environ_get(name) -> alias for getenv (explicit "module.attr" style)."""
-fn environ_get(name):
-    return env.get(name)
+from "files.a" import remove, unlink, rename, replace, renames, truncate, link, symlink, readlink
 
-# -- process / cwd -------------------------------------------------------------
+from "randbytes.a" import urandom, getrandom
 
-"""getcwd() -> absolute path of the current working directory."""
-fn getcwd():
-    return current_dir()
+from "termsize.a" import get_terminal_size, TerminalSize
 
-"""getpid() -> unsupported; panics (no process-id builtin)."""
-fn getpid():
-    core.panic("os.getpid is not supported by the A runtime")
-
-# -- directory operations ------------------------------------------------------
-
-"""listdir(path = ".") -> [String] of entry names, sorted by the runtime."""
-fn listdir(path = "."):
-    return list_dir(path)
-
-"""scandir? -- same as listdir (kept for name parity with Python)."""
-fn scandir(path = "."):
-    return list_dir(path)
-
-"""
-makedirs(path) -> create path and all missing parents.
-The runtime create_dir already creates intermediate components, so this
-is a direct wrapper (exists-and-is-dir checks are not possible without a
-stat builtin).
-"""
-fn makedirs(path):
-    create_dir(path)
-
-"""mkdir(path) -> alias of makedirs (runtime creates parents too)."""
-fn mkdir(path):
-    create_dir(path)
-
-"""
-rmdir(path) / removedirs(path) -> recursively remove a directory tree.
-WARNING: unlike Python os.rmdir (single, must-be-empty directory), the
-runtime remove_dir is recursive like shutil.rmtree.
-"""
-fn rmdir(path):
-    remove_dir(path)
-
-fn removedirs(path):
-    remove_dir(path)
-
-# -- file operations -----------------------------------------------------------
-
-"""remove(path) / unlink(path) -> delete a file (panics on failure)."""
-fn remove(path):
-    remove_file(path)
-
-fn unlink(path):
-    remove_file(path)
-
-# NOTE: os.rename / os.replace are intentionally absent — the global
-# builtin `rename(old, new)` already provides the semantics, and a
-# module-level `fn rename` would shadow it and recurse forever.
-
-"""
-exists(path) -> true when path is a readable regular FILE.
-Directories return false (file_exists uses fopen); there is no stat
-builtin to probe directories — use listdir and catch panics instead.
-"""
-fn exists(path):
-    return file_exists(path)
-
-"""lexists(path) -> alias of exists (no symlink distinction available)."""
-fn lexists(path):
-    return file_exists(path)
-
-"""getsize(path) -> size in bytes, or -1 when missing/not a file."""
-fn getsize(path):
-    return file_size(path)
-
-"""isfile(path) -> alias of exists (regular-file check only)."""
-fn isfile(path):
-    return file_exists(path)
-
-"""isdir(path) -> true when list_dir succeeds (directory probe)."""
-fn isdir(path):
-    # list_dir panics on non-directories AND on missing paths; there is
-    # no stat builtin, so this can only answer "yes" — it raises otherwise.
-    list_dir(path)
-    return true
-
-"""ismount? -- always false (no mount-table access)."""
-fn ismount(path):
-    return false
-
-"""urandom(n) -> [i64] of n bytes from std:random.randbytes."""
-fn urandom(n):
-    # Not a CSPRNG — documented deviation; use for non-security bytes only.
-    return random.randbytes(n)
+from "pathns.a" import path, PathNamespace

@@ -160,6 +160,7 @@ class Sema {
     Kind kind = Kind::Value;
     bool native = false;
     bool python = false;
+    std::string sourceName;  // name in the source module (re-export tracking)
     std::string nativeName;  // builtin implementing a native member
     std::string pythonModule;
     std::string pythonMember;
@@ -193,6 +194,9 @@ class Sema {
   ModuleExports& exportsFor(int moduleId);
   TypePtr moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
                            bool report);
+  // Follow `from "x.a" import name` value re-exports to the declaring
+  // module so exported package values keep their concrete type.
+  TypePtr resolveReexportedValue(int moduleId, const std::string& name, int depth);
   TypePtr moduleMemberCall(const ModuleAlias& alias, const std::string& member, CallExpr& call);
   ModuleAlias* findAlias(const std::string& name);
 

@@ -46,6 +46,7 @@ void Sema::registerImports(Module& module) {
         FromBinding binding;
         binding.span = item.span;
         binding.moduleId = from->moduleId;
+        binding.sourceName = item.name;
 
         if (from->pythonModuleImport) {
           binding.python = true;
@@ -105,7 +106,9 @@ void Sema::registerImports(Module& module) {
             bool found = false;
             if (target.program) {
               for (auto& stmt : target.program->statements) {
-                if (auto* asg = dynamic_cast<AssignStmt*>(stmt.get())) {
+                if (auto* let = dynamic_cast<LetStmt*>(stmt.get())) {
+                  if (let->name == item.name) { found = true; break; }
+                } else if (auto* asg = dynamic_cast<AssignStmt*>(stmt.get())) {
                   if (auto* id = dynamic_cast<IdentExpr*>(asg->target.get())) {
                     if (id->name == item.name) { found = true; break; }
                   }
@@ -461,6 +464,22 @@ void Sema::checkModule(Module& module) {
   checkDeclaredVariables();
   checkReturnPaths();
 
+  // Re-exports captured at registration time may still be `var` (the
+  // dependency had not been checked yet). Refresh them now so package
+  // __init__ values expose their concrete type to importers.
+  for (auto& entry : fromBindings_) {
+    FromBinding& b = entry.second;
+    if (b.kind != FromBinding::Kind::Value || b.native || b.python || b.moduleId < 0)
+      continue;
+    if (b.type && b.type->kind != TypeKind::Var) continue;
+    const std::string& src = b.sourceName.empty() ? entry.first : b.sourceName;
+    if (TypePtr t = resolveReexportedValue(b.moduleId, src, 0)) {
+      if (t->kind != TypeKind::Var) {
+        b.type = t;
+        exportsFor(module.id).values[entry.first] = t;
+      }
+    }
+  }
   buildModuleExports(module);
 }
 

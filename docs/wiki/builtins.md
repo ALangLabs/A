@@ -41,7 +41,16 @@ runtimes always take the serial path.
 `compiler/astra/frontend/name-resolution/native_modules.hpp`):
 
 `math` (sqrt/abs/min/max/pow/trig/log/floor/ceil/round/trunc/random + `PI`,`E`),
-`io` (print/eprint/input/flush), `fs` (file ops), `strings`, `collections`,
+`io` (print/eprint/input/flush), `fs` (file ops + POSIX primitives: `read_file`,
+`write_file`, `append_file`, `file_exists`, `file_size`, `list_dir`,
+`remove_file`, `create_dir`, `remove_dir`, `rename`, `current_dir`,
+`read_bytes`, `write_bytes`, `chdir`, `getpid`/`getppid`, `getuid`/`geteuid`,
+`getgid`/`getegid`, `getlogin`, `cpu_count`, `uname` (5-tuple), `stat`/`lstat`
+(13-tuple: mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime,
+is_file, is_dir, is_symlink), `access`, `chmod`, `symlink`/`link`/`readlink`,
+`utime`, `mkdir`/`rmdir`, `truncate`, `environ` (Map(String,String)),
+`getenv` (None when unset), `setenv`, `unsetenv`, `system` (exit status),
+`urandom` (`[i64]` byte values)), `strings`, `collections`,
 `core` (panic/assert/assert_eq/bytes_utf8_decode/bytes_utf8_encode/
 bytes_new/bytes_append/bytes_to_str), `time` (now/sleep), `json`, `binary`,
 `testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_listen/tcp_connect/accept/
@@ -49,11 +58,13 @@ send/recv/recv_status/close/set_timeout/set_nonblocking/poll/local_port/
 udp_socket/udp_bind/udp_send/udp_recv/tls_connect/tls_wrap/tls_available/
 send_bytes/recv_bytes/recv_buf/recv_buf_all/recv_body/recv_body_all/recv_exact/
 inflate_bytes/inflate_available), `terminal`,
-`env` (`get` only), `repl` (eval/quiet), `py` (Python bridge), `unsafe`,
+`env` (`get`, `getenv`/`all`/`set`/`unset`), `repl` (eval/quiet), `py` (Python bridge), `unsafe`,
 `arena`, `kernel_ops`.
 
 `env.get(name) -> String` returns the environment variable's value, or the
-empty string when it is unset — it is *not* an `Optional`.
+empty string when it is unset — it is *not* an `Optional`. Use
+`fs.getenv(name) -> String?` (or `std:os`'s `getenv`) when unset and empty
+must be distinguished.
 
 `core.bytes_utf8_decode(bytes) -> String?` and `core.bytes_utf8_encode(s) ->
 [i64]` are the single-pass native conversions behind `std:bytes`

@@ -1,0 +1,78 @@
+# std.os.environment — environment-variable access.
+#
+# getenv() distinguishes "unset" from "set to the empty string" by using the
+# native os_getenv primitive, which returns None for a missing key. That is
+# Python's behaviour; the old wrapper returned "" for both cases.
+
+import std:fs
+import std:core
+
+fn getenv(key, default=None):
+    v = fs.getenv(key)
+    if v == None:
+        return default
+    return v
+
+"""getenv_default(key, default) -> value, or `default` when the key is unset."""
+fn getenv_default(key, default):
+    return getenv(key, default)
+
+"""environ_get(key) -> raw value, or "" when the key is unset."""
+fn environ_get(key):
+    v = fs.getenv(key)
+    if v == None:
+        return ""
+    return v
+
+"""environ_getb(key) -> bytes value (not supported; A strings are UTF-8)."""
+fn getenvb(key, default=None):
+    return getenv(key, default)
+
+"""environ_all() -> map of every variable in the current environment."""
+fn environ_all():
+    return fs.environ()
+
+"""putenv(key, value) -> set an environment variable for this process."""
+fn putenv(key, value):
+    fs.setenv(key, value)
+
+"""unsetenv(key) -> remove an environment variable."""
+fn unsetenv(key):
+    fs.unsetenv(key)
+
+
+# Mapping-style facade: os.environ.get(...) / .set(...) / .all().
+class Environ:
+    fn get(self, key, default=None):
+        v = fs.getenv(key)
+        if v == None:
+            return default
+        return v
+
+    fn set(self, key, value):
+        fs.setenv(key, value)
+
+    fn unset(self, key):
+        fs.unsetenv(key)
+
+    fn contains(self, key):
+        d = fs.environ()
+        return key in d
+
+    fn all(self):
+        return fs.environ()
+
+    fn keys(self):
+        return fs.environ().keys()
+
+    fn values(self):
+        return fs.environ().values()
+
+    fn items(self):
+        return fs.environ().items()
+
+    fn copy(self):
+        return fs.environ()
+
+
+environ = Environ()

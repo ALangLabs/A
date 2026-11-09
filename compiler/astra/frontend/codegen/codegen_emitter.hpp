@@ -567,7 +567,7 @@ class AsmEmitter {
 
     std::int64_t evalConstIntA(const Expr* e, std::int64_t fallback);
 
-    void buildGlobalScope();
+    void buildGlobalScope(int preferModule = -1);
 
   // ---- functions / main -------------------------------------------------------
   // Bind `from <native-module> import member [as x]` items into the current
