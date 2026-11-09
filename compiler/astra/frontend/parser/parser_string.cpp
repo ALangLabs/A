@@ -154,6 +154,16 @@ std::vector<StringPart> Parser::parseStringParts(const Token& token) {
       ++i;
       continue;
     }
+    if (c == '{' && i + 1 < raw.size() && raw[i + 1] == '{') {
+      literal += '{';
+      i += 2;
+      continue;
+    }
+    if (c == '}' && i + 1 < raw.size() && raw[i + 1] == '}') {
+      literal += '}';
+      i += 2;
+      continue;
+    }
     if (c != '{') {
       literal += c;
       ++i;
