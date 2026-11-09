@@ -26,14 +26,19 @@ void Parser::parseTypeParams(std::vector<std::string>& typeParams,
   expect(Tok::Gt, "'>' after type parameters");
 }
 
-StmtPtr Parser::parseFnDecl() {
+StmtPtr Parser::parseFnDecl(bool entryKw) {
   Span start = cur().span;
-  expect(Tok::KwFn, "'fn'");
+  if (entryKw) {
+    advance();  // consume 'entry'
+  } else {
+    expect(Tok::KwFn, "'fn'");
+  }
   const Token& nameTok = expect(Tok::Ident, "a function name");
 
   auto decl = std::make_unique<FnDecl>();
   decl->name = nameTok.lexeme;
   decl->nameSpan = nameTok.span;
+  decl->isEntry = entryKw;
 
   if (check(Tok::Lt)) {
     parseTypeParams(decl->typeParams, decl->whereClause, decl->whereSpans);

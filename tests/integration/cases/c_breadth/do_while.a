@@ -1,4 +1,4 @@
-fn main():
+entry main():
     i = 0
     do:
         print(i)

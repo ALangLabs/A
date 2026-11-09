@@ -1,5 +1,5 @@
 # Octal literals (0o / 0O) are documented and lexed alongside 0x and 0b.
-fn main():
+entry main():
     print(0o17)
     print(0O777)
     print(0o10 + 0x10 + 0b10)

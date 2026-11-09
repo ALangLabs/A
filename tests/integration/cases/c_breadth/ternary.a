@@ -1,4 +1,4 @@
-fn main():
+entry main():
     score = 72
     print(score >= 60 ? "pass" : "fail")
     print(score > 90 ? 1 : score > 60 ? 2 : 3)

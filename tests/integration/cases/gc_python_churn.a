@@ -2,7 +2,7 @@ import python:re
 import python:array
 import std:py
 
-fn main():
+entry main():
     total = 0
     for i in 0..50000:
         pat = re.compile("a+")

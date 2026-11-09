@@ -2,7 +2,7 @@
 import std:core
 from std:bytes import utf8_decode
 
-fn main():
+entry main():
     b: Bytes = Bytes("hey")
     print(len(b))
     print(b[0])

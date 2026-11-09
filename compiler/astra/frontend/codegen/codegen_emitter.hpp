@@ -586,6 +586,18 @@ class AsmEmitter {
     void emitFunction(FnInfo* f);
 
     void emitMain();
+    // Emit the call to the entry module's `entry name():` function (at most
+    // one; multiple is a compile error). No-op when the program has none.
+    void emitEntryCall();
+    // Aval-operand comparison jump: `a <cmp> b` where both sides are
+    // statically int evaluates each side once into a slot, unboxes inline
+    // ints (emitUnboxInt), and emits a direct jcc — no bool aval, no
+    // truthiness chain. Non-int avals fall back to the matching a_*_slow
+    // compare + emitTruthyJump, identical to the generic path.
+    bool tryAvalCmpJump(const Expr* cond, const std::string& label,
+                      bool jumpIfTrue);
+    // Truthiness test on the aval already in %rax -> jcc `label`.
+    void emitTruthyJump(const std::string& label, bool jumpIfTrue);
     // Per-unit split of emitMain (Phase 2): emits `__a_modinit_<mtag>` holding
     // one module's top-level statements; emitMainShared emits `main` (runtime
     // init, fnon setup for all modules, test table, calls to modinits in

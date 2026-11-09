@@ -1,6 +1,6 @@
 # Native blocked matmul (64x64x64) — the linalg matmul builtin with fma
 # hot loops and cache tiling vs pure-A nested loops.
-fn main():
+entry main():
     n = 64
     a = []
     for i in 0..n * n:

@@ -114,6 +114,7 @@ void AsmEmitter::collectGlobals() {
           for (const ComptimeParam& p : fn->comptimeParams) info->paramNames.push_back(p.name);
           for (const ParamDecl& p : fn->params) info->paramNames.push_back(p.name);
           info->variadic = !fn->params.empty() && fn->params.back().variadic;
+          info->isEntry = fn->isEntry;
           fns_[fn] = info;
           fnList_.push_back(info);
         } else if (s->kind == StmtKind::StructDecl) {
@@ -734,6 +735,34 @@ static std::string fnDocText(const FnInfo* f) {
     return "";
 }
 
+void AsmEmitter::emitEntryCall() {
+    // Only the entry module's `entry` function runs; `entry` decls in
+    // imported modules are ordinary functions that stay inert on import.
+    FnInfo* entryFn = nullptr;
+    for (FnInfo* f : fnList_) {
+      if (!f->isMethod && f->isEntry && f->moduleId == graph_.entry) {
+        if (entryFn) {
+          fail("multiple 'entry' functions in '" +
+               graph_.at(graph_.entry).name + "'");
+          return;
+        }
+        entryFn = f;
+      }
+    }
+    if (!entryFn) return;
+    std::vector<int> ps(entryFn->paramNames.size(), -1);
+    if (entryFn->variadic && !ps.empty()) {
+      // entry is invoked with no arguments: *args collects an empty list
+      // (kMissing would leave the slot unreadable and crash len(args)).
+      movImm(0, "%rdi");
+      emit("    xor %esi, %esi\n    call a_list_new\n");
+      int ls = allocSlot();
+      storeRax(ls);
+      ps.back() = ls;
+    }
+    emitDirectCall(entryFn->cname.c_str(), ps);
+}
+
 void AsmEmitter::emitMain() {
     std::ostringstream saved;
     saved.swap(text_);
@@ -869,24 +898,9 @@ void AsmEmitter::emitMain() {
       loadSlot(testRc);
       emit("    leave\n    ret\n");
     } else {
-      // `fn main()` entry point: invoked once after all module top-levels,
-      // entry module only. Never runs for imports or under `a test`.
-      for (FnInfo* f : fnList_) {
-        if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
-          std::vector<int> ps(f->paramNames.size(), -1);
-          if (f->variadic && !ps.empty()) {
-            // main is invoked with no arguments: *args collects an empty list
-            // (kMissing would leave the slot unreadable and crash len(args)).
-            movImm(0, "%rdi");
-            emit("    xor %esi, %esi\n    call a_list_new\n");
-            int ls = allocSlot();
-            storeRax(ls);
-            ps.back() = ls;
-          }
-          emitDirectCall(f->cname.c_str(), ps);
-          break;
-        }
-      }
+      // `entry name():` — the program entry point, invoked once after all
+      // module top-levels. Entry module only; never under `a test`.
+      emitEntryCall();
       emitFramePop();
       emit("    xor %eax, %eax\n    leave\n    ret\n");
     }
@@ -1157,20 +1171,8 @@ void AsmEmitter::emitMainShared() {
     loadSlot(testRc);
     emit("    leave\n    ret\n");
   } else {
-    for (FnInfo* f : fnList_) {
-      if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
-        std::vector<int> ps(f->paramNames.size(), -1);
-        if (f->variadic && !ps.empty()) {
-          movImm(0, "%rdi");
-          emit("    xor %esi, %esi\n    call a_list_new\n");
-          int ls = allocSlot();
-          storeRax(ls);
-          ps.back() = ls;
-        }
-        emitDirectCall(f->cname.c_str(), ps);
-        break;
-      }
-    }
+    // `entry name():` entry point (see emitMain).
+    emitEntryCall();
     emitFramePop();
     emit("    xor %eax, %eax\n    leave\n    ret\n");
   }

@@ -2,5 +2,5 @@
 fn get_field(v):
     return v.foo
 
-fn main():
+entry main():
     print(get_field(None))

@@ -22,7 +22,7 @@ fn nested(limit):
             total += 1
     return total
 
-fn main():
+entry main():
     print(classify(3))
     print(classify(15))
 

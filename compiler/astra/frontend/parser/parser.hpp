@@ -40,7 +40,7 @@ class Parser {
   void synchronize();
 
   StmtPtr parseStatement();
-  StmtPtr parseFnDecl();
+  StmtPtr parseFnDecl(bool entryKw = false);
   StmtPtr parseStructDecl();
   StmtPtr parseEnumDecl();
   StmtPtr parseTraitDecl();

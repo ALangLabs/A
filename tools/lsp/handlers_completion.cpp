@@ -47,6 +47,17 @@ void LanguageServer::completion(const Value& id, const Value* params) {
     }
   };
 
+  // Docstring first, then a synthesized body summary for undocumented
+  // declarations so completion items carry the same hover information.
+  auto symbolDoc = [&](const SymbolDef& symbol, const FileIndex& symFile) {
+    std::string doc = docCommentText(compilation, symFile, symbol.span);
+    if (doc.empty()) {
+      doc = a::lsp::synthesizeSymbolDoc(
+          compilation, ResolvedSymbol{&symbol, &symFile});
+    }
+    return doc;
+  };
+
   // Member completion after "." or "?.".
   int previous = tokenIndexBefore(*tokens, line + 1, byteColumn - 1);
   int base = -1;
@@ -71,7 +82,8 @@ void LanguageServer::completion(const Value& id, const Value* params) {
       if (!target) continue;
       for (const SymbolDef& symbol : target->symbols) {
         if (symbol.topLevel) {
-          pushItem(symbol.name, completionKind(symbol.kind), symbol.detail);
+          pushItem(symbol.name, completionKind(symbol.kind), symbol.detail,
+                   symbolDoc(symbol, *target));
         }
       }
     }
@@ -99,7 +111,8 @@ void LanguageServer::completion(const Value& id, const Value* params) {
         } else if (!typeName.empty()) {
           for (const SymbolDef* member :
                a::lsp::structMembers(compilation, *resolved.file, typeName)) {
-            pushItem(member->name, completionKind(member->kind), member->detail);
+            pushItem(member->name, completionKind(member->kind), member->detail,
+                     symbolDoc(*member, *resolved.file));
           }
         }
       }
@@ -147,7 +160,8 @@ void LanguageServer::completion(const Value& id, const Value* params) {
   }
   for (const SymbolDef* symbol :
        a::lsp::visibleSymbols(compilation, *file, line + 1, byteColumn)) {
-    pushItem(symbol->name, completionKind(symbol->kind), symbol->detail);
+    pushItem(symbol->name, completionKind(symbol->kind), symbol->detail,
+             symbolDoc(*symbol, *file));
   }
   for (const a::lsp::ImportDef& import : file->imports) {
     pushItem(import.alias, import.wholeModule ? 9 : 18, import.modulePath);
@@ -346,6 +360,10 @@ void LanguageServer::signatureHelp(const Value& id, const Value* params) {
       label = resolved.symbol->detail;
       documentation =
           docCommentText(compilation, *resolved.file, resolved.symbol->span);
+      if (documentation.empty()) {
+        documentation =
+            a::lsp::synthesizeSymbolDoc(compilation, resolved);
+      }
     }
   }
   if (label.empty() && qualifiedOnDot && baseToken.kind == Tok::Ident) {

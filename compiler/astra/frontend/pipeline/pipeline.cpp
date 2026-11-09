@@ -620,18 +620,30 @@ struct Plan {
   std::string file;  // final cache file path
 };
 
-inline std::string cacheDir() {
+// A_CACHE_DIR overrides the run-cache root (used by tests/CI). By default,
+// cache artifacts live in `_acache_` next to the relevant source, like
+// Python's __pycache__.
+inline bool cacheDirOverridden() {
+  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return true;
+  return false;
+}
+inline std::string cacheDir(const std::string& nearPath = "") {
   if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return d;
+  if (!nearPath.empty()) {
+    std::error_code ec;
+    std::filesystem::path p = std::filesystem::absolute(nearPath, ec);
+    std::filesystem::path dir = p.parent_path();
+    if (dir.empty()) dir = ".";
+    return (dir / "_acache_").string();
+  }
 #ifdef _WIN32
   char tmp[MAX_PATH];
   DWORD n = GetTempPathA(MAX_PATH, tmp);
-  return std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "a_cache_run";
+  return std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "_acache_";
 #else
-  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
-    return std::string(x) + "/a/run";
   if (const char* home = std::getenv("HOME"); home && *home)
-    return std::string(home) + "/.cache/a/run";
-  return "/tmp/a_cache_run";
+    return std::string(home) + "/.cache/_acache_";
+  return "/tmp/_acache_";
 #endif
 }
 
@@ -695,8 +707,14 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   }
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
+  std::string near;
+  if (g.entry >= 0 && g.entry < (int)g.modules.size())
+    near = g.at(g.entry).path;
   p.active = true;
-  p.file = cacheDir() + "/" + hex;
+  std::string dir = cacheDir(near);
+  std::error_code ec;
+  std::filesystem::create_directories(dir, ec);
+  p.file = dir + "/run." + hex;
   return p;
 }
 
@@ -2434,12 +2452,12 @@ bool entryHasMain(const ModuleGraph& g){
   const Module& mod=g.at(g.entry);
   if(!mod.program) return false;
   for(const StmtPtr& s:mod.program->statements)
-    if(s->kind==StmtKind::FnDecl&&static_cast<const FnDecl*>(s.get())->name=="main") return true;
+    if(s->kind==StmtKind::FnDecl&&static_cast<const FnDecl*>(s.get())->isEntry) return true;
   return false;
 }
 void warnNoMain(const ModuleGraph& g,const std::string& path,std::ostream& err){
   if(entryHasMain(g)) return;
-  err<<"warning: '"<<path<<"' has no 'fn main'; only top-level statements will run\n";
+  err<<"warning: '"<<path<<"' has no 'entry' function; only top-level statements will run\n";
 }
 CompiledModule runFrontendPipeline(const std::string& path,std::string source,const PipelineConfig& config,DiagnosticSink& sink,std::ostream& diagOut,std::ostream& diagErr){
   ModuleLoaderOptions opts; opts.modulePaths=config.modulePaths; opts.stdlibRoot=config.stdlibRoot;

@@ -3,6 +3,7 @@
 #include "server.hpp"
 #include "diagnostics.hpp"
 #include "docs.hpp"
+#include "synth_docs.hpp"
 #include "text_utils.hpp"
 
 #include "analysis.hpp"

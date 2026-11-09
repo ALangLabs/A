@@ -74,6 +74,13 @@ std::unique_ptr<Program> Parser::parseProgram() {
 }
 
 StmtPtr Parser::parseStatement() {
+  // `entry name(...):` — program entry point (alternative to `fn`). The
+  // Ident+Ident+LParen lookahead keeps `entry` usable as a normal name:
+  // `entry = 1`, `entry(x)`, `entry.main` etc. never match this shape.
+  if (cur().kind == Tok::Ident && cur().lexeme == "entry" &&
+      peek(1).kind == Tok::Ident && peek(2).kind == Tok::LParen) {
+    return parseFnDecl(true);
+  }
   switch (cur().kind) {
     case Tok::KwFn:
       return parseFnDecl();

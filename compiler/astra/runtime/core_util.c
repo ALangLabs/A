@@ -252,6 +252,12 @@ void *xmalloc(size_t n) {
    costs. Huge pages cut the fault count by ~500x. Falls back to the heap
    where mmap/huge pages are unavailable, and untouched pages cost nothing. */
 char *xarena(size_t n) {
+    /* Arena-only churn must drive collections the same way xmalloc
+       churn does, otherwise bump chunks never reclaim (unbounded RSS
+       in small-string / int-box loops). Reclaim runs before the fresh
+       chunk is mapped; stale cursors are refreshed by callers via
+       a_gc_arena_stale afterwards. */
+    a_gc_maybe_collect();
 #if defined(__linux__) && defined(MAP_ANONYMOUS)
     void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);

@@ -5,7 +5,7 @@ fn add(a: int, b: int) -> int:
 fn bad_return() -> int:
     return "s"
 
-fn main():
+entry main():
     x: int = "hi"
     print(x)
     print(add(1, "x"))

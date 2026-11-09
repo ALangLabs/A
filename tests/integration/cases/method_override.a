@@ -8,7 +8,7 @@ class Dog(Animal):
     fn speak(self):
         return "woof"
 
-fn main():
+entry main():
     d = Dog("Rex")
     print(d.speak())
     a = Animal("generic")

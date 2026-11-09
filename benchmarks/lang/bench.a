@@ -6,7 +6,7 @@ fn fib(n: i64) -> i64:
         return n
     return fib(n - 1) + fib(n - 2)
 
-fn main():
+entry main():
     N = 20000000
 
     best = 1000000000000

@@ -460,6 +460,7 @@ static GCArenaRange *gc_arena_containing(uintptr_t p) {
     return NULL;
 }
 
+static uint64_t g_alloc_bytes;   /* bytes registered since last GC */
 static uint32_t gc_register_chunk_block(void *p, size_t n, uint64_t id) {
     uint32_t i = ht_find((uintptr_t)p);
     if (i != GC_NONE) {
@@ -486,6 +487,12 @@ static uint32_t gc_register_chunk_block(void *p, size_t n, uint64_t id) {
 
 void a_gc_note_arena(void *p, size_t n, int mapped) {
     if (!p || !n) return;
+    /* Count arena chunks toward the next-collection threshold so
+       bump-arena churn (small strings, int boxes, fmt cache) triggers
+       collections and whole chunks are reclaimed after they fall
+       unreferenced for two collections. Without this, xarena-only
+       programs never collect and arena memory grows unbounded. */
+    g_alloc_bytes += n;
     if (g_narena == g_caparena) {
         size_t nc = g_caparena ? g_caparena * 2 : 8;
         GCArenaRange *nr = (GCArenaRange *)realloc(g_arena_ranges,
@@ -1087,11 +1094,37 @@ static int gc_obj_pinned(const void *obj) {
     return t == T_PYOBJ || t == T_PYBUF;
 }
 
+static void gc_arena_remove_range(GCArenaRange *r) {
+    if (!r) return;
+    size_t idx = (size_t)(r - g_arena_ranges);
+    if (idx >= g_narena || &g_arena_ranges[idx] != r) return;
+    memmove(&g_arena_ranges[idx], &g_arena_ranges[idx + 1],
+            (g_narena - idx - 1) * sizeof(GCArenaRange));
+    --g_narena;
+}
+
+static void gc_arena_reclaim(GCArenaRange *r) {
+    if (!r) return;
+    uintptr_t lo = r->lo, hi = r->hi;
+    int mapped = r->mapped;
+    uint32_t idx = ht_find(lo);
+    if (idx != GC_NONE) blk_delist_fast(idx);
+    gc_arena_remove_range(r);
+    if (mapped) {
+#if defined(__linux__) || defined(__APPLE__)
+        (void)munmap((void *)lo, (size_t)(hi - lo));
+#else
+        gc_raw_free((void *)lo);
+#endif
+    } else {
+        gc_raw_free((void *)lo);
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* collection                                                          */
 /* ------------------------------------------------------------------ */
 
-static uint64_t g_alloc_bytes;   /* bytes registered since last GC */
 static uint64_t g_next_gc = 1u << 20; /* 1 MiB initial threshold */
 static uint64_t g_live_bytes;
 static uint64_t g_ncollections, g_nfreed_objs, g_nfreed_bytes, g_ndelisted;
@@ -1163,17 +1196,44 @@ static void gc_collect(void) {
         if (b->flags & GC_F_CHUNK) {
             GCArenaRange *range = gc_arena_by_id(b->arena_id);
             if (!range) continue;
-            /* Arena chunks are immortal bump storage (see xarena): carved
-               strings/int boxes are never individually freed, and a chunk
-               can hold live objects referenced only from C cells that the
-               conservative marker does not scan (e.g. refs that survive
-               only in unscanned heap blocks). Reclaiming such a chunk
-               munmaps live data and segfaults on next use. With 2 MiB
-               chunks this was rare; 128 KiB chunks spread the working
-               set over many inactive chunks and made the race likely.
-               Retain chunks: drop the candidate bookkeeping, keep the
-               ranges (and mappings) for the process lifetime. */
-            (void)range;
+            if ((b->flags & GC_F_MARK) || range->active) {
+                range->candidate = 0;
+            } else if (range->candidate && !getenv("A_NO_ARENA_RECLAIM")) {
+                /* Second consecutive unreferenced collection: verify
+                   no marked block or stack slot still points into
+                   [lo,hi) before munmap (covers heap-carried refs the
+                   worklist missed). Any hit keeps the chunk alive for
+                   another cycle rather than munmapping live data. */
+                int safe = 1;
+                uintptr_t lo = range->lo, hi = range->hi;
+                for (uint32_t bi = 0; bi < g_nblk && safe; ++bi) {
+                    GCBlock *mb = &g_blk[bi];
+                    if (!(mb->flags & (GC_F_USED | GC_F_MARK)) ||
+                        (mb->flags & GC_F_CHUNK)) continue;
+                    if ((mb->flags & (GC_F_USED | GC_F_MARK)) !=
+                        (GC_F_USED | GC_F_MARK)) continue;
+                    uintptr_t a = mb->start, e = mb->end;
+                    for (; a + sizeof(uintptr_t) <= e; a += sizeof(uintptr_t)) {
+                        uint64_t w = *(const uint64_t *)a;
+                        uintptr_t p = 0;
+                        if ((w & 0xFFFF000000000000ULL) == A_TAG) {
+                            uint64_t pay = w & 0x0000FFFFFFFFFFFFULL;
+                            if (pay && (pay & 0xFULL) == 0) p = (uintptr_t)pay;
+                        } else {
+                            p = (uintptr_t)w;
+                            if (p & 0xFULL) continue;
+                        }
+                        if (p >= lo && p < hi) { safe = 0; break; }
+                    }
+                }
+                if (safe) {
+                    gc_arena_reclaim(range);
+                } else {
+                    range->candidate = 0;
+                }
+            } else {
+                range->candidate = 1;
+            }
             continue;
         }
         if (b->flags & GC_F_MARK) continue;
@@ -1468,6 +1528,27 @@ int a_gc_registered_obj(void *p) {
     if (i == GC_NONE) return 0;
     GCBlock *b = &g_blk[i];
     return ((b->flags & (GC_F_USED | GC_F_OBJ)) == (GC_F_USED | GC_F_OBJ));
+}
+
+/* Release every live T_PYOBJ/T_PYBUF wrapper's owned reference at
+   interpreter shutdown. Top-level globals stay reachable via
+   __a_gc_roots at exit, so no collection would free them; without this
+   the owned PyObject* (e.g. a 280 KiB array.array in opaque_objects.a)
+   prevents Py_Finalize from reclaiming it and LSan reports a direct
+   leak. Only the Python reference is dropped; the A wrapper memory
+   itself is left for the OS to reclaim (process exit). */
+void a_gc_shutdown_py(void) {
+    for (uint32_t i = 0; i < g_nblk; ++i) {
+        GCBlock *b = &g_blk[i];
+        if (!(b->flags & (GC_F_USED | GC_F_OBJ))) continue;
+        const AObj *o = (const AObj *)(uintptr_t)b->start;
+        /* Only T_PYOBJ here: T_PYBUF views are drained first by
+           pybuf_release_all (PyBuffer_Release while the exporter is
+           still alive); releasing them again — or releasing the
+           exporter first — corrupts the buffer. */
+        if (o->type == T_PYOBJ)
+            a_py_release_obj((void *)(uintptr_t)b->start);
+    }
 }
 
 /* Free a young region object (interior buffers + delist + release) when

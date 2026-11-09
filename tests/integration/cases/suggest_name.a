@@ -1,2 +1,2 @@
-fn main():
+entry main():
     pritn("hello")

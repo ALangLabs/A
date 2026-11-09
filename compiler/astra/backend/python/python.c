@@ -494,6 +494,11 @@ static void py_init_once(void) {
 static void py_finalize(void) {
     if (!g_py.Py_Finalize) return;
     pybuf_release_all();
+    /* Live global wrappers still hold owned refs (e.g. array.array
+       280 KiB): drop them before the interpreter is torn down, or
+       Py_Finalize cannot reclaim them and LSan reports a direct
+       leak. A-wrapper memory itself is left to the OS. */
+    a_gc_shutdown_py();
     g_py.Py_Finalize();
 }
 

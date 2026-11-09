@@ -1,4 +1,4 @@
-fn main():
+entry main():
     total = 0
     for i in 0..4:
         doubled = i * 2

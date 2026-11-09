@@ -1,4 +1,4 @@
-fn main():
+entry main():
     total = 0
     for round in 0..500:
         parts = [str(n) for n in 0..200]

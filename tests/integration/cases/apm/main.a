@@ -2,5 +2,5 @@
 # must find .apm/packages automatically since apm.json is in this dir.
 import hello_lib
 
-fn main():
+entry main():
     print(hello_lib.greet("apm"))

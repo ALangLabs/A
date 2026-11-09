@@ -2,5 +2,5 @@ enum Color:
     Red
     Green
 
-fn main():
+entry main():
     print(Color.Pink)

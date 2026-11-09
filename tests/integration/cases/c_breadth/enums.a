@@ -14,7 +14,7 @@ fn describe(c):
         Color.Blue => "blue"
         _ => "other"
 
-fn main():
+entry main():
     print(Color.Red)
     print(Color.Green)
     print(Color.Blue)

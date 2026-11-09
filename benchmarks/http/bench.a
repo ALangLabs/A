@@ -9,7 +9,7 @@ import std:core
 N = 300
 PATH = "/tiny"
 
-fn main():
+entry main():
     url = "http://127.0.0.1:8901" + PATH
     warm = get(url, None, None, 30000)
     if len(warm.body) == 0 and len(warm.body_bytes) == 0 and PATH != "/empty":

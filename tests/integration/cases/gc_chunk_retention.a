@@ -1,4 +1,4 @@
-fn main():
+entry main():
     kept = []
     for i in 0..5000:
         kept.append("value-" + str(i))

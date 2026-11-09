@@ -13,7 +13,7 @@
 # `a test` also runs test functions in concurrent forked batches
 # (A_TEST_JOBS=N to tune, 1 = serial).
 
-fn main():
+entry main():
     n = 1000000
     xs = []
     for i in range(n):

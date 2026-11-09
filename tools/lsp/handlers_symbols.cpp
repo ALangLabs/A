@@ -41,8 +41,11 @@ void LanguageServer::hover(const Value& id, const Value* params) {
       }
     }
     std::string markdown = "```a\n" + formatSignature(description) + "\n```";
-    const std::string documentation =
+    std::string documentation =
         docCommentText(compilation, *resolved.file, resolved.symbol->span);
+    if (documentation.empty()) {
+      documentation = a::lsp::synthesizeSymbolDoc(compilation, resolved);
+    }
     const std::string body = renderDocSections(documentation);
     if (!body.empty()) markdown += "\n\n" + body;
     // Definition link, like pyrefly hover.

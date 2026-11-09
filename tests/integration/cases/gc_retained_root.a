@@ -1,4 +1,4 @@
-fn main():
+entry main():
     kept = "retained"
     total = 0
     # Enough temporary lists/strings to drive multiple role-collection

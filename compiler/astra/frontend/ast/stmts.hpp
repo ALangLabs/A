@@ -156,6 +156,7 @@ struct FnDecl : Stmt {
   Span whereSpan;
   std::vector<StmtPtr> body;
   int moduleId = -1;  // module owning the function, filled in by Sema
+  bool isEntry = false;  // `entry name():` — program entry point
   // Docstring attached from a string-literal statement inside an enclosing
   // type/impl body (methods only). Top-level and body docstrings are recovered
   // from the statement stream instead.

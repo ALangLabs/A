@@ -2,5 +2,5 @@
 fn spin(n: int) -> int:
     return spin(n + 1)
 
-fn main():
+entry main():
     print(spin(0))

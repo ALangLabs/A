@@ -303,6 +303,7 @@ struct FnInfo {
   std::vector<const Expr*> paramDefaults;
   bool variadic = false;
   bool isMethod = false;
+  bool isEntry = false;
   std::string structName;
   int moduleId = -1;
   std::string name;
@@ -1403,6 +1404,7 @@ class NativeEmitter {
             info->paramDefaults.push_back(p.defaultValue.get());
             info->variadic = info->variadic || p.variadic;
           }
+          info->isEntry = fn->isEntry;
           fns_[fn] = info;
           fnList_.push_back(info);
         } else if (s->kind == StmtKind::StructDecl) {
@@ -2033,17 +2035,28 @@ class NativeEmitter {
       testRcSlot = allocSlot();
       storeAcc(testRcSlot);
     } else {
-      // `fn main()` entry point: invoked once after all module top-levels,
-      // entry module only. Never runs for imports or under `a test`.
-      if (FnInfo* mf = findModuleFn(graph_.entry, "main")) {
+      // `entry name():` — the program entry point, invoked once after all
+      // module top-levels. Entry module only; never under `a test`.
+      FnInfo* entryFn = nullptr;
+      for (FnInfo* f : fnList_) {
+        if (!f->isMethod && f->isEntry && f->moduleId == graph_.entry) {
+          if (entryFn) {
+            fail("multiple 'entry' functions in '" +
+                 graph_.at(graph_.entry).name + "'");
+            return;
+          }
+          entryFn = f;
+        }
+      }
+      if (entryFn) {
         std::vector<int> argSlots;
-        for (std::size_t i = 0; i < mf->paramNames.size(); ++i) {
+        for (std::size_t i = 0; i < entryFn->paramNames.size(); ++i) {
           int s = allocSlot();
           movImm(kTag, acc());
           storeAcc(s);
           argSlots.push_back(s);
         }
-        if (mf->variadic && !argSlots.empty()) {
+        if (entryFn->variadic && !argSlots.empty()) {
           int lst = allocSlot();
           movImm(0, A(0));
           zeroReg(A(1));
@@ -2051,7 +2064,7 @@ class NativeEmitter {
           storeAcc(lst);
           argSlots.back() = lst;
         }
-        emitOrderedCall(mf->cname, argSlots);
+        emitOrderedCall(entryFn->cname, argSlots);
       }
     }
     // program exit: drop RAII bindings in every remaining scope

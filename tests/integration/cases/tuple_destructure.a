@@ -1,5 +1,5 @@
 # Unparenthesized tuple targets: `a, b = pair` and `a, b = 1, 2`.
-fn main():
+entry main():
     pair = (1, 2)
     a, b = pair
     print(a, b)

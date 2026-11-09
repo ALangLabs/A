@@ -14,6 +14,7 @@ add_executable(a-lsp
   handlers_hierarchy.cpp
   text_utils.cpp
   docs.cpp
+  synth_docs.cpp
   main.cpp
   analysis.cpp
   analysis_index.cpp

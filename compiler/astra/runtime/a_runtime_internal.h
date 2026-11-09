@@ -729,6 +729,7 @@ int a_py_truthy(aval obj);
 int a_py_equals(aval a, aval b);              /* PyObject_RichCompareBool(Py_EQ) */
 void a_py_release_obj(void *p);                /* GC: release owned PyObject/buffer */
 int a_gc_registered_obj(void *p);
+void a_gc_shutdown_py(void);                    /* exit: drop live Py refs */
 aval a_py_buffer_view(aval obj);              /* T_PYOBJ -> zero-copy T_PYBUF view */
 aval a_py_hasattr(aval obj, const char *name);
 aval a_py_delattr(aval obj, const char *name);

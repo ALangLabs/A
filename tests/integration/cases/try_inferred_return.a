@@ -8,5 +8,5 @@ fn chain(n):
     v = maybefail(n)?
     return Some(v + 1)
 
-fn main():
+entry main():
     print(chain(3), chain(-1))

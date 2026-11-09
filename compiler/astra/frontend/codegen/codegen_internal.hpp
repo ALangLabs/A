@@ -188,6 +188,7 @@ struct FnInfo {
   int moduleId = -1;
   std::string name;
   bool variadic = false;  // last param collects extra args into a list
+  bool isEntry = false;   // `entry name():` program entry point
 };
 
 struct StructInfo {

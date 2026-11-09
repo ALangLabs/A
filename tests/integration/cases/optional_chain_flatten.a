@@ -4,7 +4,7 @@ class Node:
     v
     next
 
-fn main():
+entry main():
     inner = Node(2, None)
     n = Node(1, inner)
     r = n.next?.next

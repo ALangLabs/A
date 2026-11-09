@@ -1,4 +1,4 @@
-fn main():
+entry main():
     flag = true
     x = flag ? 1 : "no"
     print(x)

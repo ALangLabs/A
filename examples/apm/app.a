@@ -11,7 +11,7 @@ from hello_lib import greet
 import math_utils
 from string_utils import slugify, truncate
 
-fn main():
+entry main():
     print(greet("A-lang"))
     print(slugify("Hello, apm world!"))
     print(truncate("the quick brown fox", 7))

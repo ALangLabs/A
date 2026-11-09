@@ -130,7 +130,7 @@ fn fn_churn():
         i = i + 1
     return acc
 
-fn main():
+entry main():
     bench("dict_churn", dict_churn)
     bench("dict_pop", dict_pop)
     bench("set_ops", set_ops)
