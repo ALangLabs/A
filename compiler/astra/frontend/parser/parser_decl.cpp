@@ -34,6 +34,7 @@ StmtPtr Parser::parseFnDecl(bool entryKw) {
     expect(Tok::KwFn, "'fn'");
   }
   const Token& nameTok = expect(Tok::Ident, "a function name");
+  const bool nestedFn = fnDepth_ > 0;
 
   auto decl = std::make_unique<FnDecl>();
   decl->name = nameTok.lexeme;
@@ -89,6 +90,7 @@ StmtPtr Parser::parseFnDecl(bool entryKw) {
   }
 
   // Allow either ':' or direct '=' (expression body) without requiring ':'
+  ++fnDepth_;
   if (match(Tok::Colon)) {
     if (match(Tok::Eq)) {
       auto value = parseExpression();
@@ -110,8 +112,45 @@ StmtPtr Parser::parseFnDecl(bool entryKw) {
   } else {
     fail(cur().span, "Expected ':' or '=' after function signature.");
   }
+  --fnDepth_;
 
   decl->span = Span::join(start, previousSpan());
+  if (nestedFn) {
+    // Nested `fn` desugars to a lambda binding when the body is a single
+    // `return <expr>`; lambdas already capture enclosing locals.
+    if (!decl->typeParams.empty() || !decl->whereClause.empty() ||
+        !decl->comptimeParams.empty()) {
+      fail(decl->nameSpan,
+           "Nested functions cannot be generic.",
+           "Move the function to top level or drop the type parameters.");
+    }
+    if (decl->body.size() == 1) {
+      if (auto* ret = dynamic_cast<ReturnStmt*>(decl->body[0].get())) {
+        if (ret->value != nullptr) {
+          auto lam = std::make_unique<LambdaExpr>();
+          lam->span = decl->span;
+          lam->params = std::move(decl->params);
+          lam->returnType = std::move(decl->returnType);
+          lam->body = std::move(ret->value);
+          auto asg = std::make_unique<AssignStmt>();
+          asg->span = decl->span;
+          asg->op = "=";
+          asg->binop = BinOp::Invalid;
+          asg->opSpan = decl->nameSpan;
+          auto tgt = std::make_unique<IdentExpr>();
+          tgt->name = decl->name;
+          tgt->span = decl->nameSpan;
+          asg->target = std::move(tgt);
+          asg->value = std::move(lam);
+          return asg;
+        }
+      }
+    }
+    fail(decl->nameSpan,
+         "Nested functions must have a single 'return <expr>' body.",
+         "Write `name = fn(args) => expr` for expression bodies, or move "
+         "the function to top level.");
+  }
   return decl;
 }
 

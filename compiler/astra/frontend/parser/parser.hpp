@@ -106,6 +106,9 @@ class Parser {
   // Extra statements produced by one source statement (e.g. `x = y = v`
   // chained assignment). Callers append them after the returned statement.
   std::vector<StmtPtr> pendingStmts_;
+  // Nesting depth of `fn` bodies being parsed; >0 means a `fn` declaration
+  // here is nested inside another function.
+  int fnDepth_ = 0;
   DiagnosticSink& sink_;
 };
 
