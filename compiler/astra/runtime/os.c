@@ -13,6 +13,10 @@
 
 #if !defined(_WIN32)
 #include <pwd.h>
+#include <signal.h>
+#include <stdlib.h> /* getloadavg */
+#include <sys/resource.h>
+#include <sys/statvfs.h>
 #include <sys/time.h>
 #include <sys/utsname.h>
 #else
@@ -349,11 +353,10 @@ aval os_utime(uint64_t n, aval *argv) {
     want_args("utime", n, 1, 3);
     const char *path = path_arg(argv[0], "path");
 #if !defined(_WIN32)
-    struct stat st;
-    if (stat(path, &st) != 0)
-        panicf("os.utime: cannot stat '%s': %s", path, strerror(errno));
-    double at = (n >= 2) ? num_to_double(argv[1]) : (double)st.st_atime;
-    double mt = (n >= 3) ? num_to_double(argv[2]) : (double)st.st_mtime;
+    /* No times given: touch to the current time (Python semantics). */
+    double now = (double)time(NULL);
+    double at = (n >= 2) ? num_to_double(argv[1]) : now;
+    double mt = (n >= 3) ? num_to_double(argv[2]) : now;
     struct timeval tv[2];
     tv[0].tv_sec = (time_t)at;
     tv[0].tv_usec = (suseconds_t)((at - (double)tv[0].tv_sec) * 1e6);
@@ -498,7 +501,17 @@ aval os_system(uint64_t n, aval *argv) {
     want_args("system", n, 1, 1);
     const char *cmd = str_of(argv[0], "command")->data;
     int rc = system(cmd);
+    /* Return the process exit code, not the raw wait(2) status word
+     * (so "exit 3" yields 3, matching Python's os.system contract on
+     * POSIX via WEXITSTATUS). */
+    if (rc == -1) return mkint_full(-1);
+#if defined(_WIN32)
     return mkint_full((int64_t)rc);
+#else
+    if (WIFEXITED(rc)) return mkint_full((int64_t)WEXITSTATUS(rc));
+    if (WIFSIGNALED(rc)) return mkint_full((int64_t)(-WTERMSIG(rc)));
+    return mkint_full((int64_t)rc);
+#endif
 }
 
 /* Cryptographically secure random bytes from the OS. Returns a list of
@@ -536,4 +549,183 @@ aval os_urandom(uint64_t n, aval *argv) {
     free(out.p);
     free(buf);
     return r;
+}
+
+/* ---- system-level extensions (C parity) ---------------------------------- */
+
+aval os_getloadavg(uint64_t n, aval *argv) {
+    want_args("getloadavg", n, 0, 0);
+    (void)argv;
+#if !defined(_WIN32)
+    double load[3] = { 0.0, 0.0, 0.0 };
+    if (getloadavg(load, 3) != 3) {
+        /* Fallback (some minimal/sandboxed environments deny the libc
+         * call): parse /proc/loadavg directly. */
+        FILE *f = fopen("/proc/loadavg", "r");
+        if (!f || fscanf(f, "%lf %lf %lf", &load[0], &load[1], &load[2]) != 3)
+            panicf("os.getloadavg: cannot read load average");
+        if (f) fclose(f);
+    }
+    aval items[3];
+    items[0] = a_mkdouble(load[0]);
+    items[1] = a_mkdouble(load[1]);
+    items[2] = a_mkdouble(load[2]);
+    return os_tuple(items, 3);
+#else
+    panicf("os.getloadavg is not supported on Windows");
+    return os_tuple(NULL, 0);
+#endif
+}
+
+aval os_gethostname(uint64_t n, aval *argv) {
+    want_args("gethostname", n, 0, 0);
+    (void)argv;
+#if !defined(_WIN32)
+    char host[256];
+    if (gethostname(host, sizeof(host)) != 0)
+        panicf("os.gethostname: %s", strerror(errno));
+    return os_str_c(host);
+#else
+    char host[256];
+    DWORD len = (DWORD)sizeof(host);
+    if (!GetComputerNameA(host, &len))
+        panicf("os.gethostname: cannot get computer name");
+    return os_str_c(host);
+#endif
+}
+
+aval os_umask(uint64_t n, aval *argv) {
+    want_args("umask", n, 1, 1);
+    int64_t mask = expect_int64(argv[0], "umask mode");
+#if !defined(_WIN32)
+    return mkint_full((int64_t)umask((mode_t)mask));
+#else
+    (void)mask;
+    panicf("os.umask is not supported on Windows");
+    return mkint_full(0);
+#endif
+}
+
+aval os_getpagesize(uint64_t n, aval *argv) {
+    want_args("getpagesize", n, 0, 0);
+    (void)argv;
+#if !defined(_WIN32)
+    long sz = sysconf(_SC_PAGESIZE);
+    return mkint_full(sz > 0 ? (int64_t)sz : 4096);
+#else
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return mkint_full((int64_t)si.dwPageSize);
+#endif
+}
+
+aval os_chown(uint64_t n, aval *argv) {
+    want_args("chown", n, 3, 3);
+    const char *path = path_arg(argv[0], "path");
+    int64_t uid = expect_int64(argv[1], "chown uid");
+    int64_t gid = expect_int64(argv[2], "chown gid");
+#if !defined(_WIN32)
+    if (chown(path, (uid_t)uid, (gid_t)gid) != 0)
+        panicf("os.chown: cannot chown '%s': %s", path, strerror(errno));
+    return A_NONE;
+#else
+    (void)path; (void)uid; (void)gid;
+    panicf("os.chown is not supported on Windows");
+    return A_NONE;
+#endif
+}
+
+/* Real mount-point probe: a path is a mount point when its device
+ * differs from its parent's (POSIX), with "/" always a mount point. */
+aval os_ismount(uint64_t n, aval *argv) {
+    want_args("ismount", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    struct stat a, b;
+    if (stat(path, &a) != 0) return A_FALSE;
+    const char *slash = strrchr(path, '/');
+    if (!slash || slash == path) return A_TRUE; /* root (or no parent) */
+    char *parent = xstrdup(path);
+    parent[(size_t)(slash - path)] = '\0';
+    int rc = stat(parent, &b);
+    free(parent);
+    if (rc != 0) return A_FALSE;
+    return a.st_dev != b.st_dev ? A_TRUE : A_FALSE;
+#else
+    (void)path;
+    return path && !strcmp(path, "\\") ? A_TRUE : A_FALSE;
+#endif
+}
+
+/* statvfs(2): (total_bytes, used_bytes, free_bytes) for the fs holding path. */
+aval os_disk_usage(uint64_t n, aval *argv) {
+    want_args("disk_usage", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    struct statvfs vfs;
+    if (statvfs(path, &vfs) != 0)
+        panicf("os.disk_usage: cannot stat '%s': %s", path, strerror(errno));
+    unsigned long long total = (unsigned long long)vfs.f_blocks * (unsigned long long)vfs.f_frsize;
+    unsigned long long free_ = (unsigned long long)vfs.f_bavail * (unsigned long long)vfs.f_frsize;
+    aval items[3];
+    items[0] = mkint_full((int64_t)total);
+    items[1] = mkint_full((int64_t)(total - free_));
+    items[2] = mkint_full((int64_t)free_);
+    return os_tuple(items, 3);
+#else
+    (void)path;
+    panicf("os.disk_usage is not supported on Windows");
+    return os_tuple(NULL, 0);
+#endif
+}
+
+/* popen(3): run a shell command and return its stdout as a string. */
+aval os_popen(uint64_t n, aval *argv) {
+    want_args("popen", n, 1, 1);
+    const char *cmd = str_of(argv[0], "command")->data;
+    FILE *p = popen(cmd, "r");
+    if (!p) panicf("os.popen: cannot run '%s'", cmd);
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)xmalloc(cap);
+    for (;;) {
+        if (len == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap); }
+        size_t r = fread(buf + len, 1, cap - len, p);
+        len += r;
+        if (r == 0) break;
+    }
+    pclose(p);
+    aval out = a_str_new(buf, (uint64_t)len);
+    free(buf);
+    return out;
+}
+
+/* Send a signal to a process (POSIX kill(2)). Windows: terminate only. */
+aval os_kill(uint64_t n, aval *argv) {
+    want_args("kill", n, 2, 2);
+    int64_t pid = expect_int64(argv[0], "kill pid");
+    int64_t sig = expect_int64(argv[1], "kill signal");
+#if !defined(_WIN32)
+    if (kill((pid_t)pid, (int)sig) != 0)
+        panicf("os.kill: cannot signal %lld: %s", (long long)pid, strerror(errno));
+    return A_NONE;
+#else
+    (void)sig;
+    HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
+    if (!h) panicf("os.kill: cannot open process %lld", (long long)pid);
+    BOOL ok = TerminateProcess(h, 0);
+    CloseHandle(h);
+    if (!ok) panicf("os.kill: cannot signal %lld", (long long)pid);
+    return A_NONE;
+#endif
+}
+
+/* Terminate the current process immediately with an exit code. */
+aval os_exit(uint64_t n, aval *argv) {
+    want_args("exit", n, 0, 1);
+    int code = 0;
+    if (n >= 1) code = (int)expect_int64(argv[0], "exit code");
+    fflush(stdout);
+    fflush(stderr);
+    exit(code);
+    return A_NONE;
 }

@@ -151,13 +151,33 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "os_truncate", os_truncate }, { "os_environ", os_environ_all },
     { "os_setenv", os_setenv }, { "os_unsetenv", os_unsetenv },
     { "os_system", os_system }, { "os_urandom", os_urandom },
-    { "os_getenv", os_getenv }
+    { "os_getenv", os_getenv },
+    /* os system-level extensions (appended; order matches A_BI_OS_* enum) */
+    { "os_getloadavg", os_getloadavg },
+    { "os_gethostname", os_gethostname }, { "os_umask", os_umask },
+    { "os_getpagesize", os_getpagesize }, { "os_chown", os_chown },
+    { "os_ismount", os_ismount }, { "os_disk_usage", os_disk_usage },
+    { "os_popen", os_popen }, { "os_kill", os_kill }, { "os_exit", os_exit }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
 
+/* GC root provider: the builtin fn objects live only in this static
+   table, so the collector must mark them on every pass. */
+static void builtin_objs_gc_roots(void) {
+    for (uint64_t i = 0; i < A_BI_COUNT; ++i) a_gc_mark_aval(g_builtin_objs[i]);
+}
+static int g_builtin_gc_hooked;
+static void builtin_objs_gc_hook(void) {
+    if (!g_builtin_gc_hooked) {
+        g_builtin_gc_hooked = 1;
+        a_gc_add_root_cb(builtin_objs_gc_roots);
+    }
+}
+
 aval a_builtin(uint64_t id) {
     if (id >= A_BI_COUNT) panicf("invalid builtin id %llu", (unsigned long long)id);
+    builtin_objs_gc_hook();
 #if A_PAR_REAL
     /* Lazy init runs on pool workers too (generated code resolves builtins
        through a_builtin on whatever thread executes it). Publish with
@@ -168,6 +188,7 @@ aval a_builtin(uint64_t id) {
     aval nv = fnon_new_raw((uint64_t)(uintptr_t)g_builtins[id].fn,
                            A_NONE, g_builtins[id].name,
                            FNON_BUILTIN, NPARAMS_UNKNOWN);
+    a_promote(nv);   /* escapes into the file-static builtin table */
     aval expected = 0;
     __atomic_compare_exchange_n(&g_builtin_objs[id], &expected, nv, 0,
                                 __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
@@ -199,14 +220,17 @@ const char *a_builtin_name(uint64_t id) {
 /* ------------------------------------------------------------------ */
 
 static void printv(FILE *f, uint64_t n, aval *argv) {
+    /* One scratch buffer for the whole call: formatting each argument into
+       a fresh Buf meant a malloc+free pair per argument per print. */
+    Buf b;
+    buf_init(&b);
     for (uint64_t i = 0; i < n; ++i) {
         if (i) fputc(' ', f);
-        Buf b;
-        buf_init(&b);
+        b.len = 0;
         format_into(&b, argv[i], 0);
         if (b.len) fwrite(b.p, 1, b.len, f);
-        free(b.p);
     }
+    free(b.p);
     fputc('\n', f);
     fflush(f);
 }
@@ -401,6 +425,11 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
             if (pipe(pfd) != 0) { perror("pipe"); break; }
             /* Non-blocking read side: drain loops must never stall. */
             fcntl(pfd[0], F_SETFL, fcntl(pfd[0], F_GETFL, 0) | O_NONBLOCK);
+            /* Allocate the capture buffer before forking: allocating after
+               fork meant a malloc failure left a live child whose pipe fd
+               was never closed, reaped, or reported. */
+            char *cbuf = (char *)malloc(A_TEST_CAPTURE + 1);
+            if (!cbuf) { perror("malloc"); close(pfd[0]); close(pfd[1]); break; }
             pid_t pid = fork();
             if (pid == 0) {
                 close(pfd[0]); dup2(pfd[1], 2); close(pfd[1]);
@@ -416,12 +445,11 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
                 fns[base + (uint64_t)j](argv);
                 fflush(stdout); fflush(stderr); _exit(0);
             }
-            if (pid < 0) { perror("fork"); close(pfd[0]); close(pfd[1]); break; }
+            if (pid < 0) { perror("fork"); free(cbuf); close(pfd[0]); close(pfd[1]); break; }
             close(pfd[1]);
             slots[j].pid = pid;
             slots[j].fd = pfd[0];
-            slots[j].buf = (char *)malloc(A_TEST_CAPTURE + 1);
-            if (!slots[j].buf) { perror("malloc"); close(pfd[0]); break; }
+            slots[j].buf = cbuf;
             ++launched;
         }
         /* Drain every live child's pipe until EOF, reaping as they exit. */

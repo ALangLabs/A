@@ -146,6 +146,7 @@ aval a_setitem(aval obj, aval idx, aval val) {
             int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)vw->len);
             int64_t base;
             AArr *root = view_root(obj, &base);
+            a_region_store(root, val);   /* write escapes into root's items */
             root->items[(size_t)(base + i)] = val;
             return val;
         }
@@ -161,6 +162,7 @@ aval a_setitem(aval obj, aval idx, aval val) {
                 arr_ensure_aval(a);
             }
             if ((a->flags & ARR_F_F64) && !a_is_double(val)) a->flags &= ~ARR_F_F64;
+            a_region_store(a, val);   /* region write barrier */
             a->items[i] = val;
             return val;
         }
@@ -219,7 +221,10 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
        converts the root to aval storage first (mirrors a_setitem). */
     int pok = 0;
     int64_t pv = 0;
-    if (arr_packed(root)) {
+    /* root is NULL only for an empty (parentless) view; normalize_index
+       below panics on the first iteration anyway, so skipping the packed
+       probe here preserves the out-of-range panic semantics. */
+    if (root && arr_packed(root)) {
         if (is_int_val(val)) {
             pok = 1;
             pv = int_val_full(val);
@@ -228,6 +233,9 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
             arr_ensure_aval(root);
         }
     }
+    /* Same val is stored at every index: one barrier call promotes it
+       once if root can outlive the value's region. */
+    if (!pok) a_region_store(root, val);
     int64_t k = lo;
     if (step >= 0) {
         while (k < hi) {
@@ -258,10 +266,19 @@ static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
     vw->h.type = T_VIEW;
     vw->h.len = (uint32_t)len;
     vw->h.cap = 0;
-    vw->parent = parent;
+    /* An empty view can never alias: every element access is bounds-checked
+       against len==0 and every mutator either panics or is a no-op, so the
+       parent reference is unobservable. Dropping it keeps e.g. xs[a..a] of a
+       huge list from pinning the whole backing store. view_root() returns
+       NULL for such views; all callers either bounds-check len first or
+       guard the NULL (see a_list_fill_range/method_view/value_compare). */
+    vw->parent = len ? parent : A_NONE;
     vw->off = off;
     vw->len = len;
     vw->is_tuple = is_tuple;
+    /* The view aliases the parent's element buffer: pin its capacity so
+       arr_shrink never reallocates it out from under the view's offsets. */
+    if (len) arr_note_view(parent);
     return mkobj(&vw->h);
 }
 /* Resolve a view (or direct list) to root AArr + absolute offset.
@@ -383,9 +400,10 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         return r;
     }
     AArr *a = (AArr *)o;
-    arr_ensure_aval(a);
+    /* arr_elem reads packed int64 storage too, so a stepped slice of a
+       packed-int list no longer forces the whole parent to aval storage. */
     for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
-        avec_push(&v, a->items[i]);
+        avec_push(&v, arr_elem(a, (uint64_t)i));
         if (st > 0) { if (i > INT64_MAX - st) break; i += st; }
         else { if (i < INT64_MIN - st) break; i += st; }
     }
@@ -448,9 +466,18 @@ aval a_iter_next(aval it, aval *out) {
     AObj *o = obj_of(it);
     if (!o || o->type != T_ITER) panicf("argument is not an iterator");
     AIter *iter = (AIter *)o;
+    /* src is reset to A_NONE once the iterator is exhausted (see the
+       return-0 paths below) so a long-lived iterator object stops pinning
+       the whole collection. A_NONE can never be a live src: a_iter_new
+       rejects non-iterables before storing it. */
+    if (a_is_none(iter->src)) return (aval)0;
     if (iter->py_mode) {
         if (!iter->has_lookahead) {
-            if (!a_py_iter_next(iter->src, &iter->lookahead)) return (aval)0;
+            if (!a_py_iter_next(iter->src, &iter->lookahead)) {
+                iter->src = A_NONE;
+                return (aval)0;
+            }
+            a_region_store(iter, iter->lookahead);  /* iter may have escaped */
             iter->has_lookahead = 1;
         }
         *out = iter->lookahead;
@@ -462,7 +489,7 @@ aval a_iter_next(aval it, aval *out) {
     if (kind_of(src) == K_RANGE) {
         int64_t c = iter->cur, e = iter->end, s = iter->step;
         int more = s > 0 ? c < e : c > e;
-        if (!more) return (aval)0;
+        if (!more) { iter->src = A_NONE; return (aval)0; }
         *out = mkint_full(c);
         if (s > 0) {
             if (c > INT64_MAX - s) iter->cur = e;
@@ -500,7 +527,7 @@ aval a_iter_next(aval it, aval *out) {
         if (arr_packed(a)) iitems = a->iitems;
         else items = a->items;
     }
-    if (iter->idx >= len) return (aval)0;
+    if (iter->idx >= len) { iter->src = A_NONE; return (aval)0; }
     uint64_t i = iter->idx++;
     if (d) *out = d->pairs[i].k;
     else if (pb_src) *out = pybuf_read(pb_src, (int64_t)i);

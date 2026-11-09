@@ -32,15 +32,31 @@ aval a_str_join(uint64_t n, aval *items) {
 aval a_str_joinsep(aval sep, uint64_t n, aval *items) {
     uint64_t sn;
     const char *sp = str_data(sep, &sn);
-    Buf b;
-    buf_init(&b);
+    /* Exact-size single allocation (same hot-path rule as concat_str):
+       sum the item lengths first, then fill in one pass. The Buf path
+       realloc-copied the growing buffer O(log n) times for join-heavy
+       code (joining 100k parts copied ~2x the output). */
+    uint64_t total = n ? (n - 1) * sn : 0;
     for (uint64_t i = 0; i < n; ++i) {
-        if (i) buf_addn(&b, sp, (size_t)sn);
+        uint64_t in;
+        (void)str_data(items[i], &in);
+        if ((uint64_t)UINT32_MAX - total < in) panicf("string too large");
+        total += in;
+    }
+    aval outv = a_str_new_uninit(total);
+    AStr *o = (AStr *)obj_of(outv);
+    char *d = o->data;
+    for (uint64_t i = 0; i < n; ++i) {
+        if (i) {
+            if (sn) memcpy(d, sp, (size_t)sn);
+            d += sn;
+        }
         uint64_t in;
         const char *ip = str_data(items[i], &in);
-        buf_addn(&b, ip, (size_t)in);
+        if (in) memcpy(d, ip, (size_t)in);
+        d += in;
     }
-    return buf_take(&b);
+    return outv;
 }
 
 aval list_from_vec(const aval *p, uint64_t n, int tuple) {
@@ -190,32 +206,97 @@ aval a_range_new(aval lo, aval hi, aval step) {
 /* deep copy (copy() builtin)                                          */
 /* ------------------------------------------------------------------ */
 
-static aval deepcopy(aval v, int depth) {
+/* Cycle/sharing-preserving memo for deepcopy. Containers are allocated
+   and registered in the map BEFORE their children are copied, so a
+   structure that refers back to itself (a list containing itself, a dict
+   whose value is the dict, ...) copies finitely: the back-reference
+   resolves to the already-created copy. DAG-shaped sharing is likewise
+   preserved — the same source object maps to the same copy everywhere it
+   appears. Objects are never freed, so source pointer identity is stable
+   for the whole process and a plain pointer-keyed table suffices. */
+typedef struct { const void *old; aval nw; } DCEnt;
+typedef struct { DCEnt *t; size_t cap, len; } DCMap;
+
+static uint64_t dcent_hash(const void *p) {
+    uintptr_t x = (uintptr_t)p >> 4;
+    x ^= x >> 33;
+    x *= UINT64_C(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x *= UINT64_C(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    return (uint64_t)x;
+}
+
+static void dcmap_grow(DCMap *m) {
+    size_t ncap = m->cap ? m->cap * 2 : 64;
+    DCEnt *nt = (DCEnt *)xmalloc(ncap * sizeof(DCEnt));
+    memset(nt, 0, ncap * sizeof(DCEnt));
+    for (size_t i = 0; i < m->cap; ++i) {
+        if (!m->t[i].old) continue;
+        size_t s = (size_t)(dcent_hash(m->t[i].old) & (ncap - 1));
+        while (nt[s].old) s = (s + 1) & (ncap - 1);
+        nt[s] = m->t[i];
+    }
+    free(m->t);
+    m->t = nt;
+    m->cap = ncap;
+}
+
+static void dcmap_put(DCMap *m, const void *old, aval nw) {
+    if (!m->cap || (m->len + 1) * 10 >= m->cap * 7) dcmap_grow(m);
+    size_t s = (size_t)(dcent_hash(old) & (m->cap - 1));
+    while (m->t[s].old) s = (s + 1) & (m->cap - 1);
+    m->t[s].old = old;
+    m->t[s].nw = nw;
+    m->len++;
+}
+
+static int dcmap_get(DCMap *m, const void *old, aval *out) {
+    if (!m->cap) return 0;
+    size_t s = (size_t)(dcent_hash(old) & (m->cap - 1));
+    while (m->t[s].old) {
+        if (m->t[s].old == old) { *out = m->t[s].nw; return 1; }
+        s = (s + 1) & (m->cap - 1);
+    }
+    return 0;
+}
+
+static aval deepcopy(aval v, int depth, DCMap *m) {
+    /* Depth cap stays as a guard against pathological acyclic nesting
+       overflowing the C stack; true cycles no longer recurse because the
+       memo resolves back-references before descending. */
     if (depth > 500)
-        panicf("copy() value is too deeply nested (cyclic structure?)");
+        panicf("copy() value is too deeply nested");
     AObj *o = obj_of(v);
     if (!o) return v;
+    aval prev;
+    if (dcmap_get(m, o, &prev)) return prev;
     switch (o->type) {
         case T_LIST:
         case T_TUPLE: {
             AArr *a = (AArr *)o;
-            arr_ensure_aval(a);
-            AVec t = { NULL, 0, 0 };
-            for (uint64_t i = 0; i < a->h.len; ++i)
-                avec_push(&t, deepcopy(a->items[i], depth + 1));
-            aval r = list_from_vec(t.p, t.len, o->type == T_TUPLE);
-            free(t.p);
-            return r;
+            uint64_t n = a->h.len;
+            AArr *na = (AArr *)xmalloc(sizeof(AArr));
+            na->h.type = o->type == T_TUPLE ? T_TUPLE : T_LIST;
+            na->h.len = (uint32_t)n;
+            na->h.cap = n;
+            na->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
+            na->iitems = NULL;
+            na->flags = 0;
+            aval nv = mkobj(&na->h);
+            dcmap_put(m, o, nv);
+            /* arr_elem reads packed int64 storage too, so the copy is
+               always aval-mode regardless of the source's packing. */
+            for (uint64_t i = 0; i < n; ++i)
+                na->items[i] = deepcopy(arr_elem(a, i), depth + 1, m);
+            return nv;
         }
         case T_SET: {
             AArr *a = (AArr *)o;
-            arr_ensure_aval(a);
-            AVec t = { NULL, 0, 0 };
-            for (uint64_t i = 0; i < a->h.len; ++i)
-                avec_push(&t, deepcopy(a->items[i], depth + 1));
             aval r = a_set_new();
-            for (uint64_t i = 0; i < t.len; ++i) a_set_add(r, t.p[i]);
-            free(t.p);
+            dcmap_put(m, o, r);
+            for (uint64_t i = 0; i < a->h.len; ++i)
+                a_set_add(r, deepcopy(arr_elem(a, i), depth + 1, m));
             return r;
         }
         case T_DICT:
@@ -226,10 +307,11 @@ static aval deepcopy(aval v, int depth) {
                                         ((AStruct *)o)->methods,
                                         ((AStruct *)o)->methodFns)
                          : a_dict_new();
+            dcmap_put(m, o, r);
             ADict *rd = dict_of(r, "dict");
             for (uint64_t i = 0; i < d->h.len; ++i) {
-                aval k = deepcopy(d->pairs[i].k, depth + 1);
-                aval val = deepcopy(d->pairs[i].v, depth + 1);
+                aval k = deepcopy(d->pairs[i].k, depth + 1, m);
+                aval val = deepcopy(d->pairs[i].v, depth + 1, m);
                 dict_put(rd, k, val);
             }
             return r;
@@ -240,8 +322,11 @@ static aval deepcopy(aval v, int depth) {
         }
         case T_RESULT: {
             AResult *res = (AResult *)o;
-            return mkobj(result_new(res->ok, res->is_option,
-                                    deepcopy(res->value, depth + 1)));
+            AResult *nr = result_new(res->ok, res->is_option, A_NONE);
+            aval r = mkobj(&nr->h);
+            dcmap_put(m, o, r);
+            nr->value = deepcopy(res->value, depth + 1, m);
+            return r;
         }
         case T_VIEW: {
             AView *vw = (AView *)o;
@@ -249,11 +334,17 @@ static aval deepcopy(aval v, int depth) {
             nv->h.type = T_VIEW;
             nv->h.len = vw->h.len;
             nv->h.cap = 0;
-            nv->parent = deepcopy(vw->parent, depth + 1);
+            nv->parent = A_NONE;
             nv->off = vw->off;
             nv->len = vw->len;
             nv->is_tuple = vw->is_tuple;
-            return mkobj(&nv->h);
+            aval r = mkobj(&nv->h);
+            dcmap_put(m, o, r);
+            nv->parent = deepcopy(vw->parent, depth + 1, m);
+            /* The copied view aliases the copied parent's buffer: pin its
+               capacity against arr_shrink exactly like view_new does. */
+            arr_note_view(nv->parent);
+            return r;
         }
         default:
             /* immediates, strings, ranges, functions, environments,
@@ -262,5 +353,10 @@ static aval deepcopy(aval v, int depth) {
     }
 }
 
-aval a_deepcopy(aval v) { return deepcopy(v, 0); }
+aval a_deepcopy(aval v) {
+    DCMap m = { NULL, 0, 0 };
+    aval r = deepcopy(v, 0, &m);
+    free(m.t);
+    return r;
+}
 

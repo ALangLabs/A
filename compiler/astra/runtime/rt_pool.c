@@ -48,6 +48,11 @@ static int64_t g_pnext, g_pcount, g_ppending;
 static int g_pactive, g_pworkers, g_pstarted;
 static int g_atfork_reg;
 static __thread int g_pinworker;
+/* Number of in-flight a_par_for regions process-wide. The GC is
+   stop-the-world-free: collections are suppressed while any region is
+   active because worker stacks are not scanned and worker-held avals
+   would be invisible to the marker. */
+static volatile int g_par_regions;
 
 static void par_run_inline(int64_t n, int64_t grain, AParFn fn, void *ctx) {
     for (int64_t lo = 0; lo < n; lo += grain) {
@@ -146,7 +151,12 @@ int a_par_workers(void) {
     return pool_ensure() > 0 ? g_pworkers : 1;
 }
 
-void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx) {
+int a_par_gc_blocked(void) {
+    return g_pinworker ||
+           __atomic_load_n(&g_par_regions, __ATOMIC_SEQ_CST) > 0;
+}
+
+static void a_par_for_body(int64_t n, int64_t grain, AParFn fn, void *ctx) {
     if (n <= 0 || !fn) return;
     if (grain < 1) grain = 1;
     if (par_disabled() || g_pinworker) { par_run_inline(n, grain, fn, ctx); return; }
@@ -204,18 +214,31 @@ void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx) {
     free(tasks);
 }
 
+void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx) {
+    __atomic_add_fetch(&g_par_regions, 1, __ATOMIC_SEQ_CST);
+    a_par_for_body(n, grain, fn, ctx);
+    __atomic_sub_fetch(&g_par_regions, 1, __ATOMIC_SEQ_CST);
+}
+
 #else /* !A_PAR_REAL: serial fallback (Windows, astra-compiled, i8086) */
+
+static int g_par_regions_ser;
 
 int a_par_workers(void) { return 1; }
 
+int a_par_gc_blocked(void) { return g_par_regions_ser > 0; }
+
 void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx) {
-    if (n <= 0 || !fn) return;
-    if (grain < 1) grain = 1;
-    for (int64_t lo = 0; lo < n; lo += grain) {
-        int64_t hi = lo + grain;
-        if (hi > n) hi = n;
-        fn(ctx, lo, hi);
+    ++g_par_regions_ser;
+    if (n > 0 && fn) {
+        if (grain < 1) grain = 1;
+        for (int64_t lo = 0; lo < n; lo += grain) {
+            int64_t hi = lo + grain;
+            if (hi > n) hi = n;
+            fn(ctx, lo, hi);
+        }
     }
+    --g_par_regions_ser;
 }
 
 #endif /* A_PAR_REAL */

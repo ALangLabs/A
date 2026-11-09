@@ -51,6 +51,10 @@ aval bi_arena_alloc(uint64_t n, aval *argv) {
     for (uint64_t i = 0; i < a->nalloc; ++i) {
         if (a->allocs[i].free && a->allocs[i].size >= size) {
             a->allocs[i].free = 0;
+            /* Record the requested size, not the slot's original size:
+               arena.release subtracts allocs[h-1].size from live, so
+               keeping the larger stale size would underflow `live`. */
+            a->allocs[i].size = size;
             a->live += size;
             return mkint_full((int64_t)(i + 1));
         }

@@ -64,7 +64,9 @@
 #include <malloc.h>
 #define malloc(n) _aligned_malloc((n), 16)
 #define realloc(p, n) _aligned_realloc((p), (n), 16)
-#define free(p) _aligned_free(p)
+/* NOTE: free() is NOT redefined to _aligned_free here — every free in the
+   runtime is routed through a_gc_free() (declared/defined below), which
+   pairs allocations with the right release on every target. */
 #endif
 
 #if defined(_WIN32)
@@ -183,6 +185,7 @@ typedef struct AObj {
 #define ARR_F_PACKED 1u
 #define ARR_F_NOMIX  2u
 #define ARR_F_F64    4u  /* aval items verified to be all unboxed doubles */
+#define ARR_F_HAS_VIEW 8u /* a T_VIEW aliases this array's items: never shrink */
 
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
@@ -364,6 +367,18 @@ void arr_ensure_aval(AArr *a);
 void arr_try_pack(AArr *a);
 void arr_push_int(AArr *a, aval v);
 aval arr_elem(const AArr *a, uint64_t i);
+void arr_shrink(AArr *a);
+void arr_note_view(aval parent);
+/* Equality of a packed int64 element against an arbitrary aval, matching
+   values_equal's numeric rules (int-int compares int64, int-float compares
+   doubles, everything else is unequal). Lets read-only scans (index,
+   contains, count, remove) run on packed storage without converting the
+   whole array to aval elements. */
+static inline int arr_i64_eq_aval(int64_t e, aval v) {
+    if (is_int_val(v)) return e == int_val_full(v);
+    if (is_num(v)) return (double)e == num_to_double(v);
+    return 0;
+}
 ADict *dict_of(aval v, const char *what);
 int64_t dict_find(ADict *d, aval k);
 void dict_put(ADict *d, aval k, aval v);
@@ -503,6 +518,16 @@ aval os_setenv(uint64_t n, aval *argv);
 aval os_unsetenv(uint64_t n, aval *argv);
 aval os_system(uint64_t n, aval *argv);
 aval os_urandom(uint64_t n, aval *argv);
+aval os_getloadavg(uint64_t n, aval *argv);
+aval os_gethostname(uint64_t n, aval *argv);
+aval os_umask(uint64_t n, aval *argv);
+aval os_getpagesize(uint64_t n, aval *argv);
+aval os_chown(uint64_t n, aval *argv);
+aval os_ismount(uint64_t n, aval *argv);
+aval os_disk_usage(uint64_t n, aval *argv);
+aval os_popen(uint64_t n, aval *argv);
+aval os_kill(uint64_t n, aval *argv);
+aval os_exit(uint64_t n, aval *argv);
 aval bi_isinstance(uint64_t n, aval *argv);
 aval bi_join(uint64_t n, aval *argv);
 aval bi_sorted(uint64_t n, aval *argv);
@@ -702,6 +727,8 @@ aval a_py_str(aval obj);
 aval a_py_repr(aval obj);
 int a_py_truthy(aval obj);
 int a_py_equals(aval a, aval b);              /* PyObject_RichCompareBool(Py_EQ) */
+void a_py_release_obj(void *p);                /* GC: release owned PyObject/buffer */
+int a_gc_registered_obj(void *p);
 aval a_py_buffer_view(aval obj);              /* T_PYOBJ -> zero-copy T_PYBUF view */
 aval a_py_hasattr(aval obj, const char *name);
 aval a_py_delattr(aval obj, const char *name);
@@ -742,5 +769,53 @@ void a_par_for(int64_t n, int64_t grain, AParFn fn, void *ctx);
 int a_par_workers(void);
 /* Threshold below which parallel collection paths stay serial. */
 #define A_PAR_MIN_ELEMS ((int64_t)1 << 15)
+
+/* ------------------------------------------------------------------ */
+/* garbage collector (gc.c)                                            */
+/* ------------------------------------------------------------------ */
+/* Conservative mark-sweep over every xmalloc/xrealloc block. See gc.c
+   for the design. All hooks are cheap no-ops when A_GC=0. */
+void a_gc_maybe_collect(void);          /* called at the top of xmalloc/xrealloc */
+void a_gc_register(void *p, size_t n);  /* record a fresh allocation        */
+void a_gc_reregister(void *oldp, void *newp, size_t n); /* after realloc moved */
+size_t a_gc_pool_alloc_size(size_t n); /* malloc size for pooled classes    */
+void *a_gc_pool_try_alloc(size_t n);   /* reuse a delisted block, or NULL   */
+void a_gc_note_obj(void *p);            /* mkobj: flag block as GC object   */
+void a_gc_note_arena(void *p, size_t n, int mapped);/* xarena: record bump chunk */
+void a_gc_arena_switch(const void *old_cursor, void *new_chunk);
+int a_gc_arena_stale(const void *cursor);
+void a_gc_mark_ptr(const void *p);     /* root provider: mark containing blk */
+void a_gc_mark_aval(aval v);           /* root provider: mark aval's object */
+void a_gc_push_root(aval v);
+void a_gc_pop_root(void);
+void a_gc_add_root_cb(void (*fn)(void)); /* register a per-collection root provider */
+void a_gc_free(void *p);               /* free() replacement: delist + release */
+/* True while the calling thread is a pool worker or any a_par_for region
+   is active: the collector must not run (worker stacks are not scanned). */
+int a_par_gc_blocked(void);
+
+/* ------------------------------------------------------------------ */
+/* deterministic regions (region.c) + gc.c region hooks               */
+/* ------------------------------------------------------------------ */
+/* a_frame_push/a_frame_pop drive a per-thread stack of young regions;
+   mkobj reports objects to the innermost region and store sites call
+   a_region_store/a_promote. All no-ops when A_REGIONS=0 or GC is off. */
+void a_region_enter(const char *name);
+void a_region_leave(void);
+void a_region_note_obj(void *p);
+void a_region_store(void *container, aval child);
+void a_promote(aval v);
+int  a_gc_regionable(void *p);
+int  a_gc_track_region(void *p, uint32_t depth);
+void a_gc_set_region(void *p, uint32_t depth);
+uint32_t a_gc_obj_region(void *p);
+int  a_gc_obj_old(void *p);
+void a_gc_promote_block(void *p);
+int  a_gc_release_obj(void *p);
+
+/* Route every runtime free() through the collector so tracked blocks are
+   delisted before release. Defined LAST so it cannot interfere with the
+   prototypes above; a_gc_free forwards untracked pointers to real free. */
+#define free(p) a_gc_free(p)
 
 #endif /* A_RUNTIME_INTERNAL_H */

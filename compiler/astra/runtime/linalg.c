@@ -165,6 +165,41 @@ static void matvec_t_rows(void *vctx, int64_t lo, int64_t hi) {
 }
 
 typedef struct {
+    const double *x;
+    const double *wf;      /* verified all-double view, or NULL */
+    const int64_t *wi;     /* packed int view, or NULL */
+    const aval *wa;        /* aval view, or NULL */
+    const double *bias;    /* NULL when absent (zeros) */
+    double *out;
+    int64_t nin, nout;
+} AMatvecJCtx;
+
+/* matvec column-band worker: out[j] for j in [lo,hi) accumulates
+   x[i]*w[i,j] with i ascending — the identical per-element sequence the
+   serial loop runs, so results are bit-identical. w is [in][out]
+   row-major, so each i step reads a contiguous band of the row. */
+static void matvec_jcols(void *vctx, int64_t lo, int64_t hi) {
+    AMatvecJCtx *c = (AMatvecJCtx *)vctx;
+    int64_t nj = hi - lo;
+    for (int64_t j = lo; j < hi; j++) c->out[j] = c->bias ? c->bias[j] : 0.0;
+    for (int64_t i = 0; i < c->nin; i++) {
+        double xi = c->x[i];
+        uint64_t base = (uint64_t)i * (uint64_t)c->nout + (uint64_t)lo;
+        double *orow = c->out + lo;
+        if (c->wf) {
+            const double *wr = c->wf + base;
+            for (int64_t j = 0; j < nj; j++) orow[j] = fma(xi, wr[j], orow[j]);
+        } else if (c->wi) {
+            const int64_t *wr = c->wi + base;
+            for (int64_t j = 0; j < nj; j++) orow[j] = fma(xi, (double)wr[j], orow[j]);
+        } else {
+            const aval *wr = c->wa + base;
+            for (int64_t j = 0; j < nj; j++) orow[j] = fma(xi, aval_num(wr[j]), orow[j]);
+        }
+    }
+}
+
+typedef struct {
     const double *qp, *kp;
     double *scores;
     int64_t dk;
@@ -265,6 +300,23 @@ aval bi_linalg_matvec(uint64_t n, aval *argv) {
     else memset(out, 0, (size_t)nout * sizeof(double));
     const double *wf = f64_ptr(wa);
     int wp = wf ? 0 : arr_packed(wa);
+    if (lpar_ok((double)nin * (double)nout)) {
+        /* Column-parallel: each worker owns a contiguous band of output
+           columns and runs the identical i-ascending accumulation, so
+           every out[j] is bit-identical to the serial result. */
+        AMatvecJCtx mc;
+        mc.x = x;
+        mc.wf = wf;
+        mc.wi = wp ? wa->iitems : NULL;
+        mc.wa = (!wf && !wp) ? wa->items : NULL;
+        mc.bias = has_bias ? bias : NULL;
+        mc.out = out;
+        mc.nin = nin;
+        mc.nout = nout;
+        int64_t grain = nout / 64;
+        if (grain < 1) grain = 1;
+        a_par_for(nout, grain, matvec_jcols, &mc);
+    } else {
     for (int64_t i = 0; i < nin; i++) {
         double xi = x[i];
         uint64_t base = (uint64_t)i * (uint64_t)nout;
@@ -278,6 +330,7 @@ aval bi_linalg_matvec(uint64_t n, aval *argv) {
             const aval *wr = wa->items + base;
             for (int64_t j = 0; j < nout; j++) out[j] = fma(xi, aval_num(wr[j]), out[j]);
         }
+    }
     }
     aval r = f64_list((uint64_t)nout, out);
     free(out);

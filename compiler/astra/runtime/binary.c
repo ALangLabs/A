@@ -252,7 +252,12 @@ static aval bin_decode_val(BinReader *r) {
     }
     case BIN_ARRAY: case BIN_SET: case BIN_TUPLE: {
         uint64_t n = bin_varint_rd(r);
-        if (r->err) return A_NONE;
+        /* Every element costs at least one input byte (its tag), so a
+           count larger than the remaining input is malformed — reject it
+           before sizing the temporary array. Without this a huge varint
+           could wrap sizeof(aval)*n and under-allocate, after which the
+           decode loop would write past the buffer. */
+        if (r->err || n > r->len - r->pos) { r->err = 1; return A_NONE; }
         aval *items = (aval *)xmalloc(sizeof(aval) * (n ? n : 1));
         for (uint64_t i = 0; i < n; ++i) {
             items[i] = bin_decode_val(r);

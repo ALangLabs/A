@@ -97,14 +97,145 @@ int a_obj_is_instance(aval v, const char *type_name) {
 }
 
 
+/* Fast path for format_double_buf: find the minimal %.*g precision that
+   round-trips without running snprintf+strtod for every precision 1..17.
+
+   How it works: %.25e yields 26 significant digits of d (correctly rounded
+   by the libc). Rounding that digit string to p significant digits gives
+   the same decimal value %.*g would print, except possibly when d sits
+   within ~1e-26 of a rounding boundary — the '5' with all-zero tail case
+   is detected and decided with the real snprintf+strtod test instead.
+
+   A p-digit decimal V round-trips to d iff V lies strictly inside d's
+   parse interval (midpoints to the neighbouring doubles; exact ties go to
+   the even neighbour and are resolved by a real snprintf+strtod test).
+   The interval bounds and V are compared in long double, which has enough
+   extra precision that a wide safety margin makes misclassification
+   impossible; anything within the margin gets the real test instead.
+
+   Requires a >=64-bit-mantissa long double (x86 80-bit or quad) and a
+   correctly-rounded libc printf/strtod: glibc, musl, and the BSD/macOS
+   libcs qualify; MSVC's msvcrt does not, so _WIN32 is excluded. */
+#if !defined(_WIN32) && defined(__LDBL_MANT_DIG__) && __LDBL_MANT_DIG__ >= 64
+#define A_FMT_FAST_DOUBLE 1
+#endif
+
+#ifdef A_FMT_FAST_DOUBLE
+/* 10^-1 .. 10^-17 as long double literals (correctly rounded). */
+static const long double kFmtInv10[18] = {
+    1.0L, 1e-1L, 1e-2L, 1e-3L, 1e-4L, 1e-5L, 1e-6L, 1e-7L,
+    1e-8L, 1e-9L, 1e-10L, 1e-11L, 1e-12L, 1e-13L, 1e-14L, 1e-15L,
+    1e-16L, 1e-17L
+};
+
+/* The exact criterion the slow loop uses, for a single precision. */
+static int fmt_dbl_real_test(double d, int pr, char *tmp) {
+    snprintf(tmp, 64, "%.*g", pr, d);
+    return strtod(tmp, NULL) == d;
+}
+
+/* Returns the minimal precision in [1,17] whose %.*g output parses back
+   to d. tmp is scratch (>= 64 bytes). */
+static int fmt_dbl_min_prec(double d, char *tmp) {
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%.25e", d);
+    const char *p = buf;
+    int neg = 0;
+    if (*p == '-') { neg = 1; ++p; }
+    /* Layout: d . 25 fraction digits e +- XX  ->  26 significant digits. */
+    int dig[26];
+    dig[0] = p[0] - '0';
+    for (int i = 1; i < 26; ++i) dig[i] = p[1 + i] - '0';
+    p += 27;  /* land on 'e' */
+    ++p;
+    int x = atoi(p);  /* value ~= dig[0].dig[1..] * 10^x */
+
+    /* Parse interval: decimals strictly inside round to d under
+       round-to-nearest; the endpoints are exact midpoints (ties) and are
+       covered by the margin band below. */
+    int e2;
+    long double fr = frexpl((long double)d, &e2);  /* d = fr * 2^e2 */
+    long double dld = (long double)d;
+    long double ad = dld < 0 ? -dld : dld;
+    const long double kDblMin = 2.2250738585072014e-308L;
+    long double gap_up, gap_dn;
+    if (ad < kDblMin) {
+        /* subnormal: uniform spacing 2^-1074 on both sides */
+        gap_up = gap_dn = ldexpl(1.0L, -1074);
+    } else {
+        /* binade [2^(e2-1), 2^e2): spacing 2^(e2-53) */
+        gap_up = ldexpl(1.0L, e2 - 53);
+        /* a power of two (fr == 0.5) has half the spacing below, except
+           DBL_MIN whose lower neighbour is subnormal with the same
+           2^-1074 spacing */
+        gap_dn = (fr == 0.5L && ad != kDblMin)
+                     ? ldexpl(1.0L, e2 - 54)
+                     : gap_up;
+    }
+    long double lo = dld - gap_dn * 0.5L;
+    long double hi = dld + gap_up * 0.5L;
+
+    /* scale for precision pr is 10^(x-pr+1); start at 10^x (pr == 1) and
+       multiply by a correctly-rounded reciprocal each step. */
+    long double base = powl(10.0L, (long double)x);
+    long double scale = base;
+
+    for (int pr = 1; pr <= 17; ++pr) {
+        unsigned long long m = 0;
+        for (int i = 0; i < pr; ++i) m = m * 10 + (unsigned)dig[i];
+        /* Round to pr digits: first discarded digit decides; a '5' with an
+           all-zero tail is exactly at a decimal boundary within our 26
+           digits -> cannot decide from the approximation -> bail. */
+        int rd = dig[pr], up = 0, amb = 0;
+        if (rd > 5) up = 1;
+        else if (rd == 5) {
+            int sticky = 0;
+            for (int j = pr + 1; j < 26; ++j)
+                if (dig[j]) { sticky = 1; break; }
+            if (sticky) up = 1;
+            else amb = 1;
+        }
+        if (amb) {
+            /* The pr-digit rounding of the 26-digit approximation is exactly
+               at a decimal boundary, so digits beyond position 25 could
+               still flip it: decide this precision with the real test. */
+            if (fmt_dbl_real_test(d, pr, tmp)) return pr;
+        } else {
+            if (up) ++m;  /* carry to 10^pr stays correct via the scale */
+            long double val = (long double)m * scale;
+            if (neg) val = -val;
+            /* The accumulated long-double error is ~1e-18 relative; the
+               margin is ~1e-17 relative to |d|, so decisive verdicts are
+               safe and borderline cases get the exact test. */
+            long double margin = (hi - lo) * 0.05L;
+            if (val > lo + margin && val < hi - margin) return pr;
+            if (val > lo - margin && val < hi + margin) {
+                if (fmt_dbl_real_test(d, pr, tmp)) return pr;
+            }
+        }
+        /* next precision needs scale *= 10^-pr */
+        if (pr < 17) scale = base * kFmtInv10[pr];
+    }
+    return 17;  /* 17 significant digits always round-trip */
+}
+#endif  /* A_FMT_FAST_DOUBLE */
+
 static void format_double_buf(Buf *b, double d) {
     if (isnan(d)) { buf_adds(b, "nan"); return; }
     if (isinf(d)) { buf_adds(b, d < 0 ? "-inf" : "inf"); return; }
     if (d == 0.0) { buf_adds(b, signbit(d) ? "-0.0" : "0.0"); return; }
     char tmp[64];
-    for (int prec = 1; prec <= 17; ++prec) {
+    int prec = -1;
+#ifdef A_FMT_FAST_DOUBLE
+    prec = fmt_dbl_min_prec(d, tmp);
+#endif
+    if (prec > 0) {
         snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
-        if (strtod(tmp, NULL) == d) break;
+    } else {
+        for (prec = 1; prec <= 17; ++prec) {
+            snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
+            if (strtod(tmp, NULL) == d) break;
+        }
     }
     /* Avoid scientific notation for ordinary magnitudes (Python-style);
        expand to plain decimal that still round-trips. */
@@ -123,18 +254,28 @@ static void format_double_buf(Buf *b, double d) {
         buf_adds(b, ".0");
 }
 
+static int fmt_needs_quote_escape(unsigned char c) {
+    return c == '"' || c == '\\' || c == '\n' || c == '\t' || c == '\r';
+}
+
 static void format_quoted(Buf *b, const char *p, size_t n) {
     buf_addc(b, '"');
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char c = (unsigned char)p[i];
-        switch (c) {
+    size_t i = 0;
+    while (i < n) {
+        /* Copy runs of plain characters with one memcpy instead of a
+           per-byte buf_addc. */
+        size_t j = i;
+        while (j < n && !fmt_needs_quote_escape((unsigned char)p[j])) ++j;
+        if (j > i) buf_addn(b, p + i, j - i);
+        if (j >= n) break;
+        switch ((unsigned char)p[j]) {
             case '"': buf_adds(b, "\\\""); break;
             case '\\': buf_adds(b, "\\\\"); break;
             case '\n': buf_adds(b, "\\n"); break;
             case '\t': buf_adds(b, "\\t"); break;
             case '\r': buf_adds(b, "\\r"); break;
-            default: buf_addc(b, (char)c); break;
         }
+        i = j + 1;
     }
     buf_addc(b, '"');
 }
@@ -155,6 +296,24 @@ static void format_quoted(Buf *b, const char *p, size_t n) {
 static A_RT_TLS const void **g_fmt_active;
 static A_RT_TLS size_t g_fmt_active_len, g_fmt_active_cap;
 
+/* GC root provider: objects mid-format are referenced only by raw
+   pointers on this stack; an allocation inside format_into can trigger
+   a collection, so the stack's block must be marked (its pointer words
+   then keep the formatted objects alive). The bounded int-string cache
+   likewise names bump-arena strings. */
+static void fmt_active_gc_roots(void) {
+    a_gc_mark_ptr(g_fmt_active);
+    for (int i = 0; i < 4096; ++i)
+        if (g_int_str_cache[i]) a_gc_mark_aval(g_int_str_cache[i]);
+}
+static int g_fmt_gc_hooked;
+static void fmt_active_gc_hook(void) {
+    if (!g_fmt_gc_hooked) {
+        g_fmt_gc_hooked = 1;
+        a_gc_add_root_cb(fmt_active_gc_roots);
+    }
+}
+
 static int fmt_active_has(const void *p) {
     for (size_t i = 0; i < g_fmt_active_len; ++i)
         if (g_fmt_active[i] == p) return 1;
@@ -162,6 +321,7 @@ static int fmt_active_has(const void *p) {
 }
 
 static void fmt_active_push(const void *p) {
+    fmt_active_gc_hook();
     if (g_fmt_active_len == g_fmt_active_cap) {
         g_fmt_active_cap = g_fmt_active_cap ? g_fmt_active_cap * 2 : 64;
         g_fmt_active = (const void **)xrealloc(g_fmt_active,
@@ -200,28 +360,39 @@ static void format_into_body(Buf *b, aval v, int quote) {
             uint64_t n = (uint64_t)by->h.len;
             int text = a_utf8_valid(p, n) && !quote;
             if (text) {
-                for (uint64_t i = 0; i < n; ++i) buf_addc(b, p[i]);
+                buf_addn(b, p, (size_t)n);
                 return;
             }
             buf_addc(b, 'b');
             buf_addc(b, '"');
-            for (uint64_t i = 0; i < n; ++i) {
-                unsigned char c = (unsigned char)p[i];
+            uint64_t i = 0;
+            while (i < n) {
+                /* memcpy runs of printable bytes; escape the rest. */
+                uint64_t j = i;
+                while (j < n) {
+                    unsigned char c = (unsigned char)p[j];
+                    if (c == '"' || c == '\\' || c == '\n' || c == '\t' ||
+                        c == '\r' || c < 0x20 || c >= 0x7f)
+                        break;
+                    ++j;
+                }
+                if (j > i) buf_addn(b, p + i, (size_t)(j - i));
+                if (j >= n) break;
+                unsigned char c = (unsigned char)p[j];
                 switch (c) {
                     case '"': buf_adds(b, "\\\""); break;
                     case '\\': buf_adds(b, "\\\\"); break;
                     case '\n': buf_adds(b, "\\n"); break;
                     case '\t': buf_adds(b, "\\t"); break;
                     case '\r': buf_adds(b, "\\r"); break;
-                    default:
-                        if (c >= 0x20 && c < 0x7f) buf_addc(b, (char)c);
-                        else {
-                            char hex[8];
-                            snprintf(hex, sizeof(hex), "\\x%02x", c);
-                            buf_adds(b, hex);
-                        }
+                    default: {
+                        static const char hexd[] = "0123456789abcdef";
+                        char hex[4] = {'\\', 'x', hexd[c >> 4], hexd[c & 15]};
+                        buf_addn(b, hex, 4);
                         break;
+                    }
                 }
+                i = j + 1;
             }
             buf_addc(b, '"');
             return;
@@ -373,17 +544,25 @@ static aval format_aval(aval v, int quote) {
 }
 
 static aval a_str_i64(int64_t v) {
+    /* The cached small-int strings below are arena objects held only in
+       g_int_str_cache; install the GC root callback that pins them before
+       the first cache store, or a collection can reclaim+munmap their arena
+       chunk while the cache still points into it (use-after-munmap). */
+    fmt_active_gc_hook();
     int ci = (v >= 0 && v < 4096) ? (int)v : -1;
     if (ci >= 0 && g_int_str_cache[ci]) return g_int_str_cache[ci];
     uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
     uint64_t t = u;
     int nd = 1;
     while (t >= 10) { t /= 10; ++nd; }
+    if (g_small_str && a_gc_arena_stale(g_small_str)) g_small_str = NULL;
     size_t len = (size_t)nd + (v < 0 ? 1 : 0);
     size_t need = (sizeof(AStr) + len + 1 + 15) & ~(size_t)15;
     size_t avail = g_small_str ? (size_t)(g_small_str_end - g_small_str) : 0;
     if (avail < need) {
+        void *old = g_small_str;
         g_small_str = xarena(kSmallStrChunk);
+        a_gc_arena_switch(old, g_small_str);
         g_small_str_end = g_small_str + kSmallStrChunk;
     }
     AStr *s = (AStr *)g_small_str;

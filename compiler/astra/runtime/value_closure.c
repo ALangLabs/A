@@ -50,6 +50,7 @@ aval a_env_set(aval env, uint64_t i, aval v) {
     if (!o || o->type != T_ENV) panicf("environment expected");
     AEnv *e = (AEnv *)o;
     if (i >= e->h.cap) panicf("environment index out of range");
+    a_region_store(e, v);   /* region write barrier */
     e->slots[i] = v;
     return A_NONE;
 }

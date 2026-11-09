@@ -62,13 +62,12 @@ aval bi_input(uint64_t n, aval *argv) {
         fwrite(p, 1, (size_t)len, stdout);
     }
     fflush(stdout);
-    char *buf = (char *)xmalloc(4096);
-    if (!fgets(buf, 4096, stdin)) { free(buf); panicf("Input ended before a line could be read."); }
+    char buf[4096];
+    if (!fgets(buf, sizeof(buf), stdin)) panicf("Input ended before a line could be read.");
     size_t len = strlen(buf);
     if (len && buf[len - 1] == '\n') buf[--len] = '\0';
     if (len && buf[len - 1] == '\r') buf[--len] = '\0';
     aval r = a_str_new(buf, (uint64_t)len);
-    free(buf);
     return r;
 }
 

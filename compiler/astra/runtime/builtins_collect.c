@@ -362,7 +362,9 @@ aval bi_reversed(uint64_t n, aval *argv) {
     aval t = collect_iterable(argv[0]);
     AArr *a = (AArr *)obj_of(t);
     AVec out = { NULL, 0, 0 };
-    for (uint64_t i = a->h.len; i > 0; --i) avec_push(&out, a->items[i - 1]);
+    /* arr_elem handles packed int64 storage: a->items is NULL for packed
+       lists, so indexing it directly would dereference NULL. */
+    for (uint64_t i = a->h.len; i > 0; --i) avec_push(&out, arr_elem(a, i - 1));
     aval r = list_from_vec(out.p, out.len, 0);
     free(out.p);
     return r;

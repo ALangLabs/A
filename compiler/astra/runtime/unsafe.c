@@ -9,6 +9,16 @@
 static aval *g_ptrtab;
 static size_t g_nptrtab, g_capptrtab;
 
+/* GC root provider: unsafe.address_of pins avals in this table. */
+static void ptrtab_gc_roots(void) { a_gc_mark_ptr(g_ptrtab); }
+static int g_ptrtab_gc_hooked;
+static void ptrtab_gc_hook(void) {
+    if (!g_ptrtab_gc_hooked) {
+        g_ptrtab_gc_hooked = 1;
+        a_gc_add_root_cb(ptrtab_gc_roots);
+    }
+}
+
 static uint64_t ptr_id(aval v) {
     if (kind_of(v) != K_INT) panicf("unsafe: address must be int");
     uint64_t id = (uint64_t)int_val_full(v);
@@ -70,6 +80,7 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
             arr_ensure_aval(a);
         }
         if ((a->flags & ARR_F_F64) && !a_is_double(argv[2])) a->flags &= ~ARR_F_F64;
+        a_region_store(a, argv[2]);   /* region write barrier */
         a->items[i] = argv[2];
         return A_NONE;
     }
@@ -79,10 +90,12 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
 
 aval bi_unsafe_address_of(uint64_t n, aval *argv) {
     want_args("unsafe.address_of", n, 1, 1);
+    ptrtab_gc_hook();
     if (g_nptrtab == g_capptrtab) {
         g_capptrtab = g_capptrtab ? g_capptrtab * 2 : 64;
         g_ptrtab = (aval *)xrealloc(g_ptrtab, g_capptrtab * sizeof(aval));
     }
+    a_promote(argv[0]);   /* escapes into the file-static pointer table */
     g_ptrtab[g_nptrtab] = argv[0];
     return mkint_full((int64_t)(g_nptrtab++ + 1));
 }
@@ -94,6 +107,7 @@ aval bi_unsafe_load(uint64_t n, aval *argv) {
 
 aval bi_unsafe_store(uint64_t n, aval *argv) {
     want_args("unsafe.store", n, 2, 2);
+    a_promote(argv[1]);   /* escapes into the file-static pointer table */
     g_ptrtab[ptr_id(argv[0])] = argv[1];
     return A_NONE;
 }

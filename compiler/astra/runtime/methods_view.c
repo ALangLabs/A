@@ -22,29 +22,38 @@ aval method_view(aval obj, const char *name, uint64_t n, aval *argv) {
         }
         if (!strcmp(name, "sort")) {
             want_args(name, n, 0, 0);
-            aval *ptr = root->items + (size_t)base;
-            sort_arr(ptr, (uint64_t)vw->len);
+            /* root is NULL only for an empty (parentless) view; sorting
+               zero elements is a no-op either way. */
+            if (vw->len) {
+                aval *ptr = root->items + (size_t)base;
+                sort_arr(ptr, (uint64_t)vw->len);
+            }
             return A_NONE;
         }
         if (!strcmp(name, "count")) {
             want_args(name, n, 1, 1);
+            /* view_root already normalized the parent to aval storage;
+               hoist the element pointer and use the scalar fast path. */
+            aval *items = root ? root->items + (size_t)base : NULL;
             int64_t c = 0;
             for (int64_t i = 0; i < vw->len; ++i)
-                if (values_equal(root->items[(size_t)(base + i)], argv[0])) ++c;
+                if (aval_eq_fast(items[i], argv[0])) ++c;
             return mkint_full(c);
         }
         if (!strcmp(name, "index")) {
             want_args(name, n, 1, 1);
+            aval *items = root ? root->items + (size_t)base : NULL;
             for (int64_t i = 0; i < vw->len; ++i)
-                if (values_equal(root->items[(size_t)(base + i)], argv[0]))
+                if (aval_eq_fast(items[i], argv[0]))
                     return mkint_full(i);
             panicf("Value is not in the list.");
             return A_NONE;
         }
         if (!strcmp(name, "contains")) {
             want_args(name, n, 1, 1);
+            aval *items = root ? root->items + (size_t)base : NULL;
             for (int64_t i = 0; i < vw->len; ++i)
-                if (values_equal(root->items[(size_t)(base + i)], argv[0]))
+                if (aval_eq_fast(items[i], argv[0]))
                     return A_TRUE;
             return A_FALSE;
         }
@@ -60,7 +69,10 @@ aval method_view(aval obj, const char *name, uint64_t n, aval *argv) {
         }
         if (!strcmp(name, "copy")) {
             want_args(name, n, 0, 0);
-            return list_from_vec(root->items + (size_t)base, (uint64_t)vw->len, vw->is_tuple);
+            /* root is NULL only for an empty (parentless) view; copying
+               zero elements yields an empty list/tuple either way. */
+            return list_from_vec(root ? root->items + (size_t)base : NULL,
+                                 (uint64_t)vw->len, vw->is_tuple);
         }
         if (!strcmp(name, "clear")) {
             panicf("Cannot 'clear' a view.");

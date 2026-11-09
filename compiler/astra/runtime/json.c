@@ -272,12 +272,24 @@ static aval jvalue(JParser *ps) {
 
 /* ---- JSON serializer ---- */
 
+static int json_needs_escape(unsigned char c) {
+    return c == '"' || c == '\\' || c == '\b' || c == '\f' || c == '\n' ||
+           c == '\r' || c == '\t' || c < 0x20;
+}
+
 static void json_escape_str(Buf *b, aval v) {
     uint64_t n;
     const char *s = str_data(v, &n);
+    static const char hexd[] = "0123456789abcdef";
     buf_addc(b, '"');
-    for (uint64_t i = 0; i < n; ++i) {
-        unsigned char c = (unsigned char)s[i];
+    uint64_t i = 0;
+    while (i < n) {
+        /* memcpy runs of unescaped bytes instead of per-byte buf_addc. */
+        uint64_t j = i;
+        while (j < n && !json_needs_escape((unsigned char)s[j])) ++j;
+        if (j > i) buf_addn(b, s + i, (size_t)(j - i));
+        if (j >= n) break;
+        unsigned char c = (unsigned char)s[j];
         switch (c) {
             case '"': buf_adds(b, "\\\""); break;
             case '\\': buf_adds(b, "\\\\"); break;
@@ -286,15 +298,15 @@ static void json_escape_str(Buf *b, aval v) {
             case '\n': buf_adds(b, "\\n"); break;
             case '\r': buf_adds(b, "\\r"); break;
             case '\t': buf_adds(b, "\\t"); break;
-            default:
-                if (c < 0x20) {
-                    char tmp[8];
-                    snprintf(tmp, sizeof(tmp), "\\u%04x", c);
-                    buf_adds(b, tmp);
-                } else {
-                    buf_addc(b, (char)c);
-                }
+            default: {
+                /* c < 0x20 -> \u00XX (lowercase hex, same as %04x) */
+                char tmp[6] = {'\\', 'u', '0', '0',
+                               hexd[c >> 4], hexd[c & 15]};
+                buf_addn(b, tmp, 6);
+                break;
+            }
         }
+        i = j + 1;
     }
     buf_addc(b, '"');
 }
@@ -307,7 +319,15 @@ static void json_indent(Buf *b, int pretty, int depth) {
     for (int i = 0; i < depth; ++i) buf_adds(b, "  ");
 }
 
+/* Depth guard against cyclic input: json_write recurses structurally and
+   a self-referential dict/list would otherwise recurse until the C stack
+   overflows (same failure format_into's g_fmt_active guard prevents).
+   1000 matches the practical nesting depth json.parse itself tolerates. */
+#define JSON_WRITE_MAX_DEPTH 1000
+
 static void json_write(Buf *b, aval v, int pretty, int depth) {
+    if (depth > JSON_WRITE_MAX_DEPTH)
+        panicf("json: value nesting too deep (possible cycle)");
     v = json_unwrap(v);
     if (a_is_none(v)) { buf_adds(b, "null"); return; }
     if (v == A_TRUE) { buf_adds(b, "true"); return; }
@@ -353,7 +373,7 @@ static void json_write(Buf *b, aval v, int pretty, int depth) {
                     aval ks = a_str(k);
                     json_escape_str(b, ks);
                 }
-                buf_adds(b, pretty ? ": " : ": ");
+                buf_adds(b, ": ");
                 json_write(b, d->pairs[i].v, pretty, depth + 1);
             }
             if (d->h.len) json_indent(b, pretty, depth);

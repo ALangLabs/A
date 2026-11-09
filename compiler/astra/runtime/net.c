@@ -216,7 +216,7 @@ aval bi_net_tcp_connect(uint64_t n, aval *argv) {
     net_fd_t fd = net_tcp_connect_fd(host, port);
     if (fd < 0) return mkint_full(-1);
     int h = net_sock_new(fd);
-    if (!h) { net_close(fd); return mkint_full(-1); }
+    if (!h) return mkint_full(-1);   /* net_sock_new already closed fd */
     return mkint_full(h);
 }
 
@@ -462,8 +462,7 @@ aval bi_net_tls_connect(uint64_t n, aval *argv) {
     int h = net_sock_new(fd);
     if (!h) {
         p_net_SSL_free(ssl);
-        close(fd);
-        return mkint_full(-1);
+        return mkint_full(-1);   /* net_sock_new already closed fd */
     }
     g_socks[h - 1].ssl = ssl;
     return mkint_full(h);
@@ -535,7 +534,7 @@ aval bi_net_tcp_listen(uint64_t n, aval *argv) {
     freeaddrinfo(res);
     if (fd < 0) return mkint_full(-1);
     int h = net_sock_new(fd);
-    if (!h) { net_close(fd); return mkint_full(-1); }
+    if (!h) return mkint_full(-1);   /* net_sock_new already closed fd */
     return mkint_full(h);
 }
 
@@ -545,7 +544,7 @@ aval bi_net_accept(uint64_t n, aval *argv) {
     net_fd_t fd = accept(s->fd, NULL, NULL);
     if (fd < 0) return mkint_full(-1);
     int h = net_sock_new(fd);
-    if (!h) { net_close(fd); return mkint_full(-1); }
+    if (!h) return mkint_full(-1);   /* net_sock_new already closed fd */
     return mkint_full(h);
 }
 
@@ -604,7 +603,7 @@ aval bi_net_udp_socket(uint64_t n, aval *argv) {
     net_fd_t fd = socket(AF_INET, SOCK_DGRAM, 0);
     if (fd < 0) return mkint_full(-1);
     int h = net_sock_new(fd);
-    if (!h) { net_close(fd); return mkint_full(-1); }
+    if (!h) return mkint_full(-1);   /* net_sock_new already closed fd */
     return mkint_full(h);
 }
 

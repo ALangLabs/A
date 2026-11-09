@@ -15,6 +15,17 @@ typedef struct {
 
 static ASpan *g_spans;
 static size_t g_nspans, g_capspans;
+
+/* GC root provider: spans hold avals (name/attrs/events) in a heap array
+   reachable only through this static pointer. */
+static void trace_gc_roots(void) { a_gc_mark_ptr(g_spans); }
+static int g_trace_gc_hooked;
+static void trace_gc_hook(void) {
+    if (!g_trace_gc_hooked) {
+        g_trace_gc_hooked = 1;
+        a_gc_add_root_cb(trace_gc_roots);
+    }
+}
 static uint64_t g_next_span = 1;
 static uint64_t g_current_span = 0;
 static uint64_t g_trace_id_hi = UINT64_C(0x4bf92f3577b34da6);
@@ -38,15 +49,19 @@ static int64_t now_ms(void) {
 
 aval bi_trace_start(uint64_t n, aval *argv) {
     want_args("trace.start", n, 1, 2);
+    trace_gc_hook();
     if (g_nspans == g_capspans) {
         g_capspans = g_capspans ? g_capspans * 2 : 16;
         g_spans = (ASpan *)xrealloc(g_spans, g_capspans * sizeof(ASpan));
     }
     ASpan *s = &g_spans[g_nspans++];
     s->id = g_next_span++;
+    a_promote(argv[0]);        /* escapes into the file-static span table */
     s->name = argv[0];
     s->attrs = dict_new_empty();
     s->events = list_from_vec(NULL, 0, 0);
+    a_promote(s->attrs);       /* referenced only from g_spans */
+    a_promote(s->events);
     s->start_ms = now_ms();
     s->end_ms = -1;
     if (!g_trace_id_lo)
@@ -147,7 +162,13 @@ aval bi_trace_spans(uint64_t n, aval *argv) {
 
 aval bi_trace_reset(uint64_t n, aval *argv) {
     want_args("trace.reset", n, 0, 0);
+    /* Free the span table too (like metrics_reset): spans hold aval
+       references, but the ASpan array itself is plain C memory that
+       would otherwise stay at its peak size for the process lifetime. */
+    free(g_spans);
+    g_spans = NULL;
     g_nspans = 0;
+    g_capspans = 0;
     g_current_span = 0;
     g_next_span = 1;
     return A_NONE;

@@ -46,40 +46,63 @@ static A_RT_TLS int g_stack_have_bounds;
 static A_RT_TLS int g_stack_guard_init;
 static A_RT_TLS char *g_stack_probe;   /* shallowest observed SP */
 
-static void print_frame_line(const AFrame *f) {
+/* Source line of the statement currently executing. Generated code stores
+   it before every statement (`movl $N, a_stmt_line(%rip)` in the x86-64 asm
+   emitter). Module frames push line 0 — a module has no declaration line —
+   so panic locations fall back to this value. Not thread-local: a raced
+   store can only make a diagnostic line less precise, never wrong-shaped. */
+int a_stmt_line = 0;
+
+static void print_frame_line(const AFrame *f, int line) {
     const char *file = f->file && *f->file ? f->file : "?";
     const char *name = f->name && *f->name ? f->name : "?";
-    if (f->line > 0)
-        fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, f->line, name);
+    if (line > 0)
+        fprintf(stderr, "  File \"%s\", line %d, in %s\n", file, line, name);
     else
         fprintf(stderr, "  File \"%s\", in %s\n", file, name);
+}
+
+/* Line to print for frame `i`: the frame's own line, or — for the innermost
+   frame — the statement line the generated code last recorded. */
+static int frame_line(size_t i) {
+    int line = g_frames[i].line;
+    if (line <= 0 && a_stmt_line > 0 && i + 1 == g_nframes) line = a_stmt_line;
+    return line;
 }
 
 /* `main` pushes a "<module>" frame for the entry module and the entry
    module's __a_modinit_* function pushes another "<module>" frame for the
    same file while its top-level statements run, so a panic at top level
    prints the same synthetic frame twice in a row. Collapse consecutive
-   identical <module> frames when printing; real function frames are never
-   named "<module>" and recursive calls keep distinct line numbers. */
+   identical <module> frames when printing (keeping the more precise line of
+   the pair); real function frames are never named "<module>" and recursive
+   calls keep distinct line numbers. */
 static int same_module_frame(const AFrame *a, const AFrame *b) {
     if (!a->name || !b->name || strcmp(a->name, "<module>") != 0 ||
-        strcmp(b->name, "<module>") != 0 || a->line != b->line)
+        strcmp(b->name, "<module>") != 0)
         return 0;
     if (a->file == b->file) return 1;
     if (!a->file || !b->file) return 0;
     return strcmp(a->file, b->file) == 0;
 }
 
-/* Print frames [start, g_nframes), skipping a <module> frame identical to
-   the previously printed one. */
+/* Print frames [start, g_nframes), collapsing a repeated <module> frame
+   into the previous one (the later frame knows the statement line). */
 static void print_frames(size_t start) {
-    const AFrame *prev = NULL;
+    AFrame prev;
+    int have_prev = 0;
     for (size_t i = start; i < g_nframes; ++i) {
-        const AFrame *f = &g_frames[i];
-        if (prev && same_module_frame(prev, f)) continue;
-        print_frame_line(f);
+        AFrame f = g_frames[i];
+        f.line = frame_line(i);
+        if (have_prev && same_module_frame(&prev, &f)) {
+            if (f.line > prev.line) prev.line = f.line;
+            continue;
+        }
+        if (have_prev) print_frame_line(&prev, prev.line);
         prev = f;
+        have_prev = 1;
     }
+    if (have_prev) print_frame_line(&prev, prev.line);
 }
 
 static void stack_overflow_error(uintptr_t sp) {
@@ -142,10 +165,12 @@ void a_frame_push(const char *name, const char *file, int line) {
     g_frames[g_nframes].file = file;
     g_frames[g_nframes].line = line;
     ++g_nframes;
+    a_region_enter(name);   /* young-generation region for this frame */
 }
 
 void a_frame_pop(void) {
     if (g_nframes) --g_nframes;
+    a_region_leave();       /* sweep unescaped young objects of the frame */
 }
 
 static void print_traceback(void) {
@@ -171,8 +196,10 @@ void panicf(const char *fmt, ...) {
     // even before the full traceback (and when a builder only shows one line).
     for (size_t i = g_nframes; i-- > 0;) {
         const AFrame *f = &g_frames[i];
-        if (f->file && *f->file && f->line > 0) {
-            fprintf(stderr, "  --> %s:%d\n", f->file, f->line);
+        int line = f->line;
+        if (line <= 0 && i == g_nframes - 1) line = a_stmt_line;
+        if (f->file && *f->file && line > 0) {
+            fprintf(stderr, "  --> %s:%d\n", f->file, line);
             break;
         }
     }
@@ -181,23 +208,39 @@ void panicf(const char *fmt, ...) {
 }
 
 void *xmalloc(size_t n) {
+    /* A GC may run before this allocation: everything reachable is marked
+       through the roots scanned inside a_gc_maybe_collect. */
+    a_gc_maybe_collect();
+    size_t req = n ? n : 1;
+    /* Reuse a block the last sweep delisted before asking libc for more
+       memory. Pooled blocks are already 16-byte aligned and are
+       re-registered below exactly like a fresh posix_memalign block. */
+    void *p = a_gc_pool_try_alloc(req);
+    if (p) {
+        a_gc_register(p, req);
+        return p;
+    }
     /* Heap objects are NaN-boxed pointers distinguished by a zero low
      * nibble, so every object needs 16-byte alignment. 32-bit libcs
      * (ARM, i386, 32-bit Windows) only guarantee 8, so allocate aligned
      * explicitly; on those targets a_runtime_internal.h maps malloc/
      * realloc/free onto the _aligned_* CRT entry points so the pairing
-     * stays consistent. */
+     * stays consistent. Pool-eligible sizes request the size-class
+     * capacity while the registry keeps the caller's requested extent. */
+    size_t asize = a_gc_pool_alloc_size(req);
 #if defined(_WIN32)
     /* Win64 CRT malloc returns 16-byte-aligned blocks; on 32-bit Windows
        the malloc macro in a_runtime_internal.h already routes this call
        to _aligned_malloc. */
-    void *p = malloc(n ? n : 1);
+    p = malloc(asize);
     if (!p) panicf("out of memory");
+    a_gc_register(p, req);
     return p;
 #else
-    void *p = NULL;
-    if (posix_memalign(&p, 16, n ? n : 1) != 0 || !p)
+    p = NULL;
+    if (posix_memalign(&p, 16, asize) != 0 || !p)
         panicf("out of memory");
+    a_gc_register(p, req);
     return p;
 #endif
 }
@@ -216,15 +259,35 @@ char *xarena(size_t n) {
 #ifdef MADV_HUGEPAGE
         (void)madvise(p, n, MADV_HUGEPAGE);
 #endif
+        a_gc_note_arena(p, n, 1); /* mmap bump chunk */
         return (char *)p;
     }
 #endif
-    return (char *)xmalloc(n);
+    /* Linux branch left `p` in scope above; assign rather than redeclare. */
+    p = xmalloc(n);
+    a_gc_note_arena(p, n, 0);  /* heap fallback bump chunk */
+    return (char *)p;
 }
 
 void *xrealloc(void *p, size_t n) {
-    void *q = realloc(p, n ? n : 1);
+    a_gc_maybe_collect();
+    size_t req = n ? n : 1;
+    void *q;
+    if (!p) {
+        q = a_gc_pool_try_alloc(req);
+        if (!q) {
+            size_t asize = a_gc_pool_alloc_size(req);
+#if defined(_WIN32)
+            q = malloc(asize);
+#else
+            if (posix_memalign(&q, 16, asize) != 0) q = NULL;
+#endif
+        }
+    } else {
+        q = realloc(p, a_gc_pool_alloc_size(req));
+    }
     if (!q) panicf("out of memory");
+    a_gc_reregister(p, q, req);
     return q;
 }
 
@@ -246,6 +309,8 @@ aval mkobj(void *p) {
     uintptr_t u = (uintptr_t)p;
     if ((u & 0xFULL) != 0 || u >= (UINT64_C(1) << 48))
         panicf("object pointer out of NaN-boxed range");
+    a_gc_note_obj(p); /* flag the backing block as a collectable object */
+    a_region_note_obj(p); /* track in the innermost young region, if any */
     return A_TAG | (uint64_t)u;
 }
 
@@ -290,7 +355,7 @@ int64_t expect_int64(aval v, const char *what) {
    value: it removes malloc's size-class logic and bookkeeping, which was the
    entire cost of integer arithmetic that leaves the inline range (e.g. any
    product above 7e13, as in a 32-bit LCG step). */
-#define INT_BOX_CHUNK (2u << 20)  /* one huge page */
+#define INT_BOX_CHUNK (128u << 10)  /* 128 KiB chunks (see core_str.c) */
 static char *g_intbox_cursor = NULL;
 static size_t g_intbox_left = 0;
 
@@ -309,8 +374,12 @@ static AInt64 *intbox_alloc(void) {
 #if A_PAR_REAL
     pthread_mutex_lock(&g_intbox_mu);
 #endif
+    if (g_intbox_cursor && a_gc_arena_stale(g_intbox_cursor))
+        g_intbox_left = 0;
     if (g_intbox_left < INT_BOX_STEP) {
+        void *old = g_intbox_cursor;
         g_intbox_cursor = xarena(INT_BOX_CHUNK);
+        a_gc_arena_switch(old, g_intbox_cursor);
         g_intbox_left = INT_BOX_CHUNK;
     }
     AInt64 *p = (AInt64 *)g_intbox_cursor;

@@ -197,6 +197,10 @@ enum {
     A_BI_OS_READLINK, A_BI_OS_UTIME, A_BI_OS_MKDIR, A_BI_OS_RMDIR,
     A_BI_OS_TRUNCATE, A_BI_OS_ENVIRON, A_BI_OS_SETENV,
     A_BI_OS_UNSETENV, A_BI_OS_SYSTEM, A_BI_OS_URANDOM, A_BI_OS_GETENV,
+    /* os system-level extensions (appended so existing ids stay stable) */
+    A_BI_OS_GETLOADAVG, A_BI_OS_GETHOSTNAME, A_BI_OS_UMASK,
+    A_BI_OS_GETPAGESIZE, A_BI_OS_CHOWN, A_BI_OS_ISMOUNT,
+    A_BI_OS_DISK_USAGE, A_BI_OS_POPEN, A_BI_OS_KILL, A_BI_OS_EXIT,
     A_BI_COUNT
 };
 
@@ -488,6 +492,16 @@ aval a_call(aval fn, uint64_t n, aval *argv);   /* dispatch A-fn or builtin */
    in each function prologue and a_frame_pop() before every return. */
 void a_frame_push(const char *name, const char *file, int line);
 void a_frame_pop(void);
+/* Deterministic-region escape hatch: codegen emits a_promote(retval)
+   before frame pop on value-returning paths so the returned object (and
+   everything it transitively references) survives the region sweep.
+   No-op when regions are disabled (A_REGIONS=0) or GC is off. */
+void a_promote(aval v);
+
+/* Source line of the statement currently executing; the x86-64 asm emitter
+   stores it before each statement so `<module>` frames (which push line 0)
+   still report a usable location in panics and tracebacks. */
+extern int a_stmt_line;
 /* argv holds n positional args followed by nkw (name, value) pairs.
    Named args are only meaningful for T_PYOBJ receivers (Python kwargs);
    other receiver kinds panic when nkw > 0. */

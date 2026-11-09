@@ -26,7 +26,17 @@ void buf_addn(Buf *b, const char *s, size_t n) {
 
 void buf_adds(Buf *b, const char *s) { buf_addn(b, s, strlen(s)); }
 
-void buf_addc(Buf *b, char c) { buf_addn(b, &c, 1); }
+void buf_addc(Buf *b, char c) {
+    /* Fast path: room for the byte plus the NUL terminator already
+       reserved — skip the buf_addn -> buf_reserve -> memcpy(1) chain.
+       Per-char loops (expandtabs, quoting, padding) call this heavily. */
+    if (b->len + 2 <= b->cap) {
+        b->p[b->len++] = c;
+        b->p[b->len] = '\0';
+        return;
+    }
+    buf_addn(b, &c, 1);
+}
 
 void buf_addi64(Buf *b, int64_t v) {
     char tmp[24];

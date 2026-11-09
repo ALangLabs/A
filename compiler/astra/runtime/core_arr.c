@@ -11,21 +11,32 @@ AArr *arr_of(aval v, const char *what) {
     return (AArr *)o;
 }
 
+/* Geometric growth at ~1.5x instead of doubling: still amortized O(1)
+   appends, but the worst-case slack after a growth step drops from 50%
+   to 33% of capacity — meaningful for the large retained lists that
+   dominate RSS. */
+static uint64_t arr_next_cap(uint64_t cap, uint64_t need) {
+    uint64_t nc = cap ? cap : 4;
+    while (nc < need) {
+        uint64_t step = nc / 2;
+        nc += step ? step : 1; /* cap can be as small as 1 (exact-fit lists) */
+    }
+    return nc;
+}
+
 void arr_reserve(AArr *a, uint64_t need) {
     /* Safety net: any caller that reserved aval capacity on a packed
        array first converts it back to aval storage. */
     if (arr_packed(a)) arr_ensure_aval(a);
     if (need <= a->h.cap) return;
-    uint64_t nc = a->h.cap ? a->h.cap : 4;
-    while (nc < need) nc *= 2;
+    uint64_t nc = arr_next_cap(a->h.cap, need);
     a->items = (aval *)xrealloc(a->items, (size_t)nc * sizeof(aval));
     a->h.cap = nc;
 }
 
 void arr_reserve_i64(AArr *a, uint64_t need) {
     if (need <= a->h.cap) return;
-    uint64_t nc = a->h.cap ? a->h.cap : 4;
-    while (nc < need) nc *= 2;
+    uint64_t nc = arr_next_cap(a->h.cap, need);
     a->iitems = (int64_t *)xrealloc(a->iitems, (size_t)nc * sizeof(int64_t));
     a->h.cap = nc;
 }
@@ -77,6 +88,51 @@ aval arr_elem(const AArr *a, uint64_t i) {
     return arr_packed(a) ? mkint_full(a->iitems[i]) : a->items[i];
 }
 
+/* Release spare element capacity after removals (pop/remove_at/remove/
+   discard/clear). Wide hysteresis: only when less than 1/8 of the
+   allocation is in use and the buffer is at least 32 slots, and never
+   for a list a view can still alias (ARR_F_HAS_VIEW) — view offsets are
+   absolute into items[], so shrinking the buffer under a live view
+   would leave its accesses out of bounds. Sets are never view parents,
+   tuples never shrink, so the type check is just T_LIST/T_SET. */
+void arr_shrink(AArr *a) {
+    if (a->h.type != T_LIST && a->h.type != T_SET) return;
+    if (a->flags & ARR_F_HAS_VIEW) return;
+    if (a->h.cap < 32 || a->h.len * 8 >= a->h.cap) return;
+    if (a->h.len == 0) {
+        free(a->items);
+        free(a->iitems);
+        a->items = NULL;
+        a->iitems = NULL;
+        a->h.cap = 0;
+        return;
+    }
+    /* ~1.5x headroom over len, matching the growth policy, so a refill
+       does not immediately reallocate. */
+    uint64_t nc = a->h.len + a->h.len / 2 + 4;
+    if (arr_packed(a))
+        a->iitems = (int64_t *)xrealloc(a->iitems, (size_t)nc * sizeof(int64_t));
+    else
+        a->items = (aval *)xrealloc(a->items, (size_t)nc * sizeof(aval));
+    a->h.cap = nc;
+}
+
+/* Mark the root list backing a new view so arr_shrink leaves its buffer
+   alone. Views are one level deep (a_slice stores the root list as
+   parent), but walk defensively anyway. */
+void arr_note_view(aval parent) {
+    for (;;) {
+        AObj *o = obj_of(parent);
+        if (!o) return;
+        if (o->type == T_LIST) {
+            ((AArr *)o)->flags |= ARR_F_HAS_VIEW;
+            return;
+        }
+        if (o->type != T_VIEW) return;
+        parent = ((AView *)o)->parent;
+    }
+}
+
 void arr_push(AArr *a, aval v) {
     if (a->h.len == UINT32_MAX) panicf("array too large");
     if (arr_packed(a)) {
@@ -90,6 +146,7 @@ void arr_push(AArr *a, aval v) {
     }
     arr_reserve(a, (uint64_t)a->h.len + 1);
     if ((a->flags & ARR_F_F64) && !a_is_double(v)) a->flags &= ~ARR_F_F64;
+    a_region_store(a, v);   /* region write barrier */
     a->items[a->h.len++] = v;
 }
 

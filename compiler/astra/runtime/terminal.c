@@ -7,6 +7,14 @@
 #if !defined(_WIN32)
 static struct termios g_repl_termios;
 static int g_repl_termios_saved = 0;
+static int g_repl_atexit_registered = 0;
+
+/* Restore the saved terminal mode if the process exits while raw mode is
+   still active (e.g. a REPL killed without calling raw_mode(false)). */
+static void repl_restore_termios(void) {
+    if (g_repl_termios_saved)
+        tcsetattr(STDIN_FILENO, TCSAFLUSH, &g_repl_termios);
+}
 
 aval bi_terminal_isatty(uint64_t n, aval *argv) {
     (void)argv;
@@ -20,6 +28,10 @@ aval bi_terminal_raw_mode(uint64_t n, aval *argv) {
     if (on) {
         if (tcgetattr(STDIN_FILENO, &g_repl_termios) != 0) return A_FALSE;
         g_repl_termios_saved = 1;
+        if (!g_repl_atexit_registered) {
+            g_repl_atexit_registered = 1;
+            atexit(repl_restore_termios);
+        }
         struct termios raw = g_repl_termios;
         cfmakeraw(&raw);
         /* Keep output post-processing (NL -> CR-NL) enabled: the REPL and any
