@@ -109,6 +109,10 @@ StmtPtr Parser::parseDefer() {
   expect(Tok::KwDefer, "'defer'");
   auto stmt = std::make_unique<DeferStmt>();
   stmt->body = parseStatement();
+  if (!pendingStmts_.empty()) {
+    fail(stmt->body->span, "Chained assignment is not allowed in 'defer'.",
+         "Assign the names on separate lines inside a block.");
+  }
   stmt->span = Span::join(start, previousSpan());
   return stmt;
 }
@@ -257,6 +261,63 @@ StmtPtr Parser::parseSimpleStatement() {
   if (isAssignmentOp(cur().kind)) {
     const Token& opTok = advance();
     auto value = parseExpression();
+    // `x = y = v` chained assignment: when the "value" is a plain name
+    // followed by '=', it is actually another target. Only '=' chains are
+    // supported and only plain-name targets can feed later targets.
+    std::vector<ExprPtr> chainTargets;
+    std::vector<Span> chainEqSpans;
+    while (opTok.kind == Tok::Eq &&
+           dynamic_cast<TupleExpr*>(target.get()) == nullptr &&
+           dynamic_cast<IdentExpr*>(value.get()) != nullptr &&
+           cur().kind == Tok::Eq) {
+      chainTargets.push_back(std::move(value));
+      chainEqSpans.push_back(advance().span);
+      value = parseExpression();
+    }
+    if (!chainTargets.empty()) {
+      // targets = [target] + chainTargets; the last target receives the
+      // value, each earlier target copies the next one's name.
+      std::vector<std::string> names;
+      names.reserve(chainTargets.size());
+      for (auto& t : chainTargets) {
+        names.push_back(static_cast<IdentExpr*>(t.get())->name);
+      }
+      std::vector<Span> eqSpans;
+      eqSpans.push_back(opTok.span);
+      for (auto& s : chainEqSpans) eqSpans.push_back(s);
+      // Returned stmt assigns the deepest target first; pending stmts copy
+      // names outward so every target ends up with the same value.
+      // total targets = [target] + chainTargets (length m); names[i] is the
+      // name of total[i+1] for i in 0..m-2.
+      auto stmt = std::make_unique<AssignStmt>();
+      stmt->span = Span::join(start, previousSpan());
+      stmt->op = "=";
+      stmt->binop = BinOp::Invalid;
+      stmt->opSpan = eqSpans.back();
+      stmt->target = std::move(chainTargets.back());
+      stmt->value = std::move(value);
+      StmtPtr result = std::move(stmt);
+      const std::size_t m = chainTargets.size() + 1;
+      for (std::size_t i = m - 1; i-- > 0;) {
+        auto s = std::make_unique<AssignStmt>();
+        s->span = result->span;
+        s->op = "=";
+        s->binop = BinOp::Invalid;
+        s->opSpan = eqSpans[i];
+        if (i == 0) {
+          s->target = std::move(target);
+        } else {
+          s->target = std::move(chainTargets[i - 1]);
+        }
+        auto src = std::make_unique<IdentExpr>();
+        src->name = names[i];
+        src->span = s->target->span;
+        s->value = std::move(src);
+        pendingStmts_.push_back(std::move(s));
+      }
+      expectNewline();
+      return result;
+    }
     // `a, b = 1, 2`: allow a bare comma tuple on the right for destructuring.
     if (dynamic_cast<TupleExpr*>(target.get()) != nullptr && check(Tok::Comma)) {
       auto rhs = std::make_unique<TupleExpr>();

@@ -102,6 +102,9 @@ class Parser {
 
   std::vector<Token> tokens_;
   std::size_t pos_ = 0;
+  // Extra statements produced by one source statement (e.g. `x = y = v`
+  // chained assignment). Callers append them after the returned statement.
+  std::vector<StmtPtr> pendingStmts_;
   DiagnosticSink& sink_;
 };
 

@@ -46,6 +46,7 @@ void Parser::fail(Span span, std::string message, std::string help) {
 }
 
 void Parser::synchronize() {
+  pendingStmts_.clear();
   while (!check(Tok::Eof)) {
     if (check(Tok::Dedent)) return;
     if (check(Tok::Newline)) {
@@ -66,6 +67,8 @@ std::unique_ptr<Program> Parser::parseProgram() {
              "Only blocks introduced by ':' may be indented.");
       }
       program->statements.push_back(parseStatement());
+      for (auto& extra : pendingStmts_) program->statements.push_back(std::move(extra));
+      pendingStmts_.clear();
     } catch (ParseError&) {
       synchronize();
     }
@@ -162,10 +165,14 @@ std::vector<StmtPtr> Parser::parseSuite() {
     while (!check(Tok::Dedent) && !check(Tok::Eof)) {
       if (match(Tok::Newline)) continue;
       body.push_back(parseStatement());
+      for (auto& extra : pendingStmts_) body.push_back(std::move(extra));
+      pendingStmts_.clear();
     }
     expect(Tok::Dedent, "the end of the block");
   } else {
     body.push_back(parseStatement());
+    for (auto& extra : pendingStmts_) body.push_back(std::move(extra));
+    pendingStmts_.clear();
   }
   return body;
 }
