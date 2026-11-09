@@ -251,7 +251,7 @@
           },
           "default": [],
           "scope": "resource",
-          "description": "Extra directories searched for imported A modules, passed as -I to the compiler and to a-lsp. Supports ${workspaceFolder}."
+          "description": "Extra directories searched for imported A modules, passed as -I to the compiler and to a-lsp. Supports ${workspaceFolder}. The workspace project's .apm/packages directory (when it holds an apm.json) is added automatically."
         },
         "a.useLanguageServer": {
           "type": "boolean",

@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -13,6 +14,24 @@
 namespace {
 
 constexpr int kExitUsage = 64;
+
+// Walks up from the entry file's directory looking for an `apm.json`
+// project manifest and returns that directory ("" when there is none).
+// Every file command (`run`, `build`, `check`, `test`, `ir`) uses it to
+// find apm-installed packages automatically: `<root>/.apm/packages` is
+// added to the module search paths, so `import <pkg>` resolves without
+// needing `apm run` or an explicit `-I`.
+std::string findProjectDir(const std::string& entryPath) {
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::path dir = fs::path(entryPath).parent_path();
+  if (dir.empty()) dir = ".";
+  for (fs::path d = fs::absolute(dir, ec); !d.empty(); d = d.parent_path()) {
+    if (fs::is_regular_file(d / "apm.json", ec)) return d.string();
+    if (d == d.parent_path()) break;
+  }
+  return {};
+}
 
 void printUsage(std::ostream& os) {
   os << "A language toolchain " << a::kVersion << " (v2)\n"
@@ -46,6 +65,8 @@ void printUsage(std::ostream& os) {
      << "  --optnone    disable all optimizations (LLVM optnone attribute)\n"
      << "  --opt            run optimization passes (ir)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
+      << "                     (.apm/packages of an apm.json project is\n"
+      << "                     added automatically for run/build/check/test/ir)\n"
      << "  --stdlib <dir>   override standard library directory\n"
      << "  --target <t>     cross-compile target arch:\n"
      << "                    x86_64, i386, arm, aarch64/arm64, riscv64, i8086\n"
@@ -253,6 +274,21 @@ int main(int argc, char** argv) {
     try { if (options.jobs == 1) config.jobs = std::stoi(env); } catch (...) {}
   }
   config.modulePaths = options.modulePaths;
+  // apm packages are found automatically: for an `apm.json` project, add
+  // `<root>/.apm/packages` to the module search paths for every file
+  // command (run/build/check/test/ir), so `import <pkg>` works without
+  // `apm run` or an explicit `-I` flag.
+  if (!options.path.empty()) {
+    namespace fs = std::filesystem;
+    const std::string root = findProjectDir(options.path);
+    if (!root.empty()) {
+      std::error_code ec;
+      const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
+      if (fs::is_directory(pkgDir, ec)) {
+        config.modulePaths.insert(config.modulePaths.begin(), pkgDir.string());
+      }
+    }
+  }
   config.stdlibRoot = options.stdlibRoot;
   config.target = options.target;
   config.testFilter = options.testFilter;

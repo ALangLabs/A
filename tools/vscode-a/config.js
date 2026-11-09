@@ -85,11 +85,34 @@ function isExecutable(pathname) {
     }
 }
 
+// apm packages: the workspace folder (or nearest ancestor) that holds an
+// apm.json gets its .apm/packages appended ("" when it is not an apm
+// project). Mirrors the CLI's findProjectDir, so bare `import <pkg>` and
+// its candidates resolve to installed packages exactly like `a run`.
+function apmPackagesDir(folder) {
+    if (!folder) return '';
+    let dir = path.resolve(folder);
+    for (;;) {
+        try {
+            if (fs.existsSync(path.join(dir, 'apm.json'))) {
+                const pkgDir = path.join(dir, '.apm', 'packages');
+                if (fs.statSync(pkgDir).isDirectory()) return pkgDir;
+                return '';
+            }
+        } catch { /* not a readable directory */ }
+        const parent = path.dirname(dir);
+        if (parent === dir) return '';
+        dir = parent;
+    }
+}
+
 function modulePaths(config, cwd, file) {
     const merged = [
         ...(Array.isArray(config.get('modulePaths', [])) ? config.get('modulePaths', []) : []),
         ...(Array.isArray(config.get('server.modulePaths', [])) ? config.get('server.modulePaths', []) : [])
     ];
+    const apmDir = apmPackagesDir(cwd);
+    if (apmDir) merged.push(apmDir);
     const seen = new Set();
     const dirs = [];
     for (const entry of merged) {
@@ -186,5 +209,5 @@ function bareImportCandidates(name, config) {
 
 module.exports = {
     expand, absolute, compilerPath, serverPath, isExecutable, modulePaths,
-    settings, argumentsFor, quotedImportCandidates, bareImportCandidates
+    apmPackagesDir, settings, argumentsFor, quotedImportCandidates, bareImportCandidates
 };

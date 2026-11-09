@@ -44,6 +44,44 @@ using a::lsp::ResolvedSymbol;
 using a::lsp::SymbolDef;
 using a::lsp::SymbolKind;
 
+namespace {
+
+// Mirrors the CLI's apm auto-discovery (findProjectDir in
+// cli/main.cpp): walks up from the document looking for an apm.json and
+// returns its directory ("" when there is none), so bare `import <pkg>`
+// resolves into the project's installed packages just like `a run`.
+std::string findProjectDir(const std::string& filePath) {
+  std::error_code ec;
+  fs::path dir = fs::path(filePath).parent_path();
+  if (dir.empty()) return {};
+  for (fs::path d = fs::absolute(dir, ec); !d.empty(); d = d.parent_path()) {
+    if (fs::is_regular_file(d / "apm.json", ec)) return d.string();
+    if (d == d.parent_path()) break;
+  }
+  return {};
+}
+
+// The module search paths used to analyze a document: `basePaths` with
+// the document's apm project packages dir prepended.
+std::vector<std::string> modulePathsFor(const std::string& filePath,
+                                        const std::vector<std::string>& basePaths) {
+  std::vector<std::string> paths = basePaths;
+  const std::string root = findProjectDir(filePath);
+  if (!root.empty()) {
+    std::error_code ec;
+    const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
+    if (fs::is_directory(pkgDir, ec)) {
+      std::string s = pkgDir.string();
+      if (std::find(paths.begin(), paths.end(), s) == paths.end()) {
+        paths.insert(paths.begin(), s);
+      }
+    }
+  }
+  return paths;
+}
+
+}  // namespace
+
 void LanguageServer::startWorker() {
   if (worker_.joinable()) return;
   worker_ = std::thread([this] { workerLoop(); });
@@ -92,8 +130,9 @@ void LanguageServer::workerLoop() {
       job = std::move(*pendingJob_);
       pendingJob_.reset();
     }
-    auto compilation = a::lsp::analyzeDocument(job.path, job.text, job.modulePaths,
-                                                job.stdlibRoot);
+    auto compilation =
+        a::lsp::analyzeDocument(job.path, job.text, modulePathsFor(job.path, job.modulePaths),
+                                job.stdlibRoot);
     {
       std::lock_guard<std::mutex> lock(jobMutex_);
       if (job.generation != generation_) continue;  // stale; a newer edit won
@@ -124,14 +163,16 @@ void LanguageServer::ensureCompiled(Document* document) {
   if (!document) return;
   if (document->compilation && document->compiledVersion == document->version) return;
   document->compilation = a::lsp::analyzeDocument(document->path, document->text,
-                                                   modulePaths_, stdlibRoot_);
+                                                   modulePathsFor(document->path, modulePaths_),
+                                                   stdlibRoot_);
   document->compiledVersion = document->version;
 }
 
 // Legacy synchronous path (no async publish). Handlers now use
 // ensureCompiled() which reuses the worker's debounce instead.
 void LanguageServer::recompile(Document& document) {
-  document.compilation = a::lsp::analyzeDocument(document.path, document.text, modulePaths_,
+  document.compilation = a::lsp::analyzeDocument(document.path, document.text,
+                                                  modulePathsFor(document.path, modulePaths_),
                                                   stdlibRoot_);
   document.compiledVersion = document.version;
   log("compiled " + document.path + " (sync, errors: " +
