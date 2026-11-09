@@ -499,6 +499,58 @@ ExprPtr Parser::parsePostfix() {
       call->span = Span::join(expr->span, previousSpan());
       call->callee = std::move(expr);
       call->args = std::move(args);
+      if (auto* nav = dynamic_cast<SafeNavExpr*>(call->callee.get())) {
+        // obj?.method(args) -> (obj == None) ? None : obj.method(args).
+        // The receiver is duplicated, so it must be a plain name.
+        if (dynamic_cast<IdentExpr*>(nav->object.get()) == nullptr) {
+          fail(nav->object->span,
+               "A method call through '?.' needs a plain-name receiver.",
+               "Bind the receiver to a name first, e.g. `r = expr`.");
+        }
+        auto receiver = std::move(nav->object);
+        std::string method = nav->field;
+        Span methodSpan = nav->fieldSpan;
+        Span wholeSpan = call->span;
+        // Condition: receiver == None
+        auto cmp = std::make_unique<BinaryExpr>();
+        cmp->span = wholeSpan;
+        cmp->op = "==";
+        cmp->binop = BinOp::Eq;
+        auto lhsIdent = std::make_unique<IdentExpr>();
+        lhsIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
+        lhsIdent->span = receiver->span;
+        cmp->lhs = std::move(lhsIdent);
+        auto noneIdent = std::make_unique<IdentExpr>();
+        noneIdent->name = "None";
+        noneIdent->span = wholeSpan;
+        cmp->rhs = std::move(noneIdent);
+        // Else branch: (!receiver).method(args) — the '!' unwraps the
+        // optional before dispatch. Reuse the parsed call.
+        auto field = std::make_unique<FieldExpr>();
+        field->span = wholeSpan;
+        auto unwrap = std::make_unique<UnaryExpr>();
+        unwrap->span = wholeSpan;
+        unwrap->op = "!";
+        unwrap->postfix = true;
+        auto unwrapIdent = std::make_unique<IdentExpr>();
+        unwrapIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
+        unwrapIdent->span = receiver->span;
+        unwrap->operand = std::move(unwrapIdent);
+        field->object = std::move(unwrap);
+        field->field = method;
+        field->fieldSpan = methodSpan;
+        call->callee = std::move(field);
+        auto tern = std::make_unique<TernaryExpr>();
+        tern->span = wholeSpan;
+        tern->cond = std::move(cmp);
+        auto thenNone = std::make_unique<IdentExpr>();
+        thenNone->name = "None";
+        thenNone->span = wholeSpan;
+        tern->thenValue = std::move(thenNone);
+        tern->elseValue = std::move(call);
+        expr = std::move(tern);
+        continue;
+      }
       expr = std::move(call);
       continue;
     }
