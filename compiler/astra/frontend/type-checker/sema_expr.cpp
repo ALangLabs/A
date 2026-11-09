@@ -518,6 +518,24 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
       if (countOk) return typeString();
       // String * non-int still reaches the numeric check below and errors.
     }
+    // list/tuple * int repeats the sequence (Python parity); either side
+    // may hold the sequence.
+    auto isSeqType = [](TypePtr t) {
+      return t->kind == TypeKind::Array || t->kind == TypeKind::Tuple;
+    };
+    if (isSeqType(lhsResolved) || isSeqType(rhsResolved)) {
+      TypePtr seqSide = isSeqType(lhsResolved) ? lhs : rhs;
+      TypePtr countSide = isSeqType(lhsResolved) ? rhs : lhs;
+      TypePtr count = resolveType(countSide);
+      bool countOk = count->kind == TypeKind::Int ||
+                     (count->kind == TypeKind::Var &&
+                      count->constraint == Constraint::Integer);
+      if (count->kind == TypeKind::Var && count->constraint == Constraint::None) {
+        if (constrainVar(countSide, Constraint::Integer)) countOk = true;
+      }
+      if (countOk) return resolveType(seqSide);
+      // Sequence * non-int still reaches the numeric check below and errors.
+    }
   }
 
   if (op == "-" || op == "*" || op == "/" || op == "//" || op == "%" || op == "**") {

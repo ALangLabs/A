@@ -208,6 +208,39 @@ static aval concat_arr(aval l, aval r) {
     return mkobj(&out->h);
 }
 
+static aval repeat_arr(aval listv, int64_t n) {
+    AArr *a = (AArr *)obj_of(listv);
+    int is_tuple = kind_of(listv) == K_TUPLE || a->h.type == T_TUPLE;
+    uint64_t len = (uint64_t)a->h.len;
+    AArr *out = (AArr *)xmalloc(sizeof(AArr));
+    out->h.type = is_tuple ? T_TUPLE : T_LIST;
+    out->iitems = NULL;
+    out->flags = 0;
+    if (n <= 0 || len == 0) {
+        out->h.len = 0;
+        out->h.cap = 0;
+        out->items = NULL;
+        return mkobj(&out->h);
+    }
+    if ((uint64_t)n > UINT64_MAX / len) panicf("repeated sequence too large");
+    uint64_t total = len * (uint64_t)n;
+    out->h.len = total;
+    out->h.cap = total;
+    if (!is_tuple && arr_packed(a)) {
+        out->items = NULL;
+        out->iitems = (int64_t *)xmalloc((size_t)total * sizeof(int64_t));
+        for (uint64_t i = 0; i < (uint64_t)n; ++i)
+            memcpy(out->iitems + i * len, a->iitems, (size_t)len * sizeof(int64_t));
+        out->flags |= ARR_F_PACKED;
+        return mkobj(&out->h);
+    }
+    arr_ensure_aval(a);
+    out->items = (aval *)xmalloc((size_t)total * sizeof(aval));
+    for (uint64_t i = 0; i < (uint64_t)n; ++i)
+        memcpy(out->items + i * len, a->items, (size_t)len * sizeof(aval));
+    return mkobj(&out->h);
+}
+
 aval binary_arith(aval l, aval r, char op, const char *opname) {
     int li = is_int_val(l), ri = is_int_val(r);
     int ld = a_is_double(l), rd = a_is_double(r);
@@ -230,6 +263,10 @@ aval binary_arith(aval l, aval r, char op, const char *opname) {
     if (op == '*' ) {
         if (kind_of(l) == K_STR && ri) return str_repeat(l, int_val_full(r));
         if (kind_of(r) == K_STR && li) return str_repeat(r, int_val_full(l));
+        if ((kind_of(l) == K_LIST || kind_of(l) == K_TUPLE) && ri)
+            return repeat_arr(l, int_val_full(r));
+        if ((kind_of(r) == K_LIST || kind_of(r) == K_TUPLE) && li)
+            return repeat_arr(r, int_val_full(l));
     }
     if (li && ri) return arith_int_int(l, r, op);
     panic_binop(opname, l, r);
