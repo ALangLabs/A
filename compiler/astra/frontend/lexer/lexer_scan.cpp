@@ -313,6 +313,7 @@ void Lexer::scanChar() {
         token.span = makeSpan(start, startLine, startCol);
         token.lexeme = text_.substr(start, pos_ - start);
         token.strValue = content;
+        token.plainString = true;
         tokens_.push_back(std::move(token));
         return;
       }

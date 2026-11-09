@@ -553,6 +553,11 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       if (!arity(0, 0, "no arguments")) return typeError();
       return typeInt(64, true);
     }
+    if (method == "format") {
+      // "{} {0} {name}".format(...) — positional fields only.
+      for (auto& arg : call.args) inferExpr(*arg.value);
+      return typeString();
+    }
     sink_.error(field.fieldSpan,
                 "String has no method named '" + method + "'.",
                 availableMethodsHelp("string", stringMethods()));

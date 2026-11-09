@@ -269,6 +269,56 @@ static aval str_case_fast(aval v, int mode) {
     return outv;
 }
 
+/* "{}".format / "{0}".format / "{name}".format — positional and named
+   fields with {{ }} escapes, like Python's str.format (no format specs). */
+static aval str_format_obj(aval self, uint64_t n, aval *argv) {
+    uint64_t slen;
+    const char *s = str_data(self, &slen);
+    Buf b;
+    buf_init(&b);
+    uint64_t autoIdx = 0;
+    for (uint64_t i = 0; i < slen; ++i) {
+        char c = s[i];
+        if (c == '}') {
+            if (i + 1 < slen && s[i + 1] == '}') { buf_addc(&b, '}'); ++i; continue; }
+            panicf("single '}' in format string");
+        }
+        if (c != '{') { buf_addc(&b, c); continue; }
+        if (i + 1 < slen && s[i + 1] == '{') { buf_addc(&b, '{'); ++i; continue; }
+        // Parse field: {name} or {index}; no format specs supported.
+        uint64_t j = i + 1;
+        uint64_t fieldStart = j;
+        while (j < slen && s[j] != '}' && s[j] != ':' && s[j] != '!') ++j;
+        if (j >= slen || s[j] != '}') {
+            panicf("unsupported or unterminated '{}' field in format string");
+        }
+        uint64_t flen = j - fieldStart;
+        aval arg;
+        if (flen == 0) {
+            if (autoIdx >= n) panicf("not enough arguments for format string");
+            arg = argv[autoIdx++];
+        } else {
+            // Field must be all digits (positional index).
+            uint64_t idx = 0;
+            int digits = 1;
+            for (uint64_t k = fieldStart; k < j; ++k) {
+                if (s[k] < '0' || s[k] > '9') { digits = 0; break; }
+                idx = idx * 10 + (uint64_t)(s[k] - '0');
+            }
+            if (!digits) panicf("named format fields are not supported");
+            if (idx >= n) panicf("argument index out of range in format string");
+            arg = argv[idx];
+        }
+        aval sv = a_str(arg);
+        uint64_t vlen;
+        const char *vs = str_data(sv, &vlen);
+        buf_addn(&b, vs, vlen);
+        i = j;
+    }
+    (void)autoIdx;
+    return buf_take(&b);
+}
+
 /* str_affix with memset padding instead of per-byte buf_addc. Same modes
    (0 ljust, 1 rjust, 2 center, 3 zfill) and byte-count semantics. */
 static aval str_affix_fast(aval v, int64_t width, aval fillv, int mode) {
@@ -392,6 +442,9 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             want_args(name, n, 2, 3);
             int64_t count = n == 3 ? expect_int64(argv[2], "count") : -1;
             return str_replace_fast(obj, argv[0], argv[1], count);
+        }
+        if (!strcmp(name, "format")) {
+            return str_format_obj(obj, n, argv);
         }
         if (!strcmp(name, "startswith") || !strcmp(name, "endswith")) {
             want_args(name, n, 1, 3);

@@ -131,6 +131,7 @@ struct Token {
   double floatValue = 0.0;
   char32_t charValue = 0;
   bool rawString = false;  // triple-quoted literal: no escapes/interpolation
+  bool plainString = false;  // '...' literal: escapes decoded, no interpolation
 };
 
 const char* tokName(Tok kind);

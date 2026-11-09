@@ -115,6 +115,14 @@ std::vector<StringPart> Parser::parseStringParts(const Token& token) {
     if (!part.text.empty()) parts.push_back(std::move(part));
     return parts;
   }
+  if (token.plainString) {
+    // '...' literals: escapes decode, but {expr} is never interpolation.
+    StringPart part;
+    part.isExpr = false;
+    part.text = decodeEscapes(raw, token.span);
+    if (!part.text.empty()) parts.push_back(std::move(part));
+    return parts;
+  }
   std::string literal;
   std::size_t i = 0;
 

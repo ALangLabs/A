@@ -121,6 +121,7 @@ inline const std::vector<MethodSig>& stringMethods() {
       {"rsplit", "rsplit([sep[, maxsplit]])", "Splits from the right into an array."},
       {"splitlines", "splitlines([keepends])", "Splits at line boundaries."},
       {"join", "join(parts)", "Concatenates an array of strings with this string between."},
+      {"format", "format(*args)", "Python-style '{}'/ '{0}' field formatting."},
       {"isalnum", "isalnum()", "True when every character is a letter or digit."},
       {"isalpha", "isalpha()", "True when every character is a letter."},
       {"isascii", "isascii()", "True when every character is ASCII."},
