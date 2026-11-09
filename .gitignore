@@ -16,6 +16,7 @@ cmake-build-*/
 *.exe
 compile_commands.json
 .cache/
+_acache_/
 Plan.md
 .kilo/
 __pycache__/
