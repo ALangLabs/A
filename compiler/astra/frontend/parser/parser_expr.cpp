@@ -7,6 +7,7 @@ int Parser::binaryPrecedence(Tok kind) {
   switch (kind) {
     case Tok::Pipe: return 1;
     case Tok::Question: return 2;
+    case Tok::KwIf: return 2;
     case Tok::QuestionQuestion: return 3;
     case Tok::KwOr: return 4;
     case Tok::KwAnd: return 5;
@@ -175,6 +176,20 @@ ExprPtr Parser::parseExpression(int minPrec) {
     int prec = binaryPrecedence(kind);
     if (prec < minPrec || prec < 0) break;
     const Token& opTok = advance();
+    if (kind == Tok::KwIf) {
+      // Python-style inline conditional: `value if cond else other`.
+      // `left` is the then-value; the condition sits between 'if' and 'else'.
+      auto cond = parseExpression();
+      expect(Tok::KwElse, "'else' in the inline conditional");
+      auto elseValue = parseExpression(prec);
+      auto ternary = std::make_unique<TernaryExpr>();
+      ternary->span = Span::join(left->span, elseValue->span);
+      ternary->cond = std::move(cond);
+      ternary->thenValue = std::move(left);
+      ternary->elseValue = std::move(elseValue);
+      left = std::move(ternary);
+      continue;
+    }
     if (kind == Tok::Question) {
       auto thenValue = parseExpression();
       expect(Tok::Colon, "':' in the conditional expression");
