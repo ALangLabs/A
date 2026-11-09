@@ -538,6 +538,12 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     }
   }
 
+  if (op == "%" && resolveType(lhs)->kind == TypeKind::String) {
+    // Python-style printf formatting: "%d %s" % (a, b).
+    inferExpr(*expr.rhs);
+    return typeString();
+  }
+
   if (op == "-" || op == "*" || op == "/" || op == "//" || op == "%" || op == "**") {
     // Arithmetic other than '+' requires numeric operands; the runtime
     // panics on anything else (e.g. "a" - "b", true + 1 handled above).

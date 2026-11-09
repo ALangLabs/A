@@ -241,7 +241,129 @@ static aval repeat_arr(aval listv, int64_t n) {
     return mkobj(&out->h);
 }
 
+// Growable byte buffer for str_format_percent.
+typedef struct { char *p; size_t len, cap; } FmtBuf;
+static void fmt_putc(FmtBuf *b, char c) {
+    if (b->len + 1 > b->cap) {
+        b->cap = b->cap ? b->cap * 2 : 256;
+        b->p = (char *)realloc(b->p, b->cap);
+    }
+    b->p[b->len++] = c;
+}
+static void fmt_puts(FmtBuf *b, const char *s) {
+    while (*s) fmt_putc(b, *s++);
+}
+
+// "%d %s" % args — Python-style printf formatting. Supports the C subset
+// %[flags][width][.precision]conv for d i u x X o c s r f F e E g G %.
+static aval str_format_percent(aval fmt, aval args) {
+    uint64_t flen;
+    const char *f = str_data(fmt, &flen);
+    // Collect positional arguments.
+    aval *argv = NULL;
+    uint64_t argc = 0;
+    if (kind_of(args) == K_TUPLE) {
+        AArr *a = (AArr *)obj_of(args);
+        if (a) {
+            argc = a->h.len;
+            argv = (aval *)xmalloc((size_t)(argc ? argc : 1) * sizeof(aval));
+            for (uint64_t i = 0; i < argc; ++i) argv[i] = arr_elem(a, i);
+        }
+    } else {
+        argv = (aval *)xmalloc(sizeof(aval));
+        argv[0] = args;
+        argc = 1;
+    }
+    FmtBuf out = { NULL, 0, 0 };
+    uint64_t ai = 0;
+    for (uint64_t i = 0; i < flen; ++i) {
+        char c = f[i];
+        if (c != '%') { fmt_putc(&out, c); continue; }
+        if (i + 1 < flen && f[i + 1] == '%') { fmt_putc(&out, '%'); ++i; continue; }
+        // Parse the spec: %[flags][width][.precision][length]conv
+        uint64_t j = i + 1;
+        char spec[64];
+        uint64_t sn = 0;
+        spec[sn++] = '%';
+        while (j < flen && strchr("-+ #0", f[j]) && sn < 60) spec[sn++] = f[j++];
+        while (j < flen && isdigit((unsigned char)f[j]) && sn < 60) spec[sn++] = f[j++];
+        if (j < flen && f[j] == '.' && sn < 60) {
+            spec[sn++] = f[j++];
+            while (j < flen && isdigit((unsigned char)f[j]) && sn < 60) spec[sn++] = f[j++];
+        }
+        while (j < flen && strchr("lhLzjt", f[j])) ++j;  // skip length modifiers
+        if (j >= flen) { panicf("incomplete format specifier"); }
+        char conv = f[j];
+        if (sn >= 60) panicf("format specifier too long");
+        if (ai >= argc) panicf("not enough arguments for format string");
+        aval v = argv[ai++];
+        char numbuf[512];
+        switch (conv) {
+            case 'd': case 'i': {
+                spec[sn++] = 'l'; spec[sn++] = 'l'; spec[sn++] = 'd'; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, (long long)int_val_full(v));
+                break;
+            }
+            case 'u': {
+                spec[sn++] = 'l'; spec[sn++] = 'l'; spec[sn++] = 'u'; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, (unsigned long long)int_val_full(v));
+                break;
+            }
+            case 'x': case 'X': case 'o': {
+                char lc = conv == 'X' ? 'X' : conv;
+                spec[sn++] = 'l'; spec[sn++] = 'l'; spec[sn++] = lc; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, (unsigned long long)int_val_full(v));
+                break;
+            }
+            case 'c': {
+                spec[sn++] = 'c'; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, (int)int_val_full(v));
+                break;
+            }
+            case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': {
+                spec[sn++] = conv; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, num_to_double(v));
+                break;
+            }
+            case 's': {
+                aval sv = a_str(v);
+                uint64_t vlen;
+                const char *vs = str_data(sv, &vlen);
+                char *tmp = (char *)xmalloc(vlen + 1);
+                memcpy(tmp, vs, vlen);
+                tmp[vlen] = 0;
+                spec[sn++] = 's'; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, tmp);
+                free(tmp);
+                break;
+            }
+            case 'r': {
+                aval rs = a_repr(v);
+                uint64_t rlen;
+                const char *rsdata = str_data(rs, &rlen);
+                char *tmp = (char *)xmalloc(rlen + 1);
+                memcpy(tmp, rsdata, rlen);
+                tmp[rlen] = 0;
+                spec[sn++] = 's'; spec[sn] = 0;
+                snprintf(numbuf, sizeof(numbuf), spec, tmp);
+                free(tmp);
+                break;
+            }
+            default:
+                panicf("unsupported format specifier");
+        }
+        fmt_puts(&out, numbuf);
+        i = j;
+    }
+    if (ai < argc && argc > 1) panicf("not all arguments converted during string formatting");
+    free(argv);
+    aval result = a_str_new(out.p ? out.p : "", out.len);
+    free(out.p);
+    return result;
+}
+
 aval binary_arith(aval l, aval r, char op, const char *opname) {
+    if (op == '%' && kind_of(l) == K_STR) return str_format_percent(l, r);
     int li = is_int_val(l), ri = is_int_val(r);
     int ld = a_is_double(l), rd = a_is_double(r);
     if ((li && rd) || (ld && ri) || (ld && rd))
