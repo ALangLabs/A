@@ -46,6 +46,10 @@ void flushFinal(DiagnosticSink& s,const PipelineConfig& c,std::ostream& o,std::o
   if(c.jsonDiagnostics&&c.checkOnly) s.writeJson(o); else s.flush(e,c.useColor);
 }
 bool readAll(const std::string& p,std::string& t,std::ostream& e){
+  std::error_code ec;
+  if(std::filesystem::is_directory(p,ec)){
+    e<<"error: '"<<p<<"' is a directory, not a source file\n"; return false;
+  }
   std::ifstream f(p,std::ios::binary); if(!f){e<<"error: cannot open '"<<p<<"'\n"; return false;}
   std::ostringstream b; b<<f.rdbuf(); if(f.bad()){e<<"error: failed to read '"<<p<<"'\n"; return false;} t=b.str(); return true;
 }
@@ -1113,6 +1117,18 @@ inline std::uint64_t sighash(const Module& mod) {
         h = run_cache::mixBytes(h, "L:" + let->name + ":" + typeSig(let->type));
         break;
       }
+      case StmtKind::Assign: {
+        // Top-level `x = ...` creates an implicit global (__a_top_*) just
+        // like `let`; it must be part of the interface hash or dependent
+        // units keep stale objects when the global appears/disappears.
+        const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
+        if (as->target && as->target->kind == ExprKind::Ident) {
+          const std::string& nm =
+              static_cast<const IdentExpr*>(as->target.get())->name;
+          h = run_cache::mixBytes(h, "AS:" + nm + ":" + exprSig(as->value.get()));
+        }
+        break;
+      }
       case StmtKind::TypeAlias: {
         const TypeAliasDecl* ta = static_cast<const TypeAliasDecl*>(s.get());
         h = run_cache::mixBytes(h, "A:" + ta->name + ":" + typeSig(ta->type));
@@ -1159,6 +1175,54 @@ inline std::uint64_t sighash(const Module& mod) {
       }
       default:
         break;
+    }
+  }
+  return h;
+}
+// Names a module contributes to the emitter's flat global scope
+// (buildGlobalScope binds top-level lets/assigns, functions, structs, enum
+// variants and module names across ALL modules, first/last-wins in module
+// order). A unit's object can therefore reference `__a_top_*`/`__a_f_*`
+// symbols owned by modules outside its import closure, so the unit key must
+// capture the whole graph's *name namespace* — but not signatures or bodies:
+// callers reach cross-module functions through adaptive/runtime dispatch, so
+// an interface-only edit (e.g. an extra parameter) does not change the
+// symbols a dependent unit references.
+inline std::uint64_t scopeNamesHash(const Module& mod) {
+  std::uint64_t h = 1469598103934665603ULL;
+  h = run_cache::mixBytes(h, "scope1");
+  h = run_cache::mixBytes(h, mod.name);
+  h = run_cache::mixBytes(h, stemOf(mod.path));
+  if (mod.program) {
+    for (const StmtPtr& s : mod.program->statements) {
+      switch (s->kind) {
+        case StmtKind::Let: {
+          h = run_cache::mixBytes(h, "L:" + static_cast<const LetStmt*>(s.get())->name);
+          break;
+        }
+        case StmtKind::Assign: {
+          const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
+          if (as->target && as->target->kind == ExprKind::Ident)
+            h = run_cache::mixBytes(
+                h, "A:" + static_cast<const IdentExpr*>(as->target.get())->name);
+          break;
+        }
+        case StmtKind::FnDecl:
+          h = run_cache::mixBytes(h, "F:" + static_cast<const FnDecl*>(s.get())->name);
+          break;
+        case StmtKind::StructDecl:
+          h = run_cache::mixBytes(h, "S:" + static_cast<const StructDecl*>(s.get())->name);
+          break;
+        case StmtKind::EnumDecl: {
+          const EnumDecl* e = static_cast<const EnumDecl*>(s.get());
+          h = run_cache::mixBytes(h, "E:" + e->name);
+          for (const EnumVariant& v : e->variants)
+            h = run_cache::mixBytes(h, "V:" + v.name + "=" + exprSig(v.value.get()));
+          break;
+        }
+        default:
+          break;
+      }
     }
   }
   return h;
@@ -1259,6 +1323,13 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
 // identity and per-module sighashes/sources are computed once, not per unit.
 struct KeyContext {
   std::uint64_t runtimeBase = 0;
+  // Hash of the flat global scope every unit is emitted against: each
+  // module's path, module name/stem and top-level exported names, in
+  // g.modules order (the order buildGlobalScope resolves collisions).
+  // Signature/body edits leave this unchanged, so unaffected units keep
+  // their cached objects; adding/removing/reordering a module or renaming
+  // a top-level symbol changes it and rebuilds everything.
+  std::uint64_t graphKey = 0;
   std::unordered_map<int, std::uint64_t> sighById;
   std::unordered_map<int, std::string> sourceById;
 };
@@ -1305,6 +1376,17 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
     }
     ctx.sourceById[mod.id] = std::move(text);
   }
+  {
+    std::uint64_t gh = 1469598103934665603ULL;
+    gh = run_cache::mixBytes(gh, "graph1");
+    gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.entry));
+    gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.preludeId));
+    for (const Module& mod : g.modules) {
+      gh = run_cache::mixBytes(gh, "G:" + mod.path);
+      gh = run_cache::mixInt(gh, scopeNamesHash(mod));
+    }
+    ctx.graphKey = gh;
+  }
   return ctx;
 }
 inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
@@ -1312,6 +1394,7 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
                                   const std::string* testFilter, int moduleId,
                                   const std::set<int>& deps) {
   std::uint64_t h = ctx.runtimeBase;
+  h = run_cache::mixInt(h, ctx.graphKey);
   const ModuleGraph& g = *m.graph;
   const Module& mod = g.at(moduleId);
   h = run_cache::mixBytes(h, "M:" + mod.path);
@@ -1326,6 +1409,9 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
     h = run_cache::mixInt(h, dit == ctx.sighById.end() ? 0 : dit->second);
   }
   if (moduleId == g.entry) {
+    // g.order is the module init-call order emitted into the entry unit;
+    // it is not implied by module-id order, so hash it explicitly.
+    for (int id : g.order) h = run_cache::mixInt(h, static_cast<std::uint64_t>(id));
     h = run_cache::mixInt(h, testMode ? 1 : 0);
     if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
   }
@@ -2332,6 +2418,21 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   return rc < 0 ? kCErr : rc;
 }
 }
+// True when the entry module declares `fn main` — the automatic entry
+// point invoked after module top-level statements (docs/wiki/modules.md).
+// `a run`/`a build` on a file without one used to exit 0 silently.
+bool entryHasMain(const ModuleGraph& g){
+  if(g.entry<0||g.entry>=(int)g.modules.size()) return false;
+  const Module& mod=g.at(g.entry);
+  if(!mod.program) return false;
+  for(const StmtPtr& s:mod.program->statements)
+    if(s->kind==StmtKind::FnDecl&&static_cast<const FnDecl*>(s.get())->name=="main") return true;
+  return false;
+}
+void warnNoMain(const ModuleGraph& g,const std::string& path,std::ostream& err){
+  if(entryHasMain(g)) return;
+  err<<"warning: '"<<path<<"' has no 'fn main'; only top-level statements will run\n";
+}
 CompiledModule runFrontendPipeline(const std::string& path,std::string source,const PipelineConfig& config,DiagnosticSink& sink,std::ostream& diagOut,std::ostream& diagErr){
   ModuleLoaderOptions opts; opts.modulePaths=config.modulePaths; opts.stdlibRoot=config.stdlibRoot;
   ModuleLoader loader(std::move(opts),sink); ModuleGraph graph=loader.load(path,std::move(source));
@@ -2384,6 +2485,9 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   {
     std::ostringstream diagStream;
     DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,diagStream); if(!m.ok){ err << diagStream.str(); return kCErr; }
+    // Route through diagStream so the warning is captured in the run-cache
+    // .diag sidecar and replayed on precheck hits like other diagnostics.
+    warnNoMain(*m.graph,path,diagStream);
     diagCapture = diagStream.str();
     err << diagCapture;
     if(!preBin.empty()){
@@ -2403,9 +2507,10 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  // --filter with no matching test_* function: report and exit cleanly
-  // instead of compiling a binary that would run zero tests. Mirrors the
-  // emitter's discovery predicate (top-level FnDecl in the entry module).
+  // --filter with no matching test_* function: report and exit nonzero
+  // instead of compiling a binary that would run zero tests — a typo'd
+  // filter must not pass CI silently. Mirrors the emitter's discovery
+  // predicate (top-level FnDecl in the entry module).
   if(!config.testFilter.empty()){
     bool any=false;
     const ModuleGraph& g=*m.graph;
@@ -2421,14 +2526,62 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
         }
       }
     }
-    if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kOk; }
+    if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kCErr; }
+  }
+  // test_* functions are invoked by the runtime harness as f(argv) with no
+  // declared arguments; a parameter would silently read a padded A_NONE
+  // slot. Sema cannot see test mode, so reject them here — same predicate
+  // as the emitter's discovery (top-level FnDecl in the entry module).
+  {
+    const ModuleGraph& g=*m.graph;
+    if(g.entry>=0 && g.entry<(int)g.modules.size()){
+      const Module& mod=g.at(g.entry);
+      if(mod.program){
+        for(const StmtPtr& s:mod.program->statements){
+          if(s->kind!=StmtKind::FnDecl) continue;
+          const FnDecl* f=static_cast<const FnDecl*>(s.get());
+          if(f->name.rfind("test_",0)!=0) continue;
+          if(f->params.empty() && f->comptimeParams.empty()) continue;
+          Span sp=f->nameSpan.valid()?f->nameSpan:f->span;
+          sink.error(sp,
+                     "Test function '"+f->name+"' must not declare parameters.",
+                     "The test harness calls test_* functions with no arguments.");
+        }
+      }
+    }
+    if(sink.hasErrors()){ sink.flush(err,config.useColor); return kCErr; }
   }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
                        config.testFilter.empty()?nullptr:&config.testFilter, config.jobs);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
+  // Guard `a build x.a -o x.a`: astra would overwrite the source file with
+  // the ELF. Compare canonical paths so `./x.a`, `sub/../x.a` and symlinks
+  // are caught too.
+  {
+    std::error_code eci, eco;
+    std::filesystem::path inAbs = std::filesystem::absolute(path, eci);
+    std::filesystem::path outAbs = std::filesystem::absolute(outputPath, eco);
+    bool same;
+    if (!eci && !eco) {
+      std::error_code eci2, eco2;
+      std::filesystem::path inC = std::filesystem::weakly_canonical(inAbs, eci2);
+      std::filesystem::path outC = std::filesystem::weakly_canonical(outAbs, eco2);
+      same = (!eci2 && !eco2)
+                 ? (inC == outC)
+                 : (inAbs.lexically_normal() == outAbs.lexically_normal());
+    } else {
+      same = inAbs.lexically_normal() == outAbs.lexically_normal();
+    }
+    if (same) {
+      err << "error: output path '" << outputPath << "' equals input file '"
+          << path << "' — refusing to overwrite the source\n";
+      return kCErr;
+    }
+  }
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
+  warnNoMain(*m.graph,path,err);
   // `a build`: emit target assembly (x86-64 SysV asm, per-arch native),
   // then astra links a native executable for the target arch.
   TargetDesc td;

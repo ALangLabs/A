@@ -30,7 +30,7 @@ faster dev builds).
 - `--no-color` — plain diagnostics.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.a --filter dict`). A filter
-  matching nothing prints `no tests matched` and exits 0. The filter is part
+  matching nothing prints `no tests matched` and exits 1. The filter is part
   of the run-cache key, so different filters never share a cached binary.
 - `--target <arch>` — cross-compile target: `x86_64`
   (default; x86-64 assembly emitter on Linux/macOS SysV, Win64 MS-ABI

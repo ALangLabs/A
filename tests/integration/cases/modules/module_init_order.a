@@ -1,0 +1,5 @@
+import "lib/order_mid.a" as mid
+import "lib/order_base.a" as base
+fn main():
+    print(mid.val_seen)
+    print(base.val)
