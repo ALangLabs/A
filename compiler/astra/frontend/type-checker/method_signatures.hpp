@@ -43,6 +43,7 @@ inline const std::vector<MethodSig>& mapMethods() {
   static const std::vector<MethodSig> methods = {
       {"get", "get(k[, default])", "Value for key k; the default or None when absent."},
       {"pop", "pop(k[, default])", "Removes the key and returns its value or the default."},
+      {"remove_at", "remove_at(k)", "Removes the key and returns its value; panics when absent."},
       {"setdefault", "setdefault(k[, default])", "Value for key k, inserting the default when absent."},
       {"contains", "contains(k)", "True when the map holds the key."},
       {"keys", "keys()", "The keys as an array."},

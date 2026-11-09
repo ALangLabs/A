@@ -55,6 +55,7 @@ class Parser {
   StmtPtr parseBreak();
   StmtPtr parseContinue();
   StmtPtr parseDefer();
+  StmtPtr parseDel();
   StmtPtr parseImport();
   StmtPtr parseFromImport();
   StmtPtr parseTypedDeclaration();

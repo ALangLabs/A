@@ -25,6 +25,14 @@ aval method_dict(aval obj, const char *name, uint64_t n, aval *argv) {
             }
             return A_NONE;
         }
+        if (!strcmp(name, "remove_at")) {
+            want_args(name, n, 1, 1);
+            int64_t i = dict_find(d, argv[0]);
+            if (i < 0) panicf("key not found");
+            aval r = d->pairs[i].v;
+            dict_remove_at(d, (uint64_t)i);
+            return r;
+        }
         if (!strcmp(name, "pop")) {
             want_args(name, n, 1, 2);
             int64_t i = dict_find(d, argv[0]);

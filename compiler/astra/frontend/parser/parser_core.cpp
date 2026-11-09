@@ -129,6 +129,8 @@ StmtPtr Parser::parseStatement() {
       return parseContinue();
     case Tok::KwDefer:
       return parseDefer();
+    case Tok::KwDel:
+      return parseDel();
     case Tok::KwImport:
       return parseImport();
     case Tok::KwFrom:

@@ -39,6 +39,7 @@ const char* tokName(Tok kind) {
     case Tok::KwAnd: return "'and'";
     case Tok::KwOr: return "'or'";
     case Tok::KwIs: return "'is'";
+    case Tok::KwDel: return "'del'";
     case Tok::KwNot: return "'not'";
     case Tok::KwImport: return "'import'";
     case Tok::KwFrom: return "'from'";

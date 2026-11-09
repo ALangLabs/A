@@ -117,6 +117,51 @@ StmtPtr Parser::parseDefer() {
   return stmt;
 }
 
+StmtPtr Parser::parseDel() {
+  Span start = cur().span;
+  expect(Tok::KwDel, "'del'");
+  auto target = parseExpression();
+  Span span = Span::join(start, previousSpan());
+  auto noneLit = [&]() {
+    auto n = std::make_unique<IdentExpr>();
+    n->name = "None";
+    n->span = span;
+    return n;
+  };
+  if (auto* idx = dynamic_cast<IndexExpr*>(target.get())) {
+    // del xs[i]  ->  xs.remove_at(i)
+    auto call = std::make_unique<CallExpr>();
+    call->span = span;
+    auto field = std::make_unique<FieldExpr>();
+    field->span = span;
+    field->object = std::move(idx->object);
+    field->field = "remove_at";
+    field->fieldSpan = span;
+    call->callee = std::move(field);
+    CallArg arg;
+    arg.value = std::move(idx->index);
+    call->args.push_back(std::move(arg));
+    auto stmt = std::make_unique<ExprStmt>();
+    stmt->span = span;
+    stmt->expr = std::move(call);
+    return stmt;
+  }
+  if (dynamic_cast<FieldExpr*>(target.get()) != nullptr ||
+      dynamic_cast<IdentExpr*>(target.get()) != nullptr) {
+    // del x.k / del x  ->  x.k = None / x = None
+    auto stmt = std::make_unique<AssignStmt>();
+    stmt->span = span;
+    stmt->op = "=";
+    stmt->binop = BinOp::Invalid;
+    stmt->opSpan = span;
+    stmt->target = std::move(target);
+    stmt->value = noneLit();
+    return stmt;
+  }
+  fail(target->span, "'del' target must be a name, index, or field.",
+       "Write del x, del x[i], or del x.field.");
+}
+
 StmtPtr Parser::parseImport() {
   Span start = cur().span;
   expect(Tok::KwImport, "'import'");

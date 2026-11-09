@@ -273,6 +273,11 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       }
       return value;
     }
+    if (method == "remove_at") {
+      if (!arity(1, 1, "1 argument (key)")) return typeError();
+      keyArg(0);
+      return value;
+    }
     if (method == "setdefault") {
       if (!arity(1, 2, "1 or 2 arguments (key[, default])")) return typeError();
       keyArg(0);
