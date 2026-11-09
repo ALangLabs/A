@@ -736,7 +736,12 @@ bool AsmEmitter::tryEmitInlineCall(FnInfo* f, const CallExpr& call) {
     specNames_.clear();
     nameRanges_.clear();
 
-    if (rawOk) {
+    if (argsRaw) {
+      // Raw body requires raw int64 args: emitRawBody(argsRaw=false)
+      // unboxes aval args via emitAvalToI64, which panics on a double
+      // aval — and an int-*typed* arg can hold one after overflow
+      // promotion. Args failing rawSafeExpr take the generic inline
+      // path below (params bound as avals, fully dynamic semantics).
       emitRawBody(f, argSlots, argsRaw, false);
     } else {
       for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
@@ -1170,6 +1175,92 @@ void AsmEmitter::emitMethodCall(const Expr* objExpr, const std::string& field, c
     emit("    call a_method");
   }
 
+// Runtime-checked method dispatch for receivers whose static type cannot
+// name the struct (untyped class fields, `var`, error types). Each
+// candidate is guarded by: obj is a T_STRUCT (tagged pointer to an object
+// whose AObj.type == 17) AND its stored class name (AStruct.name, an aval
+// string at payload+40) equals the candidate's display name — the same
+// module-stripped name emitStructCtor stores via a_struct_new. On a match
+// the method is called directly with self = obj; anything else falls back
+// to a_method so builtin container/str/dict/set/pyobj receivers keep
+// working and wrong-type struct receivers panic via method_no_method
+// instead of silently running another class's method.
+void AsmEmitter::emitCheckedMethodCall(
+    const Expr* objExpr, const std::string& field, const CallExpr& call,
+    const std::vector<std::pair<std::string, FnInfo*>>& cands) {
+    int os = evalSlot(objExpr);
+    std::string fbL = newLabel("umfb"), doneL = newLabel("umdn");
+    // T_STRUCT test: tagged pointer (top16 == 0xFFFF), 16-aligned payload,
+    // nonzero, AObj.type == T_STRUCT (17). Mirrors emitUnboxInt's checks.
+    loadSlot(os, "%rcx");
+    emit("    mov %rcx, %rax\n    shr $48, %rax\n    cmp $0xFFFF, %eax\n"
+         "    jne " + fbL + "\n");
+    emit("    mov %rcx, %rax\n    and $0xF, %eax\n    jnz " + fbL + "\n");
+    emit("    mov %rcx, %rax\n    shl $16, %rax\n    shr $16, %rax\n"
+         "    jz " + fbL + "\n");
+    emit("    cmpl $17, (%rax)\n    jne " + fbL + "\n");
+    // AStruct layout: ADict (AObj 16B + pairs 8 + slots 8 + scap 8 = 40B),
+    // then aval name @40, aval methods @48.
+    int nameS = allocSlot();
+    emit("    mov 40(%rax), %rcx\n    mov %rcx, " + slotRef(nameS) + "\n");
+    for (const auto& c : cands) {
+      std::string nextL = newLabel("umnx");
+      int cs = strLitSlot(c.first);
+      call2slot("a_eq_slow", nameS, cs);
+      emit("    mov %rax, %rdi\n    call a_truthy_raw_slow\n"
+           "    test %rax, %rax\n    jz " + nextL + "\n");
+      FnInfo* m = c.second;
+      std::vector<int> ps(m->paramNames.size(), -1);
+      ps[0] = os;  // self
+      if (m->paramNames.size() > 1) {
+        std::vector<std::string> rest(m->paramNames.begin() + 1,
+                                      m->paramNames.end());
+        placeArgs(call, rest, ps, 1,
+                  m->variadic ? (int)m->paramNames.size() - 1 : -1);
+      }
+      emitDirectCall(m->cname.c_str(), ps);
+      jmp(doneL);
+      emitLabel(nextL);
+    }
+    jmp(fbL);
+    emitLabel(fbL);
+    // Fallback: identical staging to emitMethodCall but reusing the
+    // already-evaluated receiver slot (evaluating objExpr again would run
+    // its side effects twice).
+    {
+      std::vector<int> posSlots;
+      std::vector<std::pair<std::string, int>> kwSlots;
+      for (const CallArg& a : call.args) {
+        int s = evalSlot(a.value.get());
+        if (a.name.empty()) {
+          posSlots.push_back(s);
+        } else {
+          kwSlots.push_back({a.name, s});
+        }
+      }
+      Argv av = allocArgv((int)posSlots.size() + 2 * (int)kwSlots.size());
+      for (std::size_t i = 0; i < posSlots.size(); ++i)
+        argvStore(av, (int)i, posSlots[i]);
+      for (std::size_t i = 0; i < kwSlots.size(); ++i) {
+        int ks = strLitSlot(kwSlots[i].first);
+        argvStore(av, (int)(posSlots.size() + 2 * i), ks);
+        argvStore(av, (int)(posSlots.size() + 2 * i + 1), kwSlots[i].second);
+      }
+      std::string lbl = emitStrData(field, true);
+      loadSlot(os, "%rdi");
+      emit("    lea " + lbl + "(%rip), %rsi\n");
+      movImm(posSlots.size(), "%rdx");
+      movImm(kwSlots.size(), "%rcx");
+      if (av.n == 0) {
+        emit("    xor %r8d, %r8d");
+      } else {
+        leaSlot(argvPtr(av), "%r8");
+      }
+      emit("    call a_method");
+    }
+    emitLabel(doneL);
+  }
+
 // Place evaluated call args into paramSlots (indexed by paramNames position,
 // -1 = fill A_NONE). `offset` shifts where positional args land (1 for
 // methods whose paramNames[0] is `self`, already filled by the caller).
@@ -1439,34 +1530,51 @@ void AsmEmitter::emitCallExpr(const CallExpr& call) {
         }
       }
       if (!method) {
-        // Fallback: method name provided by exactly one struct (untyped
-        // receiver). Skip when the static type is a known runtime value.
+        // Untyped/unknown receiver: collect every struct declaring this
+        // method, keyed by the display name a_struct_new stores (module
+        // qualifier stripped, same as emitStructCtor). A display name
+        // shared by several structs is ambiguous and dropped — the call
+        // then falls back to a_method. Unlike the old "exactly one
+        // candidate" guess, dispatch is guarded at runtime by the
+        // receiver's actual struct name, so a wrong-type receiver panics
+        // instead of executing another class's method (and builtin
+        // method names like `get`/`sum` still reach a_method for real
+        // container receivers via the non-struct fallback).
         bool isRuntimeValue = ot && ot->kind != TypeKind::Struct &&
                               ot->kind != TypeKind::Error && ot->kind != TypeKind::Var;
-        int candidates = 0;
-        if (!isRuntimeValue && !isBuiltinValueMethod(f.field)) {
+        if (!isRuntimeValue) {
+          auto dispName = [](const std::string& n) {
+            std::size_t sep = n.rfind("::");
+            return sep == std::string::npos ? n : n.substr(sep + 2);
+          };
+          std::unordered_map<std::string, int> nameCount;
+          for (StructInfo* st : structList_)
+            if (st->methods.count(f.field)) ++nameCount[dispName(st->name)];
+          std::vector<std::pair<std::string, FnInfo*>> cands;
           for (StructInfo* st : structList_) {
-            if (st->methods.count(f.field)) {
-              method = st->methods[f.field];
-              ++candidates;
-            }
+            auto mit = st->methods.find(f.field);
+            if (mit == st->methods.end()) continue;
+            std::string dn = dispName(st->name);
+            if (nameCount[dn] == 1) cands.push_back({dn, mit->second});
+          }
+          if (!cands.empty()) {
+            emitCheckedMethodCall(f.object.get(), f.field, call, cands);
+            return;
           }
         }
-        if (candidates != 1) method = nullptr;
-      }
-      if (method) {
-        int selfS = evalSlot(f.object.get());
-        std::vector<int> ps(method->paramNames.size(), -1);
-        ps[0] = selfS;  // self
-        if (method->paramNames.size() > 1) {
-          std::vector<std::string> rest(method->paramNames.begin() + 1, method->paramNames.end());
-          placeArgs(call, rest, ps, 1,
-                    method->variadic ? (int)method->paramNames.size() - 1 : -1);
-        }
-        emitDirectCall(method->cname.c_str(), ps);
+        emitMethodCall(f.object.get(), f.field, call);
         return;
       }
-      emitMethodCall(f.object.get(), f.field, call);
+      // Statically resolved struct method: direct call, self = receiver.
+      int selfS = evalSlot(f.object.get());
+      std::vector<int> ps(method->paramNames.size(), -1);
+      ps[0] = selfS;  // self
+      if (method->paramNames.size() > 1) {
+        std::vector<std::string> rest(method->paramNames.begin() + 1, method->paramNames.end());
+        placeArgs(call, rest, ps, 1,
+                  method->variadic ? (int)method->paramNames.size() - 1 : -1);
+      }
+      emitDirectCall(method->cname.c_str(), ps);
       return;
     }
     emitACall(callee, call);

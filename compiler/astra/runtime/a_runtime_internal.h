@@ -224,8 +224,11 @@ typedef struct {
 /* Class instance: ADict embedded first so every (ADict *)obj_of(v) cast
    keeps working; `name` is the declared class name (NUL-terminated str
    data), `methods` an aval list of method-name strings (A_NONE when the
-   class declares none). kind_of() reports K_DICT for T_STRUCT. */
-typedef struct { ADict d; aval name; aval methods; } AStruct;
+   class declares none), `methodFns` an aval dict mapping each method name
+   to its fn value so dynamic dispatch (a_method on `var`/generic
+   receivers) resolves against the receiver's own class. kind_of()
+   reports K_DICT for T_STRUCT. */
+typedef struct { ADict d; aval name; aval methods; aval methodFns; } AStruct;
 static inline int is_dict_t(uint32_t t) { return t == T_DICT || t == T_STRUCT; }
 typedef struct { AObj h; int64_t lo, hi, step; } ARange;
 typedef struct {
@@ -393,7 +396,8 @@ aval a_list_take_i64(int64_t *v, uint64_t n);
 aval a_tuple_new(uint64_t n, aval *items);
 aval a_list_from_iter(aval it);
 aval a_dict_new(void);
-aval a_struct_new(aval name, aval methods);
+aval a_deepcopy(aval v);
+aval a_struct_new(aval name, aval methods, aval methodFns);
 aval a_dict_set(aval d, aval k, aval v);
 aval a_dict_get(aval d, aval k, aval dflt);
 aval a_dict_has(aval d, aval k);
@@ -539,6 +543,10 @@ aval bi_expect(uint64_t n, aval *argv);
 aval bi_likely(uint64_t n, aval *argv);
 aval bi_unlikely(uint64_t n, aval *argv);
 aval bi_env_get(uint64_t n, aval *argv);
+aval bi_move(uint64_t n, aval *argv);
+aval bi_borrow(uint64_t n, aval *argv);
+aval bi_borrow_mut(uint64_t n, aval *argv);
+aval bi_copy(uint64_t n, aval *argv);
 aval bi_time_now(uint64_t n, aval *argv);
 aval bi_time_sleep(uint64_t n, aval *argv);
 aval bi_terminal_isatty(uint64_t n, aval *argv);

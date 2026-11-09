@@ -391,6 +391,21 @@ void AsmEmitter::emitBindingValue(const ABinding& b) {
                 : b.aux == "E"    ? 2.71828182845904523536
                                     : 0.0;
       movImm(dblBits(v));
+    } else if (b.kind == BKind::Module || b.kind == BKind::PyModule) {
+      // Module namespace used as a value (e.g. `print(collections)`):
+      // materialize a `<module 'name'>` string aval. Member access is
+      // intercepted earlier in emitField/emitCallExpr and never reaches
+      // here.
+      std::string nm = b.aux;
+      if (nm.empty() && b.moduleId >= 0 &&
+          b.moduleId < (int)graph_.modules.size())
+        nm = graph_.at(b.moduleId).name;
+      if (nm.empty()) nm = "module";
+      std::string msg = "<module '" + nm + "'>";
+      std::string lbl = emitStrData(msg, false);
+      emit("    lea " + lbl + "(%rip), %rdi\n");
+      movImm(msg.size(), "%rsi");
+      emit("    call a_str_new\n");
     } else {
       fail("unsupported binding kind in expression");
       movImm(kNone);

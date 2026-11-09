@@ -135,6 +135,8 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "bytes_to_str", bi_bytes_to_str },
     { "net_recv_buf", bi_net_recv_buf },
     { "net_recv_buf_all", bi_net_recv_buf_all },
+    { "move", bi_move }, { "borrow", bi_borrow },
+    { "borrow_mut", bi_borrow_mut }, { "copy", bi_copy },
     /* os module */
     { "os_chdir", os_chdir }, { "os_getpid", os_getpid },
     { "os_getppid", os_getppid }, { "os_getuid", os_getuid },
@@ -147,9 +149,9 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "os_readlink", os_readlink }, { "os_utime", os_utime },
     { "os_mkdir", os_mkdir }, { "os_rmdir", os_rmdir },
     { "os_truncate", os_truncate }, { "os_environ", os_environ_all },
-    { "os_getenv", os_getenv }, { "os_setenv", os_setenv },
-    { "os_unsetenv", os_unsetenv }, { "os_system", os_system },
-    { "os_urandom", os_urandom }
+    { "os_setenv", os_setenv }, { "os_unsetenv", os_unsetenv },
+    { "os_system", os_system }, { "os_urandom", os_urandom },
+    { "os_getenv", os_getenv }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];
@@ -404,7 +406,13 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
                 close(pfd[0]); dup2(pfd[1], 2); close(pfd[1]);
                 int dn = open("/dev/null", 1);
                 if (dn >= 0) { dup2(dn, 1); close(dn); }
-                aval argv[1]; argv[0] = A_NONE;
+                /* Generous argv: test fns are supposed to take no
+                   parameters, but a test_* accidentally declared with
+                   params would read past argv[0] — hand it a padded,
+                   A_NONE-filled array so the OOB read stays in bounds
+                   until sema rejects such tests at check time. */
+                aval argv[16];
+                for (int k = 0; k < 16; ++k) argv[k] = A_NONE;
                 fns[base + (uint64_t)j](argv);
                 fflush(stdout); fflush(stderr); _exit(0);
             }
@@ -483,8 +491,9 @@ int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
 int a_test_main(uint64_t n, const char * const *names, a_test_fn const *fns) {
     int passed = 0, failed = 0;
     for (uint64_t i = 0; i < n; ++i) {
-        aval argv[1];
-        argv[0] = A_NONE;
+        /* Padded argv, see the POSIX branch above. */
+        aval argv[16];
+        for (int k = 0; k < 16; ++k) argv[k] = A_NONE;
         fns[i](argv);
         printf("ok %s\n", names[i]);
         ++passed;

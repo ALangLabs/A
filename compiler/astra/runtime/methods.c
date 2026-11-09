@@ -113,6 +113,29 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
     AObj *po0 = obj_of(obj);
     if (nkw && !(po0 && po0->type == T_PYOBJ))
         panicf("'%s' object has no support for named arguments", type_name_cstr(obj));
+    /* Struct receivers carry their own class method table (method name ->
+       fn aval) built by the class ctor: the receiver's own class wins,
+       which keeps generic/`var` dispatch correct when several classes
+       declare the same method name. A miss falls through to the normal
+       kind dispatch (dict builtins over the fields, then
+       method_no_method). self is prepended to the call argv. */
+    if (po0 && po0->type == T_STRUCT) {
+        aval fns = ((AStruct *)po0)->methodFns;
+        AObj *fo = obj_of(fns);
+        if (fo && fo->type == T_DICT) {
+            aval key = a_str_new(name, strlen(name));
+            int64_t mi = dict_find((ADict *)fo, key);
+            if (mi >= 0) {
+                aval fn = ((ADict *)fo)->pairs[mi].v;
+                aval *av2 = (aval *)xmalloc((size_t)(n + 1) * sizeof(aval));
+                av2[0] = obj;
+                for (uint64_t i = 0; i < n; ++i) av2[i + 1] = argv[i];
+                aval r = a_call(fn, n + 1, av2);
+                free(av2);
+                return r;
+            }
+        }
+    }
     /* `.len()` mirrors the len() builtin for every sized value kind. Only
        the builtin container/scalar kinds are intercepted here; other
        receivers (structs reached through `var`, Python objects) keep the

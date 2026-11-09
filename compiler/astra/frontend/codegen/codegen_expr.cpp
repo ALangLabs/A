@@ -656,6 +656,10 @@ void AsmEmitter::emitComprehension(const ComprehensionExpr& x) {
       jmp(mergedL);
       emitLabel(slowL);
       emitComprehensionIterTail(iv, x, mergedL);
+      // Balance the pushScope() above: both the fast-end exit and the
+      // iterator tail converge on mergedL, so the comprehension variable
+      // must not stay bound in the enclosing scope.
+      popScope();
       emitLabel(mergedL);
       return;
     }
@@ -1052,6 +1056,15 @@ void AsmEmitter::emitExpr(const Expr* e) {
       }
       case ExprKind::Unary: {
         auto& x = static_cast<const UnaryExpr&>(*e);
+        // `-<lit>` whose magnitude is exactly 2^63 (9223372036854775808 or
+        // 0x8000000000000000): the lexer wraps it to INT64_MIN, and negating
+        // INT64_MIN at runtime would promote to +2^63 as a double. The
+        // intended value is INT64_MIN itself, so emit it directly.
+        if (x.op == "-" && x.operand->kind == ExprKind::IntLit &&
+            static_cast<const IntLitExpr*>(x.operand.get())->value == INT64_MIN) {
+          emitIntLitA(INT64_MIN);
+          return;
+        }
         if (x.op == "++" || x.op == "--") {
           // ++/-- on a variable: updated = old +/- 1; prefix yields updated,
           // postfix yields old (mirrors the IR lowering).

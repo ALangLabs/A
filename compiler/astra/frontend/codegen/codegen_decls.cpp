@@ -458,34 +458,7 @@ void AsmEmitter::bindModuleImports(int moduleId) {
           continue;
         }
         if (im->moduleId >= 0) {
-          const Module& src = graph_.at(im->moduleId);
-          if (src.program) {
-            for (const StmtPtr& ss : src.program->statements) {
-              if (ss->kind == StmtKind::FnDecl) {
-                const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
-                for (FnInfo* fi : fnList_) {
-                  if (fi->decl == fd) {
-                    ABinding b;
-                    b.kind = BKind::FnValue;
-                    b.sym = fi->globalVar;
-                    b.fn = fi;
-                    scopes_.back()[fd->name] = b;
-                  }
-                }
-              } else if (ss->kind == StmtKind::StructDecl) {
-                const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
-                for (StructInfo* sti : structList_) {
-                  if (sti->decl == sd) {
-                    ABinding b;
-                    b.kind = BKind::StructCtor;
-                    b.sym = sti->globalVar;
-                    b.st = sti;
-                    scopes_.back()[sd->name] = b;
-                  }
-                }
-              }
-            }
-          }
+          bindFileModuleFromImport(im);
         } else if (im->nativeModule) {
           // from <native> import member: bind member -> native builtin name
           bindNativeFromImport(im);
@@ -494,13 +467,73 @@ void AsmEmitter::bindModuleImports(int moduleId) {
     }
   }
 
+// Bind `from "<file>" import name [as x]` items into the current scope:
+// each listed member binds under its alias (item.name when no `as`).
+// Functions/structs resolve through the module's decl lists; top-level
+// values bind to the module's global slot.
+void AsmEmitter::bindFileModuleFromImport(const FromImportStmt* im) {
+    const Module& src = graph_.at(im->moduleId);
+    if (!src.program) return;
+    for (const auto& item : im->items) {
+      for (const StmtPtr& ss : src.program->statements) {
+        if (ss->kind == StmtKind::FnDecl) {
+          const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
+          if (fd->name != item.name) continue;
+          for (FnInfo* fi : fnList_) {
+            if (fi->decl == fd) {
+              ABinding b;
+              b.kind = BKind::FnValue;
+              b.sym = fi->globalVar;
+              b.fn = fi;
+              scopes_.back()[item.alias] = b;
+            }
+          }
+        } else if (ss->kind == StmtKind::StructDecl) {
+          const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
+          if (sd->name != item.name) continue;
+          for (StructInfo* sti : structList_) {
+            if (sti->decl == sd) {
+              ABinding b;
+              b.kind = BKind::StructCtor;
+              b.sym = sti->globalVar;
+              b.st = sti;
+              scopes_.back()[item.alias] = b;
+            }
+          }
+        } else if (ss->kind == StmtKind::Let || ss->kind == StmtKind::Assign) {
+          std::string vn;
+          if (ss->kind == StmtKind::Let) {
+            vn = static_cast<const LetStmt*>(ss.get())->name;
+          } else {
+            const AssignStmt* as = static_cast<const AssignStmt*>(ss.get());
+            if (as->target->kind != ExprKind::Ident) continue;
+            vn = static_cast<const IdentExpr*>(as->target.get())->name;
+          }
+          if (vn != item.name) continue;
+          auto it = topLevelGlobals_.find(std::to_string(src.id) + ":" + vn);
+          if (it != topLevelGlobals_.end()) {
+            ABinding b;
+            b.kind = BKind::Global;
+            b.sym = it->second;
+            scopes_.back()[item.alias] = b;
+          }
+        }
+      }
+    }
+  }
+
 void AsmEmitter::emitStructCtor(StructInfo* st) {
     // Slots: 0=argv ptr, 1=struct, 2+2i=key str, 3+2i=field value,
-    // nameS/methS hold the class-name string and method-name list passed
-    // to a_struct_new (runtime T_STRUCT carries both for introspection).
+    // nameS/methS/fnsS hold the class-name string, method-name list and
+    // method-name->fn dict passed to a_struct_new (the dict powers
+    // runtime method dispatch for `var`/generic receivers); per-method
+    // temps follow at methTmpS+2i/+2i+1.
     int nameS = 2 + 2 * (int)st->fieldNames.size();
     int methS = nameS + 1;
-    int need = methS + 1;
+    int fnsS = methS + 1;
+    int methTmpS = fnsS + 1;
+    int nm = (int)st->methods.size();
+    int need = methTmpS + 2 * nm;
     slotCounter_ = need;
     emit("    .text\n    .globl " + st->ctorCname + "\n" + st->ctorCname + ":\n");
     emit("    push %rbp\n    mov %rsp, %rbp\n    sub $" + std::to_string(frameBytes()) + ", %rsp\n");
@@ -530,8 +563,36 @@ void AsmEmitter::emitStructCtor(StructInfo* st) {
         emit("    mov %rax, %rsi\n    call a_list_append\n");
       }
     }
+    // method-name -> fn-value dict: dynamic dispatch (a_method on
+    // `var`/generic receivers) resolves against the receiver's own class,
+    // so same-named methods on different classes cannot collide.
+    emit("    call a_dict_new\n    mov %rax, " + slotRef(fnsS) + "\n");
+    {
+      int mi = 0;
+      for (const auto& kv : st->methods) {
+        const std::string& mn = kv.first;
+        FnInfo* mf = kv.second;
+        int ks = methTmpS + 2 * mi, vs = ks + 1;
+        std::string klbl = emitStrData(mn, false);
+        emit("    lea " + klbl + "(%rip), %rdi\n");
+        movImm(mn.size(), "%rsi");
+        emit("    call a_str_new\n    mov %rax, " + slotRef(ks) + "\n");
+        // fn value: entry = method code addr, env = A_NONE, name = cstr.
+        std::string nlbl = emitStrData(mn, true);
+        emit("    lea " + mf->cname + "(%rip), %rdi\n");
+        movImm(kNone, "%rsi");
+        emit("    lea " + nlbl + "(%rip), %rdx\n    call a_fnon_new\n");
+        emit("    mov %rax, " + slotRef(vs) + "\n");
+        loadSlot(fnsS, "%rdi");
+        loadSlot(ks, "%rsi");
+        loadSlot(vs, "%rdx");
+        emit("    call a_dict_set\n");
+        ++mi;
+      }
+    }
     loadSlot(nameS, "%rdi");
     loadSlot(methS, "%rsi");
+    loadSlot(fnsS, "%rdx");
     emit("    call a_struct_new\n    mov %rax, " + slotRef(1) + "\n");
     for (std::size_t i = 0; i < st->fieldNames.size(); ++i) {
       int ks = 2 + 2 * (int)i, vs = ks + 1;
@@ -709,44 +770,14 @@ void AsmEmitter::emitMain() {
       movImm((uint64_t)kv.second.value, "%rdi");
       emit("    call a_i64n\n    mov %rax, " + kv.second.globalVar + "(%rip)\n");
     }
-    if (testMode_) {
-      // `a test`: emit a table of top-level test_* functions and let the
-      // runtime harness (a_test_main) fork/pipe each one, matching the old
-      // C-emitter protocol.
-      std::vector<FnInfo*> tests;
-      for (FnInfo* f : fnList_) {
-        if (!f->isMethod && f->moduleId == graph_.entry &&
-            f->name.rfind("test_", 0) == 0 &&
-            (testFilter_.empty() ||
-             f->name.find(testFilter_) != std::string::npos)) {
-          tests.push_back(f);
-        }
-      }
-      std::sort(tests.begin(), tests.end(),
-                [](const FnInfo* a, const FnInfo* b) { return a->name < b->name; });
-      // Emit all string labels first: emitStrData switches back to .rodata,
-      // which would corrupt an interleaved .data table.
-      std::vector<std::string> nameLbls;
-      for (FnInfo* f : tests) nameLbls.push_back(emitStrData(f->name, true));
-      rodata_ << "    .section .data\n    .align 8\n"
-                 "    .globl __a_test_names\n__a_test_names:\n";
-      for (const std::string& lbl : nameLbls) rodata_ << "    .quad " << lbl << "\n";
-      rodata_ << "    .globl __a_test_fns\n__a_test_fns:\n";
-      for (FnInfo* f : tests) rodata_ << "    .quad " << f->cname << "\n";
-      emit("    mov $" + std::to_string(tests.size()) + ", %rdi\n");
-      emit("    lea __a_test_names(%rip), %rsi\n");
-      emit("    lea __a_test_fns(%rip), %rdx\n");
-      emit("    call a_test_main\n");
-      int testRc = allocSlot();
-      emit("    mov %rax, " + slotRef(testRc) + "\n");
-      emitFramePop();
-      loadSlot(testRc);
-      emit("    leave\n    ret\n");
-    } else {
-      std::vector<int> order = graph_.order;
-      if (order.empty()) order.push_back(graph_.entry);
-      int savedModule = curModuleId_;
-      for (int mid : order) {
+    // Module top-level statements and per-module imports run in every
+    // mode, `a test` included: test_* functions observe the globals and
+    // initializers the module body establishes. Only the `fn main`
+    // invocation below is skipped under `a test`.
+    std::vector<int> order = graph_.order;
+    if (order.empty()) order.push_back(graph_.entry);
+    int savedModule = curModuleId_;
+    for (int mid : order) {
       if (mid < 0 || failed_) continue;
       const Module& mod = graph_.at(mid);
       if (!mod.program) continue;
@@ -787,34 +818,7 @@ void AsmEmitter::emitMain() {
             continue;
           }
           if (im->moduleId >= 0) {
-            const Module& src = graph_.at(im->moduleId);
-            if (src.program) {
-              for (const StmtPtr& ss : src.program->statements) {
-                if (ss->kind == StmtKind::FnDecl) {
-                  const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
-                  for (FnInfo* fi : fnList_) {
-                    if (fi->decl == fd) {
-                      ABinding b;
-                      b.kind = BKind::FnValue;
-                      b.sym = fi->globalVar;
-                      b.fn = fi;
-                      scopes_.back()[fd->name] = b;
-                    }
-                  }
-                } else if (ss->kind == StmtKind::StructDecl) {
-                  const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
-                  for (StructInfo* sti : structList_) {
-                    if (sti->decl == sd) {
-                      ABinding b;
-                      b.kind = BKind::StructCtor;
-                      b.sym = sti->globalVar;
-                      b.st = sti;
-                      scopes_.back()[sd->name] = b;
-                    }
-                  }
-                }
-              }
-            }
+            bindFileModuleFromImport(im);
           } else if (im->nativeModule) {
             // from <native> import member: bind member -> native builtin name
             bindNativeFromImport(im);
@@ -826,6 +830,41 @@ void AsmEmitter::emitMain() {
       nameRanges_.clear();
       emitBody(mod.program->statements, true);
       }
+      curModuleId_ = savedModule;
+      if (testMode_) {
+      // `a test`: emit a table of top-level test_* functions and let the
+      // runtime harness (a_test_main) fork/pipe each one, matching the old
+      // C-emitter protocol.
+      std::vector<FnInfo*> tests;
+      for (FnInfo* f : fnList_) {
+        if (!f->isMethod && f->moduleId == graph_.entry &&
+            f->name.rfind("test_", 0) == 0 &&
+            (testFilter_.empty() ||
+             f->name.find(testFilter_) != std::string::npos)) {
+          tests.push_back(f);
+        }
+      }
+      std::sort(tests.begin(), tests.end(),
+                [](const FnInfo* a, const FnInfo* b) { return a->name < b->name; });
+      // Emit all string labels first: emitStrData switches back to .rodata,
+      // which would corrupt an interleaved .data table.
+      std::vector<std::string> nameLbls;
+      for (FnInfo* f : tests) nameLbls.push_back(emitStrData(f->name, true));
+      rodata_ << "    .section .data\n    .align 8\n"
+                 "    .globl __a_test_names\n__a_test_names:\n";
+      for (const std::string& lbl : nameLbls) rodata_ << "    .quad " << lbl << "\n";
+      rodata_ << "    .globl __a_test_fns\n__a_test_fns:\n";
+      for (FnInfo* f : tests) rodata_ << "    .quad " << f->cname << "\n";
+      emit("    mov $" + std::to_string(tests.size()) + ", %rdi\n");
+      emit("    lea __a_test_names(%rip), %rsi\n");
+      emit("    lea __a_test_fns(%rip), %rdx\n");
+      emit("    call a_test_main\n");
+      int testRc = allocSlot();
+      emit("    mov %rax, " + slotRef(testRc) + "\n");
+      emitFramePop();
+      loadSlot(testRc);
+      emit("    leave\n    ret\n");
+    } else {
       // `fn main()` entry point: invoked once after all module top-levels,
       // entry module only. Never runs for imports or under `a test`.
       for (FnInfo* f : fnList_) {
@@ -835,7 +874,6 @@ void AsmEmitter::emitMain() {
           break;
         }
       }
-      curModuleId_ = savedModule;
       emitFramePop();
       emit("    xor %eax, %eax\n    leave\n    ret\n");
     }
@@ -970,34 +1008,7 @@ void AsmEmitter::emitModuleInitBody(int moduleId) {
           continue;
         }
         if (im->moduleId >= 0) {
-          const Module& src = graph_.at(im->moduleId);
-          if (src.program) {
-            for (const StmtPtr& ss : src.program->statements) {
-              if (ss->kind == StmtKind::FnDecl) {
-                const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
-                for (FnInfo* fi : fnList_) {
-                  if (fi->decl == fd) {
-                    ABinding b;
-                    b.kind = BKind::FnValue;
-                    b.sym = fi->globalVar;
-                    b.fn = fi;
-                    scopes_.back()[fd->name] = b;
-                  }
-                }
-              } else if (ss->kind == StmtKind::StructDecl) {
-                const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
-                for (StructInfo* sti : structList_) {
-                  if (sti->decl == sd) {
-                    ABinding b;
-                    b.kind = BKind::StructCtor;
-                    b.sym = sti->globalVar;
-                    b.st = sti;
-                    scopes_.back()[sd->name] = b;
-                  }
-                }
-              }
-            }
-          }
+          bindFileModuleFromImport(im);
         } else if (im->nativeModule) {
           bindNativeFromImport(im);
         }
@@ -1062,6 +1073,24 @@ void AsmEmitter::emitMainShared() {
     movImm((uint64_t)kv.second.value, "%rdi");
     emit("    call a_i64n\n    mov %rax, " + kv.second.globalVar + "(%rip)\n");
   }
+  // Run every module's top-level init (__a_modinit_<mtag>, emitted by
+  // emitModuleInitBody in that module's unit) in graph order — under
+  // `a test` too, so test_* functions see initialized globals. Only the
+  // `fn main` invocation is skipped in test mode.
+  {
+    std::vector<int> order = graph_.order;
+    if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
+    for (int mid : order) {
+      if (mid < 0 || failed_) continue;
+      if (mid >= (int)graph_.modules.size()) continue;
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) continue;
+      if (mod.id != graph_.entry && mod.name == "prelude") continue;
+      // Call __a_modinit_<mtag> (defined in that module's unit).
+      std::vector<int> noArgs;
+      emitDirectCall(modInitSym(mid).c_str(), noArgs);
+    }
+  }
   if (testMode_) {
     std::vector<FnInfo*> tests;
     for (FnInfo* f : fnList_) {
@@ -1091,18 +1120,6 @@ void AsmEmitter::emitMainShared() {
     loadSlot(testRc);
     emit("    leave\n    ret\n");
   } else {
-    std::vector<int> order = graph_.order;
-    if (order.empty() && graph_.entry >= 0) order.push_back(graph_.entry);
-    for (int mid : order) {
-      if (mid < 0 || failed_) continue;
-      if (mid >= (int)graph_.modules.size()) continue;
-      const Module& mod = graph_.at(mid);
-      if (!mod.program) continue;
-      if (mod.id != graph_.entry && mod.name == "prelude") continue;
-      // Call __a_modinit_<mtag> (defined in that module's unit).
-      std::vector<int> noArgs;
-      emitDirectCall(modInitSym(mid).c_str(), noArgs);
-    }
     for (FnInfo* f : fnList_) {
       if (!f->isMethod && f->moduleId == graph_.entry && f->name == "main") {
         std::vector<int> ps(f->paramNames.size(), -1);

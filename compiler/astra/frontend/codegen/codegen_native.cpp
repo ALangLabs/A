@@ -262,15 +262,16 @@ int builtinRuntimeId(const std::string& name) {
       {"net_recv_exact", 224}, {"net_recv_body", 225}, {"net_recv_body_all", 226},
       {"bytes_new", 227}, {"Bytes", 227}, {"bytes_append", 228}, {"bytes_to_str", 229},
       {"net_recv_buf", 230}, {"net_recv_buf_all", 231},
-      {"os_chdir", 232}, {"os_getpid", 233}, {"os_getppid", 234},
-      {"os_getuid", 235}, {"os_geteuid", 236}, {"os_getgid", 237},
-      {"os_getegid", 238}, {"os_getlogin", 239}, {"os_cpu_count", 240},
-      {"os_uname", 241}, {"os_stat", 242}, {"os_lstat", 243},
-      {"os_access", 244}, {"os_chmod", 245}, {"os_symlink", 246},
-      {"os_link", 247}, {"os_readlink", 248}, {"os_utime", 249},
-      {"os_mkdir", 250}, {"os_rmdir", 251}, {"os_truncate", 252},
-      {"os_environ", 253}, {"os_getenv", 254}, {"os_setenv", 255},
-      {"os_unsetenv", 256}, {"os_system", 257}, {"os_urandom", 258},
+      {"move", 232}, {"borrow", 233}, {"borrow_mut", 234}, {"copy", 235},
+      {"os_chdir", 236}, {"os_getpid", 237}, {"os_getppid", 238},
+      {"os_getuid", 239}, {"os_geteuid", 240}, {"os_getgid", 241},
+      {"os_getegid", 242}, {"os_getlogin", 243}, {"os_cpu_count", 244},
+      {"os_uname", 245}, {"os_stat", 246}, {"os_lstat", 247},
+      {"os_access", 248}, {"os_chmod", 249}, {"os_symlink", 250},
+      {"os_link", 251}, {"os_readlink", 252}, {"os_utime", 253},
+      {"os_mkdir", 254}, {"os_rmdir", 255}, {"os_truncate", 256},
+      {"os_environ", 257}, {"os_getenv", 262}, {"os_setenv", 258},
+      {"os_unsetenv", 259}, {"os_system", 260}, {"os_urandom", 261},
   };
   auto it = kMap.find(name);
   return it == kMap.end() ? -1 : it->second;
@@ -1944,28 +1945,37 @@ class NativeEmitter {
     }
 
     retLabel_ = newLabel("ret");
+    // Module top-level statements run in every mode, `a test` included:
+    // test_* functions observe the globals and initializers the module
+    // body establishes. Only the `fn main` invocation is skipped under
+    // `a test`.
+    std::vector<int> order = graph_.order;
+    if (order.empty()) order.push_back(graph_.entry);
+    for (int mid : order) {
+      if (mid < 0 || failed_) continue;
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) continue;
+      if (std::getenv("A_DEBUG_NATIVE"))
+        std::fprintf(stderr, "native: module id=%d name='%s' path='%s'\n",
+                     mid, mod.name.c_str(), mod.path.c_str());
+      if (mod.name == "prelude" ||
+          mod.path.find("stdlib/") != std::string::npos ||
+          mod.path.find("/stdlib/") != std::string::npos) continue;
+      bindModuleImports(mod);
+      for (const StmtPtr& s : mod.program->statements) {
+        curFnName_ = "<toplevel:" + mod.name + ">";
+        emitStmt(s.get());
+      }
+      curFnName_.clear();
+    }
+    int testRcSlot = -1;
     if (testMode_) {
       emitTestMainBody();
+      // The harness result (0 pass / 1 fail) is the process exit code;
+      // stash it before the RAII drop pass clobbers the accumulator.
+      testRcSlot = allocSlot();
+      storeAcc(testRcSlot);
     } else {
-      std::vector<int> order = graph_.order;
-      if (order.empty()) order.push_back(graph_.entry);
-      for (int mid : order) {
-        if (mid < 0 || failed_) continue;
-        const Module& mod = graph_.at(mid);
-        if (!mod.program) continue;
-        if (std::getenv("A_DEBUG_NATIVE"))
-          std::fprintf(stderr, "native: module id=%d name='%s' path='%s'\n",
-                       mid, mod.name.c_str(), mod.path.c_str());
-        if (mod.name == "prelude" ||
-            mod.path.find("stdlib/") != std::string::npos ||
-            mod.path.find("/stdlib/") != std::string::npos) continue;
-        bindModuleImports(mod);
-        for (const StmtPtr& s : mod.program->statements) {
-          curFnName_ = "<toplevel:" + mod.name + ">";
-          emitStmt(s.get());
-        }
-        curFnName_.clear();
-      }
       // `fn main()` entry point: invoked once after all module top-levels,
       // entry module only. Never runs for imports or under `a test`.
       if (FnInfo* mf = findModuleFn(graph_.entry, "main")) {
@@ -1986,21 +1996,26 @@ class NativeEmitter {
         }
         emitOrderedCall(mf->cname, argSlots);
       }
-      // program exit: drop RAII bindings in every remaining scope
-      // (global scope holds module-level `x = ...` bindings).
-      for (std::size_t si = 0; si < scopes_.size(); ++si) {
-        auto& scope = scopes_[si];
-        auto& decls = scopeDeclOrder_[si];
-        std::unordered_set<std::string> seen;
-        for (auto it = decls.rbegin(); it != decls.rend(); ++it) {
-          seen.insert(*it);
-          auto f = scope.find(*it);
-          if (f != scope.end()) emitDropCall(f->second);
-        }
-        for (auto& kv : scope) {
-          if (!seen.count(kv.first)) emitDropCall(kv.second);
-        }
+    }
+    // program exit: drop RAII bindings in every remaining scope
+    // (global scope holds module-level `x = ...` bindings). Runs after
+    // `fn main` — or after the test harness in `a test` mode.
+    for (std::size_t si = 0; si < scopes_.size(); ++si) {
+      auto& scope = scopes_[si];
+      auto& decls = scopeDeclOrder_[si];
+      std::unordered_set<std::string> seen;
+      for (auto it = decls.rbegin(); it != decls.rend(); ++it) {
+        seen.insert(*it);
+        auto f = scope.find(*it);
+        if (f != scope.end()) emitDropCall(f->second);
       }
+      for (auto& kv : scope) {
+        if (!seen.count(kv.first)) emitDropCall(kv.second);
+      }
+    }
+    if (testRcSlot >= 0) {
+      loadSlot(testRcSlot, acc());
+    } else {
       zeroReg(acc());
     }
     emitLabel(retLabel_);

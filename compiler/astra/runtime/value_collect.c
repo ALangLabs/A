@@ -122,7 +122,7 @@ aval a_dict_new(void) {
     return mkobj(&d->h);
 }
 
-aval a_struct_new(aval name, aval methods) {
+aval a_struct_new(aval name, aval methods, aval methodFns) {
     AStruct *s = (AStruct *)xmalloc(sizeof(AStruct));
     s->d.h.type = T_STRUCT;
     s->d.h.len = 0;
@@ -132,6 +132,7 @@ aval a_struct_new(aval name, aval methods) {
     s->d.scap = 0;
     s->name = name;
     s->methods = methods;
+    s->methodFns = methodFns;
     return mkobj(&s->d.h);
 }
 
@@ -184,4 +185,82 @@ aval a_range_new(aval lo, aval hi, aval step) {
     r->step = c;
     return mkobj(&r->h);
 }
+
+/* ------------------------------------------------------------------ */
+/* deep copy (copy() builtin)                                          */
+/* ------------------------------------------------------------------ */
+
+static aval deepcopy(aval v, int depth) {
+    if (depth > 500)
+        panicf("copy() value is too deeply nested (cyclic structure?)");
+    AObj *o = obj_of(v);
+    if (!o) return v;
+    switch (o->type) {
+        case T_LIST:
+        case T_TUPLE: {
+            AArr *a = (AArr *)o;
+            arr_ensure_aval(a);
+            AVec t = { NULL, 0, 0 };
+            for (uint64_t i = 0; i < a->h.len; ++i)
+                avec_push(&t, deepcopy(a->items[i], depth + 1));
+            aval r = list_from_vec(t.p, t.len, o->type == T_TUPLE);
+            free(t.p);
+            return r;
+        }
+        case T_SET: {
+            AArr *a = (AArr *)o;
+            arr_ensure_aval(a);
+            AVec t = { NULL, 0, 0 };
+            for (uint64_t i = 0; i < a->h.len; ++i)
+                avec_push(&t, deepcopy(a->items[i], depth + 1));
+            aval r = a_set_new();
+            for (uint64_t i = 0; i < t.len; ++i) a_set_add(r, t.p[i]);
+            free(t.p);
+            return r;
+        }
+        case T_DICT:
+        case T_STRUCT: {
+            ADict *d = (ADict *)o;
+            aval r = o->type == T_STRUCT
+                         ? a_struct_new(((AStruct *)o)->name,
+                                        ((AStruct *)o)->methods,
+                                        ((AStruct *)o)->methodFns)
+                         : a_dict_new();
+            ADict *rd = dict_of(r, "dict");
+            for (uint64_t i = 0; i < d->h.len; ++i) {
+                aval k = deepcopy(d->pairs[i].k, depth + 1);
+                aval val = deepcopy(d->pairs[i].v, depth + 1);
+                dict_put(rd, k, val);
+            }
+            return r;
+        }
+        case T_BYTES: {
+            ABytes *b = (ABytes *)o;
+            return a_bytes_from(b->data, b->h.len);
+        }
+        case T_RESULT: {
+            AResult *res = (AResult *)o;
+            return mkobj(result_new(res->ok, res->is_option,
+                                    deepcopy(res->value, depth + 1)));
+        }
+        case T_VIEW: {
+            AView *vw = (AView *)o;
+            AView *nv = (AView *)xmalloc(sizeof(AView));
+            nv->h.type = T_VIEW;
+            nv->h.len = vw->h.len;
+            nv->h.cap = 0;
+            nv->parent = deepcopy(vw->parent, depth + 1);
+            nv->off = vw->off;
+            nv->len = vw->len;
+            nv->is_tuple = vw->is_tuple;
+            return mkobj(&nv->h);
+        }
+        default:
+            /* immediates, strings, ranges, functions, environments,
+               iterators, python objects: shared, not copied. */
+            return v;
+    }
+}
+
+aval a_deepcopy(aval v) { return deepcopy(v, 0); }
 

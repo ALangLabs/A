@@ -294,8 +294,20 @@ bool AsmEmitter::rawSafeExpr(const Expr* e) {
     if (!e || failed_) return false;
     switch (e->kind) {
       case ExprKind::IntLit:
-      case ExprKind::Ident:
         return true;
+      case ExprKind::Ident: {
+        const std::string& nm = static_cast<const IdentExpr&>(*e).name;
+        if (rawVars_.count(nm)) return true;
+        ABinding* b = lookup(nm);
+        // Promoted raw-int locals hold int64 in their slot by construction.
+        if (b && b->slot >= 0 && b->rawInt && !b->specRaw) return true;
+        // Aval bindings (incl. specRaw, whose demoted state is an aval)
+        // only qualify where range analysis proves the value stays inside
+        // int64. An int-*typed* aval can still hold a double after int64
+        // overflow promotion (+,-,*,/), and unboxing it panics instead of
+        // computing the mixed-type result the runtime slow path produces.
+        return exprRangeFlat(e).known;
+      }
       case ExprKind::Unary: {
         const UnaryExpr& u = static_cast<const UnaryExpr&>(*e);
         if (u.op == "~") return rawSafeExpr(u.operand.get());
@@ -843,12 +855,6 @@ bool AsmEmitter::arithFits(const ARange& a, const ARange& b,
 ARange AsmEmitter::rangeBinOp(const std::string& op, const ARange& l,
                     const ARange& r) const {
     if (op == "+" || op == "-" || op == "*") {
-      // Saturate to the int64 extremes instead of dropping to "unknown": the
-      // endpoints then act as +-infinity, which lets a loop head carry a
-      // one-sided fact (`i = i + 1` climbing with no upper bound yet) and lets
-      // the loop-condition narrowing intersect it back into a tight range.
-      // A saturated result is never accepted by arithFits, so nothing that
-      // could really overflow is ever taken as a raw int64 value.
       if (!l.known || !r.known) return ARange{};
       __int128 mn = 0, mx = 0;
       if (op == "+") {
@@ -866,8 +872,14 @@ ARange AsmEmitter::rangeBinOp(const std::string& op, const ARange& l,
           if (ps[i] > mx) mx = ps[i];
         }
       }
-      if (mn < rngI64Min()) mn = rngI64Min();
-      if (mx > rngI64Max()) mx = rngI64Max();
+      // A result escaping int64 is a *double* aval at runtime, not an
+      // int64: no int64 interval describes it, so the range must be
+      // unknown. (Saturating to the int64 extremes used to leave a
+      // "known" range like [INT64_MAX,INT64_MAX] for `INT64_MAX + 1`,
+      // which let arithFits/rawSafeExpr prove `y - 1` or `y % 3` raw-safe
+      // and then panic unboxing the double.)
+      const __int128 kMin = rngI64Min(), kMax = rngI64Max();
+      if (mn < kMin || mx > kMax) return ARange{};
       return rngSpan(mn, mx);
     }
     if (op == "%") {

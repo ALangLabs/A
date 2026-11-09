@@ -579,6 +579,7 @@ class AsmEmitter {
   // Register a module's import aliases (import x / from x import y) into the
   // current scope so function bodies can resolve module.member calls.
     void bindModuleImports(int moduleId);
+    void bindFileModuleFromImport(const FromImportStmt* im);
 
     void emitStructCtor(StructInfo* st);
 
@@ -1106,6 +1107,18 @@ class AsmEmitter {
   // T_PYOBJ receivers consume the pairs (as Python kwargs) — every other
   // receiver kind panics on nkw > 0.
     void emitMethodCall(const Expr* objExpr, const std::string& field, const CallExpr& call);
+
+  // Untyped/unknown receiver method call with compile-time candidates:
+  // emits a runtime T_STRUCT + struct-name check per candidate and
+  // direct-calls the matching method; non-struct receivers (and structs
+  // matching no candidate) fall back to the generic a_method dispatch.
+  // This keeps `o.inner.m()` working through untyped fields while a
+  // wrong-type receiver panics cleanly instead of calling another
+  // class's method. cands = (display name, method FnInfo) pairs, already
+  // filtered to unambiguous display names by the caller.
+    void emitCheckedMethodCall(
+        const Expr* objExpr, const std::string& field, const CallExpr& call,
+        const std::vector<std::pair<std::string, FnInfo*>>& cands);
 
   // Place evaluated call args into paramSlots (indexed by paramNames position,
   // -1 = fill A_NONE). `offset` shifts where positional args land (1 for

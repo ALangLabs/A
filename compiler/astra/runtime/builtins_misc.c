@@ -9,3 +9,10 @@ aval bi_env_get(uint64_t n, aval *argv) {
     return a_str_new(v, strlen(v));
 }
 
+/* move/borrow/borrow_mut are compile-time ownership markers: at runtime
+   they evaluate to the value itself. copy() performs a deep copy. */
+aval bi_move(uint64_t n, aval *argv) { want_args("move", n, 1, 1); return argv[0]; }
+aval bi_borrow(uint64_t n, aval *argv) { want_args("borrow", n, 1, 1); return argv[0]; }
+aval bi_borrow_mut(uint64_t n, aval *argv) { want_args("borrow_mut", n, 1, 1); return argv[0]; }
+aval bi_copy(uint64_t n, aval *argv) { want_args("copy", n, 1, 1); return a_deepcopy(argv[0]); }
+
