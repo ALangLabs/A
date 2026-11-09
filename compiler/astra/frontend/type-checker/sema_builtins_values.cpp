@@ -214,10 +214,38 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
   if (name == "isinstance") {
     // The runtime compares against runtime type-name strings ("int",
     // "list", "str", struct names, ...), so the second argument is a String.
+    // Python-style bare type names are accepted too: isinstance(x, int)
+    // rewrites the identifier to its name string. Only known type names and
+    // Capitalized names (class convention) are rewritten so that lowercase
+    // variables holding a type-name string keep working.
     if (call.args.size() != 2) {
       builtinArityError(name, call, 2);
       inferCallArgTypes(call);
       return typeBool();
+    }
+    if (auto* ident = dynamic_cast<IdentExpr*>(call.args[1].value.get())) {
+      static const char* kTypeNames[] = {
+          "int", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+          "f32", "f64", "float", "str", "String", "bool", "char",
+          "list", "dict", "map", "set", "tuple", "Bytes", "bytes",
+          "range", "Ok", "Err", "Some", "None"};
+      bool isTypeName = false;
+      for (const char* t : kTypeNames) {
+        if (ident->name == t) { isTypeName = true; break; }
+      }
+      if (!isTypeName && !ident->name.empty() &&
+          std::isupper(static_cast<unsigned char>(ident->name[0]))) {
+        isTypeName = true;
+      }
+      if (isTypeName) {
+        auto lit = std::make_unique<StringLitExpr>();
+        lit->span = ident->span;
+        StringPart part;
+        part.isExpr = false;
+        part.text = ident->name;
+        lit->parts.push_back(std::move(part));
+        call.args[1].value = std::move(lit);
+      }
     }
     TypePtr value = inferExpr(*call.args[0].value);
     if (resolveType(value)->kind == TypeKind::Void) {
