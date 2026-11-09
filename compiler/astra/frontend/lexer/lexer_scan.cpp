@@ -8,6 +8,12 @@ void Lexer::scanIdentifier() {
   advance();
   while (!atEnd() && isIdentContinue(peek())) advance();
   std::string lexeme = text_.substr(start, pos_ - start);
+  // Python-style f-string prefix: f"...". A strings already interpolate
+  // {expr}, so the prefix just selects string-literal lexing.
+  if (lexeme == "f" && peek() == '"') {
+    scanString();
+    return;
+  }
   auto it = keywordTable().find(lexeme);
   Tok kind = it != keywordTable().end() ? it->second : Tok::Ident;
   add(kind, start, startLine, startCol);
@@ -251,11 +257,67 @@ void Lexer::scanString() {
   tokens_.push_back(std::move(token));
 }
 
+// Length of a single character escape at the start of `s`, or 0 when `s`
+// does not begin with exactly one complete escape sequence.
+static std::size_t singleCharEscapeLen(const std::string& s) {
+  if (s.size() < 2 || s[0] != '\\') return 0;
+  char esc = s[1];
+  if (esc == 'x') {
+    return s.size() == 4 && std::isxdigit(static_cast<unsigned char>(s[2])) &&
+                   std::isxdigit(static_cast<unsigned char>(s[3]))
+               ? 4
+               : 0;
+  }
+  if (esc == 'u') {
+    if (s.size() < 4 || s[2] != '{') return 0;
+    std::size_t close = s.find('}', 3);
+    return close == s.size() - 1 ? s.size() : 0;
+  }
+  if (std::string("ntravbfv0\\'\"").find(esc) != std::string::npos) return 2;
+  return 0;
+}
+
 void Lexer::scanChar() {
   std::size_t start = pos_;
   int startLine = line_;
   int startCol = col_;
   advance();  // opening quote
+  // Python parity: 'abc' is a string, 'a' stays a char literal. Pre-scan
+  // for the closing quote (respecting backslash escapes) and upgrade to a
+  // String token when the content is not exactly one character/escape.
+  {
+    std::size_t j = pos_;
+    std::size_t close = std::string::npos;
+    while (j < text_.size()) {
+      char c = text_[j];
+      if (c == '\n') break;
+      if (c == '\\') {
+        j += 2;
+        continue;
+      }
+      if (c == '\'') {
+        close = j;
+        break;
+      }
+      ++j;
+    }
+    if (close != std::string::npos) {
+      std::string content = text_.substr(pos_, close - pos_);
+      bool isChar = content.size() == 1 ||
+                    (content.size() >= 2 && singleCharEscapeLen(content) == content.size());
+      if (!isChar) {
+        // Emit a normal (interpolating) string token spanning 'content'.
+        while (pos_ <= close) advance();
+        Token token;
+        token.kind = Tok::String;
+        token.span = makeSpan(start, startLine, startCol);
+        token.lexeme = text_.substr(start, pos_ - start);
+        token.strValue = content;
+        tokens_.push_back(std::move(token));
+        return;
+      }
+    }
+  }
   if (atEnd() || peek() == '\n') {
     Token token;
     token.kind = Tok::Char;
