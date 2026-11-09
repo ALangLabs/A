@@ -121,6 +121,39 @@ fn test_quote_urlencode():
     assert_eq(quote("a b/c&d"), "a%20b%2Fc%26d")
     assert_eq(quote("plain-._~09"), "plain-._~09")
     assert_eq(urlencode({"q": "a b"}), "q=a%20b")
+    # percent-encoding is byte-oriented over the UTF-8 encoding
+    assert_eq(quote("héllo"), "h%C3%A9llo")
+    assert_eq(quote("€"), "%E2%82%AC")
+    assert_eq(urlencode({"k": "é"}), "k=%C3%A9")
+
+fn test_urlsplit_edge_cases():
+    # host is lowercased for connection/pool-key stability
+    p = urlsplit("HTTP://EXAMPLE.COM:8080/P")
+    assert(p != None)
+    assert_eq(p!.host, "example.com")
+    assert_eq(p!.scheme, "http")
+    # invalid ports reject the URL instead of producing a bogus host
+    assert_eq(urlsplit("http://example.com:abc/x") == None, true)
+    assert_eq(urlsplit("http://example.com:99999/x") == None, true)
+    # empty port falls back to the scheme default
+    p2 = urlsplit("http://example.com:/x")
+    assert(p2 != None)
+    assert_eq(p2!.host, "example.com")
+    assert_eq(p2!.port, 80)
+    # bracketed IPv6: brackets are stripped for connect, re-added by urlunsplit
+    p3 = urlsplit("http://[::1]:8080/x")
+    assert(p3 != None)
+    assert_eq(p3!.host, "::1")
+    assert_eq(p3!.port, 8080)
+    assert_eq(urlunsplit(p3!), "http://[::1]:8080/x")
+    p4 = urlsplit("http://[::1]/x")
+    assert(p4 != None)
+    assert_eq(p4!.host, "::1")
+    assert_eq(p4!.port, 80)
+    # unsupported schemes parse but are rejected by request()
+    p5 = urlsplit("ftp://example.com/f")
+    assert(p5 != None)
+    assert_eq(p5!.scheme, "ftp")
 
 fn test_b_find_and_slice():
     buf = [1, 2, 13, 10, 3, 13, 10]

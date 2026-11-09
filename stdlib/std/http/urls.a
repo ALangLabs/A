@@ -3,7 +3,8 @@
 # urlsplit(url) -> UrlParts {scheme, host, port, path, query}
 # Defaults: http -> 80, https -> 443. Returns None on unparseable input.
 # quote/urlencode percent-encode query components (RFC 3986).
-from std:bytes import ord
+from std:bytes import chr
+import std:core
 
 class UrlParts:
     scheme: String
@@ -21,18 +22,28 @@ fn _default_port(scheme: String):
     return 0
 
 """
-_split_port(authority) -> (host, port_or_-1). Splits on the last ':' and
-keeps the host side verbatim (IPv6 literals are not specially handled).
+_split_port(authority) -> (host, port). Splits on the last ':' outside
+brackets; port is -1 when absent and -2 when present but invalid.
 """
 fn _split_port(authority: String):
+    # Only a ':' outside brackets can introduce a port (IPv6 literals).
     i = authority.rfind(":")
+    if authority.startswith("["):
+        close = authority.find("]")
+        if close >= 0 and i <= close:
+            i = -1
     if i < 0:
         return (authority, -1)
     host = authority[0..i]
     port_s = authority[i + 1..]
-    if port_s == "" or not port_s.isdigit():
-        return (authority, -1)
-    return (host, int(port_s))
+    if port_s == "":
+        return (host, -1)
+    if not port_s.isdigit():
+        return (host, -2)  # invalid port: caller rejects the URL
+    port = int(port_s)
+    if port > 65535:
+        return (host, -2)
+    return (host, port)
 
 """
 urlsplit(url) -> UrlParts? parsing "scheme://host[:port]/path?query".
@@ -65,9 +76,16 @@ fn urlsplit(url: String):
     if at >= 0:
         hostport = authority[at + 1..]
     (host, port) = _split_port(hostport)
-    if host == "":
+    if host == "" or port == -2:
         return None
-    if port < 0:
+    host = host.lower()
+    # Bracketed IPv6 literals connect without the brackets; the Host header
+    # and pool key stay unambiguous because the port is a separate field.
+    if host.startswith("[") and host.endswith("]") and len(host) > 2:
+        host = host[1..len(host) - 1]
+    if host.contains("[") or host.contains("]"):
+        return None  # unbalanced brackets are not a valid host
+    if port <= 0:
         port = _default_port(scheme)
     tail = rest[auth_end..end]
     path = tail
@@ -79,9 +97,15 @@ fn urlsplit(url: String):
         path = "/"
     return Some(UrlParts(scheme, host, port, path, query))
 
+"""_bracket_host(host) -> host wrapped in [] when it is an IPv6 literal."""
+fn _bracket_host(host: String):
+    if host.contains(":") and not host.startswith("["):
+        return "[" + host + "]"
+    return host
+
 """urlunsplit(parts) -> String"""
 fn urlunsplit(parts: UrlParts):
-    u = parts.scheme + "://" + parts.host
+    u = parts.scheme + "://" + _bracket_host(parts.host)
     if parts.port > 0 and parts.port != _default_port(parts.scheme):
         u = u + ":" + str(parts.port)
     u = u + parts.path
@@ -107,10 +131,11 @@ is encoded bytewise.
 fn quote(s: String):
     hex = "0123456789ABCDEF"
     out = ""
-    for ch in s.chars():
-        b = ord(ch)!
+    # Percent-encoding is byte-oriented: walk the UTF-8 encoding so multi-byte
+    # characters become one %XX triplet per byte, not per code point.
+    for b in core.bytes_utf8_encode(s):
         if _unreserved(b):
-            out = out + ch
+            out = out + chr(b)!
 
         else:
             out = out + "%" + hex[b / 16] + hex[b % 16]

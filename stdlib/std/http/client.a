@@ -32,7 +32,7 @@ import std:core
 import std:env
 from std:json import parse as parse_json, stringify as stringify_json
 from std:bytes import b2s, utf8_decode
-from "urls.a" import urlsplit, urlunsplit, urlencode, UrlParts, _default_port
+from "urls.a" import urlsplit, urlunsplit, urlencode, UrlParts, _default_port, _bracket_host
 
 class Response:
     status: i64
@@ -284,6 +284,8 @@ fn _read_chunked(conn) -> Bytes:
                     break
             break
         part = _read_n(conn, size)
+        if len(part) < size:
+            _short_read(conn, len(part), size)
         if len(chunks) == 0:
             chunks.append(part)  # no copy for the usual single-chunk response
 
@@ -310,6 +312,8 @@ fn _short_read(conn, got: i64, want: i64):
     st = net.recv_status(conn.sock)
     if st == 3:
         conn._fail("timed out after {conn.timeout} ms reading {conn.host}:{conn.port}")
+    if st == 2:
+        conn._fail("socket error reading {conn.host}:{conn.port}")
     conn._fail("connection closed after {got} of {want} body bytes from {conn.host}:{conn.port}")
 
 """
@@ -327,18 +331,24 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
         return BodyParts("", _read_chunked(conn))
     cl = headers.get("content-length")
     if cl != None:
-        n = int(cl)
+        cls = cl.strip()
+        if not cls.isdigit() or len(cls) > 18:
+            conn._fail("invalid Content-Length header: '" + cl + "'")
+        n = int(cls)
         if n <= 0:
             return BodyParts("", Bytes(0))
         if want_bytes:
-            return BodyParts("", _read_n(conn, n))
+            b = _read_n(conn, n)
+            if len(b) < n:
+                _short_read(conn, len(b), n)
+            return BodyParts("", b)
         pre = conn._buf
         conn._buf = []
         (text, raw) = net.recv_body(conn.sock, n, pre)
         if text != None:
             if len(text) < n:
                 _short_read(conn, len(text), n)
-            return BodyParts(text, [])
+            return BodyParts(text, Bytes(0))
         if len(raw) < n:
             _short_read(conn, len(raw), n)
         return BodyParts("", raw)
@@ -350,7 +360,7 @@ fn _read_body(conn, headers, fetch_bytes = false) -> BodyParts:
     conn._buf = []
     (text, raw) = net.recv_body_all(conn.sock, pre)
     if text != None:
-        return BodyParts(text, [])
+        return BodyParts(text, Bytes(0))
     return BodyParts("", raw)
 
 """_env_str(name) -> String ("" when unset; env.get returns "")."""
@@ -425,7 +435,7 @@ fn _read_connect_reply(sock):
     if len(lines) == 0:
         return 0
     parts = lines[0].split(" ", 2)
-    if len(parts) < 2:
+    if len(parts) < 2 or not parts[1].isdigit():
         return 0
     return int(parts[1])
 
@@ -461,7 +471,7 @@ class HTTPConnection:
                     self._fail("proxy connect failed: {self.proxy}")
                 if self.timeout > 0:
                     net.set_timeout(tunnel, self.timeout)
-                authority = self.host + ":" + str(self.port)
+                authority = _bracket_host(self.host) + ":" + str(self.port)
                 req = "CONNECT " + authority + " HTTP/1.1\r\n"
                 req = req + "Host: " + authority + "\r\n\r\n"
                 net.send(tunnel, req)
@@ -511,26 +521,34 @@ class HTTPConnection:
         self._eof = false
         h = ""
         has_cl = false
+        user_hdrs: [String] = []
         if headers != None:
             for kv in headers.items():
+                lk = kv[0].lower()
+                user_hdrs.append(lk)
                 h = h + kv[0] + ": " + kv[1] + "\r\n"
-                if kv[0].lower() == "content-length":
+                if lk == "content-length":
                     has_cl = true
         has_body = body != None and body != "" or body_bytes != None and len(body_bytes) > 0
-        host = self.host
+        host = _bracket_host(self.host)
         if self.port > 0 and self.port != _default_port(_scheme_of(self)):
             host = host + ":" + str(self.port)
         req = method + " " + path + " HTTP/1.1\r\n"
-        req = req + "Host: " + host + "\r\n"
-        req = req + "User-Agent: a-http/0.1\r\n"
-        req = req + "Accept: */*\r\n"
-        if net.inflate_available():
+        # User-supplied headers win over the defaults: emitting both would put
+        # two Host/Connection lines on the wire.
+        if not user_hdrs.contains("host"):
+            req = req + "Host: " + host + "\r\n"
+        if not user_hdrs.contains("user-agent"):
+            req = req + "User-Agent: a-http/0.1\r\n"
+        if not user_hdrs.contains("accept"):
+            req = req + "Accept: */*\r\n"
+        if net.inflate_available() and not user_hdrs.contains("accept-encoding"):
             req = req + "Accept-Encoding: gzip, deflate\r\n"
-        if self.keep_alive:
-            req = req + "Connection: keep-alive\r\n"
-
-        else:
-            req = req + "Connection: close\r\n"
+        if not user_hdrs.contains("connection"):
+            if self.keep_alive:
+                req = req + "Connection: keep-alive\r\n"
+            else:
+                req = req + "Connection: close\r\n"
         req = req + h
         if has_body and not has_cl:
             n = 0
@@ -561,6 +579,8 @@ class HTTPConnection:
             status = 0
             reason = ""
             if len(parts) >= 2:
+                if not parts[1].isdigit():
+                    self._fail("malformed HTTP status line: " + lines[0])
                 status = int(parts[1])
             if len(parts) >= 3:
                 reason = parts[2]
@@ -618,10 +638,21 @@ fn _split_hostport(s: String):
     i = s.rfind(":")
     if i < 0:
         return (s, 80)
-    return (s[0..i], int(s[i + 1..]))
+    port_s = s[i + 1..]
+    if port_s == "" or not port_s.isdigit():
+        return (s, 80)
+    port = int(port_s)
+    if port > 65535:
+        return (s, 80)
+    h0 = s[0..i]
+    if h0.startswith("[") and h0.endswith("]") and len(h0) > 2:
+        return (s[1..i - 1], port)
+    return (h0, port)
 
 """http_connection(host, port=80, timeout=0) -> HTTPConnection"""
 fn http_connection(host: String, port = 80, timeout = 0):
+    if host.startswith("[") and host.endswith("]") and len(host) > 2:
+        host = host[1..len(host) - 1]
     (proxy_host, proxy_port) = _proxy_for("http", host)
     proxy = ""
     if proxy_host != "":
@@ -645,6 +676,8 @@ fn http_connection(host: String, port = 80, timeout = 0):
 
 """https_connection(host, port=443, timeout=0, verify=true) -> HTTPConnection"""
 fn https_connection(host: String, port = 443, timeout = 0, verify = true):
+    if host.startswith("[") and host.endswith("]") and len(host) > 2:
+        host = host[1..len(host) - 1]
     (proxy_host, proxy_port) = _proxy_for("https", host)
     proxy = ""
     if proxy_host != "":
@@ -672,6 +705,8 @@ fn _conn_for(url: String, timeout: i64, verify = true):
     if parts == None:
         core.panic("http: bad url '{url}'")
     p = parts!
+    if p.scheme != "http" and p.scheme != "https":
+        core.panic("http: unsupported url scheme '{p.scheme}'")
     if p.scheme == "https":
         return (https_connection(p.host, p.port, timeout, verify), p)
     return (http_connection(p.host, p.port, timeout), p)
@@ -723,7 +758,10 @@ fn _pool_put(key: String, conn):
 
     else:
         if i >= 0:
+            prev = _pool_conns[i]
             _pool_conns[i] = conn
+            if prev.connected:
+                prev.close()
 
         else:
             if len(_pool_conns) >= _POOL_MAX:
@@ -758,10 +796,17 @@ fn request(method: String, url: String, body = None, headers = None, params = No
     redirects = 0
     while true:
         if params != None and len(params) > 0:
+            # A fragment is not part of the request; keep it aside so the
+            # query string lands before it instead of inside it.
+            frag = ""
+            fi = u.find("#")
+            if fi >= 0:
+                frag = u[fi..] + ""  # owned copy: u is reassigned below
+                u = u[0..fi]
             sep = "?"
             if u.contains("?"):
                 sep = "&"
-            u = u + sep + urlencode(params)
+            u = u + sep + urlencode(params) + frag
             params = None
         (conn, parts) = _conn_for(u, timeout, verify)
         key = _pool_key(parts.scheme, parts.host, parts.port, conn.proxy, verify)
@@ -776,7 +821,7 @@ fn request(method: String, url: String, body = None, headers = None, params = No
             qpath = parts.path + "?" + parts.query
         if conn.proxy != "" and not conn.tls:
             # plain-HTTP proxying uses the absolute request target
-            absolute = parts.scheme + "://" + parts.host
+            absolute = parts.scheme + "://" + _bracket_host(parts.host)
             if parts.port > 0 and parts.port != _default_port(parts.scheme):
                 absolute = absolute + ":" + str(parts.port)
             qpath = absolute + qpath
@@ -794,7 +839,7 @@ fn request(method: String, url: String, body = None, headers = None, params = No
                     m = "GET"
                     b = None
                     bb = None
-                base = parts.scheme + "://" + parts.host
+                base = parts.scheme + "://" + _bracket_host(parts.host)
                 if parts.port > 0 and parts.port != _default_port(parts.scheme):
                     base = base + ":" + str(parts.port)
                 if loc.startswith("//"):
@@ -827,7 +872,14 @@ fn post(url: String, data = None, json = None, headers = None, params = None, ti
         b = stringify_json(json)
         if h == None:
             h = {}
-        h["Content-Type"] = "application/json"
+        else:
+            h = h.copy()  # never mutate the caller's header map
+        has_ct = false
+        for k in h.keys():
+            if k.lower() == "content-type":
+                has_ct = true
+        if not has_ct:
+            h["Content-Type"] = "application/json"
     return request("POST", url, b, h, params, timeout, true, 10, verify)
 
 """delete/put/patch/head helpers."""
