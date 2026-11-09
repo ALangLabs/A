@@ -69,8 +69,5 @@ files need no `entry` at all. `a test` skips `entry` and drives
 
 `fn main` is just an ordinary function now — nothing calls it implicitly.
 An entry file without `entry` is still valid: its top-level statements run
-as the program, and the compiler prints a warning first —
-`warning: '<file>' has no 'entry' function; only top-level statements will
-run`. That warning is expected for script-style programs and for
-`a run -c` snippets; declaring `entry` silences it. It is only emitted for
-the entry file, never for imported modules.
+as the program. This is normal for script-style programs and
+`a run -c` snippets; declare `entry` when you want an explicit entry point.

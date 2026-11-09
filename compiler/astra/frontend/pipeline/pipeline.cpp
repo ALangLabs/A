@@ -2449,21 +2449,7 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
   return rc < 0 ? kCErr : rc;
 }
 }
-// True when the entry module declares `fn main` — the automatic entry
-// point invoked after module top-level statements (docs/wiki/modules.md).
-// `a run`/`a build` on a file without one used to exit 0 silently.
-bool entryHasMain(const ModuleGraph& g){
-  if(g.entry<0||g.entry>=(int)g.modules.size()) return false;
-  const Module& mod=g.at(g.entry);
-  if(!mod.program) return false;
-  for(const StmtPtr& s:mod.program->statements)
-    if(s->kind==StmtKind::FnDecl&&static_cast<const FnDecl*>(s.get())->isEntry) return true;
-  return false;
-}
-void warnNoMain(const ModuleGraph& g,const std::string& path,std::ostream& err){
-  if(entryHasMain(g)) return;
-  err<<"warning: '"<<path<<"' has no 'entry' function; only top-level statements will run\n";
-}
+
 CompiledModule runFrontendPipeline(const std::string& path,std::string source,const PipelineConfig& config,DiagnosticSink& sink,std::ostream& diagOut,std::ostream& diagErr){
   ModuleLoaderOptions opts; opts.modulePaths=config.modulePaths; opts.stdlibRoot=config.stdlibRoot;
   ModuleLoader loader(std::move(opts),sink); ModuleGraph graph=loader.load(path,std::move(source));
@@ -2516,9 +2502,8 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   {
     std::ostringstream diagStream;
     DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,diagStream); if(!m.ok){ err << diagStream.str(); return kCErr; }
-    // Route through diagStream so the warning is captured in the run-cache
-    // .diag sidecar and replayed on precheck hits like other diagnostics.
-    warnNoMain(*m.graph,path,diagStream);
+    // Route frontend diagnostics through diagStream so the run-cache .diag
+    // sidecar can replay them on precheck hits.
     diagCapture = diagStream.str();
     err << diagCapture;
     if(!preBin.empty()){
@@ -2612,7 +2597,6 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   }
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  warnNoMain(*m.graph,path,err);
   // `a build`: emit target assembly (x86-64 SysV asm, per-arch native),
   // then astra links a native executable for the target arch.
   TargetDesc td;
