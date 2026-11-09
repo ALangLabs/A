@@ -142,13 +142,9 @@ bool AsmEmitter::tryRawCondJump(const Expr* cond, const std::string& label,
     return true;
   }
 
-// Jump helper: evaluate cond expr -> truthy test -> jcc.
-// Fast paths cover A_TRUE/A_FALSE/A_NONE, inline ints, and untagged
-// doubles inline; everything else (boxed ints, strings, objects) goes
-// through a_truthy_raw_slow.
-void AsmEmitter::condJump(const Expr* cond, const std::string& label, bool jumpIfTrue) {
-    if (tryRawCondJump(cond, label, jumpIfTrue)) return;
-    emitExpr(cond);
+// Truthiness test on the aval in %rax -> jcc `label`. Shared tail of
+// condJump and the slow lanes of the comparison fast paths.
+void AsmEmitter::emitTruthyJump(const std::string& label, bool jumpIfTrue) {
     std::string oneL = newLabel("tj1"), zeroL = newLabel("tj0"),
             intL = newLabel("tji"), dblL = newLabel("tjd"),
             slowL = newLabel("tjs"), doneL = newLabel("tjf");
@@ -185,6 +181,88 @@ void AsmEmitter::condJump(const Expr* cond, const std::string& label, bool jumpI
     emitLabel(doneL);
     emit(std::string("    test %rax, %rax\n    ") +
          (jumpIfTrue ? "jnz " : "jz ") + label + "\n");
+  }
+
+// `a <cmp> b` on statically-int operands whose values live in aval slots:
+// unbox both inline (emitUnboxInt covers inline ints and boxed T_INT64;
+// doubles and everything else take the slow lane) and branch on the raw
+// int64 compare directly. The slow lane calls the same a_*_slow helper the
+// generic path uses and feeds its bool aval through emitTruthyJump, so
+// mixed-type semantics are identical — only the all-int case gets cheaper.
+bool AsmEmitter::tryAvalCmpJump(const Expr* cond, const std::string& label,
+                      bool jumpIfTrue) {
+    if (!cond || failed_) return false;
+    if (cond->kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(*cond);
+      if (u.op != "not" || !u.operand) return false;
+      return tryAvalCmpJump(u.operand.get(), label, !jumpIfTrue);
+    }
+    if (cond->kind != ExprKind::Binary) return false;
+    const BinaryExpr& b = static_cast<const BinaryExpr&>(*cond);
+    static const std::unordered_map<std::string, const char*> kJcc = {
+        {"==", "je"}, {"!=", "jne"}, {"<", "jl"},
+        {"<=", "jle"}, {">", "jg"}, {">=", "jge"}};
+    static const std::unordered_map<std::string, const char*> kInv = {
+        {"je", "jne"}, {"jne", "je"}, {"jl", "jge"}, {"jle", "jg"},
+        {"jg", "jle"}, {"jge", "jl"}};
+    static const std::unordered_map<std::string, const char*> kSlow = {
+        {"==", "a_eq_slow"}, {"!=", "a_ne_slow"}, {"<", "a_lt_slow"},
+        {"<=", "a_le_slow"}, {">", "a_gt_slow"}, {">=", "a_ge_slow"}};
+    auto it = kJcc.find(b.op);
+    if (it == kJcc.end()) return false;
+    if (!exprIsInt(b.lhs.get()) || !exprIsInt(b.rhs.get())) return false;
+    const bool lhsLit = b.lhs->kind == ExprKind::IntLit &&
+        rawIntLitFits(static_cast<const IntLitExpr&>(*b.lhs).value);
+    const bool rhsLit = b.rhs->kind == ExprKind::IntLit &&
+        rawIntLitFits(static_cast<const IntLitExpr&>(*b.rhs).value);
+    int ls = lhsLit ? -1 : evalSlot(b.lhs.get());
+    int rs = rhsLit ? -1 : evalSlot(b.rhs.get());
+    std::string slowL = newLabel("acs"), doneL = newLabel("acd");
+    movImm(kTagInt, "%rdx");
+    if (lhsLit) {
+      movImm((uint64_t)static_cast<const IntLitExpr&>(*b.lhs).value, "%r8");
+    } else {
+      loadSlot(ls, "%rdi");
+      emitUnboxInt("%r8", slowL);
+    }
+    if (rhsLit) {
+      movImm((uint64_t)static_cast<const IntLitExpr&>(*b.rhs).value, "%r9");
+    } else {
+      loadSlot(rs, "%rdi");
+      emitUnboxInt("%r9", slowL);
+    }
+    const char* cc = it->second;
+    if (!jumpIfTrue) cc = kInv.at(cc);
+    emit("    cmp %r9, %r8\n    " + std::string(cc) + " " + label + "\n"
+         "    jmp " + doneL + "\n");
+    emitLabel(slowL);
+    if (lhsLit) {
+      int t = allocSlot();
+      movImm(mkintA(static_cast<const IntLitExpr&>(*b.lhs).value));
+      storeRax(t);
+      ls = t;
+    }
+    if (rhsLit) {
+      int t = allocSlot();
+      movImm(mkintA(static_cast<const IntLitExpr&>(*b.rhs).value));
+      storeRax(t);
+      rs = t;
+    }
+    call2slot(kSlow.at(b.op), ls, rs);
+    emitTruthyJump(label, jumpIfTrue);
+    emitLabel(doneL);
+    return true;
+  }
+
+// Jump helper: evaluate cond expr -> truthy test -> jcc.
+// Fast paths cover A_TRUE/A_FALSE/A_NONE, inline ints, and untagged
+// doubles inline; everything else (boxed ints, strings, objects) goes
+// through a_truthy_raw_slow.
+void AsmEmitter::condJump(const Expr* cond, const std::string& label, bool jumpIfTrue) {
+    if (tryRawCondJump(cond, label, jumpIfTrue)) return;
+    if (tryAvalCmpJump(cond, label, jumpIfTrue)) return;
+    emitExpr(cond);
+    emitTruthyJump(label, jumpIfTrue);
   }
 
 // Conservative check for whether an otherwise-undeclared assignment target

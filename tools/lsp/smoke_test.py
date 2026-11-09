@@ -245,6 +245,38 @@ def main() -> int:
         if "Returns a friendly greeting." not in greet_hover:
             fail("hover did not include the function's docstring")
 
+        # Undocumented declarations get a synthesized hover summary
+        # (return type, calls, loops, ...) instead of a bare signature.
+        scale_call_line = next(
+            i for i, line in enumerate(lines) if "return scale(factor" in line
+        )
+        scale_column = lines[scale_call_line].index("scale(")
+        hover = client.request(
+            "textDocument/hover",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": scale_call_line, "character": scale_column},
+            },
+        )
+        scale_hover = hover["result"]["contents"]["value"]
+        if "fn scale" not in scale_hover:
+            fail("hover did not describe the scale function")
+        if "Auto-generated summary" not in scale_hover or "**Returns:**" not in scale_hover:
+            fail("hover did not synthesize docs for the undocumented scale function")
+
+        apply_decl_line = next(i for i, line in enumerate(lines) if line.startswith("fn apply"))
+        apply_column = lines[apply_decl_line].index("apply")
+        hover = client.request(
+            "textDocument/hover",
+            {
+                "textDocument": {"uri": uri},
+                "position": {"line": apply_decl_line, "character": apply_column},
+            },
+        )
+        apply_hover = hover["result"]["contents"]["value"]
+        if "**Calls:**" not in apply_hover or "`scale`" not in apply_hover:
+            fail("synthesized hover for apply did not list its calls")
+
         symbols = client.request(
             "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
         )["result"]

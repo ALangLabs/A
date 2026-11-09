@@ -833,6 +833,48 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
       rawInvAll();
       return;
     }
+    // Literal fast path: `x <op> k` / `k <op> x` for +,-,* with int-typed
+    // operands. The literal's int64 value is an immediate — no aval
+    // materialization, no second unbox. The slow lane calls the same
+    // a_*_slow helper emitArith would (with the literal boxed as its aval),
+    // so mixed-type, non-numeric, and overflow semantics are identical.
+    if (op == "+" || op == "-" || op == "*") {
+      const Expr* litE = nullptr;
+      const Expr* otherE = nullptr;
+      bool litRhs = false;
+      if (x.rhs->kind == ExprKind::IntLit &&
+          exprIsInt(x.lhs.get()) && exprIsInt(x.rhs.get()) &&
+          rawIntLitFits(static_cast<const IntLitExpr&>(*x.rhs).value)) {
+        litE = x.rhs.get(); otherE = x.lhs.get(); litRhs = true;
+      } else if (x.lhs->kind == ExprKind::IntLit &&
+                 exprIsInt(x.lhs.get()) && exprIsInt(x.rhs.get()) &&
+                 rawIntLitFits(static_cast<const IntLitExpr&>(*x.lhs).value)) {
+        litE = x.lhs.get(); otherE = x.rhs.get(); litRhs = false;
+      }
+      if (litE) {
+        const std::int64_t lv = static_cast<const IntLitExpr&>(*litE).value;
+        int os = evalSlot(otherE);
+        int ls2 = allocSlot();
+        movImm(mkintA(lv));
+        storeRax(ls2);
+        std::string slowL = newLabel("als"), doneL = newLabel("ald");
+        movImm(kTagInt, "%rdx");
+        loadSlot(os, "%rdi");
+        emitUnboxInt("%r8", slowL);
+        movImm((uint64_t)lv, "%r9");
+        const char* ins = op == "+" ? "add" : op == "-" ? "sub" : "imul";
+        emit(std::string(litRhs ? "    mov %r8, %rax\n    " :
+                                    "    mov %r9, %rax\n    ") +
+             ins + (litRhs ? " %r9, %rax\n    jo " : " %r8, %rax\n    jo ") +
+             slowL + "\n");
+        emitBoxInt64();
+        emit("    jmp " + doneL + "\n");
+        emitLabel(slowL);
+        call2slot(binopSlow(op), litRhs ? os : ls2, litRhs ? ls2 : os);
+        emitLabel(doneL);
+        return;
+      }
+    }
     int ls = evalSlot(x.lhs.get());
     int rs = evalSlot(x.rhs.get());
     emitArith(op, ls, rs);
