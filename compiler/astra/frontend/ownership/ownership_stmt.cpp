@@ -134,6 +134,12 @@ void Analyzer::analyzeAssign(const AssignStmt& assign) {
         sink_.error(assign.opSpan,
                     "Cannot modify '" + ident.name + "' through a shared borrow.",
                     "Use borrow_mut to obtain a mutable borrow.");
+      } else {
+        // `xs += v` may grow the storage, so it conflicts with every live
+        // borrower of the lender (views, shared borrows, and mutable borrows
+        // held by someone else), not just shared borrows.
+        requireNotBorrowed(lenderChain(ident.name), "modify",
+                           assign.opSpan, ident.name);
       }
       useVariable(ident);
       useExpr(*assign.value);
@@ -146,6 +152,19 @@ void Analyzer::analyzeAssign(const AssignStmt& assign) {
         sink_.error(assign.opSpan,
                     "Cannot modify '" + root + "' through a shared borrow.",
                     "Use borrow_mut to obtain a mutable borrow.");
+      } else {
+        const std::string lender = lenderChain(root);
+        if (assign.target->kind == ExprKind::Index) {
+          // Element writes keep the storage length, so views allow them;
+          // a shared borrow() still makes the whole value read-only.
+          requireNotSharedBorrowed(lender, "modify",
+                                   assign.target->span, root);
+        } else {
+          // Field (re)binds and other targets can detach or regrow storage,
+          // so they conflict with every live borrower, matching `x = v`.
+          requireNotBorrowed(lender, "modify", assign.target->span,
+                             root);
+        }
       }
     }
     useExpr(*assign.target);

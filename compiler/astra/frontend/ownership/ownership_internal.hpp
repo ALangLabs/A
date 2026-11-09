@@ -20,6 +20,21 @@ inline bool isStructuralMutator(const std::string& method) {
   return false;
 }
 
+// Every method that mutates a collection in place: the structural mutators
+// above plus length-preserving ones (sort/reverse) and dict/set mutators.
+// A shared borrow() makes its lender read-only, so none of these may be
+// called through any path rooted at the lender while the borrow is live.
+inline bool isMutatingMethod(const std::string& method) {
+  static const char* names[] = {"append",  "extend",   "insert",    "pop",
+                                "remove",  "remove_at", "clear",   "sort",
+                                "reverse", "update",   "setdefault", "add",
+                                "discard"};
+  for (const char* name : names) {
+    if (method == name) return true;
+  }
+  return false;
+}
+
 struct OwnershipState {
   bool moved = false;
   Span movedAt;
@@ -103,6 +118,14 @@ class Analyzer {
                             const std::string& except = {}) const;
   void requireNotBorrowed(const std::string& name, const std::string& action,
                           Span span, const std::string& except = {});
+
+  // First live shared borrow() of `name` other than `except`, or empty.
+  // Views (slices) and mutable borrows are tracked separately: element writes
+  // stay legal through views, and a mutable borrower may mutate its own loan.
+  std::string firstSharedBorrower(const std::string& name,
+                                  const std::string& except = {}) const;
+  void requireNotSharedBorrowed(const std::string& name, const std::string& action,
+                                Span span, const std::string& except = {});
 
   // --------------------------------------------------------- statements
 

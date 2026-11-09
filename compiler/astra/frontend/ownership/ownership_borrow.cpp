@@ -71,9 +71,12 @@ bool Analyzer::isViewExpression(const Expr& expr) const {
 void Analyzer::detectView(const std::string& view, const Expr& init) {
     if (!isViewExpression(init)) return;
     const auto& slice = static_cast<const SliceExpr&>(init);
-    if (slice.object->kind != ExprKind::Ident) return;
-    const auto& object = static_cast<const IdentExpr&>(*slice.object);
-    const std::string lender = lenderChain(object.name);
+    // Track the binding at the root of the sliced path (`box.items[0..3]`
+    // borrows `box`, `xs[i][0..3]` borrows `xs`) so that mutation anywhere
+    // under the root is rejected while the view is live.
+    const std::string root = rootIdentName(*slice.object);
+    if (root.empty()) return;
+    const std::string lender = lenderChain(root);
     addBorrow(view, lender);
     scopes_.back().views.push_back(view);
     scopes_.back().lenders.push_back(lender);

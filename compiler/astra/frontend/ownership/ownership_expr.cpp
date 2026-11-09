@@ -47,21 +47,31 @@ void Analyzer::useExpr(const Expr& expr) {
         } else if (call.callee->kind == ExprKind::Field) {
           const auto& field = static_cast<const FieldExpr&>(*call.callee);
           useExpr(*field.object);
-          if (field.object->kind == ExprKind::Ident && isStructuralMutator(field.field)) {
-            const auto& object = static_cast<const IdentExpr&>(*field.object);
-            // Method calls on a view go through the view itself; the runtime
-            // rejects structural mutation of a view on its own.
-            if (lenderOf_.count(object.name)) {
-              auto kind = borrowKind_.find(object.name);
+          if (isMutatingMethod(field.field)) {
+            // Resolve the binding at the root of the receiver chain so that
+            // `xs[i].append(..)`, `box.items.sort()`, etc. are checked against
+            // the same borrow bookkeeping as plain `xs.append(..)`.
+            const std::string root = rootIdentName(*field.object);
+            if (!root.empty()) {
+              auto kind = borrowKind_.find(root);
               if (kind != borrowKind_.end() && kind->second == BorrowKind::Shared) {
+                // Mutating through a shared borrow is never allowed.
                 sink_.error(field.fieldSpan,
                             "Cannot call '" + field.field + "' through shared borrow '" +
-                                object.name + "'.",
+                                root + "'.",
                             "Use borrow_mut to obtain a mutable borrow.");
+              } else if (isStructuralMutator(field.field)) {
+                // Structural mutators change the lender's storage, so every
+                // live borrower (view or borrow) conflicts. Mutable borrows
+                // already reject any use of the lender in useVariable.
+                requireNotBorrowed(lenderChain(root), "call '" + field.field + "' on",
+                                   field.fieldSpan, root);
+              } else {
+                // Length-preserving mutators (sort/reverse/update/...) stay
+                // legal through views but still conflict with shared borrows.
+                requireNotSharedBorrowed(lenderChain(root), "call '" + field.field + "' on",
+                                         field.fieldSpan, root);
               }
-            } else {
-              requireNotBorrowed(lenderChain(object.name), "call '" + field.field + "' on",
-                                 field.fieldSpan);
             }
           }
         } else {
@@ -195,6 +205,14 @@ void Analyzer::analyzeMove(const CallExpr& call) {
       state->movedAt = value.span;
       return;
     }
+    // move() transfers ownership out of a binding. Field/index arguments
+    // (move(xs[0]), move(box.items)) alias storage inside another value, so
+    // the "moved" result and the parent would keep aliasing the same data;
+    // tracking per-path moves is not supported, so reject them outright.
+    sink_.error(value.span,
+                "Cannot move a non-variable expression.",
+                "move() requires a plain variable; move the whole value instead of a "
+                "field or element.");
     useExpr(value);
   }
 

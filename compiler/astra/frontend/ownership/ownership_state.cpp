@@ -133,4 +133,26 @@ void Analyzer::requireNotBorrowed(const std::string& name, const std::string& ac
                     "' go out of scope (or reassign it) before modifying the value's storage.");
   }
 
+std::string Analyzer::firstSharedBorrower(const std::string& name,
+                                          const std::string& except) const {
+    if (const std::vector<std::string>* views = liveViews(name)) {
+      for (const std::string& view : *views) {
+        if (view == except) continue;
+        auto kind = borrowKind_.find(view);
+        if (kind != borrowKind_.end() && kind->second == BorrowKind::Shared) return view;
+      }
+    }
+    return {};
+  }
+
+void Analyzer::requireNotSharedBorrowed(const std::string& name, const std::string& action,
+                                        Span span, const std::string& except) {
+    const std::string borrower = firstSharedBorrower(name, except);
+    if (borrower.empty()) return;
+    sink_.error(span,
+                "Cannot " + action + " '" + name + "' while '" + borrower + "' borrows it.",
+                "Let '" + borrower +
+                    "' go out of scope (or reassign it) before modifying the value's storage.");
+  }
+
 }  // namespace a::detail
