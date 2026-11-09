@@ -62,6 +62,7 @@ enum class Tok {
   RBrace,
   Comma,
   Colon,
+  ColonEq,
   Dot,
   DotDot,
   Arrow,

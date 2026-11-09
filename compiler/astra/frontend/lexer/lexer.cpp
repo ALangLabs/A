@@ -90,6 +90,7 @@ const char* tokName(Tok kind) {
     case Tok::StarEq: return "'*='";
     case Tok::SlashEq: return "'/='";
     case Tok::SlashSlashEq: return "'//='";
+    case Tok::ColonEq: return "':='";
     case Tok::PercentEq: return "'%='";
     case Tok::AmpEq: return "'&='";
     case Tok::BarEq: return "'|='";
@@ -446,7 +447,7 @@ std::vector<Token> Lexer::tokenize() {
         emit1(Tok::Comma);
         break;
       case ':':
-        emit1(Tok::Colon);
+        peek(1) == '=' ? emit2(Tok::ColonEq) : emit1(Tok::Colon);
         break;
       case '+':
         if (peek(1) == '+') emit2(Tok::PlusPlus);

@@ -69,6 +69,7 @@ const char* Parser::opName(Tok kind) {
     case Tok::Shl: return "<<";
     case Tok::Shr: return ">>";
     case Tok::Eq: return "=";
+    case Tok::ColonEq: return "=";
     case Tok::PlusEq: return "+=";
     case Tok::MinusEq: return "-=";
     case Tok::StarEq: return "*=";
@@ -128,6 +129,7 @@ BinOp Parser::binOp(Tok kind) {
 bool Parser::isAssignmentOp(Tok kind) {
   switch (kind) {
     case Tok::Eq:
+    case Tok::ColonEq:
     case Tok::PlusEq:
     case Tok::MinusEq:
     case Tok::StarEq:
