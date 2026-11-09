@@ -1,0 +1,73 @@
+# Python-parity syntax and builtins regression coverage.
+
+# // floor division and //=
+a = -7 // 2
+b = 7.5 // 2.0
+c = 10
+c //= 3
+print(a, b, c)
+
+# is / is not
+print(1 is 1, 1 is not 2, "x" is "x")
+
+# inline conditional
+x = 5
+print(x if x > 0 else -x)
+
+# chained comparison
+print(1 < 2 < 3, 1 < 2 > 3)
+
+# chained assignment + aliasing
+y = z = [1]
+y.append(2)
+print(y, z)
+
+# walrus (statement level)
+w := 42
+print(w)
+
+# f-string and single-quoted strings
+name = "Ada"
+print(f"hi {name}")
+print('plain {literal}')
+
+# list/tuple repetition
+print([0] * 3, (1, 2) * 2, 2 * [7])
+
+# del
+d = [1, 2, 3]
+del d[0]
+m = {"a": 1, "b": 2}
+del m["a"]
+print(d, m)
+
+# dict comprehension
+print({k: k * k for k in [1, 2, 3]})
+print({k: k for k in [1, 2, 3, 4] if k % 2 == 0})
+
+# map/filter both orders, any/all bare
+print(map(fn(v) => v + 1, [1, 2]), map([1, 2], fn(v) => v + 1))
+print(filter(fn(v) => v > 1, [1, 2, 3]))
+print(any([0, 1]), all([2, 4]))
+
+# bytes alias, divmod, isinstance bare types
+print(len(bytes("hi")))
+print(divmod(7, 2), divmod(-7, 2))
+q, r = divmod(10, 3)
+print(q, r)
+print(isinstance(1, int), isinstance([1], list))
+
+# %-format and str.format
+print("%s=%d" % ("x", 5))
+print('%05.1f' % 3.14)
+print('{} and {0}'.format('a', 'b'))
+print('{{}}'.format())
+
+# ?. method call
+class P:
+    v
+    fn get(self):
+        return self.v
+p = Some(P(9))
+n = None
+print(p?.get(), n?.get())
