@@ -52,15 +52,60 @@ StmtPtr Parser::parseDoWhile() {
 StmtPtr Parser::parseFor() {
   Span start = cur().span;
   expect(Tok::KwFor, "'for'");
+  // `for x in xs` or `for x, y in pairs` (tuple unpacking). Targets are
+  // plain names parsed at token level so 'in' is never eaten as an operator.
   const Token& varTok = expect(Tok::Ident, "a loop variable name");
+  std::vector<std::string> names;
+  std::vector<Span> nameSpans;
+  names.push_back(varTok.lexeme);
+  nameSpans.push_back(varTok.span);
+  while (check(Tok::Comma) && peek(1).kind == Tok::Ident) {
+    advance();  // ','
+    const Token& t = expect(Tok::Ident, "a loop variable name");
+    names.push_back(t.lexeme);
+    nameSpans.push_back(t.span);
+  }
   expect(Tok::KwIn, "'in' after the loop variable");
   auto stmt = std::make_unique<ForStmt>();
-  stmt->var = varTok.lexeme;
-  stmt->varSpan = varTok.span;
   stmt->iterable = parseExpression();
   expect(Tok::Colon, "':' after the iterable expression");
   stmt->body = parseSuite();
   stmt->span = Span::join(start, previousSpan());
+  if (names.size() == 1) {
+    stmt->var = names[0];
+    stmt->varSpan = nameSpans[0];
+    return stmt;
+  }
+  // Desugar `for x, y in pairs` to `for __for_unpack in pairs` with
+  // `x = __for_unpack[0]; y = __for_unpack[1]; ...` prepended to the body.
+  stmt->var = "__for_unpack";
+  stmt->varSpan = start;
+  std::vector<StmtPtr> pre;
+  for (std::size_t i = 0; i < names.size(); ++i) {
+    auto idx = std::make_unique<IndexExpr>();
+    idx->span = stmt->span;
+    auto obj = std::make_unique<IdentExpr>();
+    obj->name = "__for_unpack";
+    obj->span = stmt->span;
+    idx->object = std::move(obj);
+    auto lit = std::make_unique<IntLitExpr>();
+    lit->value = static_cast<std::int64_t>(i);
+    lit->span = stmt->span;
+    idx->index = std::move(lit);
+    auto asg = std::make_unique<AssignStmt>();
+    asg->span = stmt->span;
+    asg->op = "=";
+    asg->binop = BinOp::Invalid;
+    asg->opSpan = stmt->span;
+    auto tgt = std::make_unique<IdentExpr>();
+    tgt->name = names[i];
+    tgt->span = nameSpans[i];
+    asg->target = std::move(tgt);
+    asg->value = std::move(idx);
+    pre.push_back(std::move(asg));
+  }
+  for (auto& s : stmt->body) pre.push_back(std::move(s));
+  stmt->body = std::move(pre);
   return stmt;
 }
 
