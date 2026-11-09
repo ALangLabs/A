@@ -228,24 +228,34 @@ TypePtr Sema::checkBuiltinNet(const std::string& name, CallExpr& call) {
     return typeArray(typeInt(64, true));
   }
 
-  if (name == "net_recv_bytes" || name == "net_inflate_bytes") {
+  if (name == "net_recv_bytes") {
     if (call.args.size() != 2) {
       builtinArityError(name, call, 2);
       inferCallArgTypes(call);
       return typeArray(typeInt(64, true));
     }
-    if (name == "net_recv_bytes") {
-      requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
-                     "The socket handle");
-      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
-                     "The maximum byte count");
-    } else {
+    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                   "The socket handle");
+    requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                   "The maximum byte count");
+    return typeArray(typeInt(64, true));
+  }
+
+  // net.inflate_bytes accepts Bytes or [i64] and hands back a Bytes buffer
+  // (it is documented as `-> Bytes` and the runtime returns a_bytes_take).
+  if (name == "net_inflate_bytes") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeBytes();
+    }
+    TypePtr src = inferExpr(*call.args[0].value);
+    if (resolveType(src)->kind != TypeKind::Bytes)
       checkArgAgainst(*call.args[0].value, typeArray(typeInt(64, true)),
                       "as the compressed bytes");
-      requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
-                     "The zlib windowBits");
-    }
-    return typeArray(typeInt(64, true));
+    requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                   "The zlib windowBits");
+    return typeBytes();
   }
 
   if (name == "net_inflate_available") {
