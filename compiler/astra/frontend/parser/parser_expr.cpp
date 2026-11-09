@@ -147,6 +147,106 @@ bool Parser::isAssignmentOp(Tok kind) {
   }
 }
 
+namespace {
+
+bool isChainComparisonTok(Tok kind) {
+  switch (kind) {
+    case Tok::Lt:
+    case Tok::Gt:
+    case Tok::Le:
+    case Tok::Ge:
+    case Tok::EqEq:
+    case Tok::NotEq:
+    case Tok::KwIn:
+    case Tok::KwIs:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// Middle operands of a chained comparison are duplicated in the AST, so only
+// side-effect-free literals and names may appear there.
+bool isCloneableSimple(const Expr& expr) {
+  switch (expr.kind) {
+    case ExprKind::Ident:
+    case ExprKind::IntLit:
+    case ExprKind::FloatLit:
+    case ExprKind::BoolLit:
+    case ExprKind::CharLit:
+      return true;
+    case ExprKind::StringLit: {
+      const auto& lit = static_cast<const StringLitExpr&>(expr);
+      for (const auto& part : lit.parts) {
+        if (part.isExpr) return false;
+      }
+      return true;
+    }
+    default:
+      return false;
+  }
+}
+
+ExprPtr cloneSimple(const Expr& expr) {
+  ExprPtr out;
+  switch (expr.kind) {
+    case ExprKind::Ident: {
+      auto c = std::make_unique<IdentExpr>();
+      c->name = static_cast<const IdentExpr&>(expr).name;
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    case ExprKind::IntLit: {
+      auto c = std::make_unique<IntLitExpr>();
+      c->value = static_cast<const IntLitExpr&>(expr).value;
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    case ExprKind::FloatLit: {
+      auto c = std::make_unique<FloatLitExpr>();
+      c->value = static_cast<const FloatLitExpr&>(expr).value;
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    case ExprKind::BoolLit: {
+      auto c = std::make_unique<BoolLitExpr>();
+      c->value = static_cast<const BoolLitExpr&>(expr).value;
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    case ExprKind::CharLit: {
+      auto c = std::make_unique<CharLitExpr>();
+      c->value = static_cast<const CharLitExpr&>(expr).value;
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    case ExprKind::StringLit: {
+      auto c = std::make_unique<StringLitExpr>();
+      const auto& lit = static_cast<const StringLitExpr&>(expr);
+      for (const auto& part : lit.parts) {
+        if (part.isExpr) return nullptr;
+        StringPart p;
+        p.isExpr = false;
+        p.text = part.text;
+        c->parts.push_back(std::move(p));
+      }
+      c->span = expr.span;
+      out = std::move(c);
+      break;
+    }
+    default:
+      break;
+  }
+  return out;
+}
+
+}  // namespace
+
 ExprPtr Parser::parseExpression(int minPrec) {
   ExprPtr left = parsePrefix();
   while (true) {
@@ -242,6 +342,62 @@ ExprPtr Parser::parseExpression(int minPrec) {
       call->args.insert(call->args.begin(), std::move(piped));
       call->span = Span::join(leftSpan, call->span);
       left = std::move(right);
+      continue;
+    }
+    if (isChainComparisonTok(kind) && isChainComparisonTok(cur().kind) &&
+        !(cur().kind == Tok::KwIs && peek(1).kind == Tok::KwNot)) {
+      // Python chained comparison: `a < b < c` means `(a < b) and (b < c)`.
+      // Middle operands are duplicated, so they must be simple literals or
+      // names (checked after collection, before building the 'and' chain).
+      std::vector<ExprPtr> operands;
+      operands.push_back(std::move(left));
+      operands.push_back(std::move(right));
+      std::vector<Tok> ops;
+      std::vector<Span> opSpans;
+      ops.push_back(kind);
+      opSpans.push_back(opTok.span);
+      while (isChainComparisonTok(cur().kind) &&
+             !(cur().kind == Tok::KwIs && peek(1).kind == Tok::KwNot)) {
+        const Token& cop = advance();
+        ops.push_back(cop.kind);
+        opSpans.push_back(cop.span);
+        operands.push_back(parseExpression(nextMin));
+      }
+      for (std::size_t i = 1; i + 1 < operands.size(); ++i) {
+        if (!isCloneableSimple(*operands[i])) {
+          fail(operands[i]->span,
+               "The middle operand of a chained comparison must be a name or literal.",
+               "Give the operand a name first, e.g. `t = expr` then chain on `t`.");
+        }
+      }
+      ExprPtr result;
+      for (std::size_t i = 0; i < ops.size(); ++i) {
+        ExprPtr lhs = i == 0 ? std::move(operands[0])
+                             : cloneSimple(*operands[i]);
+        ExprPtr rhs = i + 1 == operands.size() - 1
+                          ? std::move(operands[i + 1])
+                          : cloneSimple(*operands[i + 1]);
+        auto cmp = std::make_unique<BinaryExpr>();
+        cmp->span = Span::join(lhs->span, rhs->span);
+        cmp->opSpan = opSpans[i];
+        cmp->op = opName(ops[i]);
+        cmp->binop = binOp(ops[i]);
+        cmp->lhs = std::move(lhs);
+        cmp->rhs = std::move(rhs);
+        if (i == 0) {
+          result = std::move(cmp);
+        } else {
+          auto conj = std::make_unique<BinaryExpr>();
+          conj->span = Span::join(result->span, cmp->span);
+          conj->opSpan = opSpans[i];
+          conj->op = "and";
+          conj->binop = BinOp::And;
+          conj->lhs = std::move(result);
+          conj->rhs = std::move(cmp);
+          result = std::move(conj);
+        }
+      }
+      left = std::move(result);
       continue;
     }
     auto binary = std::make_unique<BinaryExpr>();
