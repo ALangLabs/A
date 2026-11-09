@@ -1,0 +1,96 @@
+# std.bytes.latin1 — Latin-1 (ISO-8859-1) and ASCII codecs.
+import std:core
+from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+
+"""b2s(bytes) -> String interpreting each byte as Latin-1 (byte value == codepoint)."""
+fn b2s(bytes):
+    parts = []
+    for b in bytes:
+        parts.append(chr(b) ?? "")
+    return join(parts, "")
+
+"""s2b(s) -> [i64] Latin-1 bytes (each char must be <= U+00FF)."""
+fn s2b(s: String):
+    out = []
+    for c in s.chars():
+        cp = ord(c)!
+        if cp > 255:
+            core.panic("s2b: character above U+00FF; use utf8_encode")
+        out.append(cp)
+    return out
+
+"""s2b_fast(s) -> [i64] UTF-8 bytes via native runtime (name kept for compat)."""
+fn s2b_fast(s: String):
+    return core.bytes_utf8_encode(s)
+
+"""latin1_encode(s, errors) -> [i64]"""
+fn latin1_encode(s: String, errors: String):
+    _check_errors(errors)
+    out = []
+    for c in s.chars():
+        cp = ord(c)!
+        if cp <= 255:
+            out.append(cp)
+        elif _is_ignore(errors):
+            pass
+        elif _is_replace(errors):
+            out.append(63)  # '?'
+        else:
+            core.panic("latin-1: character U+" + str(cp) + " cannot be encoded (strict)")
+    return out
+
+"""latin1_decode(bytes, errors) -> String"""
+fn latin1_decode(bytes, errors: String):
+    _check_errors(errors)
+    parts = []
+    for b in bytes:
+        v = b
+        if v < 0 or v > 255:
+            if _is_ignore(errors):
+                continue
+            if _is_replace(errors):
+                parts.append("�")
+                continue
+            core.panic("latin-1: invalid byte value (strict)")
+        c = chr(v)
+        if c != None:
+            parts.append(c)
+        else:
+            parts.append("�")
+    return join(parts, "")
+
+"""ascii_encode(s, errors) -> [i64]"""
+fn ascii_encode(s: String, errors: String):
+    _check_errors(errors)
+    out = []
+    for c in s.chars():
+        cp = ord(c)!
+        if cp <= 127:
+            out.append(cp)
+        elif _is_ignore(errors):
+            pass
+        elif _is_replace(errors):
+            out.append(63)
+        else:
+            core.panic("ascii: character U+" + str(cp) + " cannot be encoded (strict)")
+    return out
+
+"""ascii_decode(bytes, errors) -> String"""
+fn ascii_decode(bytes, errors: String):
+    _check_errors(errors)
+    parts = []
+    for b in bytes:
+        v = b
+        if v < 0 or v > 127:
+            if _is_ignore(errors):
+                continue
+            if _is_replace(errors):
+                parts.append("�")
+                continue
+            core.panic("ascii: invalid byte value (strict)")
+        c = chr(v)
+        if c != None:
+            parts.append(c)
+        else:
+            parts.append("�")
+    return join(parts, "")

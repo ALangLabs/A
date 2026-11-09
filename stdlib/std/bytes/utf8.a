@@ -1,0 +1,134 @@
+# std.bytes.utf8 — UTF-8 codec.
+import std:core
+from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+
+"""utf8_encode(s) -> [i64] UTF-8 bytes of the string s."""
+fn utf8_encode(s: String):
+    out = []
+    for c in s.chars():
+        cp = ord(c)!
+        if cp < 0:
+            core.panic("utf8_encode: invalid char")
+        if cp < 128:
+            out.append(cp)
+        elif cp < 2048:
+            out.append(192 + cp / 64)
+            out.append(128 + cp % 64)
+        elif cp < 65536:
+            out.append(224 + cp / 4096)
+            out.append(128 + cp / 64 % 64)
+            out.append(128 + cp % 64)
+        else:
+            out.append(240 + cp / 262144)
+            out.append(128 + cp / 4096 % 64)
+            out.append(128 + cp / 64 % 64)
+            out.append(128 + cp % 64)
+    return out
+
+"""utf8_decode(bytes) -> String? decoding UTF-8 (strict-compatible: None on malformed)."""
+fn utf8_decode(bytes) -> String?:
+    return core.bytes_utf8_decode(bytes)
+
+"""utf8_decode_errors(bytes, errors) -> String. errors: strict|replace|ignore."""
+fn utf8_decode_errors(bytes, errors: String):
+    _check_errors(errors)
+    if _is_strict(errors):
+        d = core.bytes_utf8_decode(bytes)
+        if d == None:
+            core.panic("utf8: invalid byte sequence (strict)")
+        return d!
+    parts = []
+    i = 0
+    n = len(bytes)
+    while i < n:
+        b0 = bytes[i]
+        if b0 < 0 or b0 > 255:
+            if _is_ignore(errors):
+                i = i + 1
+                continue
+            parts.append("�")
+            i = i + 1
+            continue
+        if b0 < 128:
+            c = chr(b0)
+            if c != None:
+                parts.append(c)
+            i = i + 1
+        elif b0 >= 192 and b0 < 224:
+            if i + 1 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192:
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            cp = (b0 - 192) * 64 + (bytes[i + 1] - 128)
+            if cp < 128:
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            c = chr(cp)
+            if c != None:
+                parts.append(c)
+            else:
+                parts.append("�")
+            i = i + 2
+        elif b0 >= 224 and b0 < 240:
+            if i + 2 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192:
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            cp = (b0 - 224) * 4096 + (bytes[i + 1] - 128) * 64 + (bytes[i + 2] - 128)
+            if cp < 2048 or (cp >= 55296 and cp <= 57343):
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            c = chr(cp)
+            if c != None:
+                parts.append(c)
+            else:
+                parts.append("�")
+            i = i + 3
+        elif b0 >= 240 and b0 < 248:
+            if i + 3 >= n or bytes[i + 1] < 128 or bytes[i + 1] >= 192 or bytes[i + 2] < 128 or bytes[i + 2] >= 192 or bytes[i + 3] < 128 or bytes[i + 3] >= 192:
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            cp = (b0 - 240) * 262144 + (bytes[i + 1] - 128) * 4096 + (bytes[i + 2] - 128) * 64 + (bytes[i + 3] - 128)
+            if cp < 65536 or cp > 1114111:
+                if _is_ignore(errors):
+                    i = i + 1
+                else:
+                    parts.append("�")
+                    i = i + 1
+                continue
+            c = chr(cp)
+            if c != None:
+                parts.append(c)
+            else:
+                parts.append("�")
+            i = i + 4
+        else:
+            if _is_ignore(errors):
+                i = i + 1
+            else:
+                parts.append("�")
+                i = i + 1
+    return join(parts, "")
+
+"""utf8_encode_errors(s, errors) -> [i64]."""
+fn utf8_encode_errors(s: String, errors: String):
+    _check_errors(errors)
+    return utf8_encode(s)

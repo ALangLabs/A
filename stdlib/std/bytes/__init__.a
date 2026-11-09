@@ -1,2 +1,12 @@
-# std.bytes package — byte/char utilities (Python `bytes`-type helpers).
-from "bytes.a" import chr, ord, utf8_encode, utf8_decode, b2s, s2b, s2b_fast
+# std.bytes — byte/char utilities and text encodings (multi-file, Python-like API).
+#
+# Easy API:
+#   from std:bytes import encode, decode
+#   b = encode("hello", "utf-8")      # Bytes
+#   s = decode(b, "utf-8")            # String
+#
+# Legacy helpers still available:
+#   utf8_encode, utf8_decode, b2s, s2b, s2b_fast, chr, ord
+from "codecs.a" import encode, decode, encode_list, supported_encodings
+from "utf8.a" import chr, ord, utf8_encode, utf8_decode
+from "latin1.a" import b2s, s2b, s2b_fast

@@ -1,0 +1,82 @@
+# std.bytes.common — shared helpers: chr/ord, error handling, encoding normalization.
+import std:core
+import std:binary
+
+"""_varint_encode(v, out) -> appends LEB128 varint bytes of v >= 0."""
+fn _varint_encode(v: i64, out: [i64]):
+    while v >= 128:
+        out.append(v % 128 + 128)
+        v = v / 128
+    out.append(v)
+
+"""chr(cp) -> char for a Unicode code point, or None when out of range."""
+fn chr(cp: i64) -> String?:
+    if cp < 0 or cp > 1114111:
+        return None
+    bytes = [13]
+    _varint_encode(cp, bytes)
+    d = binary.decode(bytes)
+    if d == None:
+        return None
+    return Some(str(d ?? "\0"))
+
+"""ord(c) -> code point of a char or 1-character string, None otherwise."""
+fn ord(c) -> i64?:
+    b = core.bytes_utf8_encode(c)
+    n = len(b)
+    if n == 0:
+        return None
+    b0 = b[0]
+    cp = 0
+    need = 1
+    if b0 < 128:
+        cp = b0
+    elif b0 >= 192 and b0 < 224:
+        need = 2
+        cp = b0 - 192
+    elif b0 >= 224 and b0 < 240:
+        need = 3
+        cp = b0 - 224
+    elif b0 >= 240 and b0 < 248:
+        need = 4
+        cp = b0 - 240
+    else:
+        return None
+    if n != need:
+        return None
+    i = 1
+    while i < need:
+        bi = b[i]
+        if bi < 128 or bi >= 192:
+            return None
+        cp = cp * 64 + (bi - 128)
+        i = i + 1
+    return Some(cp)
+
+"""_norm_encoding(name) -> normalized encoding key (lowercase, no '-'/'_'/' ')."""
+fn _norm_encoding(name: String):
+    s = name.lower()
+    out = ""
+    for c in s.chars():
+        if c != '-' and c != '_' and c != ' ':
+            out = out + c
+    return out
+
+"""_is_strict(errors)"""
+fn _is_strict(errors: String):
+    return errors == "strict"
+
+"""_is_replace(errors)"""
+fn _is_replace(errors: String):
+    return errors == "replace"
+
+"""_is_ignore(errors)"""
+fn _is_ignore(errors: String):
+    return errors == "ignore"
+
+"""_check_errors(errors) -> panics on unknown error handler name."""
+fn _check_errors(errors: String):
+    if errors == "strict" or errors == "replace" or errors == "ignore":
+        _ok = 1
+    else:
+        core.panic("bytes: unknown error handler: " + errors)
