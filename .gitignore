@@ -28,3 +28,5 @@ dist/
 demo/
 # test output residue (written by tests/integration/cases/file_io.a)
 data.txt
+# runtime archive built by the astra_runtime target
+compiler/astra/runtime/libaruntime.a
