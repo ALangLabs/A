@@ -119,7 +119,7 @@ ExprPtr Parser::parsePrimary() {
         comprehension->var = varTok.lexeme;
         comprehension->varSpan = varTok.span;
         comprehension->element = std::move(first);
-        comprehension->iterable = parseExpression();
+        comprehension->iterable = parseExpression(3);
         if (match(Tok::KwIf)) {
           comprehension->condition = parseExpression();
         }
@@ -157,7 +157,7 @@ ExprPtr Parser::parsePrimary() {
         comprehension->var = varTok.lexeme;
         comprehension->varSpan = varTok.span;
         comprehension->element = std::move(firstKey);
-        comprehension->iterable = parseExpression();
+        comprehension->iterable = parseExpression(3);
         if (match(Tok::KwIf)) {
           comprehension->condition = parseExpression();
         }
@@ -166,9 +166,63 @@ ExprPtr Parser::parsePrimary() {
         return comprehension;
       }
       if (match(Tok::Colon)) {
-        // Map literal: {key: value, ...}
-        auto map = std::make_unique<MapLitExpr>();
+        // Map literal: {key: value, ...}  — or dict comprehension
+        // {k: v for x in xs [if c]} which desugars to
+        // dict(map(filter(xs, fn(x) => c), fn(x) => (k, v))).
         auto firstVal = parseExpression();
+        if (check(Tok::KwFor)) {
+          advance();
+          const Token& varTok = expect(Tok::Ident, "a loop variable name");
+          expect(Tok::KwIn, "'in' after the loop variable");
+          ExprPtr iterable = parseExpression(3);
+          ExprPtr condition;
+          if (match(Tok::KwIf)) condition = parseExpression();
+          expect(Tok::RBrace, "'}' after the dict comprehension");
+          Span span = Span::join(start, previousSpan());
+          auto makeLambda = [&](ExprPtr body) {
+            auto lam = std::make_unique<LambdaExpr>();
+            lam->span = span;
+            ParamDecl p;
+            p.name = varTok.lexeme;
+            p.span = varTok.span;
+            lam->params.push_back(std::move(p));
+            lam->body = std::move(body);
+            return lam;
+          };
+          auto callBuiltin = [&](const char* name, std::vector<ExprPtr> fargs) {
+            auto call = std::make_unique<CallExpr>();
+            call->span = span;
+            auto callee = std::make_unique<IdentExpr>();
+            callee->name = name;
+            callee->span = span;
+            call->callee = std::move(callee);
+            for (auto& e : fargs) {
+              CallArg a;
+              a.value = std::move(e);
+              call->args.push_back(std::move(a));
+            }
+            return call;
+          };
+          ExprPtr mapped = std::move(iterable);
+          if (condition) {
+            std::vector<ExprPtr> fargs;
+            fargs.push_back(std::move(mapped));
+            fargs.push_back(makeLambda(std::move(condition)));
+            mapped = callBuiltin("filter", std::move(fargs));
+          }
+          auto pair = std::make_unique<TupleExpr>();
+          pair->span = span;
+          pair->elements.push_back(std::move(firstKey));
+          pair->elements.push_back(std::move(firstVal));
+          std::vector<ExprPtr> margs;
+          margs.push_back(std::move(mapped));
+          margs.push_back(makeLambda(std::move(pair)));
+          mapped = callBuiltin("map", std::move(margs));
+          std::vector<ExprPtr> dargs;
+          dargs.push_back(std::move(mapped));
+          return callBuiltin("dict", std::move(dargs));
+        }
+        auto map = std::make_unique<MapLitExpr>();
         map->entries.push_back({std::move(firstKey), std::move(firstVal)});
         while (match(Tok::Comma)) {
           if (check(Tok::RBrace)) break;
