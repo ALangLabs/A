@@ -11,8 +11,8 @@ directory), with no external dependencies beyond the A toolchain and
 # from the repo root (build the toolchain first, see ../README.md)
 ./apm/apm init myapp                 # scaffold a project (writes apm.json)
 ./apm/apm install string-utils       # add packages (resolves deps, locks)
-./apm/apm list                       # show what is installed
-./apm/apm run main.a                 # run a program with packages on -I
+./build/a run main.a                 # plain `a` finds .apm/packages automatically
+./apm/apm run main.a                 # same, plus an explicit -I (for -I-less tools use apm exec)
 ```
 
 `apm/apm` is a small launcher: the A runtime exposes no `argv` to
@@ -29,8 +29,10 @@ APM_ARGS="install hello-lib" ./build/a run apm/apm.a
   Packages install into `.apm/packages/<import_name>/` and are pinned in
   `apm.lock.json` (commit it for reproducible installs, like `Cargo.lock`).
 - **Imports** work like Python: `import hello_lib` (package `hello-lib`
-  maps `-` → `_`). `apm run` passes `-I .apm/packages` to `a run`;
-  `apm exec` sets `A_PATH` instead.
+  maps `-` → `_`). `a run`/`a build`/`a check`/`a test` find
+  `.apm/packages` automatically when `apm.json` is found by walking up from
+  the entry file, so no `apm run` wrapper is needed; `apm exec` sets
+  `A_PATH` instead.
 - **Manifest** (`apm.json`): `name`, `version`, `description`, `main`,
   `dependencies` (package → version spec). Example:
 

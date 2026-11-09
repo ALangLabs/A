@@ -14,7 +14,10 @@ A packages, **written in A itself** (see [`apm/`](../../apm/README.md)).
 - A **project** is a directory with `apm.json`. Installed packages live in
   `.apm/packages/<import_name>/` and are pinned in `apm.lock.json`.
 - Imports behave like Python: `import hello_lib` (package `hello-lib`
-  maps `-` → `_`). `apm run` passes `-I .apm/packages` to `a run`.
+  maps `-` → `_`). `a run`/`a build`/`a check`/`a test` add
+  `<project>/.apm/packages` to the module search paths automatically
+  whenever `apm.json` is found walking up from the entry file, so no
+  `apm run` wrapper is needed; `apm exec` sets `A_PATH` instead.
 - The **registry** (`apm/registry/registry.json`) indexes package versions
   and their sources (local path, `git+<url>[#<ref>]`, or http tarball/zip);
   `APM_REGISTRY` points at another index or a remote JSON URL.
