@@ -57,6 +57,26 @@ fn cpu_count():
 fn system(command):
     return fs.system(command)
 
-"""getloadavg() -> not implemented by the runtime; raises."""
+"""getloadavg() -> [1-minute, 5-minute, 15-minute] load averages."""
 fn getloadavg():
-    core.panic("os.getloadavg() is not supported on this runtime")
+    return fs.getloadavg()
+
+"""gethostname() -> host name of the machine."""
+fn gethostname():
+    return fs.gethostname()
+
+"""umask(mask) -> set the process file mode mask; returns the old one."""
+fn umask(mask):
+    return fs.umask(mask)
+
+"""getpagesize() -> system memory page size in bytes."""
+fn getpagesize():
+    return fs.getpagesize()
+
+"""kill(pid, signal) -> send a signal to a process."""
+fn kill(pid, signal):
+    fs.kill(pid, signal)
+
+"""_exit(code) -> terminate the current process immediately."""
+fn _exit(code=0):
+    fs.exit(code)

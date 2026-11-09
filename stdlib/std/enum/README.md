@@ -163,9 +163,9 @@ Not included:
 - `EnumSpec`/`FlagSpec`/`EnumMember` are plain A classes; `==` on members
   is structural and includes a per-spec id, so members of two different
   `Enum("Color", ...)` calls never compare equal.
-- Module-level variables read as `0.0` inside `a test` test functions
-  (toolchain quirk); the `auto()` sentinel is inlined as a literal to
-  stay correct under `a test`.
+- `a test` runs top-level statements, so module-level values are
+  initialized before test functions run; the `auto()` sentinel is still
+  inlined as a literal, which keeps it correct regardless.
 
 ## Testing
 

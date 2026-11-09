@@ -37,7 +37,8 @@ compiles A straight to native machine code.
   compile-time view (slice) tracking, checked after type inference.
 - **Rich standard library** — collections, math, JSON, binary codec, filesystem,
   HTTP/net, logging, metrics, tracing, terminal, time, testing, and more —
-  written in A under [`stdlib/`](stdlib/).
+  A packages under [`stdlib/`](stdlib/) plus native runtime modules, reached
+  through `import std:<pkg>`.
 - **Python interop** — `import python:<pkg>` calls into CPython at run time via
   a `dlopen`'d libpython bridge (NumPy, PyTorch, …), including zero-copy
   buffer-protocol views.
@@ -137,7 +138,7 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 ```mermaid
 flowchart LR
     src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · codegen"]
-    fe --> s["x86-64 / per-arch asm · portable C"]
+    fe --> s["x86-64 / per-arch asm"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
     astra --> bin["native executable"]
@@ -172,10 +173,10 @@ operating systems):
 | Target | Backend | Status |
 |---|---|---|
 | `x86_64` (default) | x86-64 asm emitter → `astra` | native, fully tested |
-| `i386` | native i386 asm emitter (C fallback) → `astra-i386` | verified (runs natively on x86-64) |
-| `arm` (ARMv7 hard-float) | native ARM asm emitter (C fallback) → `astra-arm` | verified under qemu-armhf |
-| `aarch64` / `arm64` | native AArch64 asm emitter (C fallback) → `astra-arm64` | needs AArch64 sysroot |
-| `riscv64` | native RISC-V64 asm emitter (C fallback) → `astra-riscv64` | needs RISC-V64 sysroot |
+| `i386` | native i386 asm emitter → `astra-i386` | verified (runs natively on x86-64) |
+| `arm` (ARMv7 hard-float) | native ARM asm emitter → `astra-arm` | verified under qemu-armhf |
+| `aarch64` / `arm64` | native AArch64 asm emitter → `astra-arm64` | needs AArch64 sysroot |
+| `riscv64` | native RISC-V64 asm emitter → `astra-riscv64` | needs RISC-V64 sysroot |
 | `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc/sysroot; `a run` via qemu-system-i386, `a test` unsupported |
 
 `a run`, `a test` and `a repl` execute natively and reject non-host
@@ -198,15 +199,22 @@ pulls the remaining 512-byte sectors to 0x7E00+, records the sector count at
 file offset 0x1F8, and stamps the 0x55AA signature; it then far-jumps to
 `_entry` at CS=0x1000. `print` writes to COM1 (0x3F8), program exit writes
 42 to port 0xF4 and halts. The hand-written runtime
-(`compiler/astra/runtime/i8086_runtime.s`) is a subset: tagged-int
-arithmetic/comparisons and decimal `print` of ints; other builtins are
-stubs returning `none` (non-int `print` args show `?`). Real-mode CS:IP is
-16-bit, so `.text` must fit in a single 64 KiB code segment at 0x10000 —
-the emitter dead-strips unreachable functions to stay under it. The astra
-i8086 driver is built on Linux hosts only. Known gaps: string literals
-currently read the wrong memory pending a linker address fix, and
-`while` loops, methods, and lambdas are broken (the runtime stubs behind
-them return `none`) — only straight-line tagged-int code is reliable.
+(`compiler/astra/runtime/i8086_runtime.s`) is a partial subset. It handles
+tagged-int arithmetic/comparisons, `print` of ints/strings/`none`/`true`/
+`false`, string literals and `+` concatenation, `len`/`str`/`int`/`bool`/
+`abs`/`range`/`repr`, `[]` indexing (including ranges like `xs[1..4]`),
+`if`/`while`/`for` over ints, and `fn(x) => …` lambdas called directly;
+other builtins are stubs returning `none`. Real-mode CS:IP is 16-bit, so
+`.text` must fit in a single 64 KiB code segment at 0x10000 — the emitter
+dead-strips unreachable functions to stay under it. The astra i8086 driver
+is built on Linux hosts only. Known gaps: method/attribute access
+(`s.upper()`, `d.get(…)`) and dict `d[k]` read-back are stubs that print
+nothing, string interpolation `"{expr}"` and programs that mix
+heap-allocated strings with further loops wedge the image until QEMU is
+killed, and tuple iteration is rejected at code generation. The runtime
+heap is a fixed 60 KiB bump arena with no collection, so keep programs
+small. Those claims were checked by running programs under
+`qemu-system-i386`.
 `a run --target i8086` builds
 the image and executes it under `qemu-system-i386` (COM1 on stdio,
 isa-debug-exit on port 0xF4); `a test`/`a repl` still reject it.

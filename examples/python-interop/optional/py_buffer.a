@@ -7,7 +7,7 @@
 # memoryview, bytearray. Read-only exports (bytes, readonly memoryviews,
 # non-writeable ndarrays) panic on item assignment. Non-contiguous or
 # unsupported formats (strings, structs, non-native byte order) panic at
-# py_buffer() time. Views live until process exit.
+# py_buffer() time. Views are memory-managed by the GC once unreachable.
 import python:numpy as np
 import python:array
 import python:builtins

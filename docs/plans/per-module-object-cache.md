@@ -1,6 +1,29 @@
 # Plan: per-module compilation units + object cache ("recompile only what changed")
 
-Status: proposed. Owner: compiler/codegen + pipeline. Reversible at every phase.
+Status: **implemented** (Phases 1–3 landed; see deltas below). Owner: compiler/codegen + pipeline. Reversible at every phase.
+
+## Implementation status (as built)
+
+The design below shipped with these deltas from the original proposal —
+`pipeline.cpp` (`objcache` namespace) and `codegen_decls.cpp` are the source
+of truth:
+
+- Per-module split units are **on by default**; `A_SPLIT_UNITS=0` (or
+  `off`/`no`/`false`) reverts to the single-unit `emitAsm`/`emitNative` path.
+- Unit keys live in `unitKeyWithCtx`/`KeyContext`: besides `source(M)`,
+  `sighash(M)`, and transitive `sighash(D)` deps, every unit key also mixes a
+  **whole-graph scope-name hash** (`scopeNamesHash` over every module's
+  top-level `let`/`assign`/`fn`/`struct`/`enum` names, in `g.modules` order),
+  because `buildGlobalScope` resolves name collisions across the flat global
+  namespace. The entry unit additionally keys on `g.order` (module-init call
+  order) and the `a test` filter.
+- `mtag` is `stableTag()` of the module's **weakly-canonicalized path**
+  (`AsmEmitter::moduleTag`), matching §1.
+- Cache dir: `$A_CACHE_DIR`'s parent + `/obj` when set, else
+  `$XDG_CACHE_HOME/a/obj` (default `~/.cache/a/obj`, `%TEMP%\a_cache\obj` on
+  Windows) — same layout as §4.
+- `A_DEBUG_UNITS=1` prints per-unit emit/reuse counts; exercised by
+  `tests/integration/cache_test.sh`.
 
 ## Goal
 

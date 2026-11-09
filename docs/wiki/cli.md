@@ -26,7 +26,8 @@ faster dev builds).
 - `-I <dir>` — module search directory (repeatable).
 - `--stdlib <dir>` — override stdlib root (else `$A_STDLIB` / auto-detect).
 - `-j <n>`, `--jobs <n>`, `--parallel` — parallel module checking.
-- `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N`, `--optnone` — optimization.
+- `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N` (0..3; out-of-range
+  values like `9` or `-1` are rejected), `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.a --filter dict`). A filter
@@ -80,23 +81,26 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
   CS:IP is 16-bit, so `.text` must fit a single 64 KiB segment at
   0x10000; the emitter dead-strips unreachable functions to stay under it.
 - Runtime is the hand-written subset in
-  `compiler/astra/runtime/i8086_runtime.s`: tagged-int (boxed-int)
-  arithmetic and comparisons, decimal `print` of ints/strings/`none`/
-  `true`/`false`, string literals + `+` concat via a bump-allocator heap,
-  `len`/`str`/`int`/`bool`/`abs`/`range`/`repr`, collections
-  (list/tuple/dict/set/range) with `[]` indexing and `in`, bitwise ops,
-  `**`, and closure/call scaffolding. `print` writes to COM1 (0x3F8);
-  remaining builtins (`a_getattr`/`a_method`/`a_slice`/f-string
-  interpolation/`a_test_main`, …) are still stubs returning `none`.
-- Known gaps: dict `d[k]` getitem, lambda/first-class-fn calls, list
-  `print` repr, tuple iteration (type-checker rejects), methods/attribute
-  access, slicing, and f-string interpolation are stubbed. Straight-line
-  code, `while`/`if`/`for`, arithmetic, comparisons, strings, `len`,
-  indexing, and collections are reliable; method/lambda/slice-heavy
-  programs are not.
+  `compiler/astra/runtime/i8086_runtime.s`. It handles tagged-int
+  (boxed-int) arithmetic and comparisons, decimal `print` of
+  ints/strings/`none`/`true`/`false`, string literals + `+` concat,
+  `len`/`str`/`int`/`bool`/`abs`/`range`/`repr`, `[]` indexing (including
+  range subscripts like `xs[1..4]`), bitwise ops, `**`, `while`/`if`/`for`
+  over ints, and `fn(x) => …` lambdas called directly. `print` writes to
+  COM1 (0x3F8); remaining builtins (`a_getattr`/`a_method`/`a_slice`/
+  string interpolation/`a_test_main`, …) are stubs returning `none`.
+- Known gaps: method/attribute access (`s.upper()`, `d.get(…)`) and dict
+  `d[k]` read-back print nothing (stubs returning `none`); string
+  interpolation `"{expr}"` and programs that mix heap-allocated strings
+  with further loops wedge the image (kill the QEMU run, or use a shorter
+  `timeout`); tuple iteration is rejected at code generation. The heap is a
+  fixed 60 KiB bump arena with no collection, so keep images small.
+  These were checked by actually running programs under
+  `qemu-system-i386`, not only by compiling them.
 - Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
   wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
-  `tests/integration/i8086_image.sh` is the automated harness. Manual run:
+  `tests/integration/i8086_image.sh <path-to-a> <source.a> [expected.out]`
+  builds an image and diffs the serial output against `expected.out`. Manual run:
   `qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
 - The `astra-i8086` driver is built on Linux hosts only. The astra i8086
   backend is assembler-only, so if the native emitter declines a program
@@ -106,7 +110,10 @@ Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
 `A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm` to
 force the assembly emitter; `c` is rejected — the C emitter was removed), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`,
 `A_NO_CACHE` (disable the run cache), `A_CACHE_DIR` (run cache directory,
-default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`).
+default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`),
+`A_GC` (`0` disables the garbage collector), `A_GC_STATS` (`1` prints
+per-collection stats to stderr), `A_GC_DEBUG` (`1` enables collector
+stage markers).
 
 ## Run cache
 

@@ -29,6 +29,11 @@ Related: [Examples](examples.md),
 
 ## Results (Nov 2026, Ryzen 5 7520U, best of 7)
 
+Historical snapshot from one reference machine — hardware- and
+load-dependent, so treat the ratios as indicative rather than guaranteed.
+Rerun `tools/benchmark-runner/bench_4way.py` for current numbers on your
+own hardware.
+
 End-to-end wall time in ms (lower is better). `A run` uses the content-
 addressed run cache (warm: pre-parse depfile check + exec; cold compiles
 first), `A native` (`a build`) is the apples-to-apples comparison with C/C++.

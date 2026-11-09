@@ -174,6 +174,41 @@ fn test_files_and_random():
 fn test_system():
     assert_eq(os.system("exit 0"), 0)
 
+fn test_system_level():
+    la = os.getloadavg()
+    assert_eq(len(la), 3)
+    assert_true(la[0] >= 0.0 and la[1] >= 0.0 and la[2] >= 0.0)
+    assert_true(os.gethostname() != "")
+    assert_true(os.getpagesize() >= 1024)
+    # umask round-trip: returns the previous mask
+    prev = os.umask(0o022)
+    cur = os.umask(0o022)
+    assert_eq(cur, 0o022)
+    os.umask(prev)
+    # disk usage shape
+    du = os.disk_usage("/")
+    assert_eq(len(du), 3)
+    assert_true(du[0] > 0 and du[1] >= 0 and du[2] >= 0)
+    assert_eq(du[1] + du[2], du[0])
+    # ismount: root is a mount point; a deep cwd path is not
+    assert_true(os.ismount("/"))
+    assert_true(not os.ismount("/x/y/z"))
+    # popen captures stdout
+    assert_eq(os.popen("printf hi"), "hi")
+    # utime() with no times touches to now
+    base = _fresh("_os_selftest_utime")
+    f = os.path.join([base, "t.txt"])
+    write_file(f, "t")
+    os.utime(f, [1000000000.0, 1000000000.0])
+    assert_eq(os.stat(f).st_mtime, 1000000000.0)
+    os.utime(f)
+    assert_true(os.stat(f).st_mtime > 1000000000.0)
+    os.remove(f)
+    os.rmdir(base)
+    # signals are exported constants
+    assert_eq(os.SIGTERM, 15)
+    assert_eq(os.SIGKILL, 9)
+
 fn main():
     test_constants()
     test_platform()
@@ -184,5 +219,6 @@ fn main():
     test_dirs_and_walk()
     test_files_and_random()
     test_system()
+    test_system_level()
     print("os selftest: OK")
     return 0

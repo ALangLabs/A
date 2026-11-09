@@ -13,29 +13,32 @@
 #   pathns.a       the os.path namespace object
 #   randbytes.a    urandom/getrandom
 #   termsize.a     get_terminal_size
+#   syscalls.a     loadavg/hostname/umask/pagesize/popen/kill (C parity)
 #
 # Differences from CPython that are inherent to the A runtime:
 #   * Paths are UTF-8 strings; there is no separate bytes path type.
 #   * There is no file-descriptor-based API (open/read/write/fdopen, dir_fd=,
-#     os.stat_result.st_*_ns). `fwalk`, `getloadavg`, and `sameopenfile`
-#     raise instead of returning partial data.
+#     os.stat_result.st_*_ns). `fwalk` and `sameopenfile` raise instead
+#     of returning partial data (`getloadavg` is implemented).
 #   * os.urandom returns a [i64] list of byte values (as random.randbytes does)
 #     because A has no first-class `bytes` for this API.
 #   * os.chmod/utime on Windows are no-ops or unsupported, as in the runtime.
 
-from "constants.a" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END
+from "constants.a" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS
 
 from "environment.a" import getenv, getenv_default, getenvb, environ_get, environ_all, putenv, unsetenv, environ, Environ
 
-from "process.a" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg
+from "process.a" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg, gethostname, umask, getpagesize, kill, _exit
 
-from "stat.a" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, utime, samefile, samestat, ismount
+from "stat.a" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, chown, utime, samefile, samestat, ismount, disk_usage
 
 from "dirs.a" import DirEntry, listdir, scandir, mkdir, makedirs, rmdir, removedirs, walk, fwalk
 
 from "files.a" import remove, unlink, rename, replace, renames, truncate, link, symlink, readlink
 
 from "randbytes.a" import urandom, getrandom
+
+from "syscalls.a" import popen
 
 from "termsize.a" import get_terminal_size, TerminalSize
 

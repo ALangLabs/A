@@ -1,0 +1,45 @@
+# std.os.syscalls — raw system-level calls (C parity) over the native fs
+# module: load average, hostname, umask, page size, ownership, mount-point
+# detection, disk usage, shell output capture, signals, and process exit.
+
+import std:fs
+
+"""getloadavg() -> [1-minute, 5-minute, 15-minute] load averages."""
+fn getloadavg():
+    return fs.getloadavg()
+
+"""gethostname() -> host name of the machine."""
+fn gethostname():
+    return fs.gethostname()
+
+"""umask(mask) -> set the process file mode creation mask; returns the old one."""
+fn umask(mask):
+    return fs.umask(mask)
+
+"""getpagesize() -> system memory page size in bytes."""
+fn getpagesize():
+    return fs.getpagesize()
+
+"""chown(path, uid, gid) -> change file ownership (requires privilege)."""
+fn chown(path, uid, gid):
+    fs.chown(path, uid, gid)
+
+"""ismount(path) -> whether path is a mount point."""
+fn ismount(path):
+    return fs.ismount(path)
+
+"""disk_usage(path) -> [total, used, free] bytes on the containing filesystem."""
+fn disk_usage(path):
+    return fs.disk_usage(path)
+
+"""popen(command) -> stdout of a shell command as a string."""
+fn popen(command):
+    return fs.popen(command)
+
+"""kill(pid, signal) -> send a signal to a process."""
+fn kill(pid, signal):
+    fs.kill(pid, signal)
+
+"""_exit(code) -> terminate the current process immediately."""
+fn _exit(code=0):
+    fs.exit(code)

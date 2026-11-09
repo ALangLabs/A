@@ -3,10 +3,15 @@
 # names the REPL has seen defined in the session.
 
 user_names = []
+# Session-lifetime completion cache: cap it so a long REPL session cannot
+# grow it without bound (oldest names are evicted first).
+MAX_USER_NAMES = 4096
 
 fn c_add(name):
     if name != "" and not user_names.contains(name):
         user_names.append(name)
+        if len(user_names) > MAX_USER_NAMES:
+            user_names.remove_at(0)
 
 fn is_ident_start(c):
     return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"

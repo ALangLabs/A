@@ -2,9 +2,11 @@
 
 Documentation for the **A programming language** itself: syntax, types,
 declarations, statements, expressions, modules, ownership, builtins, and the
-standard library. Every claim on these pages is verified against the
-implementation (`compiler/astra/frontend/`), the examples in `examples/`, and
-the golden tests in `tests/integration/cases/`.
+standard library. The pages are checked against the implementation
+(`compiler/astra/frontend/`), the examples in `examples/`, and the golden
+tests in `tests/integration/cases/`, but they can lag: when a page disagrees
+with `a run`/`a check`, the compiler is right — a behavior change should
+update the page it contradicts, and drift should be filed as a bug.
 
 ## Pages
 

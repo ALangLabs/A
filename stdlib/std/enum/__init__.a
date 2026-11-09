@@ -23,15 +23,18 @@
 import std:core
 import std:json
 
-# NOTE: module-level variables read as 0.0 inside `a test` test functions
-# (toolchain quirk), so the auto() sentinel is inlined as a literal in
-# auto()/_is_auto rather than stored in a module constant. It is an
-# improbable plain string, only compared after json.as_str extraction.
+# NOTE: the auto() sentinel is inlined as a literal in auto()/_is_auto
+# rather than stored in a module constant — it is an improbable plain
+# string, only compared after json.as_str extraction.
 
 # Monotonic id distinguishing specs: two Enum("Color", ...) calls produce
 # distinct member types even when names/values coincide (matching enum-class semantics).
-# Under `a test` this counts in floats; ids stay unique either way.
 _spec_id_counter = 0
+
+# Upper bound on FlagSpec composite-member cache entries; beyond it,
+# composites are still built but not retained (prevents unbounded growth
+# when callers synthesize many distinct bitmasks).
+_COMPOSITES_MAX = 4096
 
 fn _next_spec_id():
     _spec_id_counter = _spec_id_counter + 1
@@ -276,7 +279,8 @@ class FlagSpec:
         member = EnumMember(pname, iv, self._spec._typename,
                             self._spec._typename + "." + pname,
                             self._spec._id, self._spec._style)
-        self._composites[iv] = member
+        if len(self._composites) < _COMPOSITES_MAX:
+            self._composites[iv] = member
         return member
 
     """value_of(v) -> member for bitmask v (canonical or composite)."""

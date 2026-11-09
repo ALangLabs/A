@@ -6,7 +6,7 @@ link-time dependency (verified in `compiler/astra/backend/python/python.c` and
 
 ## Importing Python modules
 
-```python
+```a
 import python:numpy
 from python:json import loads, dumps
 ```
@@ -14,10 +14,12 @@ from python:json import loads, dumps
 `python:<pkg>` imports resolve through the `py` native module (`py.import_module`,
 `py.try_import`, `py.getattr`, `py.call_method`, … — see
 [builtins](builtins.md)). This works on every codegen path: the x86-64
-`emitAsm` emitter, the per-arch `emitNative` emitters (non-x86-64
-`--target` builds), and the portable `emitC` fallback all bind
-`PyModule`/`PyFunc` values and lower calls through the runtime `py_call`
-builtin, so Python interop is no longer asm/C-only.
+SysV `emitAsm` emitter and the per-arch `emitNative` emitters (all
+non-x86-64 `--target` builds, plus Win64/MS-ABI for `x86_64` on Windows)
+both bind `PyModule`/`PyFunc` values and lower calls through the runtime
+`py_call` builtin. There is no C emitter — `A_CODEGEN=c` is rejected and
+an emitter decline is a hard error, so Python interop is uniform across
+targets.
 
 ## Calling and attributes
 
@@ -38,5 +40,6 @@ access without copying. `py.buffer_info` reports layout.
 - `examples/python-interop/optional/` — `numpy_array.a`, `py_buffer.a`,
   `torch_tensor.a` (require the corresponding Python packages installed).
 
-Requires a Python installation discoverable at run time; behavior differs
-between backends, so validate with `a run`.
+Requires a Python installation discoverable at run time; behavior can
+differ across target OSes (e.g. no interop on Windows), so validate with
+`a run`.

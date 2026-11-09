@@ -4,7 +4,10 @@
 
 `a test file.a` compiles the program in test mode: `main` discovers and runs
 every top-level `fn test_*()` through the runtime `a_test_main` harness, each
-in a forked child so one failure doesn't stop the suite.
+in a forked child so one failure doesn't stop the suite. `fn main` is never
+invoked, the file's top-level statements run once up front, and `test_*`
+functions must declare no parameters (a parameterized `test_*` is a compile
+error).
 
 ```python
 fn test_assertions():
@@ -21,11 +24,20 @@ See `examples/advanced/testing.a`.
 - `assert_eq(a, b)` — panics unless `a == b`.
 - `panic(msg)` — unconditional abort.
 
-## `std:testing`
+## Property helpers (`testing` module)
 
-Property-style helpers exist in the stdlib (`testing_seed`,
-`for_all_int`, `for_all_float`, `for_all_bool`, `for_all_string`,
-`for_all_elem`) for randomized/property tests.
+Randomized/property helpers exist as functions of the native `testing`
+module: `import testing` (or `import std:testing`) then
+`testing.seed(value)` to fix the generator, plus `testing.for_all_int`,
+`testing.for_all_float`, `testing.for_all_bool`, `testing.for_all_string`,
+and `testing.for_all_elem`. The module members are named `seed`,
+`for_all_int`, …, so import that form: `from std:testing import seed`.
+(`testing_seed`, `testing_for_all_int`, … also exist unqualified as
+builtins that the type checker accepts with the same signatures — they are
+not `std:testing` members, so `from std:testing import testing_seed` is an
+unknown-member error.) **Caveat:** the default asm
+backend does not implement them yet — calls type-check but fail at code
+generation ("native module function not supported by asm backend").
 
 ## Golden tests
 

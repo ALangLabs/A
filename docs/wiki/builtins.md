@@ -8,18 +8,20 @@ Core builtin functions are available without imports (verified against
 | Category | Functions |
 | --- | --- |
 | I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.a" import read_line`), which returns `""` at end-of-file |
-| Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)`; sized values (str, list, tuple, set, map) also accept the method form `x.len()` |
+| Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, "typename")` (second arg is a runtime type-name *string*, e.g. `isinstance(xs, "list")`); sized values (str, list, tuple, set, map) also accept the method form `x.len()` |
 | Math | `abs`, `min`, `max`, `sum`, `pow`, `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int` |
 | Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops |
-| Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `range`-style iteration via `a..b` |
+| Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `range(n)`/`range(a, b[, step])`, plus `a..b` range literals |
 | Option/Result | `Some(v)`, `Ok(v)`, `Err(e)` constructors; `None` literal |
 | Assertions | `assert(cond)`, `assert_eq(a, b)`, `panic(msg)` |
 | Debug | `ic(*values)` (prelude), `repr`, `__repr__`, `__debug_repr__`, `__ic_format__` |
 | Files | `read_file`, `write_file`, `append_file`, `read_bytes`, `write_bytes`, `file_exists`, `file_size`, `list_dir`, `remove_file`, `create_dir`, `remove_dir`, `rename`, `current_dir` |
-| Conversions | `i8 i16 i32 i64 u8 u16 u32 u64 f32 f64` |
-| Intrinsics | `ctz clz popcount bswap rotl rotr fma fabs copysign smin smax umin umax` + overflow variants and `expect/likely/unlikely` |
+| Conversions | `i8 i16 i32 i64 u8 u16 u32 f32 f64` (there is no `u64` builtin) |
+| Intrinsics | `ctz clz popcount bswap rotl rotr fma fabs copysign smin smax umin umax` + `sadd_overflow ssub_overflow smul_overflow uadd_overflow usub_overflow umul_overflow` and `expect`/`likely`/`unlikely` |
 
-Note: `range(5)` is **not** a function — write `0..5` range literals instead.
+Note: `range` *is* a builtin — `range(5)` iterates `0` through `4`
+(exclusive end), and `range(a, b[, step])` also works; `0..5` range
+literals are the lower-level equivalent.
 
 ### Implicit parallelism
 
@@ -49,10 +51,14 @@ runtimes always take the serial path.
 (13-tuple: mode, ino, dev, nlink, uid, gid, size, atime, mtime, ctime,
 is_file, is_dir, is_symlink), `access`, `chmod`, `symlink`/`link`/`readlink`,
 `utime`, `mkdir`/`rmdir`, `truncate`, `environ` (Map(String,String)),
-`getenv` (None when unset), `setenv`, `unsetenv`, `system` (exit status),
-`urandom` (`[i64]` byte values)), `strings`, `collections`,
-`core` (panic/assert/assert_eq/bytes_utf8_decode/bytes_utf8_encode/
-bytes_new/bytes_append/bytes_to_str), `time` (now/sleep), `json`, `binary`,
+`getenv` (None when unset), `setenv`, `unsetenv`, `system` (exit code,
+not raw wait status), `urandom` (`[i64]` byte values),
+`getloadavg` (3-tuple of floats), `gethostname`, `umask`, `getpagesize`,
+`chown`, `ismount`, `disk_usage` (total/used/free), `popen`, `kill`,
+`exit`), `strings`, `collections`,
+`core` (panic/assert/assert_eq/struct_name/struct_methods/fn_signature/
+fn_doc/bytes_utf8_decode/bytes_utf8_encode/bytes_new/bytes_append/
+bytes_to_str), `time` (now/sleep), `json`, `binary`,
 `testing`, `log`, `metrics`, `trace`, `net` (resolve/tcp_listen/tcp_connect/accept/
 send/recv/recv_status/close/set_timeout/set_nonblocking/poll/local_port/
 udp_socket/udp_bind/udp_send/udp_recv/tls_connect/tls_wrap/tls_available/

@@ -142,10 +142,14 @@ fn samestat(a, b):
 fn samefile(a, b):
     return samestat(stat(a), stat(b))
 
-"""ismount(path) -> best-effort mount-point probe.
+"""chown(path, uid, gid) -> change file ownership (requires privilege)."""
+fn chown(path, uid, gid):
+    fs.chown(path, uid, gid)
 
-Without a portable st_dev comparison against the parent this reports True only
-for "/" (the POSIX root). Kept for source compatibility with Python code.
-"""
+"""ismount(path) -> whether path is a mount point (device differs from parent)."""
 fn ismount(path):
-    return path == "/"
+    return fs.ismount(path)
+
+"""disk_usage(path) -> [total, used, free] bytes on the containing filesystem."""
+fn disk_usage(path):
+    return fs.disk_usage(path)

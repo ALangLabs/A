@@ -34,7 +34,8 @@ for x in iterable:    # lists, strings, maps (keys), sets, ranges
 loop:                 # infinite loop; break/continue work
     ...
 
-return expr           # return with optional value
+return expr           # return with value; a bare 'return' is only allowed
+                      # in '-> void' functions
 defer expr            # deferred call, runs LIFO at scope exit
 break / continue
 pass                  # empty body
@@ -45,10 +46,14 @@ import ... / from ... import ...
 
 - Literals, identifiers, unary/binary ops (see [syntax](syntax-and-types.md)).
 - Calls: `f(a, b)`, keyword args `Point(x=1, y=2)`, methods `s.strip()`,
-  safe calls `maybe?.name`.
-- Indexing/slicing: `xs[i]`, `xs[1..4]`, `xs[0..10..2]`, `xs[-4..]`,
-  `s[1..4]` — works on arrays, strings, tuples, maps, sets.
-- Field access `p.x`, optional chaining `u?.address?.city`.
+  safe field access `maybe?.name` (see below).
+- Indexing/slicing: `xs[i]` (negative indices allowed), `xs[1..4]`,
+  `xs[0..10..2]`, `xs[-4..]`, `s[1..4]` — works on arrays, strings, and
+  tuples by position and on maps by key; sets cannot be indexed (use `in`).
+- Field access `p.x`, optional chaining `u?.address?.city`: `?.` requires an
+  optional receiver holding a class instance and accesses *fields* only
+  (method calls are rejected); the result stays optional (`T?`), flattening
+  when the field itself is optional.
 - `match` expression:
 
 ```python

@@ -77,5 +77,9 @@ type UserId = i64
 id: UserId = 7
 ```
 
-`comptime` params exist in the grammar (`comptime N: int`); specialization
-coverage varies by backend (see `examples/advanced/`).
+`comptime` params are parsed (`fn f(comptime N: int)`) and bound as typed
+values inside the body, but call-site specialization is **not implemented**:
+the parameter is excluded from the call arity (passing an argument is an
+error) and reads as an uninitialized value at run time, so `comptime`
+functions are effectively unusable today. Constraints via `where` do work
+(see above).

@@ -17,9 +17,10 @@ organization.
 | `modules/` | `imports.a` + fixture `lib/mathx.a`. |
 | `optionals-result/` | `optionals.a`, `result.a`. |
 | `traits-generics/` | `traits.a`, `generics_and_aliases.a`. |
-| `stdlib/` | `core_math_fs_time.a`, `json_binary.a`, `observability_net.a`. |
+| `stdlib/` | `core_math_fs_time.a`, `json_binary.a`, `ml_kernels.a`, `observability_net.a`. |
 | `python-interop/` | `json_pipeline.a`, `opaque_objects.a`, `optional/` (numpy_array, py_buffer, torch_tensor — need Python libs). |
-| `advanced/` | `testing.a`, `unsafe_arena_comptime.a`. |
+| `advanced/` | `testing.a`, `implicit_parallel.a`, `unsafe_arena_comptime.a`. |
+| `apm/` | `app.a` + `apm.json` — demo of apm-managed packages; run with `apm/apm install -p examples/apm` then `apm/apm run -p examples/apm examples/apm/app.a`. |
 
 ## Running
 

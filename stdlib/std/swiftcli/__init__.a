@@ -103,7 +103,18 @@ fn _is_float_text(s):
             if dots > 1:
                 return false
         elif c == "e" or c == "E":
-            return _is_float_text(_slice(s, i + 1, len(s))) and digits > 0
+            # exponent: optional sign then digits only — a second 'e'/'.'/
+            # letter must not be accepted ("1e5e5" is not a float).
+            j = i + 1
+            if j < len(s) and (_char_at(s, j) == "-" or _char_at(s, j) == "+"):
+                j = j + 1
+            if j >= len(s) or not _char_at(s, j).isdigit():
+                return false
+            while j < len(s):
+                if not _char_at(s, j).isdigit():
+                    return false
+                j = j + 1
+            return digits > 0
         else:
             return false
         i = i + 1
@@ -252,7 +263,10 @@ class Parser:
             if n.startswith("--"):
                 longs.append(_slice(n, 2, len(n)))
             elif n.startswith("-"):
-                shorts.append(_slice(n, 1, len(n)))
+                part = _slice(n, 1, len(n))
+                if len(part) != 1:
+                    core.panic("swiftcli: short option must be one character: '" + n + "'")
+                shorts.append(part)
             else:
                 longs.append(n)
         if len(shorts) == 0 and len(longs) == 0:
@@ -338,7 +352,7 @@ class Parser:
         for s in self.subs:
             if s.name == name:
                 core.panic("swiftcli: duplicate subcommand '" + name + "'")
-        child = new(self.prog + " " + name, help)
+        child = new(self.prog + " " + name, help, self.version)
         child.width = self.width
         self.subs.append(Sub(name, help, child))
         return child
@@ -433,6 +447,8 @@ class Parser:
     fn _takes_value(self, o: Option):
         if o.kind == "value":
             return o.vtype != "bool"
+        if o.kind == "list":
+            return true
         return false
 
     """parse(argv) -> ParseResult. One linear pass; no exceptions, no panics."""
@@ -537,6 +553,8 @@ class Parser:
                     pos = pos + 1
                     if self._takes_value(o):
                         raw = _slice(cluster, pos, len(cluster))
+                        if raw.startswith("="):
+                            raw = _slice(raw, 1, len(raw))
                         if raw == "":
                             if i >= len(argv):
                                 failed = "option '-" + c + "' requires a value"
@@ -568,7 +586,7 @@ class Parser:
                         for k in res.ns.keys():
                             ns[k] = res.ns[k]
                         ns["command"] = tok
-                        res = self._finish(ns, seen, [])
+                        res = self._finish(ns, seen, pending)
                         res.command = tok
                         return res
             pending.append(tok)
@@ -587,7 +605,7 @@ class Parser:
                     if err != "":
                         return ParseResult("error", ns, "env " + o.envvar + ": " + err, "", "")
                     continue
-            if o.required and o.kind != "list":
+            if o.required:
                 names = o.names
                 return ParseResult("error", ns, "missing required option " + names, "", "")
 
@@ -606,7 +624,9 @@ class Parser:
             need_after = 0
             k = j + 1
             while k < len(self.pos):
-                if self.pos[k].nargs != "?":
+                # only specs with a nonzero minimum reserve arguments;
+                # "?" and "*" may legitimately take zero.
+                if self.pos[k].nargs == "one" or self.pos[k].nargs == "+":
                     need_after = need_after + 1
                 k = k + 1
             avail = total - at - need_after
