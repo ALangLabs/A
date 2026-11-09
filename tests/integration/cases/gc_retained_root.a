@@ -1,0 +1,9 @@
+fn main():
+    kept = "retained"
+    total = 0
+    # Enough temporary lists/strings to drive multiple role-collection
+    # cycles while `kept` must stay reachable from the stack/global root.
+    for i in 0..80000:
+        junk = [str(i), str(i + 1), str(i)]
+        total = total + len(junk)
+    print(kept, total)

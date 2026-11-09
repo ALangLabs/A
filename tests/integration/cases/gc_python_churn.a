@@ -1,0 +1,15 @@
+import python:re
+import python:array
+import std:py
+
+fn main():
+    total = 0
+    for i in 0..50000:
+        pat = re.compile("a+")
+        result = pat.search("caaat")
+        if result:
+            total = total + 1
+        data = array.array("i", [10, 20, 30])
+        view = py.buffer(data)
+        total = total + len(view)
+    print(total)

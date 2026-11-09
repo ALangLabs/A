@@ -1,0 +1,8 @@
+fn main():
+    kept = []
+    for i in 0..5000:
+        kept.append("value-" + str(i))
+    for i in 0..80000:
+        junk = [str(i), str(i + 1)]
+        _ = junk
+    print(len(kept) + 5 + len(kept))

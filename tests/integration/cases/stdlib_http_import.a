@@ -1,0 +1,27 @@
+# Regression: the whole std:http package must type-check on import.
+# std.http is pure A over std:net, so a broken member type (e.g. a `[]`
+# where a `Bytes` is expected) fails here instead of in user code.
+from std:http import Response, HTTPConnection, get, post, put, patch, delete, head
+from std:http import request, http_connection, https_connection
+from std:http import urlsplit, urlunsplit, quote, urlencode
+
+
+fn describe(resp: Response) -> i64:
+    if resp.is_ok:
+        print(resp.status, resp.text())
+    return resp.status
+
+
+fn main():
+    parts = urlsplit("http://example.com/a?b=1")
+    print(urlunsplit(parts), quote("a b"), urlencode({"a": "b"}))
+    resp: Response = get("http://example.com/")
+    print(describe(resp), resp.headers)
+    http_connection("example.com")
+    https_connection("example.com")
+    request("GET", "http://example.com/")
+    post("http://example.com/", "body")
+    put("http://example.com/", "body")
+    patch("http://example.com/", "body")
+    head("http://example.com/")
+    delete("http://example.com/")
