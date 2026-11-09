@@ -96,6 +96,10 @@ class Sema {
  private:
   struct VarSym {
     TypePtr type;
+    // The type written in a `x: T = ...` annotation or parameter annotation,
+    // when present. Reassignment (`x = ...`) is checked against it even though
+    // `type` itself may be rebound to a new inferred type.
+    TypePtr declaredType;
     bool mutableBinding = false;
     bool constant = false;
     bool used = false;
@@ -337,6 +341,10 @@ class Sema {
   TypePtr numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rhs, Span span);
   bool checkCompoundOp(const std::string& op, TypePtr targetType, Span span);
   void reportMismatch(TypePtr actual, TypePtr expected, Span span, const std::string& context);
+  // Payload of `T?` when T is still an unresolved inference variable — the
+  // genuinely-dynamic optional produced by e.g. `map.get` on an untyped
+  // receiver or a bare `None`. Returns nullptr for concrete optionals.
+  TypePtr dynamicOptionalElem(const TypePtr& type) const;
   std::string typePhrase(const TypePtr& type) const;
   void checkTypeVariables();
   void checkDeclaredVariables();

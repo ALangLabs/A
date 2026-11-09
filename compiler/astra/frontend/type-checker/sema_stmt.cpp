@@ -113,12 +113,14 @@ void Sema::checkStatement(Stmt& stmt) {
 void Sema::checkLet(LetStmt& stmt) {
   TypePtr initType = inferExpr(*stmt.init);
   TypePtr variableType = initType;
+  TypePtr declaredTypeForCheck;
   if (stmt.type) {
     TypePtr declared = resolveTypeExpr(*stmt.type);
     if (resolveType(declared)->kind == TypeKind::Void) {
       sink_.error(stmt.span, "A variable cannot have type void.");
       declared = typeError();
     }
+    declaredTypeForCheck = declared;
     if (!unify(initType, declared)) {
       reportMismatch(initType, declared, stmt.init->span,
                      "in the initializer for '" + stmt.name + "'");
@@ -150,6 +152,11 @@ void Sema::checkLet(LetStmt& stmt) {
 
   declareVar(stmt.name, stmt.nameSpan, variableType, stmt.mutableBinding,
              "variable", false);
+  // Remember the written annotation (if any) so later `x = ...` assignments
+  // are checked against it even though the binding itself may rebind.
+  if (VarSym* sym = lookupVar(stmt.name)) {
+    sym->declaredType = stmt.type ? declaredTypeForCheck : nullptr;
+  }
 }
 
 void Sema::checkAssign(AssignStmt& stmt) {
@@ -190,7 +197,18 @@ void Sema::checkAssign(AssignStmt& stmt) {
         checkFixedArrayLength(*stmt.value, sym->type);
       }
     } else {
-      // Dynamic: reassignment may change type (Python-style).
+      // A binding with a written type annotation keeps that type on
+      // reassignment; unannotated bindings rebind freely (Python-style).
+      TypePtr declared = sym->declaredType ? resolveType(sym->declaredType) : nullptr;
+      if (declared && declared->kind != TypeKind::Var &&
+          declared->kind != TypeKind::Error && declared->kind != TypeKind::Void) {
+        if (!unify(valueType, sym->declaredType)) {
+          reportMismatch(valueType, sym->declaredType, stmt.value->span,
+                         "in assignment to '" + ident->name + "'");
+        } else {
+          checkFixedArrayLength(*stmt.value, sym->declaredType);
+        }
+      }
       sym->type = valueType;
     }
     return;
@@ -199,6 +217,24 @@ void Sema::checkAssign(AssignStmt& stmt) {
   if (dynamic_cast<FieldExpr*>(stmt.target.get()) ||
       dynamic_cast<IndexExpr*>(stmt.target.get())) {
     TypePtr targetType = inferExpr(*stmt.target);
+    // `Enum.Variant = value` addresses the enum's namespace, not a mutable
+    // location; codegen has no assignment target for it, so reject it here
+    // instead of silently accepting (and crashing at run time).
+    if (auto* field = dynamic_cast<FieldExpr*>(stmt.target.get())) {
+      auto objectIt = exprTypes_.find(field->object.get());
+      if (objectIt != exprTypes_.end()) {
+        TypePtr object = resolveType(objectIt->second);
+        if (object->kind == TypeKind::Enum &&
+            enumNamespaceUse(field->object, object->structName)) {
+          sink_.error(stmt.target->span,
+                      "Cannot assign to enum variant '" + shortName(object->structName) + "." +
+                          field->field + "'.",
+                      "Enum variants are constants; assign to a variable instead.");
+          inferExpr(*stmt.value);
+          return;
+        }
+      }
+    }
     TypePtr valueType = inferExpr(*stmt.value);
     if (stmt.op != "=") {
       std::string baseOp = stmt.op.substr(0, stmt.op.size() - 1);
@@ -220,6 +256,61 @@ void Sema::checkAssign(AssignStmt& stmt) {
 void Sema::checkDestructure(DestructureStmt& stmt) {
   TypePtr valueType = inferExpr(*stmt.value);
   TypePtr resolved = resolveType(valueType);
+  const std::size_t arity = stmt.names.size();
+
+  // Destructuring iterates the right-hand side, so reject statically known
+  // non-iterables and fixed-length arity mismatches. Dynamic iterables
+  // (lists, strings, maps, sets, ranges) keep runtime-length semantics.
+  if (resolved->kind != TypeKind::Error) {
+    if (resolved->kind == TypeKind::Var) {
+      // An unconstrained variable stays dynamic; a constrained one (e.g. an
+      // integer literal that never unified) can never be iterable.
+      if (resolved->constraint != Constraint::None) {
+        sink_.error(stmt.value->span,
+                    "Cannot destructure " + typePhrase(resolved) + ".",
+                    "Destructuring requires an iterable value (array, tuple, string, map, "
+                    "set, or range).");
+      }
+    } else {
+      // A dynamic optional payload may be iterable at runtime.
+      if (resolved->kind == TypeKind::Optional && dynamicOptionalElem(valueType)) {
+        // fall through to dynamic binding below
+      } else {
+      bool iterable = true;
+      std::int64_t knownLength = -1;
+      switch (resolved->kind) {
+        case TypeKind::Tuple:
+          knownLength = static_cast<std::int64_t>(resolved->params.size());
+          break;
+        case TypeKind::Array:
+          knownLength = resolved->length;  // -1 for dynamically sized arrays
+          break;
+        case TypeKind::Range:
+        case TypeKind::Set:
+        case TypeKind::Map:
+        case TypeKind::String:
+        case TypeKind::Bytes:
+          break;
+        default:
+          iterable = false;
+          break;
+      }
+      if (!iterable) {
+        sink_.error(stmt.value->span,
+                    "Cannot destructure " + typePhrase(resolved) + ".",
+                    "Destructuring requires an iterable value (array, tuple, string, map, "
+                    "set, or range).");
+      } else if (knownLength >= 0 && static_cast<std::int64_t>(arity) != knownLength) {
+        sink_.error(stmt.value->span,
+                    "Cannot destructure " + typeName(resolved) + " into " +
+                        std::to_string(arity) + " name" + (arity == 1 ? "" : "s") + ".",
+                    "The value has " + std::to_string(knownLength) + " element" +
+                        (knownLength == 1 ? "" : "s") + "; the pattern binds " +
+                        std::to_string(arity) + ".");
+      }
+      }
+    }
+  }
 
   // Dynamic: always bind names (arity/type checked at runtime).
   for (std::size_t i = 0; i < stmt.names.size(); ++i) {
@@ -367,6 +458,17 @@ void Sema::checkDoWhile(DoWhileStmt& stmt) {
 TypePtr Sema::iterableElementType(TypePtr iterableType, Span span, const std::string& hint) {
   TypePtr resolved = resolveType(iterableType);
   if (resolved->kind == TypeKind::Var) {
+    // A numeric-constrained variable (int/float literal or numeric
+    // expression) can never become an iterable; only a fully unconstrained
+    // variable stays dynamic.
+    if (resolved->constraint != Constraint::None) {
+      sink_.error(span,
+                  "Cannot iterate over " + typePhrase(resolved) + ".",
+                  "Loops " + hint + " iterate over arrays, tuples, strings, maps (keys), sets, "
+                  "and integer "
+                  "ranges ('0..10').");
+      return typeError();
+    }
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (resolved->kind == TypeKind::Array || resolved->kind == TypeKind::Range ||
@@ -376,6 +478,11 @@ TypePtr Sema::iterableElementType(TypePtr iterableType, Span span, const std::st
   if (resolved->kind == TypeKind::Map) return resolved->elem;  // keys
   if (resolved->kind == TypeKind::String) return typeChar();
   if (resolved->kind == TypeKind::Bytes) return typeInt(64, true);
+  // A dynamic optional payload may be iterable at runtime.
+  if (dynamicOptionalElem(iterableType)) {
+    return freshVar(Constraint::None, span,
+                    "the element type iterated over an optional");
+  }
   if (resolved->kind == TypeKind::Tuple) {
     // Tuples iterate element-by-element at runtime (a_iter handles them), but
     // elements may be heterogeneous, so the loop variable is unconstrained.

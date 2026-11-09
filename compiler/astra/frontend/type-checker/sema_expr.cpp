@@ -253,6 +253,7 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
     if (resolved->kind == TypeKind::Var && constrainVar(operand, Constraint::Integer)) {
       return operand;
     }
+    if (dynamicOptionalElem(operand)) return operand;
     sink_.error(expr.opSpan,
                 "Operator '~' cannot be applied to " + typePhrase(operand) + ".",
                 "'~' requires an integer operand.");
@@ -264,6 +265,7 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
   if (resolved->kind == TypeKind::Var) {
     if (constrainVar(operand, Constraint::Numeric)) return operand;
   }
+  if (dynamicOptionalElem(operand)) return operand;
   sink_.error(expr.opSpan,
               "Operator '-' cannot be applied to " + typePhrase(operand) + ".");
   return typeError();
@@ -360,6 +362,13 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
       case TypeKind::Var:
       case TypeKind::Error:
         break;
+      case TypeKind::Optional:
+        // A dynamic optional payload may be a container at runtime.
+        if (dynamicOptionalElem(container)) break;
+        sink_.error(expr.rhs->span,
+                    "Right operand of '" + op + "' must be an array, map, set, string, or range, "
+                    "found " + typePhrase(container) + ".");
+        break;
       default:
         sink_.error(expr.rhs->span,
                     "Right operand of '" + op + "' must be an array, map, set, string, or range, "
@@ -375,7 +384,19 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
   if (comparison) {
     TypePtr lhsResolved = resolveType(lhs);
     TypePtr rhsResolved = resolveType(rhs);
-    if (!unify(lhs, rhs)) {
+    // `T?` is transparent at runtime (the payload or None), so comparing an
+    // optional against a non-optional compares the payload — `opt == 5` is
+    // false when opt is None, not a type error. unify() would otherwise try
+    // to bind the other side's variable to the Optional itself and fail for
+    // constrained vars (e.g. int literals).
+    TypePtr cmpL = lhs, cmpR = rhs;
+    if (lhsResolved->kind == TypeKind::Optional &&
+        rhsResolved->kind != TypeKind::Optional)
+      cmpL = lhsResolved->elem;
+    if (rhsResolved->kind == TypeKind::Optional &&
+        lhsResolved->kind != TypeKind::Optional)
+      cmpR = rhsResolved->elem;
+    if (!unify(cmpL, cmpR)) {
       sink_.error(expr.opSpan,
                   "Cannot compare " + typePhrase(lhsResolved) + " and " +
                       typePhrase(rhsResolved) + ".");
@@ -419,16 +440,102 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     bool lhsString = lhsResolved->kind == TypeKind::String;
     bool rhsString = rhsResolved->kind == TypeKind::String;
     if (lhsString || rhsString) {
+      // str + any concatenates (the runtime formats the other operand).
       return typeString();
-      TypePtr other = lhsString ? rhs : lhs;
-      if (resolveType(other)->kind == TypeKind::Var && unify(other, typeString())) {
-        return typeString();
+    }
+
+    // The remaining '+' forms the runtime supports: numeric+numeric,
+    // Bytes+Bytes, list+list, tuple+tuple. Classify each operand; an
+    // unresolved (Constraint::None) variable or Json may still become any
+    // of them, so those stay dynamic.
+    auto plusShape = [](const TypePtr& t) -> int {
+      if (!t || t->kind == TypeKind::Error || t->kind == TypeKind::Json) return 0;
+      if (t->kind == TypeKind::Optional) {
+        // `T?` is only a static fiction: at runtime the value is either the
+        // payload or None. When the payload is still an unresolved variable
+        // (e.g. `map.get` on a dynamic receiver) the whole optional stays
+        // dynamic; a concrete payload keeps its real shape below.
+        TypePtr e = resolveType(t->elem);
+        return (e && e->kind == TypeKind::Var) ? 0 : 5;
       }
-      sink_.error(expr.opSpan,
-                  "Cannot add a String and " + typePhrase(other) + ".",
-                  "Use string interpolation, e.g. \"Price: {100}\".");
+      if (t->kind == TypeKind::Var) {
+        return t->constraint == Constraint::None ? 0 : 1;  // constrained => numeric
+      }
+      if (isNumericType(t)) return 1;
+      if (t->kind == TypeKind::Bytes) return 2;
+      if (t->kind == TypeKind::Array) return 3;
+      if (t->kind == TypeKind::Tuple) return 4;
+      return 5;
+    };
+    const int ls = plusShape(lhsResolved);
+    const int rs = plusShape(rhsResolved);
+    if (ls == 0 && rs == 0) {
+      return numericBinaryResult(op, lhs, rhs, expr.opSpan);
+    }
+    if (ls == 0 || rs == 0) {
+      // One side still unknown: bind it to the known operand when that
+      // operand has a '+'-able shape, so the result type is useful; other
+      // shapes (bool, map, struct, ...) stay fully dynamic.
+      const bool lhsUnknown = ls == 0;
+      TypePtr known = lhsUnknown ? rhs : lhs;
+      TypePtr dyn = lhsUnknown ? lhs : rhs;
+      const int ks = lhsUnknown ? rs : ls;
+      if (ks >= 1 && ks <= 4 && unify(dyn, known)) return known;
+      return numericBinaryResult(op, lhs, rhs, expr.opSpan);
+    }
+    if (ls == 1 && rs == 1) {
+      return numericBinaryResult(op, lhs, rhs, expr.opSpan);
+    }
+    if (ls == rs && ls >= 2 && ls <= 4) {
+      // Same-shape concatenation; unify so shared element types stay
+      // consistent, but stay permissive (the runtime concatenates anyway).
+      unify(lhs, rhs);
+      return lhs;
+    }
+    sink_.error(expr.opSpan,
+                "Operator '+' cannot be applied to " + typePhrase(lhsResolved) +
+                    " and " + typePhrase(rhsResolved) + ".");
+    return typeError();
+  }
+
+  if (op == "*") {
+    // str * int repeats the string; the count must be an integer (the
+    // runtime only accepts int operands there, not floats).
+    TypePtr lhsResolved = resolveType(lhs);
+    TypePtr rhsResolved = resolveType(rhs);
+    if (lhsResolved->kind == TypeKind::String ||
+        rhsResolved->kind == TypeKind::String) {
+      TypePtr countSide = lhsResolved->kind == TypeKind::String ? rhs : lhs;
+      TypePtr count = resolveType(countSide);
+      bool countOk = count->kind == TypeKind::Int ||
+                     (count->kind == TypeKind::Var &&
+                      count->constraint == Constraint::Integer);
+      if (count->kind == TypeKind::Var && count->constraint == Constraint::None) {
+        if (constrainVar(countSide, Constraint::Integer)) countOk = true;
+      }
+      // A dynamic optional may hold an int count at runtime.
+      if (!countOk && dynamicOptionalElem(countSide)) countOk = true;
+      if (countOk) return typeString();
+      // String * non-int still reaches the numeric check below and errors.
+    }
+  }
+
+  if (op == "-" || op == "*" || op == "/" || op == "%" || op == "**") {
+    // Arithmetic other than '+' requires numeric operands; the runtime
+    // panics on anything else (e.g. "a" - "b", true + 1 handled above).
+    TypePtr ln = resolveType(lhs)->kind == TypeKind::Error
+                     ? typeError()
+                     : requireNumeric(lhs, expr.lhs->span,
+                                      "The left operand of '" + op + "'");
+    TypePtr rn = resolveType(rhs)->kind == TypeKind::Error
+                     ? typeError()
+                     : requireNumeric(rhs, expr.rhs->span,
+                                      "The right operand of '" + op + "'");
+    if (resolveType(ln)->kind == TypeKind::Error ||
+        resolveType(rn)->kind == TypeKind::Error) {
       return typeError();
     }
+    return numericBinaryResult(op, lhs, rhs, expr.opSpan);
   }
 
   return numericBinaryResult(op, lhs, rhs, expr.opSpan);

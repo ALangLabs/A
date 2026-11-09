@@ -363,6 +363,13 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
   pushScope();
   for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
     declareVar(decl.params[i].name, decl.params[i].span, sig.paramTypes[i], false, "parameter");
+    // Annotated parameters keep their declared type on reassignment; params
+    // without an annotation stay dynamically rebindable.
+    if (decl.params[i].type) {
+      if (VarSym* sym = lookupVar(decl.params[i].name)) {
+        sym->declaredType = sig.paramTypes[i];
+      }
+    }
   }
   // Default values are checked with earlier parameters in scope, so a
   // default may reference a preceding parameter (e.g. `fn f(a, b = a + 1)`).
@@ -377,6 +384,9 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
   for (const ComptimeParam& param : decl.comptimeParams) {
     TypePtr type = param.type ? resolveTypeExpr(*param.type) : typeInt(64, true);
     declareVar(param.name, param.span, type, false, "compile-time parameter");
+    if (VarSym* sym = lookupVar(param.name)) {
+      if (param.type) sym->declaredType = type;
+    }
   }
   checkStatements(decl.body);
   reportUnusedLocals(scopes_.back());

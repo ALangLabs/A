@@ -45,6 +45,9 @@ Strings interpolate with `{expr}`: `"sum = {2 + 3}"`, `"Hello, {name}!"`.
   coalesce `a ?? b`, safe-nav `?.`, call/index `()[]`, slice `[lo..hi..step]`,
   try `expr?`
 
+Note: `%` follows C remainder semantics for integers (`-7 % 3 == -1`) but
+Python-style floored semantics for floats (`-7.0 % 3.0 == 2.0`).
+
 ## Built-in types
 
 | Type | Notes |

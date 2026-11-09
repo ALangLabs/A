@@ -354,6 +354,34 @@ TypePtr Sema::inferTry(TryExpr& expr) {
     return resolved->elem;
   }
   if (resolved->kind != TypeKind::Result) {
+    // `prelude.Err(...)`/`prelude.Ok(...)` return the plain `prelude.Result`
+    // struct (fields ok/value/error), which is a different runtime
+    // representation from the Ok/Err builtins' Result<T, E> value. `?` can
+    // only propagate the builtin kind, so say so instead of the generic
+    // "requires a Result" diagnostic.
+    if (resolved->kind == TypeKind::Struct) {
+      // Identify the prelude Result struct by shape (fields ok/value/error)
+      // so the diagnostic does not depend on the module's qualified name.
+      auto structIt = structs_.find(resolved->structName);
+      bool isPreludeResult = structIt != structs_.end() &&
+                             shortName(resolved->structName) == "Result";
+      if (isPreludeResult) {
+        bool hasOk = false, hasValue = false, hasError = false;
+        for (const auto& f : structIt->second.fields) {
+          hasOk = hasOk || f.first == "ok";
+          hasValue = hasValue || f.first == "value";
+          hasError = hasError || f.first == "error";
+        }
+        isPreludeResult = hasOk && hasValue && hasError;
+      }
+      if (isPreludeResult) {
+        sink_.error(expr.operand->span,
+                    "The '?' operator requires a Result value from Ok(...)/Err(...); "
+                    "'prelude.Result' is a plain struct, not a Result<T, E>.",
+                    "Use prelude.is_ok(r)/prelude.unwrap(r), or return Ok(...)/Err(...).");
+        return typeError();
+      }
+    }
     if (resolved->kind != TypeKind::Error) {
       std::string message =
           "The '?' operator requires a Result or Optional value, found '" +
@@ -415,10 +443,27 @@ void Sema::requireBool(TypePtr type, Span span, const std::string& what) {
       sink_.error(span, what + " must be bool, found " + typePhrase(type) + ".");
     }
 
+    TypePtr Sema::dynamicOptionalElem(const TypePtr& type) const {
+      TypePtr resolved = resolveType(type);
+      if (!resolved || resolved->kind != TypeKind::Optional) return nullptr;
+      TypePtr elem = resolveType(resolved->elem);
+      return (elem && elem->kind == TypeKind::Var) ? elem : nullptr;
+    }
+
     void Sema::requireInteger(TypePtr type, Span span, const std::string& what) {
   TypePtr resolved = resolveType(type);
   if (resolved->kind == TypeKind::Int) return;
+  // A dynamic optional (e.g. `map.get` on an untyped receiver) may hold an
+  // integer at runtime; concrete optionals still error below.
+  if (dynamicOptionalElem(type)) return;
   if (resolved->kind == TypeKind::Var) {
+    // A float-constrained variable (e.g. a `1.5` literal) can never become an
+    // integer: constrainVar would merely merge the constraints to Numeric,
+    // which still admits floats. Reject it outright.
+    if (resolved->constraint == Constraint::Floating) {
+      sink_.error(span, what + " must be an integer, found " + typePhrase(type) + ".");
+      return;
+    }
     if (constrainVar(type, Constraint::Integer)) return;
     return;
   }
@@ -429,6 +474,9 @@ void Sema::requireBool(TypePtr type, Span span, const std::string& what) {
 TypePtr Sema::requireNumeric(TypePtr type, Span span, const std::string& what) {
   TypePtr resolved = resolveType(type);
   if (resolved->kind == TypeKind::Int || resolved->kind == TypeKind::Float) return type;
+  // Dynamic optional payload: the runtime value decides (None would panic,
+  // same as any other dynamic operand).
+  if (dynamicOptionalElem(type)) return type;
   if (resolved->kind == TypeKind::Var && constrainVar(type, Constraint::Numeric)) return type;
   sink_.error(span, what + " must be numeric, found " + typePhrase(type) + ".");
   return typeError();
@@ -441,54 +489,21 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
       return true;
     }
 
-    namespace {
-    // True when a type still carries an unresolved inference variable anywhere
-    // in its structure. Such a mismatch is not conclusive yet: the variable may
-    // be bound later (e.g. by another branch or a later assignment), so we stay
-    // quiet instead of rejecting code that is merely not fully inferred.
-    bool containsUnresolvedVar(const TypePtr& raw) {
-      TypePtr t = resolveType(raw);
-      if (!t) return true;
-      switch (t->kind) {
-        case TypeKind::Var: return true;
-        case TypeKind::Error: return false;
-        case TypeKind::Array:
-        case TypeKind::Range:
-        case TypeKind::Optional:
-        case TypeKind::Set:
-        case TypeKind::Bytes:
-        case TypeKind::Pointer:
-          return containsUnresolvedVar(t->elem);
-        case TypeKind::Result:
-          return containsUnresolvedVar(t->elem) || containsUnresolvedVar(t->errorType);
-        case TypeKind::Map:
-          if (containsUnresolvedVar(t->elem)) return true;
-          for (const auto& p : t->params) if (containsUnresolvedVar(p)) return true;
-          return false;
-        case TypeKind::Tuple:
-        case TypeKind::Function:
-          for (const auto& p : t->params) if (containsUnresolvedVar(p)) return true;
-          return t->kind == TypeKind::Function && containsUnresolvedVar(t->ret);
-        default:
-          return false;
-      }
-    }
-    }  // namespace
-
     void Sema::reportMismatch(TypePtr actual, TypePtr expected, Span span,
                               const std::string& context) {
       TypePtr actualResolved = resolveType(actual);
       TypePtr expectedResolved = resolveType(expected);
-      // Never complain about an already-failed check or a type that still has
-      // unresolved inference variables: unannotated expressions legitimately
-      // infer as Var and bind later.
+      // Never complain about an already-failed check.
       if (actualResolved->kind == TypeKind::Error || expectedResolved->kind == TypeKind::Error)
         return;
       // Only enforce types the programmer wrote down. Element/return types that
       // were merely inferred (e.g. a list element type from its first append)
       // stay dynamic, matching the language's Python-style collection behavior.
+      // Note: callers only reach this after unify() failed, and a failed
+      // unify is conclusive — an unresolved variable either binds to the
+      // expected type successfully or its constraint forbids the match — so
+      // unresolved vars in `actual` do not suppress the diagnostic.
       if (!expectedResolved->fromAnnotation) return;
-      if (containsUnresolvedVar(actual) || containsUnresolvedVar(expected)) return;
       std::string message = "Expected " + typePhrase(expected) + ", found " + typePhrase(actual);
       if (!context.empty()) message += " " + context;
       message += ".";
@@ -507,6 +522,9 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
     }
   }
   std::string name = typeName(resolved);
+  // typeName() already includes an article for unresolved-variable shapes
+  // (e.g. Optional<int-var> renders "an integer type?"); don't double it.
+  if (name.rfind("an ", 0) == 0 || name.rfind("a ", 0) == 0) return name;
   char first = name.empty() ? 'x' : name[0];
   bool vowelSound = first == 'a' || first == 'e' || first == 'i' || first == 'o';
   return (vowelSound ? "an " : "a ") + name;
