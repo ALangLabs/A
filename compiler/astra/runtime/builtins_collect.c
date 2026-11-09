@@ -329,8 +329,8 @@ aval bi_filter(uint64_t n, aval *argv) {
     return r;
 }
 
-aval bi_any(uint64_t n, aval *argv) { want_args("any", n, 1, 2); aval tmp; AArr *a=iterable_arr(argv[0],&tmp); for(uint64_t i=0;i<a->h.len;++i){ aval v=arr_elem(a,i); if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(truthy(v)) return A_TRUE; } return A_FALSE; }
-aval bi_all(uint64_t n, aval *argv) { want_args("all", n, 1, 2); aval tmp; AArr *a=iterable_arr(argv[0],&tmp); for(uint64_t i=0;i<a->h.len;++i){ aval v=arr_elem(a,i); if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(!truthy(v)) return A_FALSE; } return A_TRUE; }
+aval bi_any(uint64_t n, aval *argv) { want_args("any", n, 1, 2); if(n==2 && kind_of(argv[0])==K_FNON){ aval t=argv[0]; argv[0]=argv[1]; argv[1]=t; } aval tmp; AArr *a=iterable_arr(argv[0],&tmp); for(uint64_t i=0;i<a->h.len;++i){ aval v=arr_elem(a,i); if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(truthy(v)) return A_TRUE; } return A_FALSE; }
+aval bi_all(uint64_t n, aval *argv) { want_args("all", n, 1, 2); if(n==2 && kind_of(argv[0])==K_FNON){ aval t=argv[0]; argv[0]=argv[1]; argv[1]=t; } aval tmp; AArr *a=iterable_arr(argv[0],&tmp); for(uint64_t i=0;i<a->h.len;++i){ aval v=arr_elem(a,i); if(n==2){ aval one[1]={v}; v=a_call(argv[1],1,one); } if(!truthy(v)) return A_FALSE; } return A_TRUE; }
 aval bi_some(uint64_t n, aval *argv) { want_args("Some", n, 1, 1); return a_some_new(argv[0]); }
 
 aval bi_reduce(uint64_t n, aval *argv) {

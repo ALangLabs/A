@@ -274,7 +274,7 @@ int builtinRuntimeId(const std::string& name) {
             {"net_inflate_available", 218},
       {"bytes_decode_utf8", 222}, {"str_encode_utf8", 223},
       {"net_recv_exact", 224}, {"net_recv_body", 225}, {"net_recv_body_all", 226},
-      {"bytes_new", 227}, {"Bytes", 227}, {"bytes_append", 228}, {"bytes_to_str", 229},
+      {"bytes_new", 227}, {"Bytes", 227}, {"bytes", 227}, {"bytes_append", 228}, {"bytes_to_str", 229},
       {"net_recv_buf", 230}, {"net_recv_buf_all", 231},
       {"move", 232}, {"borrow", 233}, {"borrow_mut", 234}, {"copy", 235},
       {"os_chdir", 236}, {"os_getpid", 237}, {"os_getppid", 238},

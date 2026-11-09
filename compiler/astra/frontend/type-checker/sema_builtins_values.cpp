@@ -44,7 +44,7 @@ TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
     return typeInt(64, true);
   }
 
-  if (name == "Bytes" || name == "bytes_new") {
+  if (name == "Bytes" || name == "bytes" || name == "bytes_new") {
     // Bytes() empty, Bytes(n) zero-filled, Bytes("s") UTF-8 of s,
     // Bytes([i64]) one byte per element, Bytes(other) copy.
     if (call.args.size() > 1) {

@@ -5,28 +5,64 @@ namespace a {
 TypePtr Sema::checkBuiltinCollections(const std::string& name, CallExpr& call) {
 
   if (name == "map" || name == "filter" || name == "any" || name == "all") {
+    // map/filter take (array, fn); the runtime also accepts Python's
+    // (fn, array) order, so accept either here. any/all take (array, fn?)
+    // — a single argument applies truthiness to each element.
+    if (call.args.size() < 1 || call.args.size() > 2) {
+      if (name == "any" || name == "all") {
+        sink_.error(call.span, "'" + name + "' expects 1 to 2 argument(s), found " +
+                               std::to_string(call.args.size()) + ".");
+      } else {
+        builtinArityError(name, call, 2);
+      }
+      inferCallArgTypes(call);
+      return typeError();
+    }
+    if ((name == "any" || name == "all") && call.args.size() == 1) {
+      TypePtr arrayType = inferExpr(*call.args[0].value);
+      TypePtr array = resolveType(arrayType);
+      if (array->kind != TypeKind::Array) {
+        sink_.error(call.args[0].value->span,
+                    "'" + name + "' expects an array, found " +
+                        typePhrase(array) + ".");
+        return typeError();
+      }
+      return typeBool();
+    }
     if (call.args.size() != 2) {
       builtinArityError(name, call, 2);
       inferCallArgTypes(call);
       return typeError();
     }
-    TypePtr arrayType = inferExpr(*call.args[0].value);
-    TypePtr array = resolveType(arrayType);
-    if (array->kind != TypeKind::Array) {
-      sink_.error(call.args[0].value->span,
-                  "'" + name + "' expects an array as its first argument, found " +
-                      typePhrase(array) + ".");
-      inferExpr(*call.args[1].value);
-      return typeError();
+    TypePtr firstType = inferExpr(*call.args[0].value);
+    TypePtr first = resolveType(firstType);
+    // Locate the array argument; the other must be the predicate/mapping fn.
+    int arrayIdx = -1;
+    TypePtr array;
+    if (first->kind == TypeKind::Array) {
+      arrayIdx = 0;
+      array = first;
+    } else {
+      TypePtr second = resolveType(inferExpr(*call.args[1].value));
+      if (second->kind == TypeKind::Array) {
+        arrayIdx = 1;
+        array = second;
+      } else {
+        sink_.error(call.args[0].value->span,
+                    "'" + name + "' expects an array as one argument, found " +
+                        typePhrase(first) + ".");
+        return typeError();
+      }
     }
+    int fnIdx = 1 - arrayIdx;
     if (name == "map") {
       TypePtr mapped = freshVar(Constraint::None, call.span,
                                 "the element type produced by 'map'");
-      checkArgAgainst(*call.args[1].value, typeFunction({array->elem}, mapped),
+      checkArgAgainst(*call.args[fnIdx].value, typeFunction({array->elem}, mapped),
                       "in the function passed to 'map'");
       return typeArray(mapped);
     }
-    checkArgAgainst(*call.args[1].value, typeFunction({array->elem}, typeBool()),
+    checkArgAgainst(*call.args[fnIdx].value, typeFunction({array->elem}, typeBool()),
                     "in the function passed to '" + name + "'");
     return name == "filter" ? typeArray(array->elem) : typeBool();
   }
