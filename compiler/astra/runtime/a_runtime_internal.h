@@ -450,6 +450,7 @@ aval bi_min(uint64_t n, aval *argv);
 aval bi_max(uint64_t n, aval *argv);
 aval bi_sum(uint64_t n, aval *argv);
 aval bi_pow(uint64_t n, aval *argv);
+aval bi_divmod(uint64_t n, aval *argv);
 aval bi_sqrt(uint64_t n, aval *argv);
 aval bi_log(uint64_t n, aval *argv);
 aval bi_asin(uint64_t n, aval *argv);

@@ -279,6 +279,7 @@ int builtinRuntimeId(const std::string& name) {
       {"move", 232}, {"borrow", 233}, {"borrow_mut", 234}, {"copy", 235},
       {"os_chdir", 236}, {"os_getpid", 237}, {"os_getppid", 238},
       {"os_getuid", 239}, {"os_geteuid", 240}, {"os_getgid", 241},
+      {"divmod", 273},
       {"os_getegid", 242}, {"os_getlogin", 243}, {"os_cpu_count", 244},
       {"os_uname", 245}, {"os_stat", 246}, {"os_lstat", 247},
       {"os_access", 248}, {"os_chmod", 249}, {"os_symlink", 250},

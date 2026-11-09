@@ -66,6 +66,23 @@ TypePtr Sema::checkBuiltinNumeric(const std::string& name, CallExpr& call) {
     return typeFloat(64);
   }
 
+  if (name == "divmod") {
+    if (call.args.size() != 2) {
+      builtinArityError(name, call, 2);
+      inferCallArgTypes(call);
+      return typeError();
+    }
+    TypePtr a = inferExpr(*call.args[0].value);
+    TypePtr b = inferExpr(*call.args[1].value);
+    requireNumeric(a, call.args[0].value->span, "The first argument of 'divmod'");
+    requireNumeric(b, call.args[1].value->span, "The second argument of 'divmod'");
+    TypePtr ra = resolveType(a);
+    TypePtr rb = resolveType(b);
+    bool isFloat = ra->kind == TypeKind::Float || rb->kind == TypeKind::Float;
+    TypePtr elem = isFloat ? typeFloat(64) : typeInt(64, true);
+    return typeTuple({elem, elem});
+  }
+
   if (name == "atan2") {
     if (call.args.size() != 2) {
       builtinArityError(name, call, 2);

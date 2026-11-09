@@ -201,6 +201,8 @@ enum {
     A_BI_OS_GETLOADAVG, A_BI_OS_GETHOSTNAME, A_BI_OS_UMASK,
     A_BI_OS_GETPAGESIZE, A_BI_OS_CHOWN, A_BI_OS_ISMOUNT,
     A_BI_OS_DISK_USAGE, A_BI_OS_POPEN, A_BI_OS_KILL, A_BI_OS_EXIT,
+    /* Python-parity builtin (appended so existing ids stay stable) */
+    A_BI_DIVMOD,
     A_BI_COUNT
 };
 

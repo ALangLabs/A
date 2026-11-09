@@ -8,6 +8,34 @@ aval bi_pow(uint64_t n, aval *argv) {
     return r;
 }
 
+aval bi_divmod(uint64_t n, aval *argv) {
+    want_args("divmod", n, 2, 2);
+    if (is_int_val(argv[0]) && is_int_val(argv[1])) {
+        int64_t a = int_val_full(argv[0]);
+        int64_t b = int_val_full(argv[1]);
+        if (b == 0) panicf("divmod() division by zero");
+        if (a == INT64_MIN && b == -1) {
+            /* quotient overflows i64; fall back to float pair */
+            double q = floor((double)a / (double)b);
+            double r = (double)a - q * (double)b;
+            aval pair[2] = { mkdouble(q), mkdouble(r) };
+            return a_tuple_new(2, pair);
+        }
+        int64_t q = a / b;
+        int64_t r = a % b;
+        if (r != 0 && ((r < 0) != (b < 0))) { --q; r += b; }
+        aval pair[2] = { mkint_full(q), mkint_full(r) };
+        return a_tuple_new(2, pair);
+    }
+    double a = math_arg(argv[0], "divmod");
+    double b = math_arg(argv[1], "divmod");
+    if (b == 0.0) panicf("divmod() division by zero");
+    double q = floor(a / b);
+    double r = a - q * b;
+    aval pair[2] = { mkdouble(q), mkdouble(r) };
+    return a_tuple_new(2, pair);
+}
+
 #define BI_MATH1(fname, expr) \
     aval fname(uint64_t n, aval *argv) { \
         want_args(#fname, n, 1, 1); \

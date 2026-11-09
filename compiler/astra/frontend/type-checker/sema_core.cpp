@@ -82,6 +82,7 @@ std::string Sema::suggestName(const std::string& name) const {
       "current_dir", "repr", "type", "isinstance", "join", "sorted",
       "reversed", "enumerate", "zip", "reduce", "flush", "env_get", "now",
       "sleep", "Some", "Ok", "Err", "None", "True", "False", "Bytes",
+      "divmod",
   };
   for (const char* b : kBuiltins) add(b);
 
