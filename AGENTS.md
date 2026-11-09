@@ -24,15 +24,6 @@ Useful targeted checks:
 
 CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ctest, checks version consistency across `CMakeLists.txt`, `compiler/astra/frontend/driver/version.hpp`, `tools/lsp/server.cpp` (`kServerVersion`), and `tools/vscode-a/package.json`, and runs an ASan/UBSan integration pass.
 
-## Web search (agent CLI)
-Use the repo-root `websearchcli.py` for web searching instead of guessing or a built-in web tool whenever you need current/external information (docs, upstream APIs, error messages, versioning). It queries the Exa MCP endpoint (`https://mcp.exa.ai/mcp`, `web_search_exa`, no API key needed) and prints ranked titles, URLs, and snippets; it requires internet access.
-```sh
-python3 websearchcli.py "<query>" [-n 1-20] [--type auto|neural|keyword] [--livecrawl fallback|always|never] [--json] [--timeout SECS]
-# e.g. python3 websearchcli.py "Astra compiler backend" -n 5 --type keyword
-#      python3 websearchcli.py "latest news about X" --livecrawl always --json
-```
-- Defaults mirror the old vtx `WebTool`: `-n 8`, `--type auto` (hybrid), `--livecrawl fallback`; use `--type neural` for concept matching, `--type keyword` for exact text, `--livecrawl always` to force fresh content.
-- The module is also importable (`from websearchcli import search`) and is stdlib-only, so it runs from any checkout without `vtx`/`pydantic`/`httpx`.
 
 ## Project layout (high level)
 - `websearchcli.py` — standalone agent web-search CLI (Exa MCP; see "Web search" above).

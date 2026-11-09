@@ -20,6 +20,8 @@ Plan.md
 .kilo/
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
 dist/
 *.vsix
 .vscode/
@@ -30,3 +32,4 @@ demo/
 data.txt
 # runtime archive built by the astra_runtime target
 compiler/astra/runtime/libaruntime.a
+websearchcli.a
