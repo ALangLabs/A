@@ -1,0 +1,109 @@
+# apm.semver — a tiny SemVer + version-spec engine for apm.
+#
+# Versions: "MAJOR.MINOR.PATCH" (pre-release suffixes after '-' are ignored).
+# Specs (npm/cargo-flavoured):
+#   "*" or ""        any version
+#   "1.2.3"          exact
+#   "^1.2.3"         >=1.2.3 <2.0.0
+#   "~1.2.3"         >=1.2.3 <1.3.0
+#   ">=1.2.3" ">1.2.3" "<=1.2.3" "<1.2.3" "==1.2.3"
+#   ">=1.0.0,<2.0.0" comma-separated AND (whitespace tolerant)
+
+"""parse_version(s) -> [major, minor, patch] (missing parts = 0)."""
+fn parse_version(s: String):
+    t = s.strip()
+    if t.startswith("v"):
+        t = t[1..]
+    # Drop pre-release / build metadata.
+    for sep in ["-", "+"]:
+        i = t.find(sep)
+        if i >= 0:
+            t = t[0..i]
+            break
+    parts = t.split(".")
+    out = [0, 0, 0]
+    i = 0
+    while i < 3 and i < len(parts):
+        p = parts[i].strip()
+        ok_num = p != ""
+        for c in p.chars():
+            if str(c) < "0" or str(c) > "9":
+                ok_num = false
+        if ok_num:
+            out[i] = int(p)
+        i += 1
+    return out
+
+"""cmp_ver(a, b) -> -1, 0, or 1 (a and b are [major, minor, patch])."""
+fn cmp_ver(a, b):
+    i = 0
+    while i < 3:
+        if a[i] < b[i]:
+            return -1
+        if a[i] > b[i]:
+            return 1
+        i += 1
+    return 0
+
+"""satisfies(version, spec) -> whether version (String) satisfies spec."""
+fn satisfies(version: String, spec: String):
+    spec = spec.strip()
+    if spec == "" or spec == "*" or spec == "latest":
+        return true
+    clauses = spec.split(",")
+    for c in clauses:
+        if not _satisfies_one(version, c.strip()):
+            return false
+    return true
+
+fn _satisfies_one(version: String, clause: String):
+    if clause == "" or clause == "*" or clause == "latest":
+        return true
+    v = parse_version(version)
+    if clause.startswith(">="):
+        return cmp_ver(v, parse_version(clause[2..])) >= 0
+    if clause.startswith("<="):
+        return cmp_ver(v, parse_version(clause[2..])) <= 0
+    if clause.startswith("=="):
+        return cmp_ver(v, parse_version(clause[2..])) == 0
+    if clause.startswith(">"):
+        return cmp_ver(v, parse_version(clause[1..])) > 0
+    if clause.startswith("<"):
+        return cmp_ver(v, parse_version(clause[1..])) < 0
+    if clause.startswith("^"):
+        base = parse_version(clause[1..])
+        if cmp_ver(v, base) < 0:
+            return false
+        if base[0] > 0:
+            return v[0] == base[0]
+        if base[1] > 0:
+            return v[0] == 0 and v[1] == base[1]
+        return v[0] == 0 and v[1] == 0 and v[2] == base[2]
+    if clause.startswith("~"):
+        base = parse_version(clause[1..])
+        return cmp_ver(v, base) >= 0 and v[0] == base[0] and v[1] == base[1]
+    return cmp_ver(v, parse_version(clause)) == 0
+
+"""max_satisfying(versions, spec) -> highest version String, or "" when none."""
+fn max_satisfying(versions, spec: String):
+    best = ""
+    for v in versions:
+        if satisfies(v, spec):
+            if best == "" or cmp_ver(parse_version(v), parse_version(best)) > 0:
+                best = v
+    return best
+
+"""valid_version(s) -> whether s parses as a numeric dotted version."""
+fn valid_version(s: String):
+    t = s.strip()
+    if t.startswith("v"):
+        t = t[1..]
+    if t == "":
+        return false
+    for p in t.split("."):
+        if p == "":
+            return false
+        for c in p.chars():
+            if str(c) < "0" or str(c) > "9":
+                return false
+    return true

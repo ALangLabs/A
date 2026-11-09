@@ -17,6 +17,7 @@ the golden tests in `tests/integration/cases/`.
 - [Ownership, move, and borrow](ownership.md) — `move`, `borrow`, `borrow_mut`, and slice views.
 - [Builtins and native modules](builtins.md) — core builtin functions and the native module table (`math`, `fs`, `json`, `net`, …).
 - [Standard library](stdlib.md) — `stdlib/` packages and `import std:` usage.
+- [Package manager](apm.md) — `apm`, the registry/lockfile/manifest system for third-party packages.
 - [Python interop](python-interop.md) — calling Python from A, buffers, examples.
 - [Testing](testing.md) — `a test`, `fn test_*()`, `assert`/`assert_eq`, `std:testing`.
 - [CLI and tooling](cli.md) — `a run/build/check/test/fmt/doc/ir/repl` and useful flags.

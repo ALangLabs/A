@@ -1,0 +1,24 @@
+# string-utils 0.3.0 — string helpers (depends on math-utils in the registry).
+
+fn slugify(s: String):
+    out = ""
+    for c in s.chars():
+        ch = str(c)
+        if ch == " " or ch == "_":
+            out += "-"
+        else:
+            out += ch
+    return out.lower()
+
+fn truncate(s: String, n):
+    if len(s) <= n:
+        return s
+    return s[0..n] + "..."
+
+fn reverse(s: String):
+    out = ""
+    i = len(s) - 1
+    while i >= 0:
+        out += s[i]
+        i -= 1
+    return out

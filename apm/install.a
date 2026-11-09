@@ -1,0 +1,139 @@
+# apm.install — fetch package sources into <project>/.apm/packages/.
+#
+# Source strings (pip-like):
+#   "<path>" or "local:<path>"     local directory or .a file (copied)
+#   "git+<url>[#<ref>]"            git clone + checkout <ref> (via git)
+#   "http(s)://...tar.gz|.tgz|.tar" / ".zip" archive (download + extract)
+#   "http(s)://..."                any other URL: downloaded as-is
+# Registry entries carry an explicit "kind" ("local"/"git"/"http"); when a
+# kind is absent the source string itself is auto-detected (above).
+#
+# Installed layout: .apm/packages/<import_name>/ where import_name maps
+# '-' -> '_' so `import hello_lib` works with the -I flag apm passes.
+
+from "util.a" import join, dirname, basename, is_dir, is_file, exists, copy_dir, list_paths, make_dirs, remove_all, read_text, write_text, shell, q, downloading, fail
+from "manifest.a" import load_manifest, mf_get
+
+"""classify_source(source) -> "local", "git", or "http"."""
+fn classify_source(source: String):
+    if source.startswith("git+"):
+        return "git"
+    if source.startswith("http://") or source.startswith("https://"):
+        return "http"
+    return "local"
+
+"""git_url(source) -> (url, ref) for git sources ("git+<url>[#<ref>]")."""
+fn git_url(source: String):
+    s = source
+    if s.startswith("git+"):
+        s = s[4..]
+    ref = ""
+    i = s.rfind("#")
+    url = s
+    if i >= 0:
+        url = s[0..i]
+        ref = s[i + 1..]
+    return (url, ref)
+
+"""fetch_local(path, dest) -> copy a local package tree into dest."""
+fn fetch_local(path: String, dest: String):
+    p = path
+    if p.startswith("file://"):
+        p = p[7..]
+    if p.startswith("local:"):
+        p = p[6..]
+    if is_dir(p):
+        copy_dir(p, dest)
+    else:
+        fail("local source must be a package directory: '" + path +
+             "' (wrap it in a directory with an apm.json)")
+
+"""fetch_git(source, dest) -> clone a git source into dest."""
+fn fetch_git(source: String, dest: String):
+    parts = git_url(source)
+    url = parts[0]
+    ref = parts[1]
+    cmd = "git clone --quiet " + q(url) + " " + q(dest)
+    if shell(cmd) != 0:
+        fail("git clone failed for '" + url + "'")
+    if ref != "":
+        if shell("git -C " + q(dest) + " checkout --quiet " + q(ref)) != 0:
+            fail("git checkout failed for ref '" + ref + "'")
+
+"""archive_contents_to_dest(staging, dest) -> move extracted tree into dest."""
+fn archive_contents_to_dest(staging: String, dest: String):
+    entries = []
+    for e in list_paths(staging):
+        entries.append(e)
+    if len(entries) == 1 and is_dir(join(staging, entries[0])):
+        # Archives normally nest under one top directory (package-1.0.0/).
+        copy_dir(join(staging, entries[0]), dest)
+    else:
+        copy_dir(staging, dest)
+    remove_all(staging)
+
+"""fetch_http(url, dest) -> download + extract an archive into dest."""
+fn fetch_http(url: String, dest: String):
+    dest_parent = dirname(dest)
+    remove_all(dest)
+    if url.endswith(".tar.gz") or url.endswith(".tgz") or url.endswith(".tar"):
+        archive = join(dest_parent, "_apm_download.tar.gz")
+        downloading(url, archive)
+        staging = join(dest_parent, "_apm_staging")
+        remove_all(staging)
+        make_dirs(staging)
+        if shell("tar -xzf " + q(archive) + " -C " + q(staging)) != 0:
+            fail("tar extraction failed for '" + url + "'")
+        archive_contents_to_dest(staging, dest)
+    elif url.endswith(".zip"):
+        archive = join(dest_parent, "_apm_download.zip")
+        downloading(url, archive)
+        staging = join(dest_parent, "_apm_staging")
+        remove_all(staging)
+        make_dirs(staging)
+        if shell("unzip -q -o " + q(archive) + " -d " + q(staging)) != 0:
+            fail("zip extraction failed for '" + url + "'")
+        archive_contents_to_dest(staging, dest)
+    else:
+        downloading(url, dest)
+
+"""fetch(source, dest) -> install `source` into `dest` (auto-detected)."""
+fn fetch(source: String, dest: String):
+    kind = classify_source(source)
+    if kind == "git":
+        fetch_git(source, dest)
+    elif kind == "http":
+        fetch_http(source, dest)
+    else:
+        fetch_local(source, dest)
+
+"""fetch_with_kind(source, kind, base_dir, dest) -> install a registry release.
+Registry `kind` "local" resolves `source` relative to base_dir (the
+registry file's directory); "git"/"http" use the source string directly.
+"""
+fn fetch_with_kind(source: String, kind: String, base_dir: String, dest: String):
+    if kind == "git":
+        fetch_git(source, dest)
+    elif kind == "http":
+        fetch_http(source, dest)
+    else:
+        if source.startswith("http://") or source.startswith("https://") or source.startswith("git+"):
+            fetch(source, dest)
+        elif is_file(join(base_dir, source)) or is_dir(join(base_dir, source)):
+            fetch_local(join(base_dir, source), dest)
+        else:
+            fetch(source, dest)
+
+"""package_manifest_dir(dest) -> directory holding the package manifest."""
+fn package_manifest_dir(dest: String):
+    if is_file(join(dest, "apm.json")):
+        return dest
+    return dirname(dest)
+
+"""read_package_name(dest, fallback_name) -> package name from installed tree."""
+fn read_package_name(dest: String, fallback_name: String):
+    d = package_manifest_dir(dest)
+    if is_file(join(d, "apm.json")):
+        m = load_manifest(join(d, "apm.json"))
+        return mf_get(m, "name", fallback_name)
+    return fallback_name

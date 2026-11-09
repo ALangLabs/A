@@ -1,0 +1,25 @@
+{
+  "name": "apm-registry",
+  "version": 1,
+  "packages": {
+    "hello-lib": {
+      "description": "A tiny greeting helper — the classic first apm package.",
+      "versions": {
+        "1.0.0": {"source": "packages/hello-lib/1.0.0", "kind": "local", "description": "First release.", "dependencies": {}},
+        "1.1.0": {"source": "packages/hello-lib/1.1.0", "kind": "local", "description": "Adds farewell().", "dependencies": {}}
+      }
+    },
+    "math-utils": {
+      "description": "Small math helpers built on hello-lib.",
+      "versions": {
+        "2.0.0": {"source": "packages/math-utils/2.0.0", "kind": "local", "description": "Factorial, fib, gcd.", "dependencies": {"hello-lib": "^1.0.0"}}
+      }
+    },
+    "string-utils": {
+      "description": "String helpers (slugify, truncate, reverse). Depends on math-utils.",
+      "versions": {
+        "0.3.0": {"source": "packages/string-utils/0.3.0", "kind": "local", "description": "First release.", "dependencies": {"math-utils": "^2.0.0"}}
+      }
+    }
+  }
+}

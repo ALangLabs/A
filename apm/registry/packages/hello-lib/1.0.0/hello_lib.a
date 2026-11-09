@@ -1,0 +1,4 @@
+# hello-lib 1.0.0 — a tiny greeting helper (packaged for apm demos/tests).
+
+fn greet(name: String):
+    return "Hello, " + name + "!"

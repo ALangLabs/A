@@ -1,0 +1,18 @@
+# math-utils 2.0.0 — small math helpers (depends on hello-lib in the registry).
+
+fn factorial(n):
+    if n < 2:
+        return 1
+    return n * factorial(n - 1)
+
+fn fib(n):
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+fn gcd(a, b):
+    while b != 0:
+        t = b
+        b = a % b
+        a = t
+    return a

@@ -1,0 +1,9 @@
+{
+  "name": "math-utils",
+  "version": "2.0.0",
+  "description": "Small math helpers built on hello-lib.",
+  "main": "math_utils.a",
+  "dependencies": {
+    "hello-lib": "^1.0.0"
+  }
+}

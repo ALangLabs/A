@@ -45,6 +45,10 @@ compiles A straight to native machine code.
   `attention`/`softmax`, FMA hot loops, and an IR `fuseFma` contraction pass).
 - **First-class tooling** — `a fmt`, `a doc`, `a ir`, a REPL, a full **LSP**
   server (`a-lsp`), and a VS Code extension.
+- **Package manager** — `apm` (`apm/apm`), `pip` for A: install, update,
+  publish, and run third-party packages written in A itself, with a
+  registry index, `apm.json` manifests, and `apm.lock.json` pinning.
+  See [`apm/`](apm/README.md).
 - **LLVM-style optimization pipeline** — constant folding, DCE, inlining, LICM,
   CSE, instcombine, SCCP, and `-O0`…`-Ofast` levels over a typed SSA IR.
 
@@ -153,6 +157,9 @@ flowchart LR
   (json, fs, net, arena, unsafe, python interop, terminal, time, intrinsics).
 - **`tools/lsp/`** — `a-lsp`, a full stdio language server (diagnostics,
   hover, go-to-definition, completion, formatting, call/type hierarchy, …).
+- **`apm/`** — `apm`, the package manager: registry index, dependency
+  resolver, installer (local/git/http sources), lockfile, and the
+  `apm` launcher script.
 - **`tools/vscode-a/`** — VS Code extension with syntax highlighting,
   snippets, tasks, and the LSP client.
 

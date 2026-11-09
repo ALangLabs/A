@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# apm — launcher for the A Package Manager (implemented in A, see apm.a).
+#
+# The A runtime has no argv/startup-location API, so this wrapper carries
+# the real CLI in APM_ARGS and points apm at its own directory:
+#   apm install hello-lib          -> APM_ARGS="install hello-lib" a run apm.a
+set -u
+
+APM_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export APM_HOME="${APM_HOME:-$APM_DIR}"
+
+if [ "$#" -gt 0 ]; then
+  APM_ARGS="$*"
+else
+  APM_ARGS=""
+fi
+export APM_ARGS
+
+A_BIN="${APM_A_BIN:-a}"
+
+# Prefer the repo build when run from a checkout; fall back to PATH.
+if [ -x "$APM_DIR/../build/a" ]; then
+  APM_A_BIN="$APM_DIR/../build/a"
+  export APM_A_BIN
+  exec "$APM_A_BIN" run "$APM_DIR/apm.a"
+else
+  exec "$A_BIN" run "$APM_DIR/apm.a"
+fi

@@ -1,0 +1,7 @@
+# hello-lib 1.1.0 — greeting helper with a farewell.
+
+fn greet(name: String):
+    return "Hello, " + name + "!"
+
+fn farewell(name: String):
+    return "Goodbye, " + name + "."

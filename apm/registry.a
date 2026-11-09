@@ -1,0 +1,245 @@
+# apm.registry — read/write the registry index (registry.json).
+#
+# Registry index format:
+#   {
+#     "name": "apm-registry", "version": 1,
+#     "packages": {
+#       "<name>": {
+#         "description": "...",
+#         "versions": {
+#           "<ver>": {"source": "...", "kind": "local|git|http",
+#                     "description": "...", "dependencies": {"<pkg>": "<spec>"}}
+#         }
+#       }
+#     }
+#   }
+# `source` is interpreted relative to the registry file for kind "local".
+# Remote registries: set APM_REGISTRY to an http(s) URL; local files win
+# for `apm publish` (publishing to a URL is rejected).
+
+import json
+from "util.a" import read_text, write_text, is_file, dirname, downloading, fail, ob, cb
+from "manifest.a" import json_esc, deps_json
+from "semver.a" import max_satisfying
+
+"""load_registry(path) -> parsed index (downloads http(s) URLs first)."""
+fn load_registry(path: String):
+    text = ""
+    if path.startswith("http://") or path.startswith("https://"):
+        tmp = dirname(path) + "/_apm_registry_remote.json"
+        downloading(path, tmp)
+        text = read_text(tmp)
+    else:
+        if not is_file(path):
+            fail("registry not found at '" + path + "' (set APM_REGISTRY or run from a checkout with apm/)")
+        text = read_text(path)
+    if not json.is_valid(text):
+        fail("invalid JSON in registry '" + path + "'")
+    return json.parse(text)
+
+"""registry_dir(path) -> directory holding a file registry ("." for URLs)."""
+fn registry_dir(path: String):
+    if path.startswith("http://") or path.startswith("https://"):
+        return "."
+    return dirname(path)
+
+"""reg_packages(reg) -> [String] of registered package names."""
+fn reg_packages(reg):
+    pkgs = json.get(reg, "packages")
+    if pkgs == None:
+        return []
+    return json.keys(pkgs!)
+
+"""reg_entry(reg, name) -> package entry map, or None."""
+fn reg_entry(reg, name: String):
+    pkgs = json.get(reg, "packages")
+    if pkgs == None:
+        return None
+    e = json.get(pkgs!, name)
+    if e == None:
+        return None
+    return e!
+
+"""reg_versions(reg, name) -> [String] versions (sorted ascending)."""
+fn reg_versions(reg, name: String):
+    e = reg_entry(reg, name)
+    if e == None:
+        return []
+    vs = json.get(e, "versions")
+    if vs == None:
+        return []
+    return sorted(json.keys(vs!))
+
+"""reg_description(reg, name) -> package description ("")."""
+fn reg_description(reg, name: String):
+    e = reg_entry(reg, name)
+    if e == None:
+        return ""
+    d = json.get(e, "description")
+    if d == None:
+        return ""
+    s = json.as_str(d!)
+    if s == None:
+        return ""
+    return s!
+
+"""reg_release(reg, name, version) -> release map, or None."""
+fn reg_release(reg, name: String, version: String):
+    e = reg_entry(reg, name)
+    if e == None:
+        return None
+    vs = json.get(e, "versions")
+    if vs == None:
+        return None
+    r = json.get(vs!, version)
+    if r == None:
+        return None
+    return r!
+
+"""reg_source(reg, name, version) -> source string ("")."""
+fn reg_source(reg, name: String, version: String):
+    r = reg_release(reg, name, version)
+    if r == None:
+        return ""
+    s = json.get(r, "source")
+    if s == None:
+        return ""
+    t = json.as_str(s!)
+    if t == None:
+        return ""
+    return t!
+
+"""_collect_dep(deps, k, out) -> copy one deps entry into out when string."""
+fn _collect_dep(deps, k: String, out):
+    s = json.as_str(json.get(deps, k))
+    if s == None:
+        return None
+    out[k] = s!
+    return None
+
+"""reg_deps(reg, name, version) -> {String: String} deps of a release."""
+fn reg_deps(reg, name: String, version: String):
+    out = {}
+    r = reg_release(reg, name, version)
+    if r == None:
+        return out
+    d = json.get(r, "dependencies")
+    if d == None:
+        return out
+    deps = d!
+    for k in json.keys(deps):
+        _collect_dep(deps, k, out)
+    return out
+
+"""reg_best_version(reg, name, spec) -> highest satisfying version, or ""."""
+fn reg_best_version(reg, name: String, spec: String):
+    return max_satisfying(reg_versions(reg, name), spec)
+
+"""reg_kind(reg, name, version) -> release kind ("local" default)."""
+fn reg_kind(reg, name: String, version: String):
+    r = reg_release(reg, name, version)
+    if r == None:
+        return "local"
+    k = json.get(r, "kind")
+    if k == None:
+        return "local"
+    t = json.as_str(k)
+    if t == None:
+        return "local"
+    return t!
+
+"""save_registry(path, reg) -> write index back (local registries only)."""
+fn save_registry(path: String, reg):
+    if path.startswith("http://") or path.startswith("https://"):
+        fail("cannot publish to a remote registry URL")
+    pkgs = json.get(reg, "packages")
+    reg_name = json.as_str(json.get(reg, "name"))
+    if reg_name == None:
+        reg_name = "apm-registry"
+    out = ob() + "\n  \"name\": \"" + json_esc(reg_name) + "\",\n  \"version\": 1,\n  \"packages\": " + ob()
+    first_pkg = true
+    if pkgs != None:
+        for name in json.keys(pkgs):
+            if not first_pkg:
+                out += ","
+            first_pkg = false
+            e = json.get(pkgs, name)
+            out += "\n    \"" + json_esc(name) + "\": " + ob() + "\"description\": \"" + json_esc(reg_description(reg, name)) + "\", \"versions\": " + ob()
+            vs = json.get(e, "versions")
+            first_v = true
+            if vs != None:
+                for ver in sorted(json.keys(vs)):
+                    if not first_v:
+                        out += ","
+                    first_v = false
+                    out += "\n      \"" + json_esc(ver) + "\": " + ob() + "\"source\": \"" + json_esc(reg_source(reg, name, ver)) + "\", \"kind\": \"" + json_esc(reg_kind(reg, name, ver)) + "\", \"description\": \"" + json_esc(reg_description(reg, name)) + "\", \"dependencies\": " + deps_json(reg_deps(reg, name, ver)) + cb()
+            out += "\n    " + cb() + "\n    " + cb()
+            out += "\n  " + cb() + "\n"
+    out += cb() + "\n"
+    write_text(path, out)
+
+"""reg_model(reg) -> [Package(name, desc, [Release...]), ...]"""
+class Package:
+    name: String
+    desc: String
+    rels
+
+"""Release -> one registry release (version, source, kind, deps)."""
+class Release:
+    ver: String
+    source: String
+    kind: String
+    deps
+
+fn reg_model(reg):
+    model = []
+    pkgs = json.get(reg, "packages")
+    if pkgs == None:
+        return model
+    for name in json.keys(pkgs):
+        rels = []
+        vs = json.get(json.get(pkgs, name), "versions")
+        if vs != None:
+            for ver in sorted(json.keys(vs)):
+                rels.append(Release(ver, reg_source(reg, name, ver), reg_kind(reg, name, ver), reg_deps(reg, name, ver)))
+        model.append(Package(name, reg_description(reg, name), rels))
+    return model
+
+"""render_model(model, reg_name) -> registry JSON text."""
+fn render_model(model, reg_name: String):
+    out = ob() + "\n  \"name\": \"" + json_esc(reg_name) + "\",\n  \"version\": 1,\n  \"packages\": " + ob()
+    first_pkg = true
+    for pkg in model:
+        if not first_pkg:
+            out += ","
+        first_pkg = false
+        out += "\n    \"" + json_esc(pkg.name) + "\": " + ob() + "\"description\": \"" + json_esc(pkg.desc) + "\", \"versions\": " + ob()
+        first_v = true
+        for rel in pkg.rels:
+            if not first_v:
+                out += ","
+            first_v = false
+            out += "\n      \"" + json_esc(rel.ver) + "\": " + ob() + "\"source\": \"" + json_esc(rel.source) + "\", \"kind\": \"" + json_esc(rel.kind) + "\", \"description\": \"" + json_esc(pkg.desc) + "\", \"dependencies\": " + deps_json(rel.deps) + cb()
+        out += "\n    " + cb() + "\n    " + cb()
+    out += "\n  " + cb() + "\n"
+    out += cb() + "\n"
+    return out
+
+"""model_add(model, name, desc, version, source, kind, deps) -> model with release added."""
+fn model_add(model, name: String, desc: String, version: String, source: String, kind: String, deps):
+    out = []
+    found = false
+    for pkg in model:
+        if pkg.name == name:
+            found = true
+            rels = []
+            for rel in pkg.rels:
+                if rel.ver != version:
+                    rels.append(rel)
+            rels.append(Release(version, source, kind, deps))
+            out.append(Package(pkg.name, pkg.desc, rels))
+        else:
+            out.append(pkg)
+    if not found:
+        out.append(Package(name, desc, [Release(version, source, kind, deps)]))
+    return out

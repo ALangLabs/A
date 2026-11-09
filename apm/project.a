@@ -1,0 +1,111 @@
+# apm.project — project root, manifest/lock paths, and lockfile I/O.
+#
+# A "project" is any directory containing apm.json. Installed packages live
+# in <project>/.apm/packages/<import_name> and the resolved dependency graph
+# is recorded in <project>/apm.lock.json (the pip requirements.txt /
+# Cargo.lock analogue: commit it for reproducible installs).
+
+import json
+from "util.a" import join, dirname, basename, is_dir, is_file, exists, getenv, read_text, write_text, norm_import_name, fail, ob, cb
+from "manifest.a" import load_manifest, mf_get, mf_deps, json_esc
+
+"""project_root(flag) -> project dir: -p flag, APM_PROJECT, or cwd."""
+fn project_root(flag: String):
+    if flag != "":
+        return flag
+    env = getenv("APM_PROJECT", "")
+    if env != "":
+        return env
+    return current_dir()
+
+"""manifest_path(root) -> <root>/apm.json."""
+fn manifest_path(root: String):
+    return join(root, "apm.json")
+
+"""lock_path(root) -> <root>/apm.lock.json."""
+fn lock_path(root: String):
+    return join(root, "apm.lock.json")
+
+"""packages_dir(root) -> <root>/.apm/packages."""
+fn packages_dir(root: String):
+    return join(join(root, ".apm"), "packages")
+
+"""cache_dir(root) -> <root>/.apm/cache."""
+fn cache_dir(root: String):
+    return join(join(root, ".apm"), "cache")
+
+"""package_dir(root, name) -> install dir for package `name`."""
+fn package_dir(root: String, name: String):
+    return join(packages_dir(root), norm_import_name(name))
+
+"""project_name(root) -> manifest "name" (basename of root if no manifest)."""
+fn project_name(root: String):
+    if is_file(manifest_path(root)):
+        m = load_manifest(manifest_path(root))
+        return mf_get(m, "name", basename(root))
+    return basename(root)
+
+"""lock_text(name, resolved) -> apm.lock.json text.
+resolved: [ [pkg_name, version, source_str], ... ]
+"""
+fn lock_text(name: String, resolved):
+    out = ob() + "\n  \"name\": \"" + json_esc(name) + "\",\n  \"packages\": ["
+    prev = false
+    for item in resolved:
+        if prev:
+            out += ","
+        prev = true
+        out += "\n    " + ob() + "\"name\": \"" + json_esc(item[0]) + "\", \"version\": \"" + json_esc(item[1]) + "\", \"source\": \"" + json_esc(item[2]) + "\", \"import\": \"" + json_esc(norm_import_name(item[0])) + "\"" + cb()
+    out += "\n  ]\n"
+    out += cb() + "\n"
+    return out
+
+"""write_lock(root, name, resolved) -> write apm.lock.json."""
+fn write_lock(root: String, name: String, resolved):
+    write_text(lock_path(root), lock_text(name, resolved))
+
+"""read_lock(root) -> [ [name, version, source], ... ] from apm.lock.json."""
+fn read_lock(root: String):
+    out = []
+    if not is_file(lock_path(root)):
+        return out
+    text = read_text(lock_path(root))
+    if not json.is_valid(text):
+        fail("invalid JSON in lockfile '" + lock_path(root) + "'")
+    lock = json.parse(text)
+    pkgs = json.get(lock, "packages")
+    if pkgs == None:
+        return out
+    arr = json.as_array(pkgs)
+    if arr == None:
+        return out
+    for entry in arr!:
+        _lock_entry(entry, out)
+    return out
+
+"""_src_of(entry) -> lock "source" string ("" when absent)."""
+fn _src_of(entry):
+    s = json.as_str(json.get(entry, "source"))
+    if s == None:
+        return ""
+    return s!
+
+"""_lock_entry(entry, out) -> append a lock entry when name/version are strings."""
+fn _lock_entry(entry, out):
+    n = json.as_str(json.get(entry, "name"))
+    if n == None:
+        return None
+    v = json.as_str(json.get(entry, "version"))
+    if v == None:
+        return None
+    out.append([n!, v!, _src_of(entry)])
+    return None
+
+"""installed_packages(root) -> [String] import names currently installed."""
+fn installed_packages(root: String):
+    out = []
+    dir = packages_dir(root)
+    if is_dir(dir):
+        for e in list_dir(dir):
+            out.append(e)
+    return out
