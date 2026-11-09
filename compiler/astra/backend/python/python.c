@@ -678,7 +678,10 @@ static PyObj aval_to_py(aval v) {
                 else c = g_py.PyList_New((PySsize)a->h.len);
                 if (!c) return NULL;
                 for (uint64_t i = 0; i < a->h.len; ++i) {
-                    PyObj item = aval_to_py(a->items[i]);
+                    /* arr_elem: packed-int lists keep elements in iitems
+                       with items == NULL; reading items[] directly
+                       segfaults. */
+                    PyObj item = aval_to_py(arr_elem(a, i));
                     if (!item) { g_py.Py_DecRef(c); return NULL; }
                     int rc = isTuple ? g_py.PyTuple_SetItem(c, (PySsize)i, item)
                                      : g_py.PyList_SetItem(c, (PySsize)i, item);
@@ -691,7 +694,7 @@ static PyObj aval_to_py(aval v) {
                 PyObj s = g_py.PySet_New(NULL);
                 if (!s) return NULL;
                 for (uint64_t i = 0; i < a->h.len; ++i) {
-                    PyObj item = aval_to_py(a->items[i]);
+                    PyObj item = aval_to_py(arr_elem(a, i));
                     if (!item) { g_py.Py_DecRef(s); return NULL; }
                     if (g_py.PySet_Add(s, item) < 0) {
                         g_py.Py_DecRef(item);
@@ -751,7 +754,8 @@ static PyObj aval_to_py(aval v) {
                 PyObj l = g_py.PyList_New((PySsize)vw->len);
                 if (!l) return NULL;
                 for (PySsize i = 0; i < vw->len; ++i) {
-                    PyObj item = aval_to_py(a->items[(size_t)(vw->off + i)]);
+                    /* arr_elem: the view's parent list may be packed. */
+                    PyObj item = aval_to_py(arr_elem(a, (uint64_t)(vw->off + i)));
                     if (!item || g_py.PyList_SetItem(l, i, item) < 0) {
                         if (item) g_py.Py_DecRef(item);
                         g_py.Py_DecRef(l);
@@ -1469,12 +1473,26 @@ aval bi_py_setattr_builtin(uint64_t n, aval *argv) {
 aval bi_py_getitem_builtin(uint64_t n, aval *argv) { want_args("py.getitem", n, 2, 2); return a_py_getitem(argv[0], argv[1]); }
 aval bi_py_setitem_builtin(uint64_t n, aval *argv) { want_args("py.setitem", n, 3, 3); return a_py_setitem(argv[0], argv[1], argv[2]); }
 
-static int py_collect_args(aval seq, aval **out_items, uint64_t *out_n) {
+/* Collects the aval elements of a list/tuple/set argument sequence.
+   *out_owned is set when the returned array was freshly allocated (packed
+   int storage cannot be borrowed as avals); the caller must free it. */
+static int py_collect_args(aval seq, aval **out_items, uint64_t *out_n,
+                           int *out_owned) {
     AObj *o = obj_of(seq);
-    *out_items = NULL; *out_n = 0;
+    *out_items = NULL; *out_n = 0; *out_owned = 0;
     if (!o) return 0;
     if (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET) {
         AArr *a = (AArr *)o;
+        if (arr_packed(a)) {
+            /* Packed-int storage: items is NULL and elements live in
+               iitems; materialize avals so callers can treat the result
+               as a plain aval array. */
+            aval *items = (aval *)xmalloc((size_t)(a->h.len ? a->h.len : 1) *
+                                          sizeof(aval));
+            for (uint64_t i = 0; i < a->h.len; ++i) items[i] = arr_elem(a, i);
+            *out_items = items; *out_n = a->h.len; *out_owned = 1;
+            return 1;
+        }
         *out_items = a->items; *out_n = a->h.len; return 1;
     }
     return 0;
@@ -1506,8 +1524,9 @@ static aval py_call_obj_impl(aval fn, aval args_seq, aval kwargs_map, int as_res
         if (as_result) return py_err_cstr("py.call: first argument must be a Python object");
         panicf("py.call: first argument must be a Python object, not '%s'", type_name_cstr(fn));
     }
-    aval *aitems = NULL; uint64_t an = 0;
-    if (!a_is_none(args_seq) && !py_collect_args(args_seq, &aitems, &an)) {
+    aval *aitems = NULL; uint64_t an = 0; int aitems_owned = 0;
+    if (!a_is_none(args_seq) &&
+        !py_collect_args(args_seq, &aitems, &an, &aitems_owned)) {
         if (as_result) return py_err_cstr("py.call: args must be a list or tuple");
         panicf("py.call: args must be a list or tuple, not '%s'", type_name_cstr(args_seq));
     }
@@ -1522,8 +1541,10 @@ static aval py_call_obj_impl(aval fn, aval args_seq, aval kwargs_map, int as_res
             for (uint64_t i = 0; i < kn; ++i) { kflat[2*i] = d->pairs[i].k; kflat[2*i+1] = d->pairs[i].v; }
             kpairs = kflat;
         } else if (as_result) {
+            if (aitems_owned) free(aitems);
             return py_err_cstr("py.call: kwargs must be a dict/map or None");
         } else {
+            if (aitems_owned) free(aitems);
             panicf("py.call: kwargs must be a dict/map or None, not '%s'", type_name_cstr(kwargs_map));
         }
     }
@@ -1538,6 +1559,7 @@ static aval py_call_obj_impl(aval fn, aval args_seq, aval kwargs_map, int as_res
     if (kw) g_py.Py_DecRef(kw);
     if (args) g_py.Py_DecRef(args);
     if (kflat) free(kflat);
+    if (aitems_owned) free(aitems);
     if (!r) {
         if (as_result) { aval e = py_err_to_aval("call failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
         py_fail("call");
@@ -1569,8 +1591,9 @@ static aval py_call_method_impl(aval obj, aval namev, aval args_seq, aval kwargs
     }
     uint64_t nlen = 0; char nbuf[512];
     aval_cstr_tmp(namev, &nlen, nbuf, sizeof nbuf);
-    aval *aitems = NULL; uint64_t an = 0;
-    if (!a_is_none(args_seq) && !py_collect_args(args_seq, &aitems, &an)) {
+    aval *aitems = NULL; uint64_t an = 0; int aitems_owned = 0;
+    if (!a_is_none(args_seq) &&
+        !py_collect_args(args_seq, &aitems, &an, &aitems_owned)) {
         if (as_result) return py_err_cstr("py.call_method: args must be a list or tuple");
         panicf("py.call_method: args must be a list or tuple");
     }
@@ -1583,14 +1606,17 @@ static aval py_call_method_impl(aval obj, aval namev, aval args_seq, aval kwargs
             kflat = (aval *)xmalloc((size_t)(kn ? kn * 2 : 1) * sizeof(aval));
             for (uint64_t i = 0; i < kn; ++i) { kflat[2*i] = d->pairs[i].k; kflat[2*i+1] = d->pairs[i].v; }
         } else if (as_result) {
+            if (aitems_owned) free(aitems);
             return py_err_cstr("py.call_method: kwargs must be a dict/map or None");
         } else {
+            if (aitems_owned) free(aitems);
             panicf("py.call_method: kwargs must be a dict/map or None");
         }
     }
     int gil = g_py.PyGILState_Ensure();
     PyObj m = g_py.PyObject_GetAttrString(((APyObj*)oo)->obj, nbuf);
     if (!m) {
+        if (aitems_owned) free(aitems);
         if (kflat) free(kflat);
         if (as_result) { aval e = py_err_to_aval("attribute access failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
         py_fail("attribute access");
@@ -1606,6 +1632,7 @@ static aval py_call_method_impl(aval obj, aval namev, aval args_seq, aval kwargs
     if (args) g_py.Py_DecRef(args);
     g_py.Py_DecRef(m);
     if (kflat) free(kflat);
+    if (aitems_owned) free(aitems);
     if (!r) {
         if (as_result) { aval e = py_err_to_aval("method call failed"); g_py.PyGILState_Release(gil); return py_errv(e); }
         py_fail("method call");

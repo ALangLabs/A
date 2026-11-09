@@ -55,6 +55,33 @@ static void print_frame_line(const AFrame *f) {
         fprintf(stderr, "  File \"%s\", in %s\n", file, name);
 }
 
+/* `main` pushes a "<module>" frame for the entry module and the entry
+   module's __a_modinit_* function pushes another "<module>" frame for the
+   same file while its top-level statements run, so a panic at top level
+   prints the same synthetic frame twice in a row. Collapse consecutive
+   identical <module> frames when printing; real function frames are never
+   named "<module>" and recursive calls keep distinct line numbers. */
+static int same_module_frame(const AFrame *a, const AFrame *b) {
+    if (!a->name || !b->name || strcmp(a->name, "<module>") != 0 ||
+        strcmp(b->name, "<module>") != 0 || a->line != b->line)
+        return 0;
+    if (a->file == b->file) return 1;
+    if (!a->file || !b->file) return 0;
+    return strcmp(a->file, b->file) == 0;
+}
+
+/* Print frames [start, g_nframes), skipping a <module> frame identical to
+   the previously printed one. */
+static void print_frames(size_t start) {
+    const AFrame *prev = NULL;
+    for (size_t i = start; i < g_nframes; ++i) {
+        const AFrame *f = &g_frames[i];
+        if (prev && same_module_frame(prev, f)) continue;
+        print_frame_line(f);
+        prev = f;
+    }
+}
+
 static void stack_overflow_error(uintptr_t sp) {
     (void)sp;
     fputs("error: stack overflow (possible infinite recursion)\n", stderr);
@@ -64,7 +91,7 @@ static void stack_overflow_error(uintptr_t sp) {
         size_t start = g_nframes > 24 ? g_nframes - 24 : 0;
         fputs("Traceback (most recent call last):\n", stderr);
         if (start > 0) fprintf(stderr, "  ... %zu earlier frames ...\n", start);
-        for (size_t i = start; i < g_nframes; ++i) print_frame_line(&g_frames[i]);
+        print_frames(start);
     }
     fflush(stderr);
     exit(2);
@@ -130,7 +157,7 @@ static void print_traceback(void) {
         start = g_nframes - 64;
         fprintf(stderr, "  ... %zu earlier frames ...\n", start);
     }
-    for (size_t i = start; i < g_nframes; ++i) print_frame_line(&g_frames[i]);
+    print_frames(start);
 }
 
 void panicf(const char *fmt, ...) {

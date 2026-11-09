@@ -4,7 +4,61 @@
 /* equality / ordering                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Cycle guard for values_equal. Structural equality recurses over the
+   value graph; two distinct but cyclic objects (e.g. two class instances
+   whose fields point back to themselves, or isomorphic cyclic lists)
+   would otherwise recurse until the C stack overflows. g_eq_active is a
+   per-thread stack (A_RT_TLS: comparisons may run on pool workers) of
+   the (left, right) object-pointer pairs currently being compared.
+   Re-encountering a pair means the comparison has come back around a
+   cycle; we treat it as equal — the coinductive reading of structural
+   equality ("the subtrees are equal if their unfoldings match"), which
+   is what makes `a == b` true for two isomorphic cyclic graphs while
+   `a == c` stays false when the cycle shapes differ. This is deliberately
+   simpler than a depth cap: deep acyclic comparisons keep working and
+   only true cycles take the shortcut. panicf() exits the process, so a
+   panic mid-comparison cannot leave stale entries behind. */
+typedef struct { const void *a, *b; } AEqPair;
+static A_RT_TLS AEqPair *g_eq_active;
+static A_RT_TLS size_t g_eq_active_len, g_eq_active_cap;
+
+static int eq_trackable_kind(int k) {
+    return k == K_LIST || k == K_TUPLE || k == K_DICT || k == K_SET ||
+           k == K_VIEW || k == K_RESULT;
+}
+
+static int values_equal_body(aval a, aval b);
+
 int values_equal(aval a, aval b) {
+    int ka = kind_of(a), kb = kind_of(b);
+    /* Track container pairs only; scalars/strings/bytes are leaves and
+       cannot recurse. K_VIEW compares against K_LIST/K_TUPLE too, so the
+       check is "both sides are trackable kinds", not ka == kb. */
+    if (eq_trackable_kind(ka) && eq_trackable_kind(kb)) {
+        AObj *oa = obj_of(a), *ob = obj_of(b);
+        if (oa && ob) {
+            for (size_t i = 0; i < g_eq_active_len; ++i) {
+                if (g_eq_active[i].a == (const void *)oa &&
+                    g_eq_active[i].b == (const void *)ob)
+                    return 1; /* cycle: coinductive equality */
+            }
+            if (g_eq_active_len == g_eq_active_cap) {
+                g_eq_active_cap = g_eq_active_cap ? g_eq_active_cap * 2 : 64;
+                g_eq_active = (AEqPair *)xrealloc(g_eq_active,
+                                                  g_eq_active_cap * sizeof(AEqPair));
+            }
+            g_eq_active[g_eq_active_len].a = (const void *)oa;
+            g_eq_active[g_eq_active_len].b = (const void *)ob;
+            g_eq_active_len++;
+            int r = values_equal_body(a, b);
+            g_eq_active_len--;
+            return r;
+        }
+    }
+    return values_equal_body(a, b);
+}
+
+static int values_equal_body(aval a, aval b) {
     int ka = kind_of(a), kb = kind_of(b);
     if (is_num(a) && is_num(b)) {
         if (is_int_val(a) && is_int_val(b))

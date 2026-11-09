@@ -139,7 +139,47 @@ static void format_quoted(Buf *b, const char *p, size_t n) {
     buf_addc(b, '"');
 }
 
-void format_into(Buf *b, aval v, int quote) {
+/* Cycle guard for format_into. The formatter recurses structurally over
+   the value graph; a cyclic graph (a class instance whose field points
+   back to itself, a list/dict/set containing itself, a view of a list
+   that contains the view, ...) would otherwise recurse until the C stack
+   overflows. g_fmt_active is a per-thread stack (A_RT_TLS: str()/repr()
+   may run on pool workers) of the container objects currently being
+   rendered; re-encountering one means the value graph has a cycle, so we
+   emit "..." — the same convention Python's repr uses for
+   self-referential containers. Objects are never freed, so pointer
+   identity is stable; the stack is popped on the way out, so DAG-shaped
+   sharing (the same object printed twice in sibling positions) still
+   renders fully both times. panicf() exits the process, so a panic
+   mid-format cannot leave stale entries behind. */
+static A_RT_TLS const void **g_fmt_active;
+static A_RT_TLS size_t g_fmt_active_len, g_fmt_active_cap;
+
+static int fmt_active_has(const void *p) {
+    for (size_t i = 0; i < g_fmt_active_len; ++i)
+        if (g_fmt_active[i] == p) return 1;
+    return 0;
+}
+
+static void fmt_active_push(const void *p) {
+    if (g_fmt_active_len == g_fmt_active_cap) {
+        g_fmt_active_cap = g_fmt_active_cap ? g_fmt_active_cap * 2 : 64;
+        g_fmt_active = (const void **)xrealloc(g_fmt_active,
+                                               g_fmt_active_cap * sizeof(void *));
+    }
+    g_fmt_active[g_fmt_active_len++] = p;
+}
+
+static int fmt_is_container(aval v) {
+    switch (kind_of(v)) {
+        case K_LIST: case K_TUPLE: case K_DICT: case K_SET: case K_VIEW:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static void format_into_body(Buf *b, aval v, int quote) {
     switch (kind_of(v)) {
         case K_NONE: buf_adds(b, "None"); return;
         case K_BOOL: buf_adds(b, v == A_TRUE ? "true" : "false"); return;
@@ -309,6 +349,20 @@ void format_into(Buf *b, aval v, int quote) {
             return;
         }
     }
+}
+
+void format_into(Buf *b, aval v, int quote) {
+    if (fmt_is_container(v)) {
+        AObj *o = obj_of(v);
+        if (o) {
+            if (fmt_active_has(o)) { buf_adds(b, "..."); return; }
+            fmt_active_push(o);
+            format_into_body(b, v, quote);
+            g_fmt_active_len--;
+            return;
+        }
+    }
+    format_into_body(b, v, quote);
 }
 
 static aval format_aval(aval v, int quote) {
