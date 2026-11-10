@@ -89,6 +89,7 @@ std::string findReplMain(const DriverConfig& c){
     std::string dir=exe; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
     roots.push_back(dir+"/../stdlib");
     roots.push_back(dir+"/../../stdlib");
+    roots.push_back(dir+"/../share/a/stdlib");
   }
   roots.push_back("stdlib");
   roots.push_back(".");

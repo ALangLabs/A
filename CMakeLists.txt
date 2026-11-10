@@ -28,4 +28,30 @@ install(DIRECTORY compiler/astra/frontend/ DESTINATION ${CMAKE_INSTALL_INCLUDEDI
   FILES_MATCHING PATTERN "*.hpp")
 install(DIRECTORY compiler/astra/runtime/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/runtime
   FILES_MATCHING PATTERN "*.hpp")
+
+# Backend + runtime payload. An installed `a` locates both relative to its own
+# executable (findAstra/findRuntime in pipeline.cpp), so the staged drivers go
+# under <bindir>/astra/ and the staged runtime dirs (headers, runtime .c files,
+# libastra1.a, libaruntime.a) under <bindir>/astralib*/. Without these the
+# installed compiler cannot build or run a single program.
+install(PROGRAMS "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}"
+        DESTINATION ${CMAKE_INSTALL_BINDIR}/astra)
+foreach(arch IN LISTS ASTRA_ALL_ARCHES)
+  if(EXISTS "${ASTRA_BUILD}/astra-${arch}${CMAKE_EXECUTABLE_SUFFIX}")
+    install(PROGRAMS "${ASTRA_BUILD}/astra-${arch}${CMAKE_EXECUTABLE_SUFFIX}"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/astra)
+  endif()
+endforeach()
+install(DIRECTORY "${ASTRA_STAGE}/" DESTINATION ${CMAKE_INSTALL_BINDIR}/astralib)
+foreach(arch IN LISTS ASTRA_ALL_ARCHES)
+  if(EXISTS "${CMAKE_BINARY_DIR}/astralib-${arch}")
+    install(DIRECTORY "${CMAKE_BINARY_DIR}/astralib-${arch}/"
+            DESTINATION ${CMAKE_INSTALL_BINDIR}/astralib-${arch})
+  endif()
+endforeach()
+# The stdlib is resolved from <bindir>/../share/a/stdlib (defaultStdlibRoot).
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/a/stdlib
+        PATTERN "_acache_" EXCLUDE)
+
 add_subdirectory(tests)

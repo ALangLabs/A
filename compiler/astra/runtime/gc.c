@@ -59,6 +59,7 @@
 #include "a_runtime_internal.h"
 #include <setjmp.h>
 #if defined(__linux__) || defined(__APPLE__)
+#include <execinfo.h> /* backtrace / backtrace_symbols_fd (A_GC_TRACE) */
 #include <sys/mman.h>
 #endif
 #if defined(__GLIBC__)
@@ -1389,11 +1390,13 @@ void a_gc_register(void *p, size_t n) {
         fprintf(stderr, "[gc-trace] register %p sz=%zu idx=%u ra=%p ra1=%p\n",
                 p, n, i, __builtin_return_address(0),
                 __builtin_return_address(1));
+#if defined(__linux__) || defined(__APPLE__)
         if (n >= ((size_t)1 << 20)) {
             void *bt[32];
             int nb = backtrace(bt, 32);
             backtrace_symbols_fd(bt, nb, 2);
         }
+#endif
     }
 }
 
