@@ -858,6 +858,7 @@ void AsmEmitter::tryEmitSqrtSlot(int id, int s) {
     loadSlot(s, "%rcx");
     emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
          "\n");
+    rawDropReg(kRRcx);  // shr rewrote %rcx outside the helpers
     int t = allocSlot();
     emit("    movsd " + slotRef(s) + ", %xmm0\n"
          "    xorpd %xmm1, %xmm1\n"

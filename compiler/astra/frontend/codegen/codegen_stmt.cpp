@@ -1858,6 +1858,7 @@ void AsmEmitter::emitAssign(const AssignStmt& st) {
             loadSlot(s, "%rcx");
             emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " +
                  pastL + "\n");
+            rawDropReg(kRRcx);  // shr rewrote %rcx outside the helpers
           }
           emit("    jmp " + dblL + "\n");
           emitLabel(dblL);

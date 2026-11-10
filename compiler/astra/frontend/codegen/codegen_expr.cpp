@@ -814,6 +814,20 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
       // and clobber %xmm0/%xmm1, so neither may be live across an evalSlot.
       int ls = evalSlot(x.lhs.get());
       int rs = evalSlot(x.rhs.get());
+      // Runtime guard: the static types above are only a hint — an
+      // unannotated callee's return type var can be bound to Float by an
+      // unrelated call site while the value is really an int aval. Both
+      // operands must be untagged doubles (top16 != 0xFFFF) or the raw
+      // movq->xmm path would reinterpret tagged bits as a double (NaN).
+      // Anything else falls back to emitArith's tagged/mixed dispatch,
+      // which is always correct.
+      std::string fbL = newLabel("fpf"), doneL = newLabel("fpd");
+      for (int s : {ls, rs}) {
+        loadSlot(s, "%rcx");
+        emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + fbL +
+             "\n");
+        rawDropReg(kRRcx);
+      }
       loadSlot(ls);
       emit("    movq %rax, %xmm0\n");
       loadSlot(rs);
@@ -824,10 +838,14 @@ void AsmEmitter::emitBinary(const BinaryExpr& x) {
       emit("    movq %xmm0, %rax\n");
       // NaN canonicalization: ucomisd sets PF iff unordered, so the branch is
       // never taken for ordinary results and costs no extra dependency.
-      std::string doneL = newLabel("fpc");
-      emit("    ucomisd %xmm0, %xmm0\n    jnp " + doneL + "\n");
+      std::string nanDoneL = newLabel("fpc");
+      emit("    ucomisd %xmm0, %xmm0\n    jnp " + nanDoneL + "\n");
       rawDropReg(kRRax);
       emit("    mov $0x7ff8000000000000, %rax\n");
+      emitLabel(nanDoneL);
+      emit("    jmp " + doneL + "\n");
+      emitLabel(fbL);
+      emitArith(op, ls, rs);
       emitLabel(doneL);
       --rawRegDepth_;
       rawInvAll();

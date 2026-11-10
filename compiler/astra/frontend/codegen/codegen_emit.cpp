@@ -30,13 +30,18 @@ void AsmEmitter::fail(const std::string& msg) {
 
 void AsmEmitter::emit(const std::string& s) {
     if (s.empty() || failed_) return;
+    const bool isCall = s.find("call ") != std::string::npos ||
+                        s.find("call\t") != std::string::npos;
+    // A call clobbers every caller-saved register — exactly the set the raw
+    // reg cache tracks — so all slot->reg claims are void past it, no
+    // matter which helper emitted the call.
+    if (isCall && rawRegOn()) rawRegOf_.clear();
     // Any call may clobber xmm registers: spill resident slots to their
     // frame slots before the call and reload them right after, keeping
     // residency (and correctness on the taken path) with zero cost on
     // paths that never reach the call.
     if (((!loopXmm_.empty() || endHoistSlot_ >= 0 || curGprSlot_ >= 0)) &&
-        (s.find("call ") != std::string::npos ||
-         s.find("call\t") != std::string::npos)) {
+        isCall) {
       // Flush the GPR counter to its slot first (it may hold the freshest
       // value; the slot is what the callee must see if it reads it).
       if (curGprSlot_ >= 0)
@@ -482,6 +487,11 @@ void AsmEmitter::emitUnboxInt(const char* dst, const std::string& slowL) {
     emit(std::string("    mov %rdi, ") + dst + "\n    shr $1, " + dst +
          "\n    shl $17, " + dst + "\n    sar $17, " + dst + "\n");
     emitLabel(doneL);
+    // The sequence rewrote %rcx and `dst` outside the helpers; any claims
+    // on those registers are stale from here on.
+    rawDropReg(kRRcx);
+    int dc = rawRegCode(dst);
+    if (dc >= 0) rawDropReg(dc);
   }
 
 // %rdi = aval -> %rax = int64, equivalent to a_int_full but with the
@@ -496,6 +506,7 @@ void AsmEmitter::emitAvalToI64() {
     emitLabel(slowL);
     emit("    call a_int_full\n");
     emitLabel(doneL);
+    rawInvAll();  // unbox clobbers + the call path leave no valid claims
   }
 
 // %rax = int64 -> %rax = aval; equivalent to mkint_full (inline ints cover
@@ -515,6 +526,9 @@ void AsmEmitter::emitBoxInt64() {
     emitLabel(callL);
     emit("    mov %rax, %rdi\n    call mkint_full\n");
     emitLabel(skipL);
+    // %rcx/%rax/%rdx were rewritten (and the call path clobbers everything)
+    // outside the helpers.
+    rawInvAll();
   }
 
 void AsmEmitter::emitPanicStr(const std::string& msg) {
@@ -530,6 +544,10 @@ void AsmEmitter::emitDoublePairCheck(int ls, int rs, const std::string& slowL) {
       loadSlot(s, "%rcx");
       emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " + slowL +
            "\n");
+      // The shr rewrote %rcx outside the helpers: the slot->rcx claim
+      // loadSlot just recorded is already stale (and would make a repeated
+      // slot skip its reload on the next iteration).
+      rawDropReg(kRRcx);
     }
   }
 
@@ -545,6 +563,7 @@ void AsmEmitter::emitXmm0ToAval(int scratch, const std::string& doneL) {
     emitLabel(nanL);
     movImm(kCanonNaN);
     emit("    jmp " + doneL + "\n");
+    rawInvAll();  // branch-local traffic; %rax holds the result unclaimed
   }
 
 // Structural mirror of emitFloatXmm's grammar — see the header.
@@ -712,12 +731,17 @@ void AsmEmitter::emitDoubleArith(const std::string& op, int ls, int rs,
       // for both zero signs, matching the runtime panic condition.
       loadSlot(rs, "%rcx");
       emit("    add %rcx, %rcx\n    jz " + divzL + "\n");
+      rawDropReg(kRRcx);  // add rewrote %rcx outside the helpers
     }
     int t = allocSlot();
     loadSlotXmm(ls, "%xmm0");
     loadSlotXmm(rs, "%xmm1");
     emit(std::string("    ") + std::string(it->second) + " %xmm1, %xmm0\n");
     emitXmm0ToAval(t, doneL);
+    // Everything above sits on a conditional branch: register claims made
+    // while emitting it are meaningless on the paths that reach the code
+    // emitted next, so leave the cache empty.
+    rawInvAll();
   }
 
 // Double*double comparisons with inline ucomisd. ucomisd sets
@@ -764,6 +788,7 @@ void AsmEmitter::emitDoubleCmp(const std::string& op, int ls, int rs,
     // (same materialization as the int compare path).
     movImm(kTagInt, "%rdx");
     emit("    lea 0x3(%rdx,%rax,2), %rax\n    jmp " + doneL + "\n");
+    rawInvAll();  // branch-local claims must not leak past the merge
   }
 
 // Binary arith/compare with inline int64 (and double*double) fast paths.
@@ -801,6 +826,7 @@ void AsmEmitter::emitArith(const std::string& op, int ls, int rs) {
         loadSlot(s, "%rcx");
         emit("    shr $48, %rcx\n    cmp $0xFFFF, %ecx\n    je " +
              pastL + "\n");
+        rawDropReg(kRRcx);  // shr rewrote %rcx outside the helpers
       }
       emit("    jmp " + dblL + "\n");
       emitLabel(dblL);
