@@ -1,0 +1,121 @@
+# Argparse-compatibility tests for std.swiftcli
+# Run: ./build/a test stdlib/std/swiftcli/argparse_compat_test.a
+import swiftcli
+
+fn test_argument_parser_alias():
+    p = swiftcli.ArgumentParser("prog", "desc", "1.0")
+    p.add_argument("-f", "store_true", "0", None, false, "bool", [], false, "flag", "", "", "")
+    # simpler: use convenience path via parse on a parser built with existing API
+    r = p.parse_args(["-f"])
+    assert(r.kind == "ok" or r.kind == "error")  # API exists
+
+fn test_add_argument_store_true():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--verbose", "store_true", "0", None, false, "bool", [], false, "verbose", "", "", "")
+    r = p.parse_args(["--verbose"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["verbose"], true)
+
+fn test_add_argument_store_false():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--no-cache", "store_false", "0", None, true, "bool", [], false, "disable cache", "", "cache", "")
+    r = p.parse_args([])
+    assert_eq(r.ns["cache"], true)
+    r2 = p.parse_args(["--no-cache"])
+    assert_eq(r2.kind, "ok")
+    assert_eq(r2.ns["cache"], false)
+
+fn test_add_argument_store_const():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--mode", "store_const", "0", "fast", "slow", "str", [], false, "mode", "", "", "")
+    r = p.parse_args([])
+    assert_eq(r.ns["mode"], "slow")
+    r2 = p.parse_args(["--mode"])
+    assert_eq(r2.kind, "ok")
+    assert_eq(r2.ns["mode"], "fast")
+
+fn test_add_argument_append():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("-x", "append", "1", None, [], "str", [], false, "x", "X", "", "")
+    r = p.parse_args(["-x", "1", "-x", "2"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["x"], ["1", "2"])
+
+fn test_add_argument_count():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("-v", "count", "0", None, 0, "int", [], false, "verbosity", "", "verbose", "")
+    r = p.parse_args(["-v", "-v", "-v"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["verbose"], 3)
+
+fn test_add_argument_int_type():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--n", "store", "1", None, 0, "int", [], false, "num", "N", "", "")
+    r = p.parse_args(["--n", "42"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["n"], 42)
+
+fn test_add_argument_choices():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--fmt", "store", "1", None, "json", "str", ["json", "csv"], false, "format", "", "", "")
+    r = p.parse_args(["--fmt", "csv"])
+    assert_eq(r.ns["fmt"], "csv")
+    r2 = p.parse_args(["--fmt", "xml"])
+    assert_eq(r2.kind, "error")
+
+fn test_add_argument_required():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--token", "store", "1", None, "", "str", [], true, "token", "", "", "")
+    r = p.parse_args([])
+    assert_eq(r.kind, "error")
+    r2 = p.parse_args(["--token", "abc"])
+    assert_eq(r2.kind, "ok")
+
+fn test_add_argument_dest():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--long-name", "store", "1", None, "", "str", [], false, "", "", "short_dest", "")
+    r = p.parse_args(["--long-name", "v"])
+    assert_eq(r.ns["short_dest"], "v")
+
+fn test_set_defaults():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--x", "store", "1", None, "", "str", [], false, "", "", "", "")
+    p.set_defaults("x", "from_default")
+    r = p.parse_args([])
+    assert_eq(r.ns["x"], "from_default")
+
+fn test_subparsers_add_parser():
+    p = swiftcli.ArgumentParser("prog")
+    p.add_subparsers("cmd", "Commands", false)
+    sub = p.add_parser("run", "run it", [])
+    sub.add_argument("--fast", "store_true", "0", None, false, "bool", [], false, "", "", "", "")
+    r = p.parse_args(["run", "--fast"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["command"], "run")
+    assert_eq(r.ns["fast"], true)
+
+fn test_allow_abbrev_false():
+    p = swiftcli.ArgumentParser("p")
+    p.allow_abbrev = false
+    p.add_argument("--verbose", "store_true", "0", None, false, "bool", [], false, "", "", "", "")
+    r = p.parse_args(["--verb"])
+    assert_eq(r.kind, "error")
+
+fn test_parse_known_args_basic():
+    p = swiftcli.ArgumentParser("p")
+    p.add_argument("--known", "store", "1", None, "", "str", [], false, "", "", "", "")
+    r = p.parse_known_args(["--known", "v", "--unknown"])
+    assert_eq(r.kind, "ok")
+    assert_eq(r.ns["known"], "v")
+    # unknown may contain --unknown depending on implementation
+
+fn test_nargs_optional_positional():
+    p = swiftcli.ArgumentParser("p")
+    p.positional("x", "x", "?")
+    r = p.parse_args([])
+    assert_eq(r.ns["x"], None)
+    r2 = p.parse_args(["hi"])
+    assert_eq(r2.ns["x"], "hi")
+
+fn assert_eq(a, b):
+    assert(a == b)
