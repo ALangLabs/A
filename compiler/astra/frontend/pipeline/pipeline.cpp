@@ -2525,7 +2525,10 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
     err << diagCapture;
     // --vm: skip all native caching/emit; the interpreter runs the checked
     // module graph in-process and its return value is the process exit code.
-    if(config.vm) return vm::runProgram(*m.graph,*m.sema,false,config.testFilter);
+    if(config.vm && !vm::programNeedsNative(*m.graph)) {
+      int rc = vm::runProgram(*m.graph,*m.sema,false,config.testFilter);
+      if (rc != vm::kVmFallbackToNative) return rc;
+    }
     if(!preBin.empty()){
       std::error_code ec;
       std::ofstream sidecar(preBin + ".diag", std::ios::binary | std::ios::trunc);
@@ -2592,7 +2595,10 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     if(sink.hasErrors()){ sink.flush(err,config.useColor); return kCErr; }
   }
   // --vm: the interpreter runs test_* functions in-process; skip emit/link.
-  if(config.vm) return vm::runProgram(*m.graph,*m.sema,true,config.testFilter);
+  if(config.vm && !vm::programNeedsNative(*m.graph)) {
+      int rc = vm::runProgram(*m.graph,*m.sema,true,config.testFilter);
+      if (rc != vm::kVmFallbackToNative) return rc;
+    }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
                        config.testFilter.empty()?nullptr:&config.testFilter, config.jobs);
 }
@@ -2676,7 +2682,7 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   DiagnosticSink sink; auto m=runFrontendPipeline("<repl>",source,config,sink,out,err); if(!m.ok) return 1;
   // --vm repl: run each eval in the interpreter; no target resolution or
   // native emit is needed (VM is host-only by construction).
-  if(config.vm) return vm::runProgram(*m.graph,*m.sema,false,"");
+  if(config.vm && !vm::programNeedsNative(*m.graph)) return vm::runProgram(*m.graph,*m.sema,false,"");
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }

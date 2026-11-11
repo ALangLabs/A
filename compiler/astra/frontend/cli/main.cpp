@@ -168,6 +168,13 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   bool colorDisabled = false;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
+    // Python-style passthrough: once `run <file>` or `test <path>` is seen,
+    // everything after belongs to the program (exported via A_ARGS).
+    if (positional.size() >= 2 &&
+        (positional[0] == "run" || positional[0] == "test")) {
+      positional.push_back(arg);
+      continue;
+    }
   // LLVM/clang-style optimization levels: -O0..-O3, -Os, -Oz, -Ofast.
   auto parseOptFlag = [&](const std::string& value, bool& ok) {
     ok = true;
@@ -293,8 +300,36 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
         // empty path => scan current directory
       } else {
         if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
-        if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
         options.path = positional[1];
+        // Extra args after the file are forwarded to the program via A_ARGS
+        // (like `python script.py args...`); std:swiftcli's args_from_env
+        // reads them. Only meaningful for run/test/repl-style execution.
+        if (positional.size() > 2 &&
+            (options.command == "run" || options.command == "test" ||
+             options.command == "repl")) {
+          std::string joined;
+          for (std::size_t i = 2; i < positional.size(); ++i) {
+            if (i > 2) joined += ' ';
+            const std::string& a = positional[i];
+            bool simple = !a.empty();
+            for (char ch : a)
+              if (!(std::isalnum((unsigned char)ch) || ch == '_' || ch == '-' ||
+                    ch == '.' || ch == '/' || ch == ':' || ch == '='))
+                simple = false;
+            if (simple) joined += a;
+            else {
+              joined += '\'';
+              for (char ch : a) {
+                if (ch == '\'') joined += "'\\''";
+                else joined += ch;
+              }
+              joined += '\'';
+            }
+          }
+          setenv("A_ARGS", joined.c_str(), 1);
+        } else if (positional.size() > 2) {
+          err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
+        }
       }
     } else if (positional.size() > 2) {
       err << "error: unexpected argument '" << positional[2] << "'\n"; return false;

@@ -21,6 +21,7 @@
 //     rejects them for known signatures anyway)
 
 #include "vm/vm.hpp"
+#include "vm/bytecode.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -30,7 +31,6 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -66,33 +66,23 @@ void a_gc_add_root_cb(void (*fn)(void));
 namespace a::vm {
 namespace {
 
-// ---------------------------------------------------------------------------
-// Exceptions used for non-local control flow inside the interpreter.
-// ---------------------------------------------------------------------------
-struct VmReturn {
-  aval v;
-};
-struct VmPropagate {
-  aval v;  // `expr?` early-returns this value from the enclosing function
-};
-struct VmBreak {};
-struct VmContinue {};
-struct VmUnsupported {
-  std::string msg;
-};
+// Scope::key sentinel: not yet promoted into scopeStore.
+constexpr uint64_t kVmNoScopeKey = ~0ULL;
 
 // ---------------------------------------------------------------------------
 // Scopes: Python-style lexical chain. `let` declares in the current scope;
 // `name = v` writes through to the owning scope when the name already
-// exists. Every scope ever created is retained in scopeStore so closure env
-// keys stay valid for the whole session (sessions are short-lived).
+// exists. Transient scopes live on the activeScopes stack and are freed when
+// they go out of scope; a scope is promoted into scopeStore (assigning it a
+// stable key) the first time a closure captures it, along with every ancestor
+// — closure env keys and VmFn::capture raw pointers must stay valid for the
+// program's lifetime, so captured chains are never freed.
 // ---------------------------------------------------------------------------
 struct Scope {
-  std::vector<std::pair<std::string, aval>> vars;
-  std::shared_ptr<Scope> parent;
-  uint64_t key = 0;  // index into VmState::scopeStore
+  std::unordered_map<std::string, aval> vars;
+  Scope* parent = nullptr;
+  uint64_t key = kVmNoScopeKey;  // valid once persisted (see below)
 };
-using ScopePtr = std::shared_ptr<Scope>;
 
 // A VM-callable function value. `capture` is the scope the function was
 // defined in (stored in the closure env so calls routed through a_call —
@@ -101,7 +91,7 @@ struct VmFn {
   enum class Kind { Decl, Lambda, PyCall } kind = Kind::Decl;
   const FnDecl* decl = nullptr;
   const LambdaExpr* lambda = nullptr;
-  ScopePtr capture;
+  Scope* capture = nullptr;
   int moduleId = -1;
   // Kind::PyCall: `from python:<mod> import name` — calling it routes through
   // the runtime py_call builtin with argv = [module, member, args...].
@@ -110,7 +100,13 @@ struct VmFn {
 };
 
 struct VmState {
-  std::vector<ScopePtr> scopeStore;   // scopeKey -> Scope (never shrinks)
+  std::vector<std::shared_ptr<Scope>> scopeStore;  // persistent scopes (owns)
+  std::vector<Scope*> scopeRaw;                    // scopeKey -> Scope (borrow)
+  // Currently-executing transient scopes, owned here and popped by
+  // ScopeGuard. Entries promoted into scopeStore stay listed until popped;
+  // scopeStore keeps them alive afterwards.
+  std::vector<std::shared_ptr<Scope>> activeScopes;
+  std::unordered_map<const std::vector<StmtPtr>*, bool> stmtHasDefer;
   std::vector<VmFn> fns;              // fnKey -> VmFn (never shrinks)
   std::unordered_map<aval, std::pair<uint64_t, uint64_t>> fnInfo;
   //   fn aval -> (fnKey, scopeKey of the captured scope)
@@ -118,8 +114,7 @@ struct VmState {
   std::unordered_map<aval, std::string> nativeOf;  // aval -> native module name
   std::unordered_map<aval, std::string> pyModOf;   // aval -> python module name
   std::unordered_map<const FnDecl*, uint64_t> declFnKey;
-  std::unordered_map<int, ScopePtr> moduleScopes;
-  std::vector<ScopePtr> allScopes;  // GC root walk (superset of scopeStore)
+  std::unordered_map<int, Scope*> moduleScopes;
 
   const ModuleGraph* graph = nullptr;
   const SemaResult* sema = nullptr;
@@ -135,61 +130,110 @@ constexpr uint64_t kVmMissing = A_TAG;  // codegen's kMissing sentinel
   throw VmUnsupported{what};
 }
 
-ScopePtr vmNewScope(ScopePtr parent) {
+// New transient scope: owned by activeScopes until its ScopeGuard pops it.
+Scope* vmNewScope(Scope* parent) {
   auto s = std::make_shared<Scope>();
-  s->parent = std::move(parent);
-  s->key = g_vm.scopeStore.size();
-  g_vm.scopeStore.push_back(s);
-  g_vm.allScopes.push_back(s);
-  return s;
+  s->parent = parent;
+  Scope* raw = s.get();
+  g_vm.activeScopes.push_back(std::move(s));
+  return raw;
+}
+
+// New persistent (module/root) scope: never on the active stack.
+Scope* vmNewRootScope(Scope* parent = nullptr) {
+  auto s = std::make_shared<Scope>();
+  s->parent = parent;
+  Scope* raw = s.get();
+  raw->key = g_vm.scopeStore.size();
+  g_vm.scopeStore.push_back(std::move(s));
+  g_vm.scopeRaw.push_back(raw);
+  return raw;
+}
+
+// Pop `s` from the active stack (LIFO; scan as a safety net).
+void vmPopScope(Scope* s) {
+  auto& v = g_vm.activeScopes;
+  if (!v.empty() && v.back().get() == s) {
+    v.pop_back();
+    return;
+  }
+  for (auto it = v.rbegin(); it != v.rend(); ++it) {
+    if (it->get() == s) {
+      v.erase(std::next(it).base());
+      return;
+    }
+  }
+}
+
+// RAII pop for vmNewScope. Movable (for guard vectors), never copyable.
+struct ScopeGuard {
+  explicit ScopeGuard(Scope* s) : s(s) {}
+  ScopeGuard(ScopeGuard&& o) noexcept : s(o.s) { o.s = nullptr; }
+  ScopeGuard& operator=(ScopeGuard&&) = delete;
+  ScopeGuard(const ScopeGuard&) = delete;
+  ScopeGuard& operator=(const ScopeGuard&) = delete;
+  ~ScopeGuard() {
+    if (s) vmPopScope(s);
+  }
+  // Swap the guarded scope (e.g. loop bodies that outgrow a captured scope).
+  void reset(Scope* ns) {
+    if (s) vmPopScope(s);
+    s = ns;
+  }
+  Scope* s;
+};
+
+// Promote `s` and every unpromoted ancestor into scopeStore so their keys
+// (stored in closure envs / VmFn::capture) stay valid forever. Safe to call
+// on already-persistent scopes (no-op for them).
+void persistScope(Scope* s) {
+  for (Scope* cur = s; cur && cur->key == kVmNoScopeKey; cur = cur->parent) {
+    for (auto it = g_vm.activeScopes.rbegin(); it != g_vm.activeScopes.rend();
+         ++it) {
+      if (it->get() == cur) {
+        cur->key = g_vm.scopeStore.size();
+        g_vm.scopeStore.push_back(*it);
+        g_vm.scopeRaw.push_back(cur);
+        break;
+      }
+    }
+    // Not found in activeScopes: cannot happen for a live transient scope
+    // (ancestors of an executing scope are always still active).
+  }
 }
 
 // Deepest scope in the chain that binds `name`, or nullptr.
-Scope* vmFindScope(ScopePtr s, const std::string& name) {
-  for (Scope* cur = s.get(); cur; cur = cur->parent.get()) {
-    for (const auto& kv : cur->vars)
-      if (kv.first == name) return cur;
+Scope* vmFindScope(Scope* s, const std::string& name) {
+  for (Scope* cur = s; cur; cur = cur->parent) {
+    if (cur->vars.find(name) != cur->vars.end()) return cur;
   }
   return nullptr;
 }
 
 // Read `name` through the chain; returns false when unbound.
-bool vmScopeGet(ScopePtr s, const std::string& name, aval& out) {
-  for (Scope* cur = s.get(); cur; cur = cur->parent.get()) {
-    for (const auto& kv : cur->vars)
-      if (kv.first == name) {
-        out = kv.second;
-        return true;
-      }
+bool vmScopeGet(Scope* s, const std::string& name, aval& out) {
+  for (Scope* cur = s; cur; cur = cur->parent) {
+    auto it = cur->vars.find(name);
+    if (it != cur->vars.end()) {
+      out = it->second;
+      return true;
+    }
   }
   return false;
 }
 
 // Write `name`: update the owning scope when bound, else declare locally.
-void vmScopeSet(ScopePtr s, const std::string& name, aval v) {
+void vmScopeSet(Scope* s, const std::string& name, aval v) {
   if (Scope* owner = vmFindScope(s, name)) {
-    for (auto& kv : owner->vars)
-      if (kv.first == name) {
-        kv.second = v;
-        return;
-      }
+    owner->vars[name] = v;
+    return;
   }
-  for (auto& kv : s->vars)
-    if (kv.first == name) {
-      kv.second = v;
-      return;
-    }
-  s->vars.emplace_back(name, v);
+  s->vars[name] = v;
 }
 
 // Declare (or shadow) `name` in exactly this scope.
-void vmScopeDeclare(ScopePtr s, const std::string& name, aval v) {
-  for (auto& kv : s->vars)
-    if (kv.first == name) {
-      kv.second = v;
-      return;
-    }
-  s->vars.emplace_back(name, v);
+void vmScopeDeclare(Scope* s, const std::string& name, aval v) {
+  s->vars[name] = v;
 }
 
 // ---------------------------------------------------------------------------
@@ -206,7 +250,10 @@ uint64_t vmAddFn(VmFn f) {
 // Create the FNON value for fnKey captured in `capture`. env layout:
 //   slot 0 = fnKey (inline int)
 //   slot 1 = scopeKey of the captured scope (inline int)
-aval vmMakeCallable(uint64_t fnKey, const ScopePtr& capture, const char* name) {
+aval vmMakeCallable(uint64_t fnKey, Scope* capture, const char* name) {
+  // The closure env stores capture->key; the scope (and its ancestors) must
+  // outlive the program once referenced, so promote the chain now.
+  persistScope(capture);
   aval env = a_closure_env_new(2);
   a_env_set(env, 0, a_mkint((int64_t)fnKey));
   a_env_set(env, 1, a_mkint((int64_t)capture->key));
@@ -229,7 +276,7 @@ aval vmMakeCallable(uint64_t fnKey, const ScopePtr& capture, const char* name) {
 
 // Forward decls (mutual recursion between call paths and the trampoline).
 aval vmTrampoline(aval* argv);
-aval vmCall(uint64_t fnKey, ScopePtr capture, std::vector<aval>& args);
+aval vmCall(uint64_t fnKey, Scope* capture, std::vector<aval>& args);
 
 struct Vm {
   const ModuleGraph& graph;
@@ -238,18 +285,19 @@ struct Vm {
   explicit Vm(const ModuleGraph& g, const SemaResult& s) : graph(g), sema(s) {}
 
   // ---- expressions -------------------------------------------------------
-  aval eval(const Expr* e, ScopePtr scope);
-  aval evalCall(const CallExpr& c, ScopePtr scope);
-  aval callValue(aval fn, std::vector<aval>& args, ScopePtr scope);
-  bool matchPattern(const Pattern& p, aval subj, ScopePtr scope);
-  void execStmt(const Stmt* s, ScopePtr scope);
-  void execStmts(const std::vector<StmtPtr>& stmts, ScopePtr scope);
-  void execBlock(const std::vector<StmtPtr>& stmts, ScopePtr scope);
-  void bindModuleImports(const Module& mod, ScopePtr scope);
-  void execModule(int moduleId);
+  aval eval(const Expr* e, Scope* scope);
+  aval evalCall(const CallExpr& c, Scope* scope);
+  aval callValue(aval fn, std::vector<aval>& args, Scope* scope);
+  bool matchPattern(const Pattern& p, aval subj, Scope* scope);
+  FlowRes execStmt(const Stmt* s, Scope* scope);
+  FlowRes execStmts(const std::vector<StmtPtr>& stmts, Scope* scope);
+  FlowRes execBlock(const std::vector<StmtPtr>& stmts, Scope* scope);
+  void bindModuleImports(const Module& mod, Scope* scope);
+  FlowRes execModule(int moduleId);
 };
 
 Vm* g_vmExec = nullptr;  // active interpreter (for the trampoline)
+
 
 // Parameter names of a VmFn in binding order: comptime params first, then
 // value params (mirrors codegen_decls.cpp FnInfo::paramNames).
@@ -267,12 +315,12 @@ std::vector<std::string> vmParamNames(const VmFn& f) {
 // Invoke a VM function value. `args` are the user arguments (no env slot);
 // they are padded to the declared arity with kVmMissing so default
 // expressions and A_NONE filling behave like the emitted backend.
-aval Vm::callValue(aval fn, std::vector<aval>& args, ScopePtr scope) {
+aval Vm::callValue(aval fn, std::vector<aval>& args, Scope* scope) {
   (void)scope;
   auto it = g_vm.fnInfo.find(fn);
   if (it != g_vm.fnInfo.end()) {
     uint64_t key = it->second.first;
-    ScopePtr capture = g_vm.scopeStore[it->second.second];
+    Scope* capture = g_vm.scopeRaw[it->second.second];
     return vmCall(key, capture, args);
   }
   // Builtin / native / struct-method FNON (or anything else a_call accepts).
@@ -283,7 +331,7 @@ aval Vm::callValue(aval fn, std::vector<aval>& args, ScopePtr scope) {
 // Core VM call: bind params into a fresh scope chained to the captured
 // (definition) scope, then run the body. Reached both directly from
 // callValue and through vmTrampoline when native code calls back.
-aval vmCall(uint64_t fnKey, ScopePtr capture, std::vector<aval>& args) {
+aval vmCall(uint64_t fnKey, Scope* capture, std::vector<aval>& args) {
   VmFn& f = g_vm.fns[fnKey];
   if (f.kind == VmFn::Kind::PyCall) {
     // from python:<mod> import name -> py_call(mod, name, args...)
@@ -295,7 +343,8 @@ aval vmCall(uint64_t fnKey, ScopePtr capture, std::vector<aval>& args) {
     return a_bi_call(A_BI_PY_CALL, (uint64_t)full.size(), full.data());
   }
 
-  ScopePtr fnScope = vmNewScope(capture);
+  Scope* fnScope = vmNewScope(capture);
+  ScopeGuard fnGuard(fnScope);
   const FnDecl* decl = f.kind == VmFn::Kind::Decl ? f.decl : nullptr;
   const LambdaExpr* lam = f.kind == VmFn::Kind::Lambda ? f.lambda : nullptr;
 
@@ -344,20 +393,30 @@ aval vmCall(uint64_t fnKey, ScopePtr capture, std::vector<aval>& args) {
   a_frame_push(fname, "", line);
   try {
     if (decl) {
-      g_vmExec->execStmts(decl->body, vmNewScope(fnScope));
+      Scope* body = vmNewScope(fnScope);
+      ScopeGuard bodyGuard(body);
+      FlowRes fr = g_vmExec->execStmts(decl->body, body);
+      a_frame_pop();
+      if (fr.f == Flow::Return) return fr.v;
+      if (fr.f != Flow::Normal)
+        vmUnsupported("'break'/'continue' outside of a loop");
+      return A_NONE;
     } else if (lam && lam->body) {
-      aval r = g_vmExec->eval(lam->body.get(), vmNewScope(fnScope));
+      Scope* body = vmNewScope(fnScope);
+      ScopeGuard bodyGuard(body);
+      aval r = g_vmExec->eval(lam->body.get(), body);
       a_frame_pop();
       return r;
     }
     a_frame_pop();
     return A_NONE;
-  } catch (VmReturn& r) {
-    a_frame_pop();
-    return r.v;
   } catch (VmPropagate& p) {
     a_frame_pop();
     return p.v;
+  } catch (VmReturn& r) {
+    // `return` inside a defer running during exception unwind (rare edge).
+    a_frame_pop();
+    return r.v;
   } catch (...) {
     a_frame_pop();
     throw;
@@ -371,7 +430,7 @@ aval vmTrampoline(aval* argv) {
   aval env = argv[0];
   uint64_t fnKey = (uint64_t)a_int_val(a_env_get(env, 0));
   uint64_t scopeKey = (uint64_t)a_int_val(a_env_get(env, 1));
-  ScopePtr capture = g_vm.scopeStore[scopeKey];
+  Scope* capture = g_vm.scopeRaw[scopeKey];
   // The callee's declared arity is fixed (nparams on the FNON), so argv[1..]
   // holds exactly that many slots; variadic packing already happened at the
   // original call site.
@@ -393,13 +452,19 @@ aval vmTrampoline(aval* argv) {
 }
 
 // ---------------------------------------------------------------------------
-// GC roots: every Scope's bindings are reachable from allScopes; mark them
-// all on each collection. C++ locals live on the machine stack which the
-// conservative marker already scans; heap-side aval vectors (call args) are
-// pushed via a_gc_push_root around calls that can allocate.
+// GC roots: live scopes are exactly the persistent scopeStore (captured
+// chains + module scopes) plus the transient activeScopes stack. Dead
+// transient scopes are already freed and need no marking. C++ locals live on
+// the machine stack which the conservative marker already scans; heap-side
+// aval vectors (call args) are pushed via a_gc_push_root around calls that
+// can allocate.
 // ---------------------------------------------------------------------------
 void vmGcMark(void) {
-  for (const ScopePtr& s : g_vm.allScopes) {
+  for (const auto& s : g_vm.scopeStore) {
+    if (!s) continue;
+    for (const auto& kv : s->vars) a_gc_mark_aval(kv.second);
+  }
+  for (const auto& s : g_vm.activeScopes) {
     if (!s) continue;
     for (const auto& kv : s->vars) a_gc_mark_aval(kv.second);
   }
@@ -419,10 +484,39 @@ struct VmCallGuard {
   std::size_t n;
 };
 
+// Compile-time constants (mirrors codegen emitIdent; checked before scope
+// lookup there too, so they cannot be shadowed).
+const std::unordered_map<std::string, aval>& vmConstants() {
+  static const std::unordered_map<std::string, aval> m = [] {
+    std::unordered_map<std::string, aval> t;
+    t.reserve(20);
+    t.emplace("None", A_NONE);
+    t.emplace("PI", a_double_canon(3.14159265358979323846));
+    t.emplace("E", a_double_canon(2.71828182845904523536));
+    t.emplace("I8_MIN", a_mkint(-128));
+    t.emplace("I8_MAX", a_mkint(127));
+    t.emplace("I16_MIN", a_mkint(-32768));
+    t.emplace("I16_MAX", a_mkint(32767));
+    t.emplace("I32_MIN", a_mkint(-2147483648LL));
+    t.emplace("I32_MAX", a_mkint(2147483647LL));
+    t.emplace("I64_MIN", a_i64n(INT64_MIN));
+    t.emplace("I64_MAX", a_i64n(INT64_MAX));
+    t.emplace("U8_MAX", a_mkint(255));
+    t.emplace("U16_MAX", a_mkint(65535));
+    t.emplace("U32_MAX", a_mkint(4294967295LL));
+    t.emplace("F32_MIN", a_double_canon(-3.4028234663852886e38));
+    t.emplace("F32_MAX", a_double_canon(3.4028234663852886e38));
+    t.emplace("F64_MIN", a_double_canon(-1.7976931348623157e308));
+    t.emplace("F64_MAX", a_double_canon(1.7976931348623157e308));
+    return t;
+  }();
+  return m;
+}
+
 // ---------------------------------------------------------------------------
 // Evaluator.
 // ---------------------------------------------------------------------------
-aval Vm::eval(const Expr* e, ScopePtr scope) {
+aval Vm::eval(const Expr* e, Scope* scope) {
   if (!e) return A_NONE;
   switch (e->kind) {
     case ExprKind::IntLit: {
@@ -474,25 +568,8 @@ aval Vm::eval(const Expr* e, ScopePtr scope) {
     case ExprKind::Ident: {
       const auto& x = static_cast<const IdentExpr&>(*e);
       const std::string& nm = x.name;
-      // Compile-time constants (mirrors codegen emitIdent).
-      if (nm == "None") return A_NONE;
-      if (nm == "PI") return a_double_canon(3.14159265358979323846);
-      if (nm == "E") return a_double_canon(2.71828182845904523536);
-      if (nm == "I8_MIN") return a_mkint(-128);
-      if (nm == "I8_MAX") return a_mkint(127);
-      if (nm == "I16_MIN") return a_mkint(-32768);
-      if (nm == "I16_MAX") return a_mkint(32767);
-      if (nm == "I32_MIN") return a_mkint(-2147483648LL);
-      if (nm == "I32_MAX") return a_mkint(2147483647LL);
-      if (nm == "I64_MIN") return a_i64n(INT64_MIN);
-      if (nm == "I64_MAX") return a_i64n(INT64_MAX);
-      if (nm == "U8_MAX") return a_mkint(255);
-      if (nm == "U16_MAX") return a_mkint(65535);
-      if (nm == "U32_MAX") return a_mkint(4294967295LL);
-      if (nm == "F32_MIN") return a_double_canon(-3.4028234663852886e38);
-      if (nm == "F32_MAX") return a_double_canon(3.4028234663852886e38);
-      if (nm == "F64_MIN") return a_double_canon(-1.7976931348623157e308);
-      if (nm == "F64_MAX") return a_double_canon(1.7976931348623157e308);
+      auto ci = vmConstants().find(nm);
+      if (ci != vmConstants().end()) return ci->second;
       aval v;
       if (vmScopeGet(scope, nm, v)) return v;
       int bid = builtinRuntimeId(nm);
@@ -605,7 +682,7 @@ aval Vm::eval(const Expr* e, ScopePtr scope) {
       aval obj = eval(x.object.get(), scope);
       auto mi = g_vm.moduleOf.find(obj);
       if (mi != g_vm.moduleOf.end()) {
-        ScopePtr ms = g_vm.moduleScopes[mi->second];
+        Scope* ms = g_vm.moduleScopes[mi->second];
         aval v;
         if (vmScopeGet(ms, x.field, v)) return v;
         int bid = builtinRuntimeId(x.field);
@@ -706,7 +783,8 @@ aval Vm::eval(const Expr* e, ScopePtr scope) {
       const auto& x = static_cast<const ComprehensionExpr&>(*e);
       aval it = a_iter_new(eval(x.iterable.get(), scope));
       aval acc = x.isSet ? a_set_new() : a_list_new(0, nullptr);
-      ScopePtr cs = vmNewScope(scope);
+      Scope* cs = vmNewScope(scope);
+      ScopeGuard cg(cs);
       vmScopeDeclare(cs, x.var, A_NONE);
       aval item;
       while (a_iter_next(it, &item)) {
@@ -726,7 +804,8 @@ aval Vm::eval(const Expr* e, ScopePtr scope) {
       const auto& m = static_cast<const MatchExpr&>(*e);
       aval subj = eval(m.subject.get(), scope);
       for (const MatchArm& arm : m.arms) {
-        ScopePtr armScope = vmNewScope(scope);
+        Scope* armScope = vmNewScope(scope);
+        ScopeGuard ag(armScope);
         if (!matchPattern(arm.pattern, subj, armScope)) continue;
         if (arm.guard && a_truthy_raw(eval(arm.guard.get(), armScope)) == 0)
           continue;
@@ -750,7 +829,7 @@ aval Vm::eval(const Expr* e, ScopePtr scope) {
 
 // ---- match patterns -------------------------------------------------------
 // Returns true when `pat` matches `subj`, binding variables into `scope`.
-bool Vm::matchPattern(const Pattern& p, aval subj, ScopePtr scope) {
+bool Vm::matchPattern(const Pattern& p, aval subj, Scope* scope) {
   switch (p.kind) {
     case Pattern::Kind::Wildcard:
       return true;
@@ -775,21 +854,24 @@ bool Vm::matchPattern(const Pattern& p, aval subj, ScopePtr scope) {
       // failed arm does not leave partial bindings (the scope is per-arm
       // anyway, but keep it clean).
       std::vector<std::pair<std::string, aval>> binds;
-      std::vector<ScopePtr> subScopes;
+      std::vector<Scope*> subScopes;
+      std::vector<ScopeGuard> subGuards;
       for (std::size_t i = 0; i < p.subpatterns.size(); ++i) {
         aval el = a_getitem(subj, a_mkint((int64_t)i));
-        ScopePtr ss = vmNewScope(scope);
+        Scope* ss = vmNewScope(scope);
+        subGuards.emplace_back(ss);
         if (!matchPattern(p.subpatterns[i], el, ss)) return false;
         subScopes.push_back(ss);
       }
       // Flatten: copy bound names from sub-scopes into the arm scope.
-      for (ScopePtr& ss : subScopes)
+      for (Scope*& ss : subScopes)
         for (auto& kv : ss->vars) vmScopeDeclare(scope, kv.first, kv.second);
       return true;
     }
     case Pattern::Kind::Or: {
       for (const Pattern& alt : p.subpatterns) {
-        ScopePtr altScope = vmNewScope(scope);
+        Scope* altScope = vmNewScope(scope);
+        ScopeGuard ag(altScope);
         if (matchPattern(alt, subj, altScope)) {
           for (auto& kv : altScope->vars)
             vmScopeDeclare(scope, kv.first, kv.second);
@@ -849,7 +931,8 @@ bool Vm::matchPattern(const Pattern& p, aval subj, ScopePtr scope) {
           aval fk = a_str_new(p.variantFields[i].data(),
                               p.variantFields[i].size());
           aval fv = a_dict_get(subj, fk, A_NONE);
-          ScopePtr ss = vmNewScope(scope);
+          Scope* ss = vmNewScope(scope);
+          ScopeGuard sg(ss);
           if (!matchPattern(p.subpatterns[i], fv, ss)) return false;
           for (auto& kv : ss->vars) vmScopeDeclare(scope, kv.first, kv.second);
         }
@@ -865,7 +948,7 @@ bool Vm::matchPattern(const Pattern& p, aval subj, ScopePtr scope) {
 // a_call (user args only). Named args are appended as (name, value) pairs
 // for a_method receivers; for plain calls they are matched by vmCall's
 // parameter binding when the callee is a VM function — handled there.
-aval Vm::evalCall(const CallExpr& c, ScopePtr scope) {
+aval Vm::evalCall(const CallExpr& c, Scope* scope) {
   // 1. Sema-resolved builtin id.
   if (c.builtinId != BuiltinId::None) {
     int id = builtinIdForBuiltin(c.builtinId);
@@ -889,8 +972,10 @@ aval Vm::evalCall(const CallExpr& c, ScopePtr scope) {
       int mid = -1;
       auto mi = sema.fnModule.find(c.calleeFunction);
       if (mi != sema.fnModule.end()) mid = mi->second;
-      ScopePtr ms = mid >= 0 ? g_vm.moduleScopes[mid]
-                             : (scope ? scope : vmNewScope(nullptr));
+      Scope* ms = mid >= 0 ? g_vm.moduleScopes[mid]
+                             : (scope ? scope : vmNewRootScope());
+      // The VmFn outlives this scope chain potentially; keep it alive.
+      persistScope(ms);
       VmFn f{VmFn::Kind::Decl, c.calleeFunction, nullptr, ms, mid, "", ""};
       key = vmAddFn(std::move(f));
       g_vm.declFnKey[c.calleeFunction] = key;
@@ -899,7 +984,7 @@ aval Vm::evalCall(const CallExpr& c, ScopePtr scope) {
     args.reserve(c.args.size());
     for (const CallArg& a : c.args) args.push_back(eval(a.value.get(), scope));
     VmCallGuard g(args);
-    ScopePtr capture = g_vm.fns[key].capture;
+    Scope* capture = g_vm.fns[key].capture;
     return vmCall(key, capture, args);
   }
   // 3. Sema-resolved runtime builtin (native-module from-import etc.).
@@ -925,7 +1010,7 @@ aval Vm::evalCall(const CallExpr& c, ScopePtr scope) {
     aval obj = eval(f.object.get(), scope);
     auto mi = g_vm.moduleOf.find(obj);
     if (mi != g_vm.moduleOf.end()) {
-      ScopePtr ms = g_vm.moduleScopes[mi->second];
+      Scope* ms = g_vm.moduleScopes[mi->second];
       aval v;
       bool found = vmScopeGet(ms, f.field, v);
       if (!found) {
@@ -1032,10 +1117,38 @@ aval Vm::evalCall(const CallExpr& c, ScopePtr scope) {
 }
 
 // ---- statements ------------------------------------------------------------
-void Vm::execStmts(const std::vector<StmtPtr>& stmts, ScopePtr scope) {
+FlowRes Vm::execStmts(const std::vector<StmtPtr>& stmts, Scope* scope) {
+  // Fast path: no Defer statements -> no defers vector, no try/catch.
+  // The AST is immutable for the run, so cache the scan per statement list
+  // (loop bodies call this once per iteration).
+  bool hasDefer;
+  auto dit = g_vm.stmtHasDefer.find(&stmts);
+  if (dit != g_vm.stmtHasDefer.end()) {
+    hasDefer = dit->second;
+  } else {
+    hasDefer = false;
+    for (const StmtPtr& s : stmts) {
+      if (s && s->kind == StmtKind::Defer) {
+        hasDefer = true;
+        break;
+      }
+    }
+    g_vm.stmtHasDefer[&stmts] = hasDefer;
+  }
+  if (!hasDefer) {
+    FlowRes res;
+    for (const StmtPtr& s : stmts) {
+      if (!s) continue;
+      if (s->span.line > 0) a_stmt_line = s->span.line;
+      res = execStmt(s.get(), scope);
+      if (res.f != Flow::Normal) break;
+    }
+    return res;
+  }
   // Defer bodies run when this statement list exits, for any reason
   // (mirrors emitDeferredDownTo in codegen).
   std::vector<const Stmt*> defers;
+  FlowRes res;
   try {
     for (const StmtPtr& s : stmts) {
       if (!s) continue;
@@ -1044,19 +1157,37 @@ void Vm::execStmts(const std::vector<StmtPtr>& stmts, ScopePtr scope) {
         defers.push_back(static_cast<const DeferStmt*>(s.get())->body.get());
         continue;
       }
-      execStmt(s.get(), scope);
+      res = execStmt(s.get(), scope);
+      if (res.f != Flow::Normal) break;
     }
   } catch (...) {
-    for (auto it = defers.rbegin(); it != defers.rend(); ++it)
-      execStmt(*it, scope);
+    for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
+      FlowRes d = execStmt(*it, scope);
+      if (d.f != Flow::Normal) {
+        // A defer's non-local exit replaces the in-flight exception path;
+        // rethrow the original exception afterwards is impossible, so
+        // surface the defer's flow via the legacy exception types.
+        if (d.f == Flow::Return) throw VmReturn{d.v};
+        if (d.f == Flow::Break) throw VmBreak{};
+        throw VmContinue{};
+      }
+    }
     throw;
   }
-  for (auto it = defers.rbegin(); it != defers.rend(); ++it)
-    execStmt(*it, scope);
+  for (auto it = defers.rbegin(); it != defers.rend(); ++it) {
+    FlowRes d = execStmt(*it, scope);
+    if (d.f != Flow::Normal) {
+      res = d;  // defer's control flow wins over the pending one
+      break;
+    }
+  }
+  return res;
 }
 
-void Vm::execBlock(const std::vector<StmtPtr>& stmts, ScopePtr scope) {
-  execStmts(stmts, vmNewScope(scope));
+FlowRes Vm::execBlock(const std::vector<StmtPtr>& stmts, Scope* scope) {
+  Scope* s = vmNewScope(scope);
+  ScopeGuard g(s);
+  return execStmts(stmts, s);
 }
 
 // Binary operator application shared by Binary exprs and compound assigns.
@@ -1104,7 +1235,7 @@ aval vmBinOp(const std::string& op, BinOp binop, aval l, aval r) {
 }
 
 // Read the current value of an assignment target.
-aval vmReadTarget(const Expr* target, ScopePtr scope, Vm& vm) {
+aval vmReadTarget(const Expr* target, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Ident) {
     aval v;
     if (vmScopeGet(scope, static_cast<const IdentExpr*>(target)->name, v))
@@ -1126,7 +1257,7 @@ aval vmReadTarget(const Expr* target, ScopePtr scope, Vm& vm) {
 }
 
 // Write `v` to an assignment target.
-void vmWriteTarget(const Expr* target, aval v, ScopePtr scope, Vm& vm) {
+void vmWriteTarget(const Expr* target, aval v, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Ident) {
     vmScopeSet(scope, static_cast<const IdentExpr*>(target)->name, v);
     return;
@@ -1147,14 +1278,14 @@ void vmWriteTarget(const Expr* target, aval v, ScopePtr scope, Vm& vm) {
   vmUnsupported("unsupported assignment target");
 }
 
-void Vm::execStmt(const Stmt* s, ScopePtr scope) {
-  if (!s) return;
+FlowRes Vm::execStmt(const Stmt* s, Scope* scope) {
+  if (!s) return {};
   switch (s->kind) {
     case StmtKind::Let: {
       const auto& st = static_cast<const LetStmt&>(*s);
       aval v = st.init ? eval(st.init.get(), scope) : A_NONE;
       vmScopeDeclare(scope, st.name, v);
-      return;
+      return {};
     }
     case StmtKind::Assign: {
       const auto& st = static_cast<const AssignStmt&>(*s);
@@ -1168,14 +1299,14 @@ void Vm::execStmt(const Stmt* s, ScopePtr scope) {
         aval v = vmBinOp(baseOp, st.binop, cur, rhs);
         vmWriteTarget(st.target.get(), v, scope, *this);
       }
-      return;
+      return {};
     }
     case StmtKind::Expr: {
       const auto& st = static_cast<const ExprStmt&>(*s);
       std::string dummy;
-      if (plainStringText(st.expr, dummy)) return;  // docstring
+      if (plainStringText(st.expr, dummy)) return {};  // docstring
       eval(st.expr.get(), scope);
-      return;
+      return {};
     }
     case StmtKind::Destructure: {
       const auto& st = static_cast<const DestructureStmt&>(*s);
@@ -1185,84 +1316,111 @@ void Vm::execStmt(const Stmt* s, ScopePtr scope) {
         aval el = a_getitem(v, a_mkint((int64_t)i));
         vmScopeDeclare(scope, st.names[i], el);
       }
-      return;
+      return {};
     }
     case StmtKind::Return: {
       const auto& st = static_cast<const ReturnStmt&>(*s);
-      throw VmReturn{st.value ? eval(st.value.get(), scope) : A_NONE};
+      return {Flow::Return, st.value ? eval(st.value.get(), scope) : A_NONE};
     }
     case StmtKind::Break:
-      throw VmBreak{};
+      return {Flow::Break, A_NONE};
     case StmtKind::Continue:
-      throw VmContinue{};
+      return {Flow::Continue, A_NONE};
     case StmtKind::Defer:
-      return;  // collected by execStmts
+      return {};  // collected by execStmts
     case StmtKind::If: {
       const auto& st = static_cast<const IfStmt&>(*s);
       for (const auto& br : st.branches) {
         if (a_truthy_raw(eval(br.cond.get(), scope)) != 0) {
-          execBlock(br.body, scope);
-          return;
+          return execBlock(br.body, scope);
         }
       }
-      if (!st.elseBody.empty()) execBlock(st.elseBody, scope);
-      return;
+      if (!st.elseBody.empty()) return execBlock(st.elseBody, scope);
+      return {};
     }
     case StmtKind::While: {
       const auto& st = static_cast<const WhileStmt&>(*s);
+      // Reuse one body scope across iterations; a fresh scope is needed only
+      // when a closure captured the previous one (persistScope assigned a
+      // key), since captured bindings must stay frozen per iteration.
+      Scope* bodyScope = vmNewScope(scope);
+      ScopeGuard bg(bodyScope);
       while (a_truthy_raw(eval(st.cond.get(), scope)) != 0) {
-        try {
-          execBlock(st.body, scope);
-        } catch (VmBreak&) {
-          break;
-        } catch (VmContinue&) {
-          continue;
+        if (bodyScope->key != kVmNoScopeKey) {
+          bodyScope = vmNewScope(scope);
+          bg.reset(bodyScope);
+        } else {
+          bodyScope->vars.clear();
         }
+        FlowRes r = execStmts(st.body, bodyScope);
+        if (r.f == Flow::Break) break;
+        if (r.f == Flow::Continue) continue;
+        if (r.f != Flow::Normal) return r;
       }
-      return;
+      return {};
     }
     case StmtKind::DoWhile: {
       const auto& st = static_cast<const DoWhileStmt&>(*s);
+      Scope* bodyScope = vmNewScope(scope);
+      ScopeGuard bg(bodyScope);
       while (true) {
-        try {
-          execBlock(st.body, scope);
-        } catch (VmBreak&) {
-          break;
-        } catch (VmContinue&) {
+        if (bodyScope->key != kVmNoScopeKey) {
+          bodyScope = vmNewScope(scope);
+          bg.reset(bodyScope);
+        } else {
+          bodyScope->vars.clear();
         }
+        FlowRes r = execStmts(st.body, bodyScope);
+        if (r.f == Flow::Break) break;
+        if (r.f != Flow::Normal && r.f != Flow::Continue) return r;
         if (a_truthy_raw(eval(st.cond.get(), scope)) == 0) break;
       }
-      return;
+      return {};
     }
     case StmtKind::For: {
       const auto& st = static_cast<const ForStmt&>(*s);
       aval it = a_iter_new(eval(st.iterable.get(), scope));
+      Scope* iterScope = vmNewScope(scope);
+      ScopeGuard ig(iterScope);
+      Scope* bodyScope = vmNewScope(iterScope);
+      ScopeGuard bg(bodyScope);
       aval item;
       while (a_iter_next(it, &item)) {
-        ScopePtr iterScope = vmNewScope(scope);
-        vmScopeDeclare(iterScope, st.var, item);
-        try {
-          execStmts(st.body, vmNewScope(iterScope));
-        } catch (VmBreak&) {
-          break;
-        } catch (VmContinue&) {
-          continue;
+        if (iterScope->key != kVmNoScopeKey ||
+            bodyScope->key != kVmNoScopeKey) {
+          iterScope = vmNewScope(scope);
+          ig.reset(iterScope);
+          bodyScope = vmNewScope(iterScope);
+          bg.reset(bodyScope);
+        } else {
+          iterScope->vars.clear();
+          bodyScope->vars.clear();
         }
+        vmScopeDeclare(iterScope, st.var, item);
+        FlowRes r = execStmts(st.body, bodyScope);
+        if (r.f == Flow::Break) break;
+        if (r.f == Flow::Continue) continue;
+        if (r.f != Flow::Normal) return r;
       }
-      return;
+      return {};
     }
     case StmtKind::Loop: {
       const auto& st = static_cast<const LoopStmt&>(*s);
+      Scope* bodyScope = vmNewScope(scope);
+      ScopeGuard bg(bodyScope);
       while (true) {
-        try {
-          execBlock(st.body, scope);
-        } catch (VmBreak&) {
-          break;
-        } catch (VmContinue&) {
-          continue;
+        if (bodyScope->key != kVmNoScopeKey) {
+          bodyScope = vmNewScope(scope);
+          bg.reset(bodyScope);
+        } else {
+          bodyScope->vars.clear();
         }
+        FlowRes r = execStmts(st.body, bodyScope);
+        if (r.f == Flow::Break) break;
+        if (r.f == Flow::Continue) continue;
+        if (r.f != Flow::Normal) return r;
       }
-      return;
+      return {};
     }
     case StmtKind::FnDecl: {
       const auto& st = static_cast<const FnDecl&>(*s);
@@ -1272,11 +1430,11 @@ void Vm::execStmt(const Stmt* s, ScopePtr scope) {
       g_vm.declFnKey[&st] = key;
       aval v = vmMakeCallable(key, scope, st.name.c_str());
       vmScopeDeclare(scope, st.name, v);
-      return;
+      return {};
     }
     case StmtKind::Import:
     case StmtKind::FromImport:
-      return;  // bound ahead of execution by bindModuleImports
+      return {};  // bound ahead of execution by bindModuleImports
     case StmtKind::StructDecl:
       vmUnsupported("struct declarations are not supported in --vm mode");
     case StmtKind::EnumDecl:
@@ -1297,7 +1455,7 @@ void Vm::execStmt(const Stmt* s, ScopePtr scope) {
 // value) plus a side-table entry so field access / calls resolve members.
 aval vmModuleMarker(const std::string& display, int moduleId,
                     const std::string& nativeName, const std::string& pyName,
-                    ScopePtr scope) {
+                    Scope* scope) {
   std::string msg = "<module '" + display + "'>";
   aval v = a_str_new(msg.data(), msg.size());
   if (moduleId >= 0) {
@@ -1311,7 +1469,7 @@ aval vmModuleMarker(const std::string& display, int moduleId,
   return v;
 }
 
-void Vm::bindModuleImports(const Module& mod, ScopePtr scope) {
+void Vm::bindModuleImports(const Module& mod, Scope* scope) {
   if (!mod.program) return;
   for (const StmtPtr& s : mod.program->statements) {
     if (s->kind == StmtKind::Import) {
@@ -1372,7 +1530,7 @@ void Vm::bindModuleImports(const Module& mod, ScopePtr scope) {
       if (im->moduleId >= 0) {
         // File module: resolve each item in the source module's scope
         // (re-exports are already bound there by its own import pass).
-        ScopePtr src = g_vm.moduleScopes[im->moduleId];
+        Scope* src = g_vm.moduleScopes[im->moduleId];
         for (const auto& item : im->items) {
           aval v = A_NONE;
           bool found = vmScopeGet(src, item.name, v);
@@ -1415,18 +1573,19 @@ void Vm::bindModuleImports(const Module& mod, ScopePtr scope) {
   }
 }
 
-void Vm::execModule(int moduleId) {
+FlowRes Vm::execModule(int moduleId) {
   const Module& mod = graph.at(moduleId);
-  if (!mod.program) return;
-  ScopePtr ms = g_vm.moduleScopes[moduleId];
+  if (!mod.program) return {};
+  Scope* ms = g_vm.moduleScopes[moduleId];
   int saved = g_vm.curModule;
   g_vm.curModule = moduleId;
   bindModuleImports(mod, ms);
   // Top-level statements execute directly in the module scope so `let`
   // bindings, FnDecl closures and import aliases are visible to member
   // lookup and to functions defined in this module.
-  execStmts(mod.program->statements, ms);
+  FlowRes res = execStmts(mod.program->statements, ms);
   g_vm.curModule = saved;
+  return res;
 }
 
 // ---------------------------------------------------------------------------
@@ -1436,7 +1595,7 @@ void Vm::execModule(int moduleId) {
 struct VmTest {
   std::string name;
   uint64_t fnKey = 0;
-  ScopePtr capture;
+  Scope* capture;
 };
 
 int vmRunTests(std::vector<VmTest>& tests) {
@@ -1553,10 +1712,18 @@ int vmRunTests(std::vector<VmTest>& tests) {
 
 }  // namespace
 
-int runProgram(const ModuleGraph& graph, const SemaResult& sema,
-               bool testMode, const std::string& testFilter) {
+static int runProgramVm(const ModuleGraph& graph, const SemaResult& sema,
+                        bool testMode, const std::string& testFilter) {
   a_runtime_init();
   a_gc_add_root_cb(vmGcMark);
+
+  // Fast path: slot-based bytecode VM; falls back to the tree-walker below
+  // when any construct is unsupported. A_VM_NOBC=1 forces the tree-walker
+  // (debugging / correctness oracle).
+  if (!std::getenv("A_VM_NOBC") && bc::compileAll(graph, sema)) {
+    g_vmExec = nullptr;
+    return bc::execute(graph, testMode, testFilter);
+  }
 
   // Fresh state per run (the process executes one program per invocation,
   // but keep runProgram re-entrant for tooling/tests).
@@ -1568,9 +1735,9 @@ int runProgram(const ModuleGraph& graph, const SemaResult& sema,
   g_vmExec = &vm;
 
   try {
-    // Module scopes for every module in the graph.
+    // Module scopes for every module in the graph (persistent roots).
     for (const Module& mod : graph.modules) {
-      g_vm.moduleScopes[mod.id] = vmNewScope(nullptr);
+      g_vm.moduleScopes[mod.id] = vmNewRootScope();
     }
 
     // Execute modules in dependency order (imports before importers).
@@ -1582,7 +1749,22 @@ int runProgram(const ModuleGraph& graph, const SemaResult& sema,
       if (!mod.program) continue;
       // Mirror codegen: skip the auto-loaded prelude for non-entry programs.
       if (mod.id != graph.entry && mod.name == "prelude") continue;
-      vm.execModule(mid);
+      FlowRes mres = vm.execModule(mid);
+      if (mres.f == Flow::Return) {
+        // `return` at module top level: end of program.
+        g_vmExec = nullptr;
+        return 0;
+      }
+      if (mres.f == Flow::Break) {
+        std::fprintf(stderr, "error: 'break' outside of a loop\n");
+        g_vmExec = nullptr;
+        return 1;
+      }
+      if (mres.f == Flow::Continue) {
+        std::fprintf(stderr, "error: 'continue' outside of a loop\n");
+        g_vmExec = nullptr;
+        return 1;
+      }
     }
 
     const Module* entryMod =
@@ -1617,7 +1799,7 @@ int runProgram(const ModuleGraph& graph, const SemaResult& sema,
         return 1;
       }
       uint64_t key = it->second;
-      ScopePtr capture = g_vm.fns[key].capture;
+      Scope* capture = g_vm.fns[key].capture;
       std::vector<aval> noargs;
       vmCall(key, capture, noargs);
       g_vmExec = nullptr;
@@ -1658,9 +1840,9 @@ int runProgram(const ModuleGraph& graph, const SemaResult& sema,
     g_vmExec = nullptr;
     return rc;
   } catch (VmUnsupported& u) {
-    std::fprintf(stderr, "error: %s\n", u.msg.c_str());
+    (void)u;
     g_vmExec = nullptr;
-    return 1;
+    return kVmFallbackToNative;
   } catch (VmReturn&) {
     // `return` at module top level: treat as end of program.
     g_vmExec = nullptr;
@@ -1680,6 +1862,65 @@ int runProgram(const ModuleGraph& graph, const SemaResult& sema,
     g_vmExec = nullptr;
     return 1;
   }
+}
+
+bool programNeedsNative(const ModuleGraph& graph) {
+  for (const Module& mod : graph.modules) {
+    if (!mod.program) continue;
+    for (const StmtPtr& s : mod.program->statements) {
+      if (!s) continue;
+      switch (s->kind) {
+        case StmtKind::StructDecl:
+        case StmtKind::EnumDecl:
+        case StmtKind::TraitDecl:
+        case StmtKind::ImplDecl:
+        case StmtKind::TypeAlias:
+          return true;
+        default:
+          break;
+      }
+    }
+  }
+  return false;
+}
+
+int runProgram(const ModuleGraph& graph, const SemaResult& sema,
+               bool testMode, const std::string& testFilter) {
+  // Buffer stdout so a mid-run VmUnsupported can fall back to the native
+  // backend without leaking partial VM output.
+#ifdef _WIN32
+  int saved = _dup(_fileno(stdout));
+#else
+  int saved = dup(fileno(stdout));
+#endif
+  FILE* buf = tmpfile();
+  if (saved < 0 || !buf) return runProgramVm(graph, sema, testMode, testFilter);
+#ifdef _WIN32
+  _dup2(_fileno(buf), _fileno(stdout));
+#else
+  dup2(fileno(buf), fileno(stdout));
+#endif
+  int rc = runProgramVm(graph, sema, testMode, testFilter);
+  std::fflush(stdout);
+#ifdef _WIN32
+  _dup2(saved, _fileno(stdout));
+  _close(saved);
+#else
+  dup2(saved, fileno(stdout));
+  close(saved);
+#endif
+  if (rc == kVmFallbackToNative) {
+    std::fclose(buf);
+    return rc;
+  }
+  // Replay buffered output to real stdout.
+  std::rewind(buf);
+  char chunk[65536];
+  std::size_t n;
+  while ((n = std::fread(chunk, 1, sizeof chunk, buf)) > 0)
+    std::fwrite(chunk, 1, n, stdout);
+  std::fclose(buf);
+  return rc;
 }
 
 }  // namespace a::vm
