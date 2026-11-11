@@ -172,7 +172,7 @@ SemaResult Sema::analyze() {
   result.fnParamTypes = fnParamTypes_;
   result.fnReturnTypes = fnReturnTypes_;
   for (const DeclaredVarInfo& info : declaredVariables_) {
-    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type, info.variableDecl});
   }
   // Mirror Expr::inferredType into the result map for LSP clients.
   result.exprTypes = exprTypes_;
@@ -249,7 +249,7 @@ SemaResult Sema::analyzeParallel(int jobs) {
   result.fnParamTypes = fnParamTypes_;
   result.fnReturnTypes = fnReturnTypes_;
   for (const DeclaredVarInfo& info : declaredVariables_) {
-    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type, info.variableDecl});
   }
   result.exprTypes = exprTypes_;
   return result;

@@ -62,6 +62,9 @@ struct VarTypeInfo {
   std::string name;
   Span span;
   TypePtr type;
+  // True only for plain `name = ...` variable declarations (not parameters,
+  // loop variables, or pattern bindings) — used to limit inlay type hints.
+  bool variableDecl = false;
 };
 
 struct SemaResult {
@@ -149,6 +152,7 @@ class Sema {
     std::string name;
     Span span;
     TypePtr type;
+    bool variableDecl = false;
   };
 
   struct ModuleAlias {

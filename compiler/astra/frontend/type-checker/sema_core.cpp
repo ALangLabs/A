@@ -652,6 +652,7 @@ void Sema::declareVar(const std::string& name, Span span, TypePtr type, bool mut
   info.name = name;
   info.span = span;
   info.type = scope[name].type;
+  info.variableDecl = std::string(what) == "variable";
   declaredVariables_.push_back(std::move(info));
 }
 

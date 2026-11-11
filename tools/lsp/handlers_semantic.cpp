@@ -165,6 +165,9 @@ void LanguageServer::inlayHints(const Value& id, const Value* params) {
   // Inferred types for variables without annotations.
   for (const auto& var : compilation.sema.variables) {
     if (!var.type) continue;
+    // Only plain `name = ...` declarations get a type hint — parameters,
+    // loop variables, and pattern bindings would flood the view.
+    if (!var.variableDecl) continue;
     if (var.span.line <= 0) continue;
     int varLine = var.span.line - 1;
     if (varLine < startLine || varLine > endLine) continue;
