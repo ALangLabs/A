@@ -205,6 +205,10 @@ fn session_names():
         out.append(name)
     return out
 
+# Drops every session-recorded name (the `clean` command / %reset).
+fn reset_session_names():
+    user_names.clear()
+
 # Short classification of a (possibly dotted) name for `name?` inspection.
 # Returns "" when the name is unknown.
 fn describe(name):

@@ -104,7 +104,7 @@ std::string findReplMain(const DriverConfig& c){
 #endif
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
 #if defined(__unix__) || defined(__APPLE__)
-  // On a TTY, `a repl` runs the self-hosted IPython-style shell written in A
+  // On a TTY, `a repl` runs the self-hosted interactive shell written in A
   // (stdlib/std/repl/main.a). Piped stdin keeps the simple line REPL below.
   if(isatty(STDIN_FILENO)){
     std::string main=findReplMain(c);

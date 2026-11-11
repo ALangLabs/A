@@ -10,7 +10,7 @@ import "complete.a"
 import "history.a"
 
 fn print_help():
-    print("A interactive shell (IPython-style)")
+    print("A interactive shell for the A language")
     print("  exit / quit / Ctrl-D     leave the REPL")
     print("  Ctrl-C                   interrupt current input")
     print("  Up/Down                  history (or move between lines)")
@@ -27,7 +27,8 @@ fn print_help():
     print("  Ctrl-A/E/K/U/W/Y         line editing (start/end/kill/yank)")
     print("  Ctrl-F/B                 move by char; Ctrl-T transpose")
     print("  Ctrl-_                   undo")
-    print("  Ctrl-L                   clear screen")
+    print("  cls / clear / Ctrl-L     clear the screen")
+    print("  clean                    forget all session names")
     print("  name? / name??           inspect a name")
     print("  %<cmd>                   line magics — see '%magic'")
 
@@ -42,7 +43,7 @@ fn magic_help():
     print("  %env NAME                  print an environment variable")
     print("  %save FILE                 write session source to FILE")
     print("  %load FILE, %run FILE      evaluate FILE in this session")
-    print("  %reset                     note: sessions cannot be reset")
+    print("  %reset, %clean           forget all session names")
     print("Shell escapes (!cmd) are unavailable: the A REPL has no shell builtin.")
 
 # Strict decimal parse; -1 on anything that is not [+-]?digits.
@@ -161,9 +162,10 @@ fn run_magic(text, acc):
         if rc == 0:
             acc = acc + src + "\n"
         return acc
-    if name == "reset":
-        print("The A REPL session cannot be reset; exit and restart to clear state.")
-        return acc
+    if name == "reset" or name == "clean":
+        complete.reset_session_names()
+        print("Session names cleared; the namespace is empty.")
+        return ""
     if name == "system" or name == "sx" or name == "capture" or name == "prun" or name == "debug" or name == "pdb":
         print("error: %" + name + " is not supported by the A REPL.")
         return acc
@@ -213,7 +215,7 @@ fn repl_main():
     terminal.flush()
     history.history_load()
 
-    print("A REPL 0.0.1 — IPython-style interactive shell for the A language")
+    print("A REPL 0.0.1 — interactive shell for the A language")
     print("Type 'help' for keys and magics, 'exit'/'quit' or Ctrl-D to quit.")
     print("")
 
@@ -234,9 +236,14 @@ fn repl_main():
         if text == "help":
             print_help()
             continue
-        if text == "clear":
+        if text == "clear" or text == "cls":
             terminal.write("\x1b[2J\x1b[H")
             terminal.flush()
+            continue
+        if text == "clean":
+            acc = ""
+            complete.reset_session_names()
+            print("Session names cleared; the namespace is empty.")
             continue
 
         # IPython-style non-code lines: shell escapes, % magics, ? queries.
