@@ -194,10 +194,24 @@ function codeLensFrom(item) {
     if (!item || !item.range) return null;
     const cmd = item.command;
     if (!cmd || typeof cmd.command !== 'string') return null;
+    let args = Array.isArray(cmd.arguments) ? cmd.arguments : [];
+    if (cmd.command === 'editor.action.showReferences') {
+        // The server sends plain JSON; the built-in command validates its
+        // arguments and requires real Uri/Position instances.
+        args = args.map((arg, i) => {
+            if (i === 0 && typeof arg === 'string') {
+                try { return vscode.Uri.parse(arg); } catch { return arg; }
+            }
+            if (i === 1 && arg && typeof arg === 'object' && Number.isFinite(arg.line)) {
+                return new vscode.Position(arg.line, Number.isFinite(arg.character) ? arg.character : 0);
+            }
+            return arg;
+        });
+    }
     return new vscode.CodeLens(toRange(item.range), {
         title: cmd.title || cmd.command,
         command: cmd.command,
-        arguments: Array.isArray(cmd.arguments) ? cmd.arguments : [],
+        arguments: args,
     });
 }
 
