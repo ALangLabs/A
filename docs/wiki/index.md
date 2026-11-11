@@ -12,6 +12,7 @@ update the page it contradicts, and drift should be filed as a bug.
 
 - [Overview](overview.md) — what A is, headline features, a first program.
 - [Syntax and types](syntax-and-types.md) — comments, literals, indentation, operators, and every built-in type.
+- [Grammar and syntax reference](grammar.md) — concise EBNF-style summary of lexical elements, literals, expressions, and control flow.
 - [Declarations](declarations.md) — `fn`, `class`/`metaclass`, `enum`, `trait`, `impl`, `type`, generics, `comptime`, `where`.
 - [Statements and expressions](statements-and-expressions.md) — assignments, control flow, `match`, comprehensions, calls, indexing/slicing, lambdas, string interpolation, `defer`.
 - [Optionals, results, and errors](optionals-results.md) — `None`/`Some`, `??`, `!`, `?.`, `try`, `Ok`/`Err`, `assert`.
