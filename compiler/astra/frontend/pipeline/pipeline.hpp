@@ -26,6 +26,11 @@ struct PipelineConfig {
   // `a test --filter <substr>`: only run test_* functions whose name
   // contains this substring. Empty means run every test.
   std::string testFilter;
+  // `a run/test --vm`: interpret the checked module graph in the VM
+  // backend (compiler/astra/frontend/vm/) instead of emitting assembly
+  // and linking a native binary. Host-only; `--native` selects the
+  // default codegen path explicitly.
+  bool vm = false;
   // Internal: scan mode (`a test` over a directory/codebase) treats a
   // per-file filter that matches no tests as "skip this file" instead of an
   // error, so `--filter` can select matching tests across files.

@@ -1,3 +1,4 @@
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -73,6 +74,10 @@ void printUsage(std::ostream& os) {
      << "                    (optional -linux/-windows/-macos suffix; must\n"
      << "                    match the host OS — astra cannot cross OSes;\n"
      << "                    a run --target i8086 uses QEMU on Linux)\n"
+     << "  --vm             run/test via the VM interpreter instead of native\n"
+     << "                    codegen (host target only; last of --vm/--native wins)\n"
+     << "  --native         force the native codegen backend (default)\n"
+     << "  --backend <b>    select backend: 'vm' or 'native' (other values ignored)\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
@@ -85,6 +90,54 @@ bool isTerminal() {
 #else
   return false;
 #endif
+}
+
+// Host arch name for --vm target validation (mirrors hostArch() in
+// pipeline.cpp; kept in sync manually — the CLI cannot call into the
+// pipeline's anonymous namespace).
+std::string cliHostArch() {
+#if defined(__x86_64__) || defined(_M_X64)
+  return "x86_64";
+#elif defined(__i386__) || defined(_M_IX86)
+  return "i386";
+#elif defined(__aarch64__) || defined(_M_ARM64)
+  return "arm64";
+#elif defined(__arm__) || defined(_M_ARM)
+  return "arm";
+#elif defined(__riscv) && (__riscv_xlen == 64)
+  return "riscv64";
+#else
+  return "";
+#endif
+}
+
+std::string lowerAscii(std::string s) {
+  for (char& c : s) c = (char)::tolower((unsigned char)c);
+  return s;
+}
+
+// Extracts the canonical arch from a --target spec ("<arch>[-<os>...]",
+// aliases like x86-64/amd64/arm64). Returns "" for native/host/empty and
+// for specs whose first token is not a known arch — the pipeline reports
+// those as unknown targets later.
+std::string targetArchToken(const std::string& spec) {
+  std::string s = lowerAscii(spec);
+  if (s.empty() || s == "native" || s == "host") return "";
+  for (char& c : s) if (c == '_') c = '-';
+  // "x86-64" carries a dash inside the arch token; peel it first like
+  // pipeline's resolveTarget does.
+  if (s == "x86-64" || s.rfind("x86-64-", 0) == 0) return "x86_64";
+  std::string tok = s.substr(0, s.find('-'));
+  if (tok == "x86_64" || tok == "amd64" || tok == "x64") return "x86_64";
+  if (tok == "i386" || tok == "i486" || tok == "i586" || tok == "i686" ||
+      tok == "x86" || tok == "ia32") return "i386";
+  if (tok == "aarch64" || tok == "arm64") return "arm64";
+  if (tok == "arm" || tok.rfind("armv", 0) == 0 || tok == "arm-linux-gnueabi" ||
+      tok == "arm-linux-gnueabihf") return "arm";
+  if (tok == "riscv64" || tok == "riscv64gc") return "riscv64";
+  if (tok == "riscv32") return "riscv32";
+  if (tok == "i8086" || tok == "8086" || tok == "i86" || tok == "8088") return "i8086";
+  return "";
 }
 
 struct Options {
@@ -102,6 +155,8 @@ struct Options {
   bool jsonOutput = false;
   bool optimize = false;
   bool optnone = false;
+  bool vm = false;
+  bool native = false;
   bool optFlagSet = false;
   int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
@@ -143,6 +198,8 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
                     arg == "-Os" || arg == "-Oz" || arg == "-Ofast" ||
                     arg.rfind("--opt-level=", 0) == 0 || arg == "--opt-level");
   if (arg == "--optnone") options.optnone = true;
+  else if (arg == "--vm") { options.vm = true; options.native = false; }
+  else if (arg == "--native") { options.native = true; options.vm = false; }
   else if (isOptFlag) {
     bool ok = false;
     if (!parseOptFlag(arg, ok)) { err << "error: invalid optimization level '" << arg << "'\n"; return false; }
@@ -164,11 +221,16 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
     }
     else if (arg == "--backend") {
-      // Accepted for compatibility; A v2 uses a single LLVM-oriented backend.
       if (i + 1 >= argc) { err << "error: '--backend' requires a name\n"; return false; }
-      ++i;
+      std::string name = lowerAscii(argv[++i]);
+      // 'vm'/'native' select the execution backend; other values remain a
+      // compatibility no-op (A v2 has a single native codegen backend).
+      if (name == "vm") { options.vm = true; options.native = false; }
+      else if (name == "native") { options.native = true; options.vm = false; }
     } else if (arg.rfind("--backend=", 0) == 0) {
-      // compatibility no-op
+      std::string name = lowerAscii(arg.substr(10));
+      if (name == "vm") { options.vm = true; options.native = false; }
+      else if (name == "native") { options.native = true; options.vm = false; }
     } else if (arg == "--indent") {
       if (i + 1 >= argc) { err << "error: '--indent' requires a number\n"; return false; }
       try { options.indentWidth = std::stoi(argv[++i]); } catch (...) { err << "error: invalid indentation width\n"; return false; }
@@ -251,6 +313,23 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   if (options.command == "ir" && options.optFlagSet) options.optimize = true;
   if (options.command != "ir" && options.optimize) { err << "error: '--opt' is only valid with 'ir'\n"; return false; }
   if (options.command != "test" && !options.testFilter.empty()) { err << "error: '--filter' is only valid with 'test'\n"; return false; }
+  if (options.vm) {
+    if (options.command == "build" || options.command == "check" ||
+        options.command == "fmt" || options.command == "doc" ||
+        options.command == "ir") {
+      err << "error: '--vm' is only valid with 'run', 'test', or 'repl'\n";
+      return false;
+    }
+    // The VM is host-only: reject --target specs naming a different arch
+    // (empty/native/host and the host arch itself are fine).
+    std::string ta = targetArchToken(options.target);
+    std::string ha = cliHostArch();
+    if (!ta.empty() && !ha.empty() && ta != ha) {
+      err << "error: '--vm' runs on the host target only ('" << options.target
+          << "' resolves to '" << ta << "', host is '" << ha << "')\n";
+      return false;
+    }
+  }
   if (options.writeInPlace && options.checkOnly) { err << "error: '--write' and '--check' cannot be combined\n"; return false; }
   options.useColor = isTerminal() && !colorDisabled;
   return true;
@@ -301,6 +380,7 @@ int main(int argc, char** argv) {
   }
   config.stdlibRoot = options.stdlibRoot;
   config.target = options.target;
+  config.vm = options.vm;
   config.testFilter = options.testFilter;
   if (options.command == "run") {
     if (!options.commandCode.empty()) {
