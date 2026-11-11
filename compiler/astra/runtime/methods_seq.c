@@ -51,6 +51,7 @@ aval method_seq(aval obj, const char *name, uint64_t n, aval *argv) {
                 out->items = NULL;
                 out->iitems = (int64_t *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(int64_t));
                 if (a->h.len) memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
+                arr_iitems_raw(out);
                 out->flags = ARR_F_PACKED;
                 return mkobj(&out->h);
             }
@@ -112,7 +113,7 @@ aval method_seq(aval obj, const char *name, uint64_t n, aval *argv) {
                 arr_ensure_aval(a);
             }
             arr_reserve(a, (uint64_t)a->h.len + 1);
-            if ((a->flags & ARR_F_F64) && !a_is_double(argv[1])) a->flags &= ~ARR_F_F64;
+            if ((a->flags & ARR_F_F64) && !a_is_double(argv[1])) arr_f64_unmark(a);
             memmove(a->items + i + 1, a->items + i,
                     (size_t)(a->h.len - (uint64_t)i) * sizeof(aval));
             a_region_store(a, argv[1]);   /* region write barrier */

@@ -79,7 +79,7 @@ aval bi_unsafe_set(uint64_t n, aval *argv) {
             a->flags |= ARR_F_NOMIX;
             arr_ensure_aval(a);
         }
-        if ((a->flags & ARR_F_F64) && !a_is_double(argv[2])) a->flags &= ~ARR_F_F64;
+        if ((a->flags & ARR_F_F64) && !a_is_double(argv[2])) arr_f64_unmark(a);
         a_region_store(a, argv[2]);   /* region write barrier */
         a->items[i] = argv[2];
         return A_NONE;

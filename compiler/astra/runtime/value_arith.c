@@ -193,6 +193,7 @@ static aval concat_arr(aval l, aval r) {
         /* int-list + int-list stays packed */
         out->items = NULL;
         out->iitems = (int64_t *)xmalloc((size_t)(out->h.cap ? out->h.cap : 1) * sizeof(int64_t));
+        arr_iitems_raw(out);
         memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
         memcpy(out->iitems + a->h.len, b->iitems, (size_t)b->h.len * sizeof(int64_t));
         out->h.len = a->h.len + b->h.len;
@@ -229,6 +230,7 @@ static aval repeat_arr(aval listv, int64_t n) {
     if (!is_tuple && arr_packed(a)) {
         out->items = NULL;
         out->iitems = (int64_t *)xmalloc((size_t)total * sizeof(int64_t));
+        arr_iitems_raw(out);
         for (uint64_t i = 0; i < (uint64_t)n; ++i)
             memcpy(out->iitems + i * len, a->iitems, (size_t)len * sizeof(int64_t));
         out->flags |= ARR_F_PACKED;

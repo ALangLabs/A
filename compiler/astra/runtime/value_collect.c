@@ -82,6 +82,7 @@ aval a_list_from_i64(const int64_t *v, uint64_t n) {
     a->items = NULL;
     a->iitems = (int64_t *)xmalloc((size_t)(n ? n : 1) * sizeof(int64_t));
     if (n) memcpy(a->iitems, v, (size_t)n * sizeof(int64_t));
+    arr_iitems_raw(a);
     a->flags = ARR_F_PACKED;
     return mkobj(&a->h);
 }
@@ -95,6 +96,7 @@ aval a_list_take_i64(int64_t *v, uint64_t n) {
     a->h.cap = n;
     a->items = NULL;
     a->iitems = v;
+    arr_iitems_raw(a);
     a->flags = ARR_F_PACKED;
     return mkobj(&a->h);
 }

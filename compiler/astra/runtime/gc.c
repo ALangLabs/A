@@ -104,7 +104,7 @@ static int gc_stats(void) {
 /* ------------------------------------------------------------------ */
 
 enum { GC_F_USED = 1u, GC_F_OBJ = 2u, GC_F_MARK = 4u, GC_F_CHUNK = 8u,
-       GC_F_OLD = 16u };
+       GC_F_OLD = 16u, GC_F_NOSCAN = 32u };
 #define GC_NONE UINT32_MAX
 
 typedef struct {
@@ -855,8 +855,12 @@ static int gc_trace(void) {
 static void mark_scan_block(uint32_t idx) {
     /* A chunk must be marked as a whole, not scanned: its carved objects
        are dead candidates as a unit, and scanning every small string would
-       needlessly resurrect values from interior words. */
-    if (g_blk[idx].flags & GC_F_CHUNK) return;
+       needlessly resurrect values from interior words.
+       GC_F_NOSCAN blocks (AArr iitems packed-int storage, and items of
+       ARR_F_F64-verified all-double lists) provably contain no pointers:
+       their words are raw int64 / IEEE-754 bits that can alias heap
+       addresses, so scanning them would only retain phantom objects. */
+    if (g_blk[idx].flags & (GC_F_CHUNK | GC_F_NOSCAN)) return;
     uintptr_t a = g_blk[idx].start, e = g_blk[idx].end;
     if (gc_trace() && e - a >= GC_TRACE_MIN)
         fprintf(stderr, "[gc-trace] scan blk idx=%u %p..%p sz=%llu flags=%x\n",
@@ -1399,16 +1403,41 @@ void a_gc_register(void *p, size_t n) {
 
 void a_gc_reregister(void *oldp, void *newp, size_t n) {
     if (!gc_enabled()) return;
+    int noscan = 0;
     if (oldp) {
         uint32_t i = ht_find((uintptr_t)oldp);
         if (getenv("A_GC_TRACE") && n >= ((size_t)256 << 10))
             fprintf(stderr, "[gc-trace] reregister old=%p new=%p n=%zu hit=%u same=%d\n",
                     oldp, newp, n, i, oldp == newp);
-        if (i != GC_NONE) blk_delist(i);
-        else if (getenv("A_GC_TRACE") && n >= ((size_t)256 << 10))
+        if (i != GC_NONE) {
+            /* realloc() of a raw-data buffer (iitems, F64 items) keeps
+               its scan suppression across the move. */
+            noscan = (g_blk[i].flags & GC_F_NOSCAN) != 0;
+            blk_delist(i);
+        } else if (getenv("A_GC_TRACE") && n >= ((size_t)256 << 10))
             fprintf(stderr, "[gc-trace] reregister MISS old=%p\n", oldp);
     }
-    if (newp) a_gc_register(newp, n);
+    if (newp) {
+        a_gc_register(newp, n);
+        if (noscan) {
+            uint32_t j = ht_find((uintptr_t)newp);
+            if (j != GC_NONE) g_blk[j].flags |= GC_F_NOSCAN;
+        }
+    }
+}
+
+/* Mark/unmark a registered non-object buffer as containing no pointers,
+   exempting it from mark_scan_block. Used for AArr iitems (packed int64)
+   and items of ARR_F_F64 lists. Refuses GC_F_OBJ blocks: flagging an
+   object header would hide its aval/pointer fields from the marker. */
+void a_gc_set_noscan(void *p, int on) {
+    if (!gc_enabled() || !p || g_in_gc) return;
+    uint32_t i = ht_find((uintptr_t)p);
+    if (i == GC_NONE) return;
+    GCBlock *b = &g_blk[i];
+    if (!(b->flags & GC_F_USED) || (b->flags & GC_F_OBJ)) return;
+    if (on) b->flags |= GC_F_NOSCAN;
+    else    b->flags &= ~GC_F_NOSCAN;
 }
 
 /* mkobj() calls a_gc_note_obj() immediately followed by

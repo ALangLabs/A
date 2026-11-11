@@ -598,6 +598,7 @@ aval a_list_push_int_str(aval list, int64_t v) {
         arr_push(a, s);
         return list;
     }
+    arr_f64_unmark(a);   /* string avals may be pointers: restore scanning */
     if (a->h.len + 1 > a->h.cap) arr_reserve(a, (uint64_t)a->h.len + 1);
     a->items[a->h.len++] = s;
     return list;
@@ -607,7 +608,7 @@ aval a_list_fill_str_range(aval list, int64_t lo, int64_t hi, int64_t step) {
     if (step == 0) panicf("range() step must be positive, found 0.");
     AArr *a = arr_of(list, "list");
     if (arr_packed(a)) arr_ensure_aval(a);
-    a->flags &= ~ARR_F_F64;
+    arr_f64_unmark(a);
     uint64_t count = 0;
     if (step > 0) {
         if (lo < hi) {

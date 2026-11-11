@@ -369,6 +369,28 @@ void arr_push_int(AArr *a, aval v);
 aval arr_elem(const AArr *a, uint64_t i);
 void arr_shrink(AArr *a);
 void arr_note_view(aval parent);
+void a_gc_set_noscan(void *p, int on);   /* gc.c: exempt a raw-data block
+                                           (no pointers inside) from the
+                                           conservative mark scan */
+/* iitems is packed int64 storage — never avals, so its block is always
+   registered GC_F_NOSCAN: int64 bit patterns can alias heap addresses
+   and would otherwise retain phantom objects. Call after every (re)alloc
+   of a->iitems; a_gc_reregister also preserves the flag across realloc. */
+static inline void arr_iitems_raw(AArr *a) { a_gc_set_noscan(a->iitems, 1); }
+/* ARR_F_F64 lists hold only unboxed-double avals in items[]: raw IEEE-754
+   bits that alias heap addresses just like int64s, so once verified the
+   buffer is GC_F_NOSCAN too. Every store path that can introduce a
+   non-double MUST call arr_f64_unmark BEFORE the store — it restores
+   scanning so the incoming pointer is seen by the marker. */
+static inline void arr_f64_mark(AArr *a) {
+    a->flags |= ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);
+}
+static inline void arr_f64_unmark(AArr *a) {
+    if (!(a->flags & ARR_F_F64)) return;
+    a->flags &= ~ARR_F_F64;
+    a_gc_set_noscan(a->items, 0);
+}
 /* Equality of a packed int64 element against an arbitrary aval, matching
    values_equal's numeric rules (int-int compares int64, int-float compares
    doubles, everything else is unequal). Lets read-only scans (index,

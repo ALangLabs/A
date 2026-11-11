@@ -45,7 +45,7 @@ static const double *f64_ptr(AArr *a) {
     if (!(a->flags & ARR_F_F64)) {
         for (uint64_t i = 0; i < a->h.len; i++)
             if (!a_is_double(a->items[i])) return NULL;
-        a->flags |= ARR_F_F64;
+        arr_f64_mark(a);   /* items is raw double bits: exempt from GC scan */
     }
     return (const double *)(const void *)a->items;
 }
@@ -241,6 +241,7 @@ static aval f64_list(uint64_t n, const double *src) {
     a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
     a->iitems = NULL;
     a->flags = ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);   /* all-double items: no pointers inside */
     for (uint64_t i = 0; i < n; i++) a->items[i] = mkdouble(src[i]);
     return mkobj(a);
 }
