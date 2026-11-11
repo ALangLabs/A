@@ -2555,7 +2555,10 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
         }
       }
     }
-    if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kCErr; }
+    if(!any){
+      if(config.scanIgnoreFilterMismatch) return 3; // kTestSkip: no matching tests in this file (scan mode)
+      err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kCErr;
+    }
   }
   // test_* functions are invoked by the runtime harness as f(argv) with no
   // declared arguments; a parameter would silently read a padded A_NONE
@@ -2662,5 +2665,184 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }
   return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source,nullptr,config.jobs);
+}
+
+namespace {
+bool shouldSkipTestDir(const std::string& name){
+  if(name.empty()) return false;
+  if(name[0]=='.') return true; // .git, .cache, .apm, hidden
+  if(name=="build" || name=="node_modules" || name=="third_party") return true;
+  if(name.rfind("cmake-build",0)==0) return true;
+  if(name.rfind("build-",0)==0) return true;
+  return false;
+}
+bool fileHasTestDecl(const std::filesystem::path& path){
+  std::ifstream f(path, std::ios::binary);
+  if(!f) return false;
+  std::string line;
+  while(std::getline(f,line)){
+    // skip line comments (common case) to reduce false positives
+    size_t i=0; while(i<line.size() && (line[i]==' '||line[i]=='\t')) ++i;
+    if(i<line.size() && line[i]=='#') continue;
+    // look for: fn <spaces/tabs> test_
+    for(size_t p=0; (p=line.find("fn", p))!=std::string::npos; ++p){
+      size_t j=p+2;
+      if(p>0){ char c=line[p-1]; if(std::isalnum((unsigned char)c)||c=='_') continue; }
+      while(j<line.size() && (line[j]==' '||line[j]=='\t')) ++j;
+      if(line.compare(j,5,"test_")==0){
+        char after = (j+5<line.size()) ? line[j+5] : '\0';
+        if(after=='\0' || std::isalnum((unsigned char)after) || after=='_' || after=='(' || after=='<' )
+          return true;
+      }
+    }
+  }
+  return false;
+}
+std::vector<std::filesystem::path> discoverTestFiles(const std::filesystem::path& root, std::ostream& err){
+  std::vector<std::filesystem::path> out;
+  std::error_code ec;
+  std::filesystem::recursive_directory_iterator it(root,
+      std::filesystem::directory_options::skip_permission_denied, ec), end;
+  if(ec){ err<<"error: cannot scan '"<<root.string()<<"': "<<ec.message()<<"\n"; return out; }
+  for(; it!=end; it.increment(ec)){
+    if(ec){ ec.clear(); continue; }
+    const auto& entry=*it;
+    if(entry.is_directory(ec)){
+      if(ec){ ec.clear(); continue; }
+      if(shouldSkipTestDir(entry.path().filename().string())) it.disable_recursion_pending();
+      continue;
+    }
+    if(ec){ ec.clear(); continue; }
+    if(!entry.is_regular_file(ec)){ ec.clear(); continue; }
+    const auto& p=entry.path();
+    if(p.extension()==".a" && fileHasTestDecl(p)) out.push_back(p);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+bool parseTestSummary(const std::string& s, int& passed, int& failed){
+  // match "<int> passed, <int> failed" (last occurrence)
+  const std::string needle = " passed, ";
+  size_t pos = std::string::npos, search = 0;
+  while(true){
+    size_t f = s.find(needle, search);
+    if(f==std::string::npos) break;
+    pos = f; search = f + needle.size();
+  }
+  if(pos==std::string::npos) return false;
+  size_t nstart = pos;
+  while(nstart>0 && std::isdigit((unsigned char)s[nstart-1])) --nstart;
+  size_t fend = pos + needle.size();
+  size_t fstart = fend;
+  while(fend<s.size() && std::isdigit((unsigned char)s[fend])) ++fend;
+  if(fend + 7 > s.size() || s.compare(fend, 7, " failed")!=0) return false;
+  try {
+    passed = std::stoi(s.substr(nstart, pos-nstart));
+    failed = std::stoi(s.substr(fstart, fend-fstart));
+    return true;
+  } catch(...) { return false; }
+}
+} // namespace
+
+int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err){
+  const std::string target = path.empty() ? "." : path;
+  std::error_code ec;
+  if(std::filesystem::is_regular_file(target, ec)){
+    return testPipeline(target, config, in, out, err);
+  }
+  if(ec && ec!=std::errc::no_such_file_or_directory){
+    err<<"error: cannot access '"<<target<<"': "<<ec.message()<<"\n"; return kCErr;
+  }
+  if(!std::filesystem::is_directory(target, ec)){
+    // let testPipeline produce the canonical open/diagnostic error
+    return testPipeline(target, config, in, out, err);
+  }
+  auto files = discoverTestFiles(std::filesystem::path(target), err);
+  // discoverTestFiles only prints on scan errors; empty is valid to report below
+  if(files.empty()){
+    err<<"a test: no test files found in '"<<target<<"'\n";
+    if(!config.testFilter.empty()) err<<"  (filter: '"<<config.testFilter<<"')\n";
+    return kCErr;
+  }
+  PipelineConfig scanCfg = config;
+  scanCfg.scanIgnoreFilterMismatch = true;
+  std::filesystem::path root(target);
+  int totalPassed=0, totalFailed=0, fileErrors=0, filesRun=0, filesSkipped=0;
+  for(const auto& f : files){
+    std::ostringstream fout, ferr;
+    std::string capturedOut, capturedErr;
+    int rc = 0;
+#if defined(__unix__) || defined(__APPLE__)
+    int outPipe[2] = {-1,-1}, errPipe[2] = {-1,-1};
+    int savedOut = -1, savedErr = -1;
+    bool captured = false;
+    if(::pipe(outPipe)==0 && ::pipe(errPipe)==0){
+      savedOut = ::dup(STDOUT_FILENO);
+      savedErr = ::dup(STDERR_FILENO);
+      ::dup2(outPipe[1], STDOUT_FILENO);
+      ::dup2(errPipe[1], STDERR_FILENO);
+      ::close(outPipe[1]); ::close(errPipe[1]);
+      outPipe[1]=errPipe[1]=-1;
+      rc = testPipeline(f.string(), scanCfg, in, fout, ferr);
+      ::fflush(stdout); ::fflush(stderr);
+      ::dup2(savedOut, STDOUT_FILENO);
+      ::dup2(savedErr, STDERR_FILENO);
+      ::close(savedOut); ::close(savedErr);
+      char buf[4096]; ssize_t n;
+      while((n=::read(outPipe[0], buf, sizeof(buf)))>0) capturedOut.append(buf, (size_t)n);
+      while((n=::read(errPipe[0], buf, sizeof(buf)))>0) capturedErr.append(buf, (size_t)n);
+      ::close(outPipe[0]); ::close(errPipe[0]);
+      captured = true;
+    } else {
+      if(outPipe[0]>=0) ::close(outPipe[0]);
+      if(outPipe[1]>=0) ::close(outPipe[1]);
+      if(errPipe[0]>=0) ::close(errPipe[0]);
+      if(errPipe[1]>=0) ::close(errPipe[1]);
+    }
+    if(!captured)
+#endif
+    {
+      rc = testPipeline(f.string(), scanCfg, in, fout, ferr);
+      capturedOut = fout.str(); capturedErr = ferr.str();
+    }
+#if defined(__unix__) || defined(__APPLE__)
+    if(captured){
+      capturedOut += fout.str();
+      capturedErr += ferr.str();
+    }
+#endif
+    if(rc == 3){ // filter matched no tests in this file
+      filesSkipped++;
+      continue;
+    }
+    filesRun++;
+    std::error_code rec;
+    std::filesystem::path rel = std::filesystem::relative(f, root, rec);
+    std::string display = (rec ? f : rel).string();
+    out << "\n== " << display << " ==\n";
+    out << capturedOut;
+    if(!capturedOut.empty() && capturedOut.back()!='\n') out << "\n";
+    err << capturedErr;
+    int p=0, fl=0;
+    if(parseTestSummary(capturedOut, p, fl)){
+      totalPassed += p;
+      totalFailed += fl;
+      if(rc != 0 && fl == 0) fileErrors++; // nonzero without counted failures -> error
+    } else {
+      if(rc != 0) fileErrors++;
+    }
+  }
+  out << "\n== summary ==\n";
+  out << totalPassed << " passed, " << totalFailed << " failed";
+  if(fileErrors) out << ", " << fileErrors << " file error(s)";
+  out << " in " << filesRun << " file(s)";
+  if(filesSkipped) out << " (" << filesSkipped << " skipped by filter)";
+  if(filesRun==0 && !config.testFilter.empty()){
+    out << "\n";
+    err << "a test: no tests matched --filter '" << config.testFilter << "'\n";
+    return kCErr;
+  }
+  out << "\n";
+  return (totalFailed==0 && fileErrors==0) ? kOk : kCErr;
 }
 }

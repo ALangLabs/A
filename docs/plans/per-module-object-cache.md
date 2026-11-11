@@ -5,7 +5,7 @@ Status: **implemented** (Phases 1–3 landed; see deltas below). Owner: compiler
 ## Implementation status (as built)
 
 The design below shipped with these deltas from the original proposal —
-`pipeline.cpp` (`objcache` namespace) and `codegen_decls.cpp` are the source
+`pipeline.cpp` (`objcache`/`run_cache` namespaces) and `codegen_decls.cpp` are the source
 of truth:
 
 - Per-module split units are **on by default**; `A_SPLIT_UNITS=0` (or
@@ -19,11 +19,14 @@ of truth:
   order) and the `a test` filter.
 - `mtag` is `stableTag()` of the module's **weakly-canonicalized path**
   (`AsmEmitter::moduleTag`), matching §1.
-- Cache dir: `$A_CACHE_DIR`'s parent + `/obj` when set, else
-  `$XDG_CACHE_HOME/a/obj` (default `~/.cache/a/obj`, `%TEMP%\a_cache\obj` on
-  Windows) — same layout as §4.
-- `A_DEBUG_UNITS=1` prints per-unit emit/reuse counts; exercised by
-  `tests/integration/cache_test.sh`.
+- **Cache layout (now `_acache_`, `__pycache__`-like):** by default, artifacts
+  live in `_acache_/` next to source modules (per-module `<key>.o`/`.sym`, and
+  run/precheck binaries near the entry, e.g. `run.<key>`, `pre.<key>`).
+  `A_CACHE_DIR` overrides with a central root for CI/tests (run entries in
+  `$A_CACHE_DIR`, objects in `dirname($A_CACHE_DIR)/obj`, preserving legacy
+  override layout for compatibility).
+- `A_NO_CACHE=1` disables caching; `A_DEBUG_UNITS=1` prints per-unit
+  emit/reuse counts; exercised by `tests/integration/cache_test.sh`.
 
 ## Goal
 

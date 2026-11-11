@@ -7,6 +7,7 @@ struct DriverConfig { bool checkOnly=false,jsonDiagnostics=false,useColor=false;
 int runFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int runSource(const std::string& displayPath,std::string source,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int testFile(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
+int testPath(const std::string& path,const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int repl(const DriverConfig& config,std::istream& in,std::ostream& out,std::ostream& err);
 int buildFile(const std::string& path,const std::string& outputPath,const DriverConfig& config,const std::string& backend,std::ostream& err);
 int emitIRFile(const std::string& path,const DriverConfig& config,bool optimize,std::ostream& out,std::ostream& err);

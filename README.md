@@ -84,7 +84,7 @@ Or use the helper script: `tooling/build/build.sh`.
 | `a run <file.a>` | Compile and execute (`-c 'code'` for inline source) |
 | `a build <file.a> -o <bin>` | Compile to a native executable |
 | `a check <file.a>` | Type-check only (`--json` for machine-readable diagnostics) |
-| `a test <file.a>` | Discover and run every `fn test_*()` |
+| `a test [file|dir]` | Discover and run `fn test_*()` in a file, or recursively in a directory/codebase (default: `.`); `--filter <substr>` selects by name |
 | `a fmt <file.a>` | Format source (`-w` in place, `--check` for CI) |
 | `a doc <file.a>` | Generate documentation (`--json` supported) |
 | `a ir <file.a>` | Print the typed SSA IR (`--opt` / `-O*` to optimize) |

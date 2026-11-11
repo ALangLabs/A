@@ -20,7 +20,7 @@ export A_CACHE_DIR="$CACHE_DIR"
 
 SRC1="$TMP_DIR/prog.a"
 cat > "$SRC1" <<'EOF'
-fn main():
+entry main():
     print(1 + 2)
 EOF
 
@@ -38,7 +38,7 @@ bins() { find "$CACHE_DIR" -type f ! -name '*.diag' | wc -l | tr -d ' '; }
 
 # Edit invalidates: new output, new entry.
 cat > "$SRC1" <<'EOF'
-fn main():
+entry main():
     print(4 + 5)
 EOF
 [[ "$(run)" == "9" ]] || { echo "FAIL: edited run did not invalidate" >&2; exit 1; }
@@ -63,7 +63,7 @@ fn add(a, b):
 EOF
   cat > "$ENTRY" <<'EOF'
 import "lib/helper.a"
-fn main():
+entry main():
     print(helper.add(1, 2))
 EOF
   # Force a cold object cache so the "3 emitted" count is exact (the prelude
@@ -91,7 +91,7 @@ fn add(a, b, c):
 EOF
   cat > "$ENTRY" <<'EOF'
 import "lib/helper.a"
-fn main():
+entry main():
     print(helper.add(1, 2, 3))
 EOF
   out="$(A_DEBUG_UNITS=1 "$A_BIN" run "$ENTRY" 2>"$TMP_DIR/dbg3" || true)"
@@ -110,7 +110,7 @@ EOF
   BARE_ENTRY="$TMP_DIR/bare_main.a"
   cat > "$BARE_ENTRY" <<'EOF'
 import helper
-fn main():
+entry main():
     print(helper.who())
 EOF
   out="$("$A_BIN" run -I "$SHADOW_B" "$BARE_ENTRY" 2>/dev/null || true)"

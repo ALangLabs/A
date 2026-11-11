@@ -26,11 +26,18 @@ struct PipelineConfig {
   // `a test --filter <substr>`: only run test_* functions whose name
   // contains this substring. Empty means run every test.
   std::string testFilter;
+  // Internal: scan mode (`a test` over a directory/codebase) treats a
+  // per-file filter that matches no tests as "skip this file" instead of an
+  // error, so `--filter` can select matching tests across files.
+  bool scanIgnoreFilterMismatch = false;
 };
 struct CompiledModule { std::unique_ptr<ModuleGraph> graph; std::unique_ptr<SemaResult> sema; bool ok = false; };
 CompiledModule runFrontendPipeline(const std::string& path, std::string source, const PipelineConfig& config, DiagnosticSink& sink, std::ostream& diagOut, std::ostream& diagErr);
 int executePipeline(const std::string& path, std::string source, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
 int testPipeline(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
+// `a test` on a file, directory, or (empty path) the current directory:
+// discovers test files recursively and runs them, aggregating results.
+int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
 int buildPipeline(const std::string& path, const std::string& outputPath, const PipelineConfig& config, std::ostream& err);
 int emitIRPipeline(const std::string& path, const PipelineConfig& config, bool optimize, std::ostream& out, std::ostream& err);
 

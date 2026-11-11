@@ -33,3 +33,6 @@ data.txt
 # runtime archive built by the astra_runtime target
 compiler/astra/runtime/libaruntime.a
 websearchcli.a
+# A compiler cache (like Python's __pycache__)
+_acache_/
+**/_acache_/

@@ -38,6 +38,7 @@ bool readAll(const std::string& path,std::string& t,std::ostream& e){
 int runSource(const std::string& n,std::string s,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return executePipeline(n,std::move(s),toP(c),i,o,e); }
 int runFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ std::string s; if(!readAll(p,s,e)) return 66; return executePipeline(p,std::move(s),toP(c),i,o,e); }
 int testFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return testPipeline(p,toP(c),i,o,e); }
+int testPath(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return a::testPath(p,toP(c),i,o,e); }
 namespace {
 // Heuristic for Python-style continuation: unclosed brackets or a trailing
 // ':' block opener mean more input is expected. Strings and '#' comments are

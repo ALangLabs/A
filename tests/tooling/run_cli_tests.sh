@@ -159,4 +159,57 @@ EOF
 "$A_BIN" run --parallel "$WORK_DIR/multi/main.a" >"$WORK_DIR/multi.out"
 grep -q "^5$" "$WORK_DIR/multi.out"
 
-echo "OK: fmt, doc, check (incl. parallel/async), and test CLI"
+# Directory / codebase scan: `a test <dir>` and `a test` (no args) discover
+# `*.a` files containing `fn test_*()` and aggregate results.
+SCAN="$WORK_DIR/scan"
+mkdir -p "$SCAN/sub"
+cat >"$SCAN/one_test.a" <<'EOF'
+fn test_one() -> void:
+    assert_eq(1, 1)
+EOF
+cat >"$SCAN/sub/two_test.a" <<'EOF'
+fn test_two() -> void:
+    assert_eq(2, 2)
+
+fn test_two_b() -> void:
+    assert_eq(3, 3)
+EOF
+cat >"$SCAN/not_a_test.a" <<'EOF'
+fn helper() -> i32:
+    return 1
+EOF
+"$A_BIN" test "$SCAN" >"$WORK_DIR/scan.out" 2>"$WORK_DIR/scan.err"
+grep -q "== one_test.a ==" "$WORK_DIR/scan.out"
+grep -q "== sub/two_test.a ==" "$WORK_DIR/scan.out"
+grep -q "ok test_one" "$WORK_DIR/scan.out"
+grep -q "ok test_two_b" "$WORK_DIR/scan.out"
+grep -q "3 passed, 0 failed in 2 file(s)" "$WORK_DIR/scan.out"
+if grep -q "not_a_test" "$WORK_DIR/scan.out" "$WORK_DIR/scan.err"; then
+  echo "error: scan ran a file without fn test_*()" >&2
+  exit 1
+fi
+
+# no-arg scan from cwd
+(cd "$SCAN" && "$A_BIN" test >"$WORK_DIR/scan_cwd.out" 2>"$WORK_DIR/scan_cwd.err")
+grep -q "3 passed, 0 failed in 2 file(s)" "$WORK_DIR/scan_cwd.out"
+
+# --filter across scanned files (files with no matching tests are skipped)
+"$A_BIN" test "$SCAN" --filter two_b >"$WORK_DIR/scan_filter.out" 2>"$WORK_DIR/scan_filter.err"
+grep -q "1 passed, 0 failed in 1 file(s)" "$WORK_DIR/scan_filter.out"
+grep -q "skipped by filter" "$WORK_DIR/scan_filter.out"
+
+if "$A_BIN" test "$SCAN" --filter nonexistent >"$WORK_DIR/scan_nomatch.out" 2>"$WORK_DIR/scan_nomatch.err"; then
+  echo "error: filtered scan with no matches should fail" >&2
+  exit 1
+fi
+grep -q "no tests matched --filter 'nonexistent'" "$WORK_DIR/scan_nomatch.err"
+
+EMPTYSCAN="$WORK_DIR/emptyscan"
+mkdir -p "$EMPTYSCAN"
+if "$A_BIN" test "$EMPTYSCAN" >"$WORK_DIR/scan_empty.out" 2>"$WORK_DIR/scan_empty.err"; then
+  echo "error: scan with no test files should fail" >&2
+  exit 1
+fi
+grep -q "no test files found" "$WORK_DIR/scan_empty.err"
+
+echo "OK: fmt, doc, check (incl. parallel/async), and test CLI (incl. scan)"

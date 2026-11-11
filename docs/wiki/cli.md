@@ -14,7 +14,7 @@ faster dev builds).
 | `a run <file.a>` | Compile and execute. `-c 'code'` runs inline source. |
 | `a build <file.a> -o <bin>` | Compile to a native executable (default `a.out`). |
 | `a check <file.a>` | Type-check only; `--json` for machine-readable diagnostics. |
-| `a test <file.a>` | Run every `fn test_*()`; `--filter <substr>` runs only tests whose name contains the substring. |
+| `a test [file\|dir]` | Run `fn test_*()` in a file, or recursively discover test files in a directory/codebase (default: `.`). `--filter <substr>` selects matching test names (in scan mode, files with no matches are skipped). |
 | `a fmt <file.a>` | Format to stdout; `-w` writes in place, `--check` exits nonzero if unformatted, `--indent <n>`. |
 | `a doc <file.a>` | Generate docs (markdown; `--json`, `-o <file>`). |
 | `a ir <file.a>` | Print the typed SSA IR; `--opt` or `-O*` runs optimization passes. |
@@ -30,9 +30,12 @@ faster dev builds).
   values like `9` or `-1` are rejected), `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
-  name contains the substring (e.g. `a test foo.a --filter dict`). A filter
-  matching nothing prints `no tests matched` and exits 1. The filter is part
-  of the run-cache key, so different filters never share a cached binary.
+  name contains the substring (e.g. `a test foo.a --filter dict`, or
+  `a test --filter dict` to select across discovered files). For a single
+  file, a filter that matches no tests is an error; in directory scan mode,
+  files with no matching tests are skipped and an error is reported only if
+  no tests match anywhere. The filter is part of the run-cache key, so
+  different filters never share a cached binary.
 - `--target <arch>` — cross-compile target: `x86_64`
   (default; x86-64 assembly emitter on Linux/macOS SysV, Win64 MS-ABI
   native emitter on Windows), `i386`, `arm`
@@ -109,13 +112,23 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
 Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
 `A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm` to
 force the assembly emitter; `c` is rejected — the C emitter was removed), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`,
-`A_NO_CACHE` (disable the run cache), `A_CACHE_DIR` (run cache directory,
-default `$XDG_CACHE_HOME/a/run` / `~/.cache/a/run` / `/tmp/a_cache_run`),
+`A_NO_CACHE` (disable caches), `A_CACHE_DIR` (override cache root for CI/tests;
+by default caches live in `_acache_/` next to source files, like Python's
+`__pycache__`),
 `A_GC` (`0` disables the garbage collector), `A_GC_STATS` (`1` prints
 per-collection stats to stderr), `A_GC_DEBUG` (`1` enables collector
 stage markers).
 
-## Run cache
+## Cache (`_acache_`, `__pycache__`-like)
+
+A stores compilation caches in `_acache_/` directories next to source files
+(like Python's `__pycache__`): per-module compiled object/symbol artifacts for
+incremental builds, plus content-addressed run/precheck binaries for `a run`,
+`a build`, and `a test`. `A_CACHE_DIR` overrides the cache root for isolated
+runs (CI/tests). `A_NO_CACHE=1` disables caching; `A_SPLIT_UNITS=0` forces the
+single-unit compile path; `A_DEBUG_UNITS=1` prints per-unit emit/reuse.
+
+### Run cache
 
 `a run` and the REPL reuse a content-addressed compiled binary across
 invocations. Two keys are involved:

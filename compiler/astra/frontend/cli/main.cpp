@@ -44,7 +44,7 @@ void printUsage(std::ostream& os) {
      << "  run <file.a>     compile and execute a program\n"
      << "  build <file.a>   compile to a native binary (-o <bin>)\n"
      << "  check <file.a>   type-check without running\n"
-     << "  test <file.a>    run every fn test_*() (--filter <substr> runs a subset)\n"
+     << "  test [path]      run fn test_*() in a file, or discover tests in a dir/codebase (default: .); --filter <substr> selects by name\n"
      << "  fmt <file.a>     format source (stdout; -w to write)\n"
      << "  doc <file.a>     generate documentation (markdown; --json)\n"
      << "  ir <file.a>      print the typed SSA IR\n"
@@ -225,9 +225,15 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       err << "error: '-c' cannot be combined with a file argument\n"; return false;
     }
     if (options.commandCode.empty()) {
-      if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
-      if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
-      options.path = positional[1];
+      if (options.command == "test") {
+        if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
+        if (positional.size() == 2) options.path = positional[1];
+        // empty path => scan current directory
+      } else {
+        if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
+        if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
+        options.path = positional[1];
+      }
     } else if (positional.size() > 2) {
       err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
     }
@@ -278,14 +284,18 @@ int main(int argc, char** argv) {
   // `<root>/.apm/packages` to the module search paths for every file
   // command (run/build/check/test/ir), so `import <pkg>` works without
   // `apm run` or an explicit `-I` flag.
-  if (!options.path.empty()) {
-    namespace fs = std::filesystem;
-    const std::string root = findProjectDir(options.path);
-    if (!root.empty()) {
-      std::error_code ec;
-      const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
-      if (fs::is_directory(pkgDir, ec)) {
-        config.modulePaths.insert(config.modulePaths.begin(), pkgDir.string());
+  {
+    const std::string apmBase = !options.path.empty() ? options.path
+                               : (options.command == "test" ? "." : "");
+    if (!apmBase.empty()) {
+      namespace fs = std::filesystem;
+      const std::string root = findProjectDir(apmBase);
+      if (!root.empty()) {
+        std::error_code ec;
+        const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
+        if (fs::is_directory(pkgDir, ec)) {
+          config.modulePaths.insert(config.modulePaths.begin(), pkgDir.string());
+        }
       }
     }
   }
@@ -299,7 +309,7 @@ int main(int argc, char** argv) {
     return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
   }
   if (options.command == "repl") return a::repl(config, std::cin, std::cout, std::cerr);
-  if (options.command == "test") return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
+  if (options.command == "test") return a::testPath(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "build") {
     std::string out = options.outputPath;
     if (out.empty()) out = "a.out";
