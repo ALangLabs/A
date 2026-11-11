@@ -147,7 +147,7 @@ fn ed_kill_whole():
     c = S.col
     if c < len(S.lines[r]) or len(S.lines) > 1:
         undo_push()
-    killed = S.lines[r][c..]
+    killed = "" + S.lines[r][c..]
     for i in (r + 1)..len(S.lines):
         killed = killed + "\n" + S.lines[i]
     S.lines = [S.lines[r][0..c]]
