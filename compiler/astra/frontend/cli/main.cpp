@@ -11,6 +11,7 @@
 
 #include "driver/driver.hpp"
 #include "driver/version.hpp"
+#include "exe_path.hpp"
 
 namespace {
 
@@ -377,9 +378,8 @@ int main(int argc, char** argv) {
 #if defined(__unix__) || defined(__APPLE__)
   // Let compiled programs (e.g. repl.eval in the self-hosted REPL) locate
   // this toolchain binary regardless of the caller's PATH/cwd.
-  char exeBuf[4096];
-  ssize_t exeLen = ::readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
-  if (exeLen > 0) { exeBuf[exeLen] = '\0'; ::setenv("A_A_BIN", exeBuf, 1); }
+  const std::string exePath = a::exePath();
+  if (!exePath.empty()) ::setenv("A_A_BIN", exePath.c_str(), 1);
 #endif
   Options options;
   if (!parseOptions(argc, argv, options, std::cerr)) return kExitUsage;

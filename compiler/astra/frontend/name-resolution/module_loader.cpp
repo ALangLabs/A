@@ -1,4 +1,5 @@
 #include "name-resolution/module_loader.hpp"
+#include "exe_path.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -49,18 +50,15 @@ std::string defaultStdlibRoot() {
   if (const char* env = std::getenv("A_STDLIB"); env && *env) return env;
 
   std::vector<fs::path> candidates;
-  std::error_code error;
-#if defined(__linux__)
-  fs::path executable = fs::read_symlink("/proc/self/exe", error);
-#else
-  fs::path executable;
-#endif
-  if (!error && !executable.empty()) {
-    fs::path dir = executable.parent_path();
-    candidates.push_back(dir / "stdlib");
-    candidates.push_back(dir / ".." / "stdlib");
-    candidates.push_back(dir / ".." / ".." / "stdlib");
-    candidates.push_back(dir / ".." / "share" / "a" / "stdlib");
+  {
+    const std::string self = exePath();
+    if (!self.empty()) {
+      fs::path dir = fs::path(self).parent_path();
+      candidates.push_back(dir / "stdlib");
+      candidates.push_back(dir / ".." / "stdlib");
+      candidates.push_back(dir / ".." / ".." / "stdlib");
+      candidates.push_back(dir / ".." / "share" / "a" / "stdlib");
+    }
   }
   // Walk up from cwd to find a repo/source stdlib (test harnesses may run
   // from subdirectories). Prefer roots that contain prelude/std layout.

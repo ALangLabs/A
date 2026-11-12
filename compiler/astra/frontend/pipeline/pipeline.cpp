@@ -1,4 +1,5 @@
 #include "pipeline/pipeline.hpp"
+#include "exe_path.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
@@ -262,11 +263,9 @@ std::string findAstra(const std::string& arch, const std::string& os = "") {
   }
   return names.front();  // let CreateProcess report the failure
 #else
-  char exe[4096];
-  ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (n > 0) {
-    exe[n] = '\0';
-    std::string dir = exe;
+  const std::string self = exePath();
+  if (!self.empty()) {
+    std::string dir = self;
     auto pos = dir.find_last_of('/');
     if (pos != std::string::npos) {
       dir = dir.substr(0, pos);
@@ -608,11 +607,7 @@ inline std::string selfExePath() {
   if (n == 0 || n >= MAX_PATH) return std::string();
   return std::string(buf, n);
 #else
-  char buf[4096];
-  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
-  if (n <= 0) return std::string();
-  buf[n] = '\0';
-  return std::string(buf);
+  return exePath();
 #endif
 }
 

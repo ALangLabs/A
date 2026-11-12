@@ -55,6 +55,29 @@ compiles A straight to native machine code.
 
 ## 🚀 Quick start
 
+### Install
+
+Prebuilt binaries are published on
+[GitHub Releases](https://github.com/ALangLabs/A/releases). The installers
+drop `a`, `a-lsp`, the Astra backend, and the stdlib under `~/.local`
+(Linux/macOS) or `%LOCALAPPDATA%\Programs\A` (Windows), put them on `PATH`,
+and install the editor extension into every detected VS Code or fork
+(Cursor, Windsurf, VSCodium, …):
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/ALangLabs/A/main/install/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/ALangLabs/A/main/install/install.ps1 | iex
+```
+
+Options: `--prefix DIR` / `A_PREFIX` to relocate, `--no-extension` /
+`A_NO_EXTENSION=1` to skip the editor step, `A_VERSION` to pin a release.
+To build from source instead, continue below.
+
+### Build from source
+
 ```sh
 # Build the toolchain (produces build/a and build/a-lsp)
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON

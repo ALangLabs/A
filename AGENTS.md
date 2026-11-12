@@ -29,6 +29,7 @@ CI (`.github/workflows/ci.yml`) builds with `-DA_WARNINGS_AS_ERRORS=ON`, runs ct
 
 ## Project layout (high level)
 - `apm/` — the A package manager (A modules for manifests, registry/resolution, install, CLI).
+- `install/` — user-facing installers: `install.sh` (curl|sh, Linux/macOS) and `install.ps1` (irm|iex, Windows). They pull versioned assets (`a-<platform>.tar.gz|.zip`, `a-language.vsix`) from GitHub Releases; `.github/workflows/release.yml` builds those assets on `v*` tags via `tooling/release/package.sh` (which stages `bin/` + `astralib*` + `stdlib` — everything `a` discovers relative to its exe).
 - `compiler/astra/frontend/` — C++ frontend modules (`a.hpp` umbrella; `diagnostics`, `lexer`, `ast`, `parser`, `name-resolution`, `type-checker`, `ownership`, `codegen`, `ir`, `optimization`, `tooling`, `pipeline`, `driver`, `cli`). The C Astra backend lives in `compiler/astra/backend/`, with the A runtime in `compiler/astra/runtime/`.
 - `compiler/astra/runtime/` — the A runtime: the C modules linked into compiled programs (`a_runtime.h`/`a_runtime.c` + domain modules such as `core_*.c`, `value_*.c`, `methods*.c`, `builtins_*.c`, `bytes_*.c`, `fs.c`, `json.c`, `os.c`, `net.c`, `time.c`, …; see `compiler/astra/runtime/` for the current set) plus the C++ frontend-support library in `collections/` and `strings/`.
 - `stdlib/` — stdlib docs/notes and A-file modules (native execution is delegated to the Astra backend (`compiler/astra/`); the A-subset it supports is still growing — confirm via docs/tests when changing behavior).

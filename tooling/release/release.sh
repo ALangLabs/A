@@ -13,18 +13,7 @@ cmake -S "$ROOT_DIR" -B "$BUILD_DIR" \
 cmake --build "$BUILD_DIR" -j "$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 ctest --test-dir "$BUILD_DIR" --output-on-failure
 
-version="$(sed -n 's/^project(Alang VERSION \([^ ]*\).*/\1/p' "$ROOT_DIR/CMakeLists.txt")"
 platform="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-name="a-${version}-${platform}"
 
-stage="$(mktemp -d)"
-trap 'rm -rf "$stage"' EXIT
-mkdir -p "$stage/$name/bin"
-cp "$BUILD_DIR/a" "$stage/$name/bin/a"
-cp -R "$ROOT_DIR/stdlib" "$stage/$name/stdlib"
-cp "$ROOT_DIR/README.md" "$stage/$name/README.md"
-tar -C "$stage" -czf "$DIST_DIR/$name.tar.gz" "$name" 2>/dev/null || {
-  mkdir -p "$DIST_DIR"
-  tar -C "$stage" -czf "$DIST_DIR/$name.tar.gz" "$name"
-}
-echo "wrote $DIST_DIR/$name.tar.gz"
+"$ROOT_DIR/tooling/release/package.sh" "$BUILD_DIR" "$DIST_DIR" "$platform"
+echo "release package: $DIST_DIR/a-$platform.tar.gz"

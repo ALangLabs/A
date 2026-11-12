@@ -1,5 +1,6 @@
 #include "driver/driver.hpp"
 #include "driver/version.hpp"
+#include "exe_path.hpp"
 #include <fstream>
 #include <istream>
 #include <ostream>
@@ -83,11 +84,9 @@ std::string findReplMain(const DriverConfig& c){
   std::vector<std::string> roots;
   if(!c.stdlibRoot.empty()) roots.push_back(c.stdlibRoot);
   if(const char* e=std::getenv("A_STDLIB"); e&&*e) roots.push_back(e);
-  char exe[4096];
-  ssize_t n=::readlink("/proc/self/exe",exe,sizeof(exe)-1);
-  if(n>0){
-    exe[n]='\0';
-    std::string dir=exe; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
+  const std::string self=exePath();
+  if(!self.empty()){
+    std::string dir=self; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
     roots.push_back(dir+"/../stdlib");
     roots.push_back(dir+"/../../stdlib");
   }
