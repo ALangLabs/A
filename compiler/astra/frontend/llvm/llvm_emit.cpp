@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -42,6 +43,9 @@ struct LlBinding {
   BKind kind = BKind::Local;
   std::string sym;    // Global/FnValue/StructCtor/EnumValue: LLVM global name
   std::string slot;   // Local/Param: alloca name
+  std::string slotF;  // numMode==1: alloca i1 holding the is-double flag
+  int numMode = 0;    // 1 = unboxed numeric: slot=i64 payload, slotF=i1 flag
+  bool rawSafe = false;  // numMode: flag provably never 2 (boxed aval)
   FnInfo* fn = nullptr;
   StructInfo* st = nullptr;
   const EnumVariantInfo* en = nullptr;
@@ -132,6 +136,43 @@ class LlvmEmitter {
     std::vector<std::pair<std::string, std::string>> captures;  // name, alloca
   };
   std::vector<PendingLambda> lambdas_;
+
+  // ---- raw-numeric safety analysis --------------------------------------
+  // Per-function pre-pass proving that a numMode binding can never hold
+  // flag==2 (a boxed aval in the payload slot): every write to the binding
+  // must produce a raw numeric value (literal, raw numMode ident, or raw
+  // unary/binary op over proven-safe operands). Params and anything fed by
+  // calls/builtins/collections stay unproven -> guards remain. See
+  // analyzeRawSafety for details.
+  struct RawBindInfo;
+  struct RawWrite {
+    const Expr* e = nullptr;                 // assigned value expression
+    BinOp cop = BinOp::Invalid;              // Invalid = `=`, else compound op
+    std::unordered_map<std::string, RawBindInfo*> env;  // visible bindings
+  };
+  struct RawBindInfo {
+    enum Cls : std::uint8_t { kCand, kPlain, kGlobal, kShadow };
+    enum State : std::uint8_t { kSafe, kUnsafe, kNotNum };
+    Cls cls = kCand;
+    State state = kSafe;
+    bool isParam = false;
+    const Expr* init = nullptr;              // let/assign-new initializer
+    std::unordered_map<std::string, RawBindInfo*> initEnv;
+    std::vector<RawWrite> writes;            // post-init assignments
+  };
+  struct RawFrame {
+    std::map<std::string, RawBindInfo*> m;
+    std::vector<const Stmt*> defers;         // deferred stmts (run at exit)
+  };
+  std::deque<RawFrame> rawFrameArena_;
+  std::deque<RawBindInfo> rawInfoArena_;
+  std::vector<RawFrame*> rawFrames_;
+  std::vector<RawBindInfo*> rawCands_;
+  std::vector<std::pair<const Stmt*, RawBindInfo*>> rawStmtBinds_;
+  std::unordered_map<const Stmt*, bool> rawSafeStmts_;
+  RawBindInfo rawPlainSentinel_, rawGlobalSentinel_, rawShadowSentinel_;
+  bool rawInFnBody_ = true;
+  int rawModuleId_ = -1;
 
   // ---- small utilities -----------------------------------------------------
   void fail(const std::string& msg) {
@@ -787,6 +828,9 @@ declare i64 @a_bool(i64)
 declare i64 @a_type_name(i64)
 declare i64 @a_int_full(i64)
 declare i64 @a_i64n(i64)
+declare { i64, i1 } @llvm.sadd.with.overflow.i64(i64, i64)
+declare { i64, i1 } @llvm.ssub.with.overflow.i64(i64, i64)
+declare { i64, i1 } @llvm.smul.with.overflow.i64(i64, i64)
 declare i64 @a_str_new(ptr, i64)
 declare i64 @a_char_new(ptr, i64)
 declare i64 @a_str_concat(i64, i64)
@@ -1331,6 +1375,73 @@ slow:
   ret i64 %s
 }
 
+; Box an unboxed numeric {payload, isDouble} into an aval. Payload is the
+; int64 value when %d is false, the raw double bits when true.
+define internal i64 @a.boxnum(i64 %p, i1 %d) {
+  br i1 %d, label %dd, label %ii
+dd:
+  %db = bitcast i64 %p to double
+  %r = call i64 @a.mdouble(double %db)
+  ret i64 %r
+ii:
+  %ok = call i1 @a.inrange(i64 %p)
+  br i1 %ok, label %m, label %big
+m:
+  %r2 = call i64 @a.mint(i64 %p)
+  ret i64 %r2
+big:
+  %r3 = call i64 @a_i64n(i64 %p)
+  ret i64 %r3
+}
+
+; Inverse of a.boxnum for aval inputs: returns {payload, flag} where flag is
+; 1 for doubles. Handles inline ints, boxed T_INT64 (AInt64.v at payload+16),
+; plain doubles, and falls back to a_float for anything else (bool, numeric
+; strings); non-numeric values panic inside a_float like the boxed paths.
+define internal { i64, i64 } @a.unboxnum(i64 %v) {
+entry:
+  %isi = call i1 @a.isintv(i64 %v)
+  br i1 %isi, label %ii, label %nc
+ii:
+  %iv = call i64 @a.ival(i64 %v)
+  %r0 = insertvalue { i64, i64 } undef, i64 %iv, 0
+  %r1 = insertvalue { i64, i64 } %r0, i64 0, 1
+  ret { i64, i64 } %r1
+nc:
+  %notag = icmp ult i64 %v, -281474976710656
+  br i1 %notag, label %dd, label %tg
+dd:
+  %r2 = insertvalue { i64, i64 } undef, i64 %v, 0
+  %r3 = insertvalue { i64, i64 } %r2, i64 1, 1
+  ret { i64, i64 } %r3
+tg:
+  %pay = and i64 %v, 281474976710655
+  %al = and i64 %pay, 15
+  %nz = icmp ne i64 %pay, 0
+  %aln = icmp eq i64 %al, 0
+  %isp = and i1 %aln, %nz
+  br i1 %isp, label %obj, label %oth
+obj:
+  %op = inttoptr i64 %pay to ptr
+  %ty = load i32, ptr %op
+  %is64 = icmp eq i32 %ty, 11
+  br i1 %is64, label %i64, label %oth
+i64:
+  %vp = getelementptr i64, ptr %op, i64 2
+  %vv = load i64, ptr %vp
+  %r4 = insertvalue { i64, i64 } undef, i64 %vv, 0
+  %r5 = insertvalue { i64, i64 } %r4, i64 0, 1
+  ret { i64, i64 } %r5
+oth:
+  ; Non-numeric aval (string, bool, None, ...): keep it boxed — flag 2
+  ; means "payload slot holds an aval", which every numMode consumer
+  ; already handles via the boxed slow paths. Never panics, so generic or
+  ; dynamically-dispatched numeric params degrade to boxed semantics.
+  %r6 = insertvalue { i64, i64 } undef, i64 %v, 0
+  %r7 = insertvalue { i64, i64 } %r6, i64 2, 1
+  ret { i64, i64 } %r7
+}
+
 )LLVM";
   }
   static std::string hostTriple() {
@@ -1354,12 +1465,46 @@ slow:
     resetGlobalScope(f->moduleId);
     pushScope();
     bindModuleImports(f->moduleId);
+    analyzeFnRawSafety(f);
     int savedModule = curModuleId_;
     curModuleId_ = f->moduleId;
     inFunctionBody_ = true;
-    // Params: load argv[i+1] into a fresh i64 alloca each.
+    // Params: load argv[i+1] into a fresh alloca each. Sema-typed numeric
+    // params (Int/Float, no default) are unboxed once into {i64,i1} slots.
     std::vector<std::string> paramSlots;
+    std::size_t paramOffset =
+        f->paramNames.size() - (f->decl ? f->decl->params.size() : 0);
     for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
+      const ParamDecl* pd =
+          (f->decl && i >= paramOffset)
+              ? &f->decl->params[i - paramOffset]
+              : nullptr;
+      bool hasDefault = pd && pd->defaultValue;
+      TypePtr ptype =
+          (!hasDefault && pd) ? numericParamType(f, i - paramOffset)
+                              : nullptr;
+      if (ptype) {
+        std::string slot = alloca("i64");
+        std::string slotF = alloca("i64");
+        std::string g = T(), v = T();
+        emit("  " + g + " = getelementptr i64, ptr %argv, i64 " +
+             std::to_string(i + 1));
+        emit("  " + v + " = load i64, ptr " + g);
+        std::string un = T(), up = T(), uf = T();
+        emit("  " + un + " = call { i64, i64 } @a.unboxnum(i64 " + v + ")");
+        emit("  " + up + " = extractvalue { i64, i64 } " + un + ", 0");
+        emit("  " + uf + " = extractvalue { i64, i64 } " + un + ", 1");
+        emit("  store i64 " + up + ", ptr " + slot);
+        emit("  store i64 " + uf + ", ptr " + slotF);
+        paramSlots.push_back(slot);
+        LlBinding b;
+        b.kind = BKind::Param;
+        b.slot = slot;
+        b.slotF = slotF;
+        b.numMode = 1;
+        scopes_.back()[f->paramNames[i]] = b;
+        continue;
+      }
       std::string slot = alloca("i64");
       std::string g = T(), v = T();
       emit("  " + g + " = getelementptr i64, ptr %argv, i64 " +
@@ -1534,6 +1679,364 @@ slow:
     return "<unknown>";
   }
 
+  // ---- raw-numeric safety analysis (implementation) ------------------------
+  // Mirrors the emitter's scope/binding structure closely enough that an
+  // Ident in a write expression resolves to the same binding at analysis and
+  // emission time. Only stmt-level constructs that create or shadow bindings
+  // are modeled; expr-level scopes (match arms, comprehensions, lambda
+  // bodies) can never contain writes and are never entered by rawKind/rawNum,
+  // so they are skipped entirely. `++`/`--` writes are neutral: on a numMode
+  // binding they always store a kind-1 numArith result whose flag stays in
+  // {0,1} whenever the binding is already safe.
+  using RawEnv = std::unordered_map<std::string, RawBindInfo*>;
+
+  RawBindInfo* rawNewInfo(RawBindInfo::Cls cls) {
+    RawBindInfo& b = rawInfoArena_.emplace_back();
+    b.cls = cls;
+    return &b;
+  }
+  RawBindInfo* rawInfoForBinding(const LlBinding& b) {
+    switch (b.kind) {
+      case BKind::Global:
+      case BKind::FnValue:
+      case BKind::StructCtor:
+      case BKind::EnumValue:
+        return &rawGlobalSentinel_;
+      case BKind::Module:
+      case BKind::Builtin:
+      case BKind::NativeConst:
+      case BKind::PyFunc:
+      case BKind::PyModule:
+        return &rawShadowSentinel_;
+      default:
+        return &rawPlainSentinel_;
+    }
+  }
+  RawBindInfo* rawLookup(const std::string& name) {
+    for (auto it = rawFrames_.rbegin(); it != rawFrames_.rend(); ++it) {
+      auto f = (*it)->m.find(name);
+      if (f != (*it)->m.end()) return f->second;
+    }
+    return nullptr;
+  }
+  RawEnv rawMergeEnv() const {
+    RawEnv env;
+    for (auto it = rawFrames_.rbegin(); it != rawFrames_.rend(); ++it)
+      for (const auto& kv : (*it)->m) env.emplace(kv.first, kv.second);
+    return env;
+  }
+  void rawPush() {
+    rawFrameArena_.emplace_back();
+    rawFrames_.push_back(&rawFrameArena_.back());
+  }
+  void rawPop() {
+    RawFrame* f = rawFrames_.back();
+    if (!f->defers.empty()) {
+      // Deferred bodies run at scope exit while the exiting frame is still
+      // visible; their own bindings are dead afterwards.
+      rawPush();
+      for (auto it = f->defers.rbegin(); it != f->defers.rend(); ++it)
+        if (*it) rawWalkStmt(**it);
+      rawPop();
+    }
+    rawFrames_.pop_back();
+  }
+
+  void beginRawAnalysis(bool inFnBody, int moduleId) {
+    rawFrameArena_.clear();
+    rawInfoArena_.clear();
+    rawFrames_.clear();
+    rawCands_.clear();
+    rawStmtBinds_.clear();
+    rawSafeStmts_.clear();
+    rawPlainSentinel_ = RawBindInfo();
+    rawPlainSentinel_.cls = RawBindInfo::kPlain;
+    rawGlobalSentinel_ = RawBindInfo();
+    rawGlobalSentinel_.cls = RawBindInfo::kGlobal;
+    rawShadowSentinel_ = RawBindInfo();
+    rawShadowSentinel_.cls = RawBindInfo::kShadow;
+    rawInFnBody_ = inFnBody;
+    rawModuleId_ = moduleId;
+    // Snapshot the emitter's current scopes (global scope + function frame
+    // with module imports) so non-local names resolve identically.
+    for (const auto& frame : scopes_) {
+      rawFrameArena_.emplace_back();
+      RawFrame& rf = rawFrameArena_.back();
+      for (const auto& kv : frame) rf.m[kv.first] = rawInfoForBinding(kv.second);
+      rawFrames_.push_back(&rf);
+    }
+  }
+  void finishRawAnalysis() {
+    // Function/module-level defers run at the end of the body.
+    if (!rawFrames_.empty()) {
+      RawFrame* top = rawFrames_.back();
+      if (!top->defers.empty()) {
+        rawPush();
+        for (auto it = top->defers.rbegin(); it != top->defers.rend(); ++it)
+          if (*it) rawWalkStmt(**it);
+        rawPop();
+      }
+    }
+    // Greatest-fixpoint: start optimistic (kSafe) and downgrade only.
+    auto rank = [](RawBindInfo::State s) {
+      return s == RawBindInfo::kSafe    ? 2
+             : s == RawBindInfo::kUnsafe ? 1
+                                         : 0;
+    };
+    bool changed = true;
+    while (changed) {
+      changed = false;
+      for (RawBindInfo* c : rawCands_) {
+        RawBindInfo::State ns = rawClassify(*c);
+        if (rank(ns) < rank(c->state)) {
+          c->state = ns;
+          changed = true;
+        }
+      }
+    }
+    for (const auto& pr : rawStmtBinds_)
+      rawSafeStmts_[pr.first] = pr.second->state == RawBindInfo::kSafe;
+  }
+  void analyzeFnRawSafety(FnInfo* f) {
+    beginRawAnalysis(true, f->moduleId);
+    rawSeedParams(f);
+    if (f->decl) rawWalkStmts(f->decl->body);
+    finishRawAnalysis();
+  }
+  void analyzeModRawSafety(int moduleId, const std::vector<StmtPtr>& body) {
+    beginRawAnalysis(false, moduleId);
+    rawWalkStmts(body);
+    finishRawAnalysis();
+  }
+  bool rawStmtSafe(const Stmt* s) const {
+    auto it = rawSafeStmts_.find(s);
+    return it != rawSafeStmts_.end() && it->second;
+  }
+
+  // Seed parameter bindings exactly like emitFunction's param loop:
+  // sema-typed numeric params without defaults become unboxed numMode
+  // bindings (always unsafe — @a.unboxnum may yield flag 2); everything
+  // else is a plain aval slot.
+  void rawSeedParams(FnInfo* f) {
+    if (rawFrames_.empty()) return;
+    std::size_t poff =
+        f->paramNames.size() - (f->decl ? f->decl->params.size() : 0);
+    for (std::size_t i = 0; i < f->paramNames.size(); ++i) {
+      const ParamDecl* pd =
+          (f->decl && i >= poff) ? &f->decl->params[i - poff] : nullptr;
+      bool hasDefault = pd && pd->defaultValue;
+      TypePtr ptype =
+          (!hasDefault && pd) ? numericParamType(f, i - poff) : nullptr;
+      if (ptype) {
+        RawBindInfo* b = rawNewInfo(RawBindInfo::kCand);
+        b->isParam = true;
+        b->state = RawBindInfo::kUnsafe;
+        rawCands_.push_back(b);
+        rawFrames_.back()->m[f->paramNames[i]] = b;
+      } else {
+        rawFrames_.back()->m[f->paramNames[i]] = &rawPlainSentinel_;
+      }
+    }
+  }
+
+  void rawWalkStmts(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& s : stmts)
+      if (s) rawWalkStmt(*s);
+  }
+  void rawWalkStmt(const Stmt& s) {
+    switch (s.kind) {
+      case StmtKind::Let: rawWalkLet(static_cast<const LetStmt&>(s)); break;
+      case StmtKind::Assign:
+        rawWalkAssign(static_cast<const AssignStmt&>(s));
+        break;
+      case StmtKind::Destructure: {
+        const auto& d = static_cast<const DestructureStmt&>(s);
+        for (const std::string& nm : d.names)
+          if (nm != "_") rawFrames_.back()->m[nm] = &rawPlainSentinel_;
+        break;
+      }
+      case StmtKind::Defer:
+        rawFrames_.back()->defers.push_back(
+            static_cast<const DeferStmt&>(s).body.get());
+        break;
+      case StmtKind::If: {
+        const auto& x = static_cast<const IfStmt&>(s);
+        for (const auto& br : x.branches) {
+          rawPush();
+          rawWalkStmts(br.body);
+          rawPop();
+        }
+        if (!x.elseBody.empty()) {
+          rawPush();
+          rawWalkStmts(x.elseBody);
+          rawPop();
+        }
+        break;
+      }
+      case StmtKind::While:
+      case StmtKind::DoWhile:
+      case StmtKind::Loop: {
+        rawPush();
+        if (s.kind == StmtKind::While)
+          rawWalkStmts(static_cast<const WhileStmt&>(s).body);
+        else if (s.kind == StmtKind::DoWhile)
+          rawWalkStmts(static_cast<const DoWhileStmt&>(s).body);
+        else
+          rawWalkStmts(static_cast<const LoopStmt&>(s).body);
+        rawPop();
+        break;
+      }
+      case StmtKind::For: {
+        const auto& x = static_cast<const ForStmt&>(s);
+        rawPush();
+        rawFrames_.back()->m[x.var] = &rawPlainSentinel_;
+        rawWalkStmts(x.body);
+        rawPop();
+        break;
+      }
+      default:
+        break;  // exprs/declarations/imports: no binding writes
+    }
+  }
+  void rawWalkLet(const LetStmt& let) {
+    // Module-init lets matching a top-level global store into the global
+    // slot, not a local (mirrors emitLet).
+    if (!rawInFnBody_) {
+      std::string key = std::to_string(rawModuleId_) + ":" + let.name;
+      if (topLevelGlobals_.find(key) != topLevelGlobals_.end()) {
+        rawFrames_.back()->m[let.name] = &rawGlobalSentinel_;
+        return;
+      }
+    }
+    RawBindInfo* b = rawNewInfo(RawBindInfo::kCand);
+    b->init = let.init ? let.init.get() : nullptr;
+    b->initEnv = rawMergeEnv();
+    rawFrames_.back()->m[let.name] = b;
+    rawCands_.push_back(b);
+    rawStmtBinds_.emplace_back(static_cast<const Stmt*>(&let), b);
+  }
+  void rawWalkAssign(const AssignStmt& as) {
+    if (as.target->kind != ExprKind::Ident) return;
+    const std::string& nm =
+        static_cast<const IdentExpr*>(as.target.get())->name;
+    RawBindInfo* b = rawLookup(nm);
+    if (as.op == "=") {
+      if (b && b->cls == RawBindInfo::kCand) {
+        RawWrite w;
+        w.e = as.value ? as.value.get() : nullptr;
+        w.env = rawMergeEnv();
+        b->writes.push_back(std::move(w));
+        return;
+      }
+      if (b && (b->cls == RawBindInfo::kPlain ||
+                b->cls == RawBindInfo::kGlobal))
+        return;  // plain local / global value: not a numMode write
+      // kShadow (module/builtin/...) or unresolved: the emitter drops the
+      // binding and declares a fresh local shadowing it.
+      if (!rawInFnBody_) return;  // module level: global store or error
+      // Bare `name = v` in a function body declares a new local.
+      RawBindInfo* nb = rawNewInfo(RawBindInfo::kCand);
+      nb->init = as.value ? as.value.get() : nullptr;
+      nb->initEnv = rawMergeEnv();
+      rawFrames_.back()->m[nm] = nb;
+      rawCands_.push_back(nb);
+      rawStmtBinds_.emplace_back(static_cast<const Stmt*>(&as), nb);
+      return;
+    }
+    // Compound assignment: a write only when the target is a candidate.
+    if (b && b->cls == RawBindInfo::kCand) {
+      RawWrite w;
+      w.e = as.value ? as.value.get() : nullptr;
+      w.cop = as.binop;
+      w.env = rawMergeEnv();
+      b->writes.push_back(std::move(w));
+    }
+  }
+
+  // evalRaw-kind mirror: 1 iff evalRaw(e) yields kind 1 (unboxed numeric),
+  // 0 otherwise. Ident resolution uses the frozen per-write env.
+  int rawKind(const Expr* e, const RawEnv& env) {
+    if (!e) return 0;
+    switch (e->kind) {
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+        return 1;
+      case ExprKind::Ident:
+        return rawIdentNum(e, env) ? 1 : 0;
+      case ExprKind::Unary: {
+        const auto& u = static_cast<const UnaryExpr&>(*e);
+        if (u.op == "++" || u.op == "--") {
+          if (u.operand->kind != ExprKind::Ident) return 0;
+          return rawIdentNum(u.operand.get(), env) ? 1 : 0;
+        }
+        if (u.op == "-" || u.op == "~") return rawKind(u.operand.get(), env);
+        return 0;  // "not" -> kind 2, "!"/others -> boxed
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(*e);
+        if (!rawArithOp(b.binop)) return 0;
+        return rawKind(b.lhs.get(), env) && rawKind(b.rhs.get(), env) ? 1 : 0;
+      }
+      default:
+        return 0;
+    }
+  }
+  bool rawIdentNum(const Expr* e, const RawEnv& env) {
+    auto it = env.find(static_cast<const IdentExpr*>(e)->name);
+    if (it == env.end() || !it->second) return false;
+    const RawBindInfo* b = it->second;
+    return b->cls == RawBindInfo::kCand && b->state != RawBindInfo::kNotNum;
+  }
+  // evalRaw-kind-1 AND flag provably in {0,1}: safe to feed raw ops and to
+  // store into a numMode binding without ever producing flag==2.
+  bool rawNum(const Expr* e, const RawEnv& env) {
+    if (!e) return false;
+    switch (e->kind) {
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+        return true;
+      case ExprKind::Ident: {
+        auto it = env.find(static_cast<const IdentExpr*>(e)->name);
+        if (it == env.end() || !it->second) return false;
+        const RawBindInfo* b = it->second;
+        return b->cls == RawBindInfo::kCand && b->state == RawBindInfo::kSafe;
+      }
+      case ExprKind::Unary: {
+        const auto& u = static_cast<const UnaryExpr&>(*e);
+        if (u.op == "++" || u.op == "--") {
+          if (u.operand->kind != ExprKind::Ident) return false;
+          auto it = env.find(
+              static_cast<const IdentExpr*>(u.operand.get())->name);
+          if (it == env.end() || !it->second) return false;
+          const RawBindInfo* b = it->second;
+          return b->cls == RawBindInfo::kCand &&
+                 b->state == RawBindInfo::kSafe;
+        }
+        if (u.op == "-" || u.op == "~") return rawNum(u.operand.get(), env);
+        return false;
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(*e);
+        if (!rawArithOp(b.binop)) return false;
+        return rawNum(b.lhs.get(), env) && rawNum(b.rhs.get(), env);
+      }
+      default:
+        return false;
+    }
+  }
+  RawBindInfo::State rawClassify(RawBindInfo& b) {
+    if (b.isParam) return RawBindInfo::kUnsafe;
+    if (rawKind(b.init, b.initEnv) == 0) return RawBindInfo::kNotNum;
+    if (!rawNum(b.init, b.initEnv)) return RawBindInfo::kUnsafe;
+    for (const RawWrite& w : b.writes) {
+      bool ok = w.cop == BinOp::Invalid
+                    ? rawNum(w.e, w.env)
+                    : (rawArithOp(w.cop) && rawNum(w.e, w.env));
+      if (!ok) return RawBindInfo::kUnsafe;
+    }
+    return RawBindInfo::kSafe;
+  }
+
   // ---- statements ------------------------------------------------------------
   void emitStmts(const std::vector<StmtPtr>& stmts) {
     for (const StmtPtr& s : stmts) {
@@ -1606,13 +2109,13 @@ slow:
   }
 
   void emitLet(const LetStmt& let) {
-    std::string v = let.init ? eval(let.init.get()) : kNone;
+    RVal rv = evalRaw(let.init.get());
     FnInfo* dropFn = dropFnFor(let.init.get());
     // Top-level lets in a module init store into their global slot.
     if (curModuleId_ >= 0 && !inFunctionBody_) {
       auto it = topLevelGlobals_.find(std::to_string(curModuleId_) + ":" + let.name);
       if (it != topLevelGlobals_.end()) {
-        emit("  store i64 " + v + ", ptr @" + it->second);
+        emit("  store i64 " + boxRVal(rv) + ", ptr @" + it->second);
         LlBinding b;
         b.kind = BKind::Global;
         b.sym = it->second;
@@ -1622,6 +2125,24 @@ slow:
         return;
       }
     }
+    if (rv.kind == 1) {
+      // Unboxed numeric local: {i64 payload, i64 tri-state flag} allocas.
+      std::string slot = alloca("i64");
+      std::string slotF = alloca("i64");
+      emit("  store i64 " + rv.v + ", ptr " + slot);
+      emit("  store i64 " + rv.f + ", ptr " + slotF);
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = slot;
+      b.slotF = slotF;
+      b.numMode = 1;
+      b.rawSafe = rawStmtSafe(&let);
+      b.dropFn = dropFn;
+      bind(let.name, b);
+      recordDrop(b, dropFn);
+      return;
+    }
+    std::string v = boxRVal(rv);
     std::string slot = alloca("i64");
     emit("  store i64 " + v + ", ptr " + slot);
     LlBinding b;
@@ -1635,95 +2156,195 @@ slow:
 
   void emitAssign(const AssignStmt& as) {
     const Expr* target = as.target.get();
-    std::string v;
-    if (as.op == "=") {
-      v = eval(as.value.get());
-    } else {
-      // Compound assign: target op= value.
-      std::string cur;
-      if (target->kind == ExprKind::Ident) {
-        const std::string& nm = static_cast<const IdentExpr*>(target)->name;
-        LlBinding* b = lookup(nm);
-        if (!b) { fail("undefined variable '" + nm + "'"); return; }
-        cur = bindingValue(*b);
-      } else {
-        cur = eval(target);
+    auto dropOld = [&](LlBinding& b) {
+      if (b.dropFn &&
+          (b.kind == BKind::Local || b.kind == BKind::Param ||
+           b.kind == BKind::Global)) {
+        if (DropRec* old = findDropRec(b)) emitDropRec(*old);
       }
-      std::string rv = eval(as.value.get());
-      v = binopValue(as.binop, cur, rv, as.opSpan);
-      if (v.empty()) return;
+    };
+    auto updateDrop = [&](LlBinding& b) {
+      FnInfo* newDrop = dropFnFor(as.value.get());
+      b.dropFn = newDrop;
+      if (DropRec* rec = findDropRec(b)) {
+        rec->fn = newDrop;
+      } else {
+        recordDrop(b, newDrop);
+      }
+    };
+    if (as.op == "=") {
+      RVal rv = evalRaw(as.value.get());
+      if (target->kind == ExprKind::Ident) {
+        const std::string& nm =
+            static_cast<const IdentExpr*>(target)->name;
+        LlBinding* b = lookup(nm);
+        // Non-lvalue bindings (module/native/builtin/python names) do not
+        // accept assignment: a bare `name = v` shadows them with a new local
+        // (mirrors Python-style rebinding; fixes `dirs = []` shadowing the
+        // `dirs` module stem).
+        if (b && (b->kind == BKind::Module || b->kind == BKind::NativeConst ||
+                  b->kind == BKind::Builtin || b->kind == BKind::PyFunc ||
+                  b->kind == BKind::PyModule))
+          b = nullptr;
+        if (!b) {
+          // Bare `name = v` in a function body declares a new local
+          // (Python-style); at module level it targets the global slot.
+          if (inFunctionBody_) {
+            if (rv.kind == 1) {
+              std::string slot = alloca("i64");
+              std::string slotF = alloca("i64");
+              emit("  store i64 " + rv.v + ", ptr " + slot);
+              emit("  store i64 " + rv.f + ", ptr " + slotF);
+              LlBinding nb;
+              nb.kind = BKind::Local;
+              nb.slot = slot;
+              nb.slotF = slotF;
+              nb.numMode = 1;
+              nb.rawSafe = rawStmtSafe(&as);
+              nb.dropFn = dropFnFor(as.value.get());
+              bind(nm, nb);
+              recordDrop(nb, nb.dropFn);
+              return;
+            }
+            std::string slot = alloca("i64");
+            emit("  store i64 " + boxRVal(rv) + ", ptr " + slot);
+            LlBinding nb;
+            nb.kind = BKind::Local;
+            nb.slot = slot;
+            nb.dropFn = dropFnFor(as.value.get());
+            bind(nm, nb);
+            recordDrop(nb, nb.dropFn);
+            return;
+          }
+          if (curModuleId_ >= 0) {
+            auto it = topLevelGlobals_.find(
+                std::to_string(curModuleId_) + ":" + nm);
+            if (it != topLevelGlobals_.end()) {
+              emit("  store i64 " + boxRVal(rv) + ", ptr @" + it->second);
+              LlBinding gb;
+              gb.kind = BKind::Global;
+              gb.sym = it->second;
+              gb.dropFn = dropFnFor(as.value.get());
+              bind(nm, gb);
+              recordDrop(gb, gb.dropFn);
+              return;
+            }
+          }
+          fail("undefined variable '" + nm + "'");
+          return;
+        }
+        // RAII: drop the previous owned value before overwriting (the new
+        // value was already evaluated above, matching AsmEmitter ordering).
+        dropOld(*b);
+        if (isNumBinding(*b)) {
+          if (rv.kind == 1) {
+            storeNumBinding(*b, rv);
+          } else {
+            // Non-numeric (or boxed) value: keep numMode, store aval+flag2.
+            storeNumBoxed(*b, boxRVal(rv));
+          }
+        } else if (b->kind == BKind::Global || b->kind == BKind::FnValue ||
+                   b->kind == BKind::StructCtor || b->kind == BKind::EnumValue) {
+          emit("  store i64 " + boxRVal(rv) + ", ptr @" + b->sym);
+        } else {
+          emit("  store i64 " + boxRVal(rv) + ", ptr " + b->slot);
+        }
+        updateDrop(*b);
+        return;
+      }
+      std::string v = boxRVal(rv);
+      if (target->kind == ExprKind::Index) {
+        const IndexExpr& ix = static_cast<const IndexExpr&>(*target);
+        std::string obj = eval(ix.object.get());
+        std::string idx = eval(ix.index.get());
+        callRt("a_setitem", {obj, idx, v});
+      } else if (target->kind == ExprKind::Field) {
+        const FieldExpr& f = static_cast<const FieldExpr&>(*target);
+        // `mod.member = v` stores into the member module's global slot.
+        if (f.object->kind == ExprKind::Ident) {
+          LlBinding* mb = lookup(
+              static_cast<const IdentExpr*>(f.object.get())->name);
+          if (mb && mb->kind == BKind::Module) {
+            std::string gsym = moduleMemberGlobal(*mb, f.field);
+            if (!gsym.empty()) {
+              emit("  store i64 " + v + ", ptr @" + gsym);
+              return;
+            }
+          }
+        }
+        std::string obj = eval(f.object.get());
+        callRtA("a_setattr", "ipi", {obj, cstrGlobal(f.field, true), v});
+      } else {
+        fail("unsupported assignment target");
+      }
+      return;
     }
-    // Store back.
+    // Compound assignment: target op= value.
     if (target->kind == ExprKind::Ident) {
       const std::string& nm = static_cast<const IdentExpr*>(target)->name;
       LlBinding* b = lookup(nm);
-      // Non-lvalue bindings (module/native/builtin/python names) do not
-      // accept assignment: a bare `name = v` shadows them with a new local
-      // (mirrors Python-style rebinding; fixes `dirs = []` shadowing the
-      // `dirs` module stem).
-      if (b && (b->kind == BKind::Module || b->kind == BKind::NativeConst ||
-                b->kind == BKind::Builtin || b->kind == BKind::PyFunc ||
-                b->kind == BKind::PyModule))
-        b = nullptr;
-      if (!b) {
-        // Bare `name = v` in a function body declares a new local
-        // (Python-style); at module level it targets the global slot.
-        if (inFunctionBody_) {
-          std::string slot = alloca("i64");
-          emit("  store i64 " + v + ", ptr " + slot);
-          LlBinding nb;
-          nb.kind = BKind::Local;
-          nb.slot = slot;
-          nb.dropFn = dropFnFor(as.value.get());
-          bind(nm, nb);
-          recordDrop(nb, nb.dropFn);
-          return;
-        }
-        if (curModuleId_ >= 0) {
-          auto it = topLevelGlobals_.find(std::to_string(curModuleId_) + ":" + nm);
-          if (it != topLevelGlobals_.end()) {
-            emit("  store i64 " + v + ", ptr @" + it->second);
-            LlBinding gb;
-            gb.kind = BKind::Global;
-            gb.sym = it->second;
-            gb.dropFn = dropFnFor(as.value.get());
-            bind(nm, gb);
-            recordDrop(gb, gb.dropFn);
-            return;
+      if (!b) { fail("undefined variable '" + nm + "'"); return; }
+      if (isNumBinding(*b)) {
+        RVal cur = loadNumBinding(*b);
+        RVal rhs = evalRaw(as.value.get());
+        RVal res = numArith(as.binop, cur, rhs);
+        if (res.kind == 1) {
+          storeNumBinding(*b, res);
+        } else {
+          std::string bv;
+          if (res.kind == 0) {
+            bv = res.v;
+          } else if (res.kind == -1 || res.kind == 2) {
+            // No raw path (In/NotIn/Range or non-fast op): boxed stmt-level
+            // semantics, then demote the binding.
+            std::string cb = boxRVal(cur), rb2 = boxRVal(rhs);
+            if (const char* sym = binopSym(as.binop)) {
+              bv = callRt(sym, {cb, rb2});
+            } else if (as.binop == BinOp::In) {
+              bv = callRt("a_contains", {rb2, cb});
+            } else if (as.binop == BinOp::NotIn) {
+              bv = callRt("a.not.fast",
+                          {callRt("a_contains", {rb2, cb})});
+            } else if (as.binop == BinOp::Range) {
+              bv = callRt("a_range_new", {cb, rb2, avalIntLit(1)});
+            } else {
+              fail("unsupported binary operator in assignment");
+              return;
+            }
+          } else {
+            bv = boxRVal(res);
           }
+          storeNumBoxed(*b, bv);
         }
-        fail("undefined variable '" + nm + "'");
+        updateDrop(*b);
         return;
       }
-      // RAII: drop the previous owned value before overwriting (the new
-      // value was already evaluated above, matching AsmEmitter ordering).
-      if (b->dropFn &&
-          (b->kind == BKind::Local || b->kind == BKind::Param ||
-           b->kind == BKind::Global)) {
-        if (DropRec* old = findDropRec(*b)) emitDropRec(*old);
-      }
+      // Boxed binding: existing path.
+      std::string cur = bindingValue(*b);
+      std::string rv = eval(as.value.get());
+      std::string v = binopValue(as.binop, cur, rv, as.opSpan);
+      if (v.empty()) return;
+      dropOld(*b);
       if (b->kind == BKind::Global || b->kind == BKind::FnValue ||
           b->kind == BKind::StructCtor || b->kind == BKind::EnumValue) {
         emit("  store i64 " + v + ", ptr @" + b->sym);
       } else {
         emit("  store i64 " + v + ", ptr " + b->slot);
       }
-      // Update this binding's pending drop record in place, or register one.
-      FnInfo* newDrop = dropFnFor(as.value.get());
-      b->dropFn = newDrop;
-      if (DropRec* rec = findDropRec(*b)) {
-        rec->fn = newDrop;
-      } else {
-        recordDrop(*b, newDrop);
-      }
-    } else if (target->kind == ExprKind::Index) {
+      updateDrop(*b);
+      return;
+    }
+    std::string cur = eval(target);
+    std::string rv = eval(as.value.get());
+    std::string v = binopValue(as.binop, cur, rv, as.opSpan);
+    if (v.empty()) return;
+    if (target->kind == ExprKind::Index) {
       const IndexExpr& ix = static_cast<const IndexExpr&>(*target);
       std::string obj = eval(ix.object.get());
       std::string idx = eval(ix.index.get());
       callRt("a_setitem", {obj, idx, v});
     } else if (target->kind == ExprKind::Field) {
       const FieldExpr& f = static_cast<const FieldExpr&>(*target);
-      // `mod.member = v` stores into the member module's global slot.
       if (f.object->kind == ExprKind::Ident) {
         LlBinding* mb = lookup(
             static_cast<const IdentExpr*>(f.object.get())->name);
@@ -1761,9 +2382,7 @@ slow:
     std::string end = newLabel("ifend");
     for (std::size_t i = 0; i < s.branches.size(); ++i) {
       const auto& br = s.branches[i];
-      std::string cv = eval(br.cond.get());
-      std::string t = T();
-      emit("  " + t + " = call i1 @a.truthy(i64 " + cv + ")");
+      std::string t = condI1(br.cond.get());
       std::string lThen = newLabel("ifb"), lNext = newLabel("ifn");
       emit("  br i1 " + t + ", label %" + lThen + ", label %" + lNext);
       emit("  " + lThen + ":");
@@ -1796,9 +2415,7 @@ slow:
     loopDeferDepth_.push_back((int)deferStack_.size());
     emit("  br label %" + cond);
     emit("  " + cond + ":");
-    std::string cv = eval(s.cond.get());
-    std::string t = T();
-    emit("  " + t + " = call i1 @a.truthy(i64 " + cv + ")");
+    std::string t = condI1(s.cond.get());
     emit("  br i1 " + t + ", label %" + body + ", label %" + end);
     emit("  " + body + ":");
     pushScope();
@@ -1830,9 +2447,7 @@ slow:
     term_ = false;
     popScope();
     emit("  " + cond + ":");
-    std::string cv = eval(s.cond.get());
-    std::string t = T();
-    emit("  " + t + " = call i1 @a.truthy(i64 " + cv + ")");
+    std::string t = condI1(s.cond.get());
     emit("  br i1 " + t + ", label %" + body + ", label %" + end);
     emit("  " + end + ":");
     loopBreak_.pop_back();
@@ -1903,8 +2518,12 @@ slow:
   }
 
   // ---- expressions -------------------------------------------------------------
-  // eval returns an LLVM value name ("%tN") or an integer constant.
-  std::string eval(const Expr* e) {
+  // eval returns an LLVM value name ("%tN") or an integer constant: always a
+  // boxed aval (i64). evalRaw is the numeric fast path — see below.
+  std::string eval(const Expr* e) { return boxRVal(evalRaw(e)); }
+  // Former boxed-only evaluator; subexpression eval() calls still route
+  // through evalRaw so nested numerics stay fast up to the boxing boundary.
+  std::string evalFallback(const Expr* e) {
     if (!e) return kNone;
     switch (e->kind) {
       case ExprKind::IntLit:
@@ -2047,12 +2666,16 @@ slow:
     return kNone;
   }
 
-  // Load the aval value a binding refers to.
+  // Load the aval value a binding refers to (boxes numMode bindings).
   std::string bindingValue(const LlBinding& b) {
     switch (b.kind) {
       case BKind::Local:
       case BKind::Param:
       case BKind::Capture: {
+        if (isNumBinding(b)) {
+          RVal r = loadNumBinding(b);
+          return boxRVal(r);
+        }
         std::string r = T();
         emit("  " + r + " = load i64, ptr " + b.slot);
         return r;
@@ -2160,6 +2783,960 @@ slow:
     if (op == BinOp::Range) return callRt("a_range_new", {l, r, avalIntLit(1)});
     fail("unsupported binary operator in assignment");
     return "";
+  }
+
+  // ---- unboxed numeric values -------------------------------------------------
+  // RVal is the raw counterpart of eval(): kind 0 = boxed aval (i64, `v`),
+  // kind 1 = unboxed number (`v` = i64 payload, `f` = i1 is-double flag; an
+  // int payload is the int64 value, a double payload is the raw double bits),
+  // kind 2 = i1 boolean (`v`). kind -1 = "unsupported, use the boxed path".
+  struct RVal {
+    int kind = 0;
+    std::string v;
+    std::string f;
+    bool safe = false;  // kind 1: flag provably never 2 (boxed aval in slot)
+  };
+  static RVal rvBoxed(const std::string& v) { return {0, v, "", false}; }
+  static RVal rvNum(const std::string& v, const std::string& f) {
+    return {1, v, f, true};
+  }
+  static RVal rvBool(const std::string& v) { return {2, v, "", false}; }
+  static RVal rvBad() { return {-1, "", "", false}; }
+
+  // Box any RVal into an aval i64 (emits code for non-trivial kinds).
+  std::string boxRVal(const RVal& r) {
+    if (r.kind == 0) return r.v;
+    if (r.kind == 2) {
+      std::string t = T();
+      emit("  " + t + " = select i1 " + r.v + ", i64 " + kTrue +
+           ", i64 " + kFalse);
+      return t;
+    }
+    return numToAval(r.v, r.f, r.safe);
+  }
+  // Load a numMode binding as a raw RVal. flag==2 means the payload slot
+  // currently holds a boxed aval; consumers must check for it unless the
+  // binding was proven raw-safe by the per-function pre-pass.
+  RVal loadNumBinding(const LlBinding& b) {
+    RVal r;
+    r.kind = 1;
+    r.v = T();
+    emit("  " + r.v + " = load i64, ptr " + b.slot);
+    r.f = T();
+    emit("  " + r.f + " = load i64, ptr " + b.slotF);
+    r.safe = b.rawSafe;
+    return r;
+  }
+  void storeNumBinding(const LlBinding& b, const RVal& r) {
+    emit("  store i64 " + r.v + ", ptr " + b.slot);
+    emit("  store i64 " + r.f + ", ptr " + b.slotF);
+  }
+  // Store a boxed aval into a numMode binding (flag = 2).
+  void storeNumBoxed(const LlBinding& b, const std::string& v) {
+    emit("  store i64 " + v + ", ptr " + b.slot);
+    emit("  store i64 2, ptr " + b.slotF);
+  }
+  // aval for a possibly-boxed-in-slot numeric payload: flag==2 -> payload is
+  // already an aval; otherwise boxnum(payload, flag==1). When `safe` the flag
+  // is provably never 2, so the boxed branch is skipped entirely.
+  std::string numToAval(const std::string& p, const std::string& f,
+                        bool safe) {
+    if (safe) {
+      std::string fi = T(), bn = T();
+      emit("  " + fi + " = icmp eq i64 " + f + ", 1");
+      emit("  " + bn + " = call i64 @a.boxnum(i64 " + p + ", i1 " + fi + ")");
+      return bn;
+    }
+    std::string isB = T(), lB = newLabel("ntb"), lN = newLabel("ntn"),
+                lEnd = newLabel("nte");
+    emit("  " + isB + " = icmp eq i64 " + f + ", 2");
+    emit("  br i1 " + isB + ", label %" + lB + ", label %" + lN);
+    std::string phi = alloca("i64");
+    emit("  " + lB + ":");
+    emit("  store i64 " + p + ", ptr " + phi);
+    emit("  br label %" + lEnd);
+    emit("  " + lN + ":");
+    std::string fi = T(), bn = T();
+    emit("  " + fi + " = icmp eq i64 " + f + ", 1");
+    emit("  " + bn + " = call i64 @a.boxnum(i64 " + p + ", i1 " + fi + ")");
+    emit("  store i64 " + bn + ", ptr " + phi);
+    emit("  br label %" + lEnd);
+    emit("  " + lEnd + ":");
+    std::string r = T();
+    emit("  " + r + " = load i64, ptr " + phi);
+    return r;
+  }
+  bool isNumBinding(const LlBinding& b) const {
+    return b.numMode == 1 &&
+           (b.kind == BKind::Local || b.kind == BKind::Param ||
+            b.kind == BKind::Capture);
+  }
+  // Sema-resolved numeric parameter type (Int or Float), nullptr otherwise.
+  TypePtr numericParamType(const FnInfo* f, std::size_t declIdx) {
+    if (!f->decl) return nullptr;
+    auto it = sema_.fnParamTypes.find(f->decl);
+    if (it == sema_.fnParamTypes.end() || declIdx >= it->second.size())
+      return nullptr;
+    TypePtr t = resolveType(it->second[declIdx]);
+    if (!t) return nullptr;
+    if (t->kind == TypeKind::Int || t->kind == TypeKind::Float) return t;
+    return nullptr;
+  }
+
+  // evalRaw: boxed eval() plus a raw numeric fast path for literals,
+  // identifiers bound to numMode slots, unary/binary numeric ops.
+  RVal evalRaw(const Expr* e) {
+    if (!e) return rvBoxed(kNone);
+    switch (e->kind) {
+      case ExprKind::IntLit:
+        return rvNum(std::to_string(
+                         static_cast<const IntLitExpr*>(e)->value),
+                     "0");
+      case ExprKind::FloatLit:
+        return rvNum(avalDoubleLit(static_cast<const FloatLitExpr*>(e)->value),
+                     "1");
+      case ExprKind::BoolLit:
+        return rvBool(static_cast<const BoolLitExpr*>(e)->value ? "true"
+                                                                : "false");
+      case ExprKind::Ident:
+        return evalRawIdent(*static_cast<const IdentExpr*>(e));
+      case ExprKind::Unary:
+        return evalRawUnary(*static_cast<const UnaryExpr*>(e), e);
+      case ExprKind::Binary:
+        return evalRawBinary(*static_cast<const BinaryExpr*>(e), e);
+      default:
+        break;
+    }
+    return rvBoxed(evalFallback(e));
+  }
+
+  RVal evalRawIdent(const IdentExpr& x) {
+    LlBinding* b = lookup(x.name);
+    if (b && isNumBinding(*b)) return loadNumBinding(*b);
+    return rvBoxed(evalIdent(x));
+  }
+
+  RVal evalRawUnary(const UnaryExpr& x, const Expr* e) {
+    if (x.op == "++" || x.op == "--") {
+      if (x.operand->kind != ExprKind::Ident) return rvBoxed(evalFallback(e));
+      const std::string& nm =
+          static_cast<const IdentExpr*>(x.operand.get())->name;
+      LlBinding* b = lookup(nm);
+      if (!b || !isNumBinding(*b)) return rvBoxed(evalFallback(e));
+      RVal cur = loadNumBinding(*b);
+      RVal one = rvNum("1", "0");
+      RVal res = numArith(x.op == "++" ? BinOp::Add : BinOp::Sub, cur, one);
+      if (res.kind == 1) {
+        storeNumBinding(*b, res);
+        return x.postfix ? cur : res;
+      }
+      // Defensive: boxed results (flag==2 aval) are stored back raw-safe.
+      std::string bv = res.kind == 0 ? res.v : boxRVal(res);
+      storeNumBoxed(*b, bv);
+      return x.postfix ? rvBoxed(boxRVal(cur)) : rvBoxed(bv);
+    }
+    if (x.op == "-" || x.op == "~" || x.op == "not") {
+      RVal v = evalRaw(x.operand.get());
+      if (v.kind != 1) return rvBoxed(evalFallback(e));
+      if (x.op == "-") return numNeg(v);
+      if (x.op == "~") return numBNot(v);
+      return numNot(v);
+    }
+    return rvBoxed(evalFallback(e));
+  }
+
+  RVal evalRawBinary(const BinaryExpr& x, const Expr* e) {
+    switch (x.binop) {
+      case BinOp::Add:
+      case BinOp::Sub:
+      case BinOp::Mul:
+      case BinOp::Div:
+      case BinOp::FloorDiv:
+      case BinOp::Mod:
+      case BinOp::BitAnd:
+      case BinOp::BitOr:
+      case BinOp::BitXor:
+      case BinOp::Shl:
+      case BinOp::Shr:
+        break;
+      case BinOp::Eq:
+      case BinOp::Ne:
+      case BinOp::Lt:
+      case BinOp::Le:
+      case BinOp::Gt:
+      case BinOp::Ge: {
+        RVal l = evalRaw(x.lhs.get());
+        RVal r = evalRaw(x.rhs.get());
+        return numCmp(x.binop, l, r);
+      }
+      default:
+        return rvBoxed(evalFallback(e));
+    }
+    RVal l = evalRaw(x.lhs.get());
+    RVal r = evalRaw(x.rhs.get());
+    return numArith(x.binop, l, r);
+  }
+
+  // ---- raw numeric ops ---------------------------------------------------------
+  // Phi-alloca pair used to merge {payload, flag} across branches.
+  struct NumPhi {
+    std::string p, f;
+  };
+  // flag is i64: 0 = int payload, 1 = double bits, 2 = payload holds a boxed
+  // aval (set when a numMode binding is assigned a non-raw value; keeps the
+  // binding loop-invariant so emitted loop bodies stay correct).
+  NumPhi numPhi() { return {alloca("i64"), alloca("i64")}; }
+  void numPhiStore(const NumPhi& ph, const std::string& p,
+                   const std::string& f) {
+    emit("  store i64 " + p + ", ptr " + ph.p);
+    emit("  store i64 " + f + ", ptr " + ph.f);
+  }
+  RVal numPhiLoad(const NumPhi& ph) {
+    RVal r;
+    r.kind = 1;
+    r.v = T();
+    emit("  " + r.v + " = load i64, ptr " + ph.p);
+    r.f = T();
+    emit("  " + r.f + " = load i64, ptr " + ph.f);
+    return r;
+  }
+  // i1 phi for boolean merges.
+  std::string boolPhi() { return alloca("i1"); }
+  void boolPhiStore(const std::string& ph, const std::string& c) {
+    emit("  store i1 " + c + ", ptr " + ph);
+  }
+  std::string boolPhiLoad(const std::string& ph) {
+    std::string r = T();
+    emit("  " + r + " = load i1, ptr " + ph);
+    return r;
+  }
+
+  // "both operands are ints" predicate (i1); flag is i64 tri-state.
+  std::string bothIntPred(const std::string& lf, const std::string& rf) {
+    std::string a = T(), b = T(), r = T();
+    emit("  " + a + " = icmp eq i64 " + lf + ", 0");
+    emit("  " + b + " = icmp eq i64 " + rf + ", 0");
+    emit("  " + r + " = and i1 " + a + ", " + b);
+    return r;
+  }
+  // i1 "payload is double bits" for a tri-state flag (flag==1).
+  std::string flagIsDouble(const std::string& f) {
+    std::string r = T();
+    emit("  " + r + " = icmp eq i64 " + f + ", 1");
+    return r;
+  }
+  // Numeric value of a raw num as double: flag==1 ? bitcast(payload) :
+  // sitofp(payload). Only valid when flag != 2 (guarded by callers).
+  std::string numAsDouble(const std::string& p, const std::string& f) {
+    std::string pb = T(), di = T(), fi = T(), d = T();
+    emit("  " + pb + " = bitcast i64 " + p + " to double");
+    emit("  " + di + " = sitofp i64 " + p + " to double");
+    emit("  " + fi + " = icmp eq i64 " + f + ", 1");
+    emit("  " + d + " = select i1 " + fi + ", double " + pb + ", double " + di);
+    return d;
+  }
+  // Boxed fallback for a binary op: box both operands, call the @a.*.fast
+  // helper (or the boxed stmt-level path when there is no helper).
+  RVal boxedBinop(BinOp op, const RVal& l, const RVal& r) {
+    if (const char* sym = binopSym(op))
+      return rvBoxed(callRt(sym, {boxRVal(l), boxRVal(r)}));
+    return rvBad();
+  }
+  // aval -> Bool RVal (comparison helpers always return A_TRUE/A_FALSE).
+  RVal avalToBool(const std::string& aval) {
+    std::string c = T();
+    emit("  " + c + " = icmp eq i64 " + aval + ", " + kTrue);
+    return rvBool(c);
+  }
+
+  // Ops with a raw (flag!=2-only) implementation in numArithRaw; other ops
+  // routed through numArith can still produce flag==2 results.
+  static bool rawArithOp(BinOp op) {
+    switch (op) {
+      case BinOp::Add:
+      case BinOp::Sub:
+      case BinOp::Mul:
+      case BinOp::Div:
+      case BinOp::FloorDiv:
+      case BinOp::Mod:
+      case BinOp::BitAnd:
+      case BinOp::BitOr:
+      case BinOp::BitXor:
+      case BinOp::Shl:
+      case BinOp::Shr:
+        return true;
+      default:
+        return false;
+    }
+  }
+  // Binary arithmetic/bitwise on possibly-raw operands -> RVal.
+  // Returns kind -1 when the op has no boxed fast path (caller falls back).
+  // flag==2 operands (boxed aval in the payload slot) take the boxed path.
+  RVal numArith(BinOp op, const RVal& l, const RVal& r) {
+    if (l.kind != 1 || r.kind != 1) return boxedBinop(op, l, r);
+    const char* sym = binopSym(op);
+    if (!sym) return rvBad();
+    // Both operands proven flag!=2 and the op has a raw impl: skip the
+    // boxed-guard branches entirely. The raw impls only reach their boxed
+    // slow paths on inputs that panic (div-by-zero, bad shift, ~double), so
+    // the result flag stays in {0,1}.
+    if (l.safe && r.safe && rawArithOp(op)) {
+      RVal res = numArithRaw(op, l, r);
+      if (res.kind == 1) res.safe = true;
+      return res;
+    }
+    // Runtime guard: either operand boxed-in-slot -> boxed helper.
+    std::string lb = T(), rb = T(), anyB = T();
+    emit("  " + lb + " = icmp eq i64 " + l.f + ", 2");
+    emit("  " + rb + " = icmp eq i64 " + r.f + ", 2");
+    emit("  " + anyB + " = or i1 " + lb + ", " + rb);
+    NumPhi ph = numPhi();
+    std::string lBox = newLabel("nab"), lRaw = newLabel("nar"),
+                lEnd = newLabel("nae");
+    emit("  br i1 " + anyB + ", label %" + lBox + ", label %" + lRaw);
+    emit("  " + lBox + ":");
+    {
+      std::string aL = numToAval(l.v, l.f, l.safe);
+      std::string aR = numToAval(r.v, r.f, r.safe);
+      std::string rr = callRt(sym, {aL, aR});
+      numPhiStore(ph, rr, "2");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lRaw + ":");
+    {
+      RVal res = numArithRaw(op, l, r);
+      if (res.kind == 1) {
+        numPhiStore(ph, res.v, res.f);
+      } else {
+        // Should not happen for the routed ops; box defensively.
+        numPhiStore(ph, boxRVal(res), "2");
+      }
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+  RVal numArithRaw(BinOp op, const RVal& l, const RVal& r) {
+    switch (op) {
+      case BinOp::Add:
+      case BinOp::Sub:
+      case BinOp::Mul:
+        return numArithOVF(op, l, r);
+      case BinOp::Div:
+      case BinOp::FloorDiv:
+      case BinOp::Mod:
+        return numArithDiv(op, l, r);
+      case BinOp::BitAnd:
+      case BinOp::BitOr:
+      case BinOp::BitXor:
+        return numBitwise(op, l, r);
+      case BinOp::Shl:
+      case BinOp::Shr:
+        return numShift(op, l, r);
+      default:
+        return boxedBinop(op, l, r);
+    }
+  }
+
+  // add/sub/mul: int path uses the with.overflow intrinsics; overflow (and
+  // the imul_of INT64_MIN edge) promotes to double exactly like
+  // arith_int_int. Double path mirrors the a.*.fast dblp branches.
+  RVal numArithOVF(BinOp op, const RVal& l, const RVal& r) {
+    const std::string& lp = l.v;
+    const std::string& lf = l.f;
+    const std::string& rp = r.v;
+    const std::string& rf = r.f;
+    std::string bothI = bothIntPred(lf, rf);
+    NumPhi ph = numPhi();
+    std::string lInt = newLabel("nint"), lDbl = newLabel("ndbl"),
+                lEnd = newLabel("nend");
+    emit("  br i1 " + bothI + ", label %" + lInt + ", label %" + lDbl);
+    emit("  " + lInt + ":");
+    std::string intr = op == BinOp::Add   ? "llvm.sadd.with.overflow.i64"
+                       : op == BinOp::Sub ? "llvm.ssub.with.overflow.i64"
+                                          : "llvm.smul.with.overflow.i64";
+    std::string ao = T();
+    emit("  " + ao + " = call { i64, i1 } @" + intr + "(i64 " + lp +
+         ", i64 " + rp + ")");
+    std::string res = T(), ovf = T();
+    emit("  " + res + " = extractvalue { i64, i1 } " + ao + ", 0");
+    emit("  " + ovf + " = extractvalue { i64, i1 } " + ao + ", 1");
+    if (op == BinOp::Mul) {
+      // imul_of treats any INT64_MIN operand (with a nonzero partner) as
+      // overflow -> double, even when the i64 product is representable.
+      std::string z1 = T(), z2 = T(), zz = T(), zzN = T();
+      std::string e1 = T(), e2 = T(), ee = T(), edge = T(), ovfE = T();
+      emit("  " + z1 + " = icmp eq i64 " + lp + ", 0");
+      emit("  " + z2 + " = icmp eq i64 " + rp + ", 0");
+      emit("  " + zz + " = or i1 " + z1 + ", " + z2);
+      emit("  " + zzN + " = icmp eq i1 " + zz + ", false");
+      emit("  " + e1 + " = icmp eq i64 " + lp + ", -9223372036854775808");
+      emit("  " + e2 + " = icmp eq i64 " + rp + ", -9223372036854775808");
+      emit("  " + ee + " = or i1 " + e1 + ", " + e2);
+      emit("  " + edge + " = and i1 " + ee + ", " + zzN);
+      emit("  " + ovfE + " = or i1 " + ovf + ", " + edge);
+      ovf = ovfE;
+    }
+    std::string lOv = newLabel("novf"), lOk = newLabel("nok");
+    emit("  br i1 " + ovf + ", label %" + lOv + ", label %" + lOk);
+    emit("  " + lOk + ":");
+    numPhiStore(ph, res, "0");
+    emit("  br label %" + lEnd);
+    emit("  " + lOv + ":");
+    {
+      // int overflow -> mkdouble((double)a op (double)b)
+      std::string di = T(), dj = T(), fd = T(), fb = T();
+      emit("  " + di + " = sitofp i64 " + lp + " to double");
+      emit("  " + dj + " = sitofp i64 " + rp + " to double");
+      emit("  " + fd + " = " + (op == BinOp::Add   ? "fadd"
+                            : op == BinOp::Sub ? "fsub"
+                                               : "fmul") +
+           " double " + di + ", " + dj);
+      emit("  " + fb + " = bitcast double " + fd + " to i64");
+      numPhiStore(ph, fb, "1");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lDbl + ":");
+    {
+      std::string ld = numAsDouble(lp, lf);
+      std::string rd = numAsDouble(rp, rf);
+      std::string fd = T(), fb = T();
+      emit("  " + fd + " = " + (op == BinOp::Add   ? "fadd"
+                            : op == BinOp::Sub ? "fsub"
+                                               : "fmul") +
+           " double " + ld + ", " + rd);
+      emit("  " + fb + " = bitcast double " + fd + " to i64");
+      numPhiStore(ph, fb, "1");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  // Slow-path block shared by div/mod/floordiv/bitwise/shift: box both
+  // operands, call the @a.*.fast helper, unbox the result back to raw num.
+  // (The helpers panic on the guarded cases, so this is effectively dead —
+  // but it keeps the IR total for every input.)
+  void emitNumSlow(const std::string& sym, const std::string& lp,
+                   const std::string& lf, const std::string& rp,
+                   const std::string& rf, const NumPhi& ph,
+                   const std::string& lEnd) {
+    std::string lb = numToAval(lp, lf, false);
+    std::string rb = numToAval(rp, rf, false);
+    std::string rr = T();
+    emit("  " + rr + " = call i64 @" + sym + "(i64 " + lb + ", i64 " + rb + ")");
+    std::string un = T(), up = T(), uf = T();
+    emit("  " + un + " = call { i64, i64 } @a.unboxnum(i64 " + rr + ")");
+    emit("  " + up + " = extractvalue { i64, i64 } " + un + ", 0");
+    emit("  " + uf + " = extractvalue { i64, i64 } " + un + ", 1");
+    numPhiStore(ph, up, uf);
+    emit("  br label %" + lEnd);
+  }
+
+  // div / floordiv / mod: divisor-as-double == 0.0 panics through the boxed
+  // slow path (covers int 0 and +/-0.0 alike, matching the C checks).
+  RVal numArithDiv(BinOp op, const RVal& l, const RVal& r) {
+    const std::string& lp = l.v;
+    const std::string& lf = l.f;
+    const std::string& rp = r.v;
+    const std::string& rf = r.f;
+    std::string bothI = bothIntPred(lf, rf);
+    std::string rd = numAsDouble(rp, rf);
+    NumPhi ph = numPhi();
+    const char* sym = op == BinOp::Div       ? "a.div.fast"
+                      : op == BinOp::FloorDiv ? "a.floordiv.fast"
+                                             : "a.mod.fast";
+    std::string lSlow = newLabel("ndz"), lChk = newLabel("ndc"),
+                lEnd = newLabel("nde");
+    std::string dz = T();
+    emit("  " + dz + " = fcmp oeq double " + rd + ", 0.000000e+00");
+    emit("  br i1 " + dz + ", label %" + lSlow + ", label %" + lChk);
+    emit("  " + lSlow + ":");
+    emitNumSlow(sym, lp, lf, rp, rf, ph, lEnd);
+    emit("  " + lChk + ":");
+    if (op == BinOp::Mod) {
+      // int % -1 == 0 (also covers INT64_MIN % -1 which would trap srem).
+      std::string bm1 = T(), lZero = newLabel("nzero"), lKind = newLabel("nkd");
+      std::string m1 = T();
+      emit("  " + m1 + " = icmp eq i64 " + rp + ", -1");
+      emit("  " + bm1 + " = and i1 " + bothI + ", " + m1);
+      emit("  br i1 " + bm1 + ", label %" + lZero + ", label %" + lKind);
+      emit("  " + lZero + ":");
+      numPhiStore(ph, "0", "0");
+      emit("  br label %" + lEnd);
+      emit("  " + lKind + ":");
+    }
+    // INT64_MIN / -1 promotes to double(2^63); excluded from the int path.
+    std::string useI = bothI;
+    if (op != BinOp::Mod) {
+      std::string e1 = T(), e2 = T(), ee = T(), eeN = T(), edge = T(), u = T();
+      emit("  " + e1 + " = icmp eq i64 " + lp + ", -9223372036854775808");
+      emit("  " + e2 + " = icmp eq i64 " + rp + ", -1");
+      emit("  " + ee + " = and i1 " + e1 + ", " + e2);
+      emit("  " + eeN + " = icmp eq i1 " + ee + ", false");
+      emit("  " + edge + " = and i1 " + bothI + ", " + eeN);
+      useI = edge;
+    }
+    std::string lInt = newLabel("ndi"), lDbl = newLabel("ndf");
+    emit("  br i1 " + useI + ", label %" + lInt + ", label %" + lDbl);
+    emit("  " + lInt + ":");
+    if (op == BinOp::Div) {
+      std::string q = T();
+      emit("  " + q + " = sdiv i64 " + lp + ", " + rp);
+      numPhiStore(ph, q, "0");
+    } else if (op == BinOp::FloorDiv) {
+      std::string q = T(), m = T(), rnz = T(), an = T(), bn = T(), dif = T(),
+              adj = T(), q1 = T(), res = T();
+      emit("  " + q + " = sdiv i64 " + lp + ", " + rp);
+      emit("  " + m + " = srem i64 " + lp + ", " + rp);
+      emit("  " + rnz + " = icmp ne i64 " + m + ", 0");
+      emit("  " + an + " = icmp slt i64 " + lp + ", 0");
+      emit("  " + bn + " = icmp slt i64 " + rp + ", 0");
+      emit("  " + dif + " = icmp ne i1 " + an + ", " + bn);
+      emit("  " + adj + " = and i1 " + rnz + ", " + dif);
+      emit("  " + q1 + " = sub i64 " + q + ", 1");
+      emit("  " + res + " = select i1 " + adj + ", i64 " + q1 + ", i64 " + q);
+      numPhiStore(ph, res, "0");
+    } else {  // Mod
+      std::string res = T();
+      emit("  " + res + " = srem i64 " + lp + ", " + rp);
+      numPhiStore(ph, res, "0");
+    }
+    emit("  br label %" + lEnd);
+    emit("  " + lDbl + ":");
+    {
+      std::string ld = numAsDouble(lp, lf);
+      std::string fd = T(), fb = T();
+      if (op == BinOp::Mod) {
+        // fmod with divisor-sign adjustment (mirrors a.mod.fast dblp).
+        std::string fm = T(), mz = T(), mg = T(), bg = T(), dif = T(),
+                cond = T(), sum = T(), rs = T();
+        emit("  " + fm + " = call double @fmod(double " + ld + ", double " +
+             rd + ")");
+        emit("  " + mz + " = fcmp une double " + fm + ", 0.000000e+00");
+        emit("  " + mg + " = fcmp ogt double " + fm + ", 0.000000e+00");
+        emit("  " + bg + " = fcmp ogt double " + rd + ", 0.000000e+00");
+        emit("  " + dif + " = icmp ne i1 " + mg + ", " + bg);
+        emit("  " + cond + " = and i1 " + mz + ", " + dif);
+        emit("  " + sum + " = fadd double " + fm + ", " + rd);
+        emit("  " + rs + " = select i1 " + cond + ", double " + sum +
+             ", double " + fm);
+        emit("  " + fb + " = bitcast double " + rs + " to i64");
+      } else {
+        emit("  " + fd + " = fdiv double " + ld + ", " + rd);
+        if (op == BinOp::FloorDiv) {
+          std::string fl = T();
+          emit("  " + fl + " = call double @llvm.floor.f64(double " + fd +
+               ")");
+          fd = fl;
+        }
+        emit("  " + fb + " = bitcast double " + fd + " to i64");
+      }
+      numPhiStore(ph, fb, "1");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  // &, |, ^: int-only op; anything else goes through the boxed helper
+  // (which panics on non-ints, like a_band_slow & friends).
+  RVal numBitwise(BinOp op, const RVal& l, const RVal& r) {
+    const std::string& lp = l.v;
+    const std::string& lf = l.f;
+    const std::string& rp = r.v;
+    const std::string& rf = r.f;
+    std::string bothI = bothIntPred(lf, rf);
+    const char* sym = op == BinOp::BitAnd ? "a.band.fast"
+                    : op == BinOp::BitOr  ? "a.bor.fast"
+                                          : "a.bxor.fast";
+    const char* iop = op == BinOp::BitAnd ? "and"
+                     : op == BinOp::BitOr  ? "or"
+                                           : "xor";
+    NumPhi ph = numPhi();
+    std::string lInt = newLabel("nbi"), lEnd = newLabel("nbe");
+    emit("  br i1 " + bothI + ", label %" + lInt + ", label %" + lEnd +
+         ".s");
+    emit("  " + lInt + ":");
+    {
+      std::string res = T();
+      emit("  " + res + " = " + iop + " i64 " + lp + ", " + rp);
+      numPhiStore(ph, res, "0");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ".s:");
+    emitNumSlow(sym, lp, lf, rp, rf, ph, lEnd);
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  // <<, >>: shift amount must be an int in [0,63]; violations take the boxed
+  // slow path (panic), matching a_shl_slow/a_shr_slow.
+  RVal numShift(BinOp op, const RVal& l, const RVal& r) {
+    const std::string& lp = l.v;
+    const std::string& lf = l.f;
+    const std::string& rp = r.v;
+    const std::string& rf = r.f;
+    std::string bothI = bothIntPred(lf, rf);
+    const char* sym = op == BinOp::Shl ? "a.shl.fast" : "a.shr.fast";
+    const char* iop = op == BinOp::Shl ? "shl" : "ashr";
+    NumPhi ph = numPhi();
+    std::string lInt = newLabel("nsi"), lGo = newLabel("nsg"),
+                lBad = newLabel("nsb"), lEnd = newLabel("nse");
+    emit("  br i1 " + bothI + ", label %" + lInt + ", label %" + lBad);
+    emit("  " + lInt + ":");
+    std::string s0 = T(), s1 = T(), rng = T();
+    emit("  " + s0 + " = icmp sge i64 " + rp + ", 0");
+    emit("  " + s1 + " = icmp sle i64 " + rp + ", 63");
+    emit("  " + rng + " = and i1 " + s0 + ", " + s1);
+    emit("  br i1 " + rng + ", label %" + lGo + ", label %" + lBad);
+    emit("  " + lGo + ":");
+    {
+      std::string res = T();
+      emit("  " + res + " = " + iop + " i64 " + lp + ", " + rp);
+      numPhiStore(ph, res, "0");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lBad + ":");
+    emitNumSlow(sym, lp, lf, rp, rf, ph, lEnd);
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  // ---- raw comparisons ----------------------------------------------------------
+  // -> Bool RVal. flag==2 operands (boxed aval in payload) take the boxed
+  // comparison helper.
+  RVal numCmp(BinOp op, const RVal& l, const RVal& r) {
+    if (l.kind != 1 || r.kind != 1) {
+      RVal b = boxedBinop(op, l, r);
+      return b.kind == 0 ? avalToBool(b.v) : b;
+    }
+    const char* sym = binopSym(op);
+    if (!sym) return rvBad();
+    // flag!=2 proven on both sides: the boxed branch is dead.
+    if (l.safe && r.safe) {
+      RVal res = numCmpRaw(op, l, r);
+      return res.kind == 2 ? res : rvBool("false");
+    }
+    std::string lb = T(), rb = T(), anyB = T();
+    emit("  " + lb + " = icmp eq i64 " + l.f + ", 2");
+    emit("  " + rb + " = icmp eq i64 " + r.f + ", 2");
+    emit("  " + anyB + " = or i1 " + lb + ", " + rb);
+    std::string ph = boolPhi();
+    std::string lBox = newLabel("nqb"), lRaw = newLabel("nqr"),
+                lEnd = newLabel("nqe");
+    emit("  br i1 " + anyB + ", label %" + lBox + ", label %" + lRaw);
+    emit("  " + lBox + ":");
+    {
+      std::string aL = numToAval(l.v, l.f, l.safe);
+      std::string aR = numToAval(r.v, r.f, r.safe);
+      std::string rr = callRt(sym, {aL, aR});
+      std::string c = T();
+      emit("  " + c + " = icmp eq i64 " + rr + ", " + kTrue);
+      boolPhiStore(ph, c);
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lRaw + ":");
+    {
+      RVal res = numCmpRaw(op, l, r);
+      if (res.kind == 2) {
+        boolPhiStore(ph, res.v);
+      } else {
+        boolPhiStore(ph, "false");
+      }
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return rvBool(boolPhiLoad(ph));
+  }
+  RVal numCmpRaw(BinOp op, const RVal& l, const RVal& r) {
+    const std::string& lp = l.v;
+    const std::string& lf = l.f;
+    const std::string& rp = r.v;
+    const std::string& rf = r.f;
+    switch (op) {
+      case BinOp::Lt:
+      case BinOp::Le:
+      case BinOp::Gt:
+      case BinOp::Ge: {
+        // int-int -> icmp (exact), otherwise fcmp on double values —
+        // matches the a.*.fast dblp path which converts ints via nval.
+        const char* ip = op == BinOp::Lt ? "slt"
+                         : op == BinOp::Le ? "sle"
+                         : op == BinOp::Gt ? "sgt"
+                                           : "sge";
+        const char* fp = op == BinOp::Lt ? "olt"
+                         : op == BinOp::Le ? "ole"
+                         : op == BinOp::Gt ? "ogt"
+                                           : "oge";
+        std::string bothI = bothIntPred(lf, rf);
+        std::string ld = numAsDouble(lp, lf);
+        std::string rd = numAsDouble(rp, rf);
+        std::string ic = T(), fc = T(), c = T();
+        emit("  " + ic + " = icmp " + ip + " i64 " + lp + ", " + rp);
+        emit("  " + fc + " = fcmp " + fp + " double " + ld + ", " + rd);
+        emit("  " + c + " = select i1 " + bothI + ", i1 " + ic + ", i1 " + fc);
+        return rvBool(c);
+      }
+      case BinOp::Eq:
+      case BinOp::Ne: {
+        // The fast helpers only compare same-kind numerics inline; mixed
+        // int/double goes slow (values_equal). Mirror that with a
+        // same-kind runtime dispatch.
+        const char* sym = op == BinOp::Eq ? "a.eq.fast" : "a.ne.fast";
+        const char* ip = op == BinOp::Eq ? "eq" : "ne";
+        const char* fp = op == BinOp::Eq ? "oeq" : "une";
+        std::string ph = boolPhi();
+        std::string lSame = newLabel("neq"), lKind = newLabel("nkd"),
+                    lInt = newLabel("nci"), lDbl = newLabel("ncd"),
+                    lMix = newLabel("ncm"), lEnd = newLabel("nce");
+        std::string same = T();
+        emit("  " + same + " = icmp eq i64 " + lf + ", " + rf);
+        emit("  br i1 " + same + ", label %" + lKind + ", label %" + lMix);
+        emit("  " + lKind + ":");
+        std::string lfi = flagIsDouble(lf);
+        emit("  br i1 " + lfi + ", label %" + lDbl + ", label %" + lInt);
+        emit("  " + lInt + ":");
+        {
+          std::string c = T();
+          emit("  " + c + " = icmp " + ip + " i64 " + lp + ", " + rp);
+          boolPhiStore(ph, c);
+          emit("  br label %" + lEnd);
+        }
+        emit("  " + lDbl + ":");
+        {
+          std::string lb = T(), rb = T(), c = T();
+          emit("  " + lb + " = bitcast i64 " + lp + " to double");
+          emit("  " + rb + " = bitcast i64 " + rp + " to double");
+          emit("  " + c + " = fcmp " + fp + " double " + lb + ", " + rb);
+          boolPhiStore(ph, c);
+          emit("  br label %" + lEnd);
+        }
+        emit("  " + lMix + ":");
+        {
+          std::string bv = callRt(sym, {boxRVal(l), boxRVal(r)});
+          std::string c = T();
+          emit("  " + c + " = icmp eq i64 " + bv + ", " + kTrue);
+          boolPhiStore(ph, c);
+          emit("  br label %" + lEnd);
+        }
+        emit("  " + lEnd + ":");
+        return rvBool(boolPhiLoad(ph));
+      }
+      default:
+        return rvBad();
+    }
+  }
+
+  // ---- raw unary ops --------------------------------------------------------------
+  // Unary numeric op guard: flag==2 operand -> boxed @a.*.fast helper, result
+  // stays boxed-in-slot (flag 2). Otherwise the raw impl runs.
+  RVal numUnaryGuard(const char* sym, const RVal& x,
+                     RVal (LlvmEmitter::*raw)(const RVal&)) {
+    const std::string& xp = x.v;
+    const std::string& xf = x.f;
+    // flag!=2 proven: the boxed branch is dead; run the raw impl directly.
+    if (x.safe) {
+      RVal res = (this->*raw)(x);
+      if (res.kind == 1) res.safe = true;
+      return res;
+    }
+    std::string isB = T(), lB = newLabel("nub"), lN = newLabel("nun"),
+                lEnd = newLabel("nue");
+    emit("  " + isB + " = icmp eq i64 " + xf + ", 2");
+    emit("  br i1 " + isB + ", label %" + lB + ", label %" + lN);
+    NumPhi ph = numPhi();
+    emit("  " + lB + ":");
+    {
+      std::string rr = callRt(sym, {xp});
+      numPhiStore(ph, rr, "2");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lN + ":");
+    {
+      RVal res = (this->*raw)(x);
+      numPhiStore(ph, res.v, res.f);
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  RVal numNeg(const RVal& x) {
+    return numUnaryGuard("a.neg.fast", x, &LlvmEmitter::numNegRaw);
+  }
+  RVal numBNot(const RVal& x) {
+    return numUnaryGuard("a.bnot.fast", x, &LlvmEmitter::numBNotRaw);
+  }
+
+  RVal numNegRaw(const RVal& x) {
+    // -i: INT64_MIN promotes to double(-(double)INT64_MIN) like a_neg_slow;
+    // -d is fneg. Merged through a phi.
+    const std::string& xp = x.v;
+    const std::string& xf = x.f;
+    NumPhi ph = numPhi();
+    std::string lDbl = newLabel("nnd"), lInt = newLabel("nni"),
+                lEnd = newLabel("nne");
+    std::string fdi = flagIsDouble(xf);
+    emit("  br i1 " + fdi + ", label %" + lDbl + ", label %" + lInt);
+    emit("  " + lInt + ":");
+    std::string isMin = T(), lMin = newLabel("nnm"), lGo = newLabel("nng");
+    emit("  " + isMin + " = icmp eq i64 " + xp + ", -9223372036854775808");
+    emit("  br i1 " + isMin + ", label %" + lMin + ", label %" + lGo);
+    emit("  " + lGo + ":");
+    {
+      std::string n = T();
+      emit("  " + n + " = sub i64 0, " + xp);
+      numPhiStore(ph, n, "0");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lMin + ":");
+    // INT64_MIN -> double path (same code as lDbl).
+    {
+      std::string di = T(), nd = T(), nb = T();
+      emit("  " + di + " = sitofp i64 " + xp + " to double");
+      emit("  " + nd + " = fneg double " + di);
+      emit("  " + nb + " = bitcast double " + nd + " to i64");
+      numPhiStore(ph, nb, "1");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lDbl + ":");
+    {
+      std::string db = T(), nd = T(), nb = T();
+      emit("  " + db + " = bitcast i64 " + xp + " to double");
+      emit("  " + nd + " = fneg double " + db);
+      emit("  " + nb + " = bitcast double " + nd + " to i64");
+      numPhiStore(ph, nb, "1");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  RVal numBNotRaw(const RVal& x) {
+    // ~i = xor -1; ~d panics through the boxed slow path.
+    const std::string& xp = x.v;
+    const std::string& xf = x.f;
+    NumPhi ph = numPhi();
+    std::string lInt = newLabel("nbi"), lEnd = newLabel("nbe");
+    std::string fdi = flagIsDouble(xf);
+    emit("  br i1 " + fdi + ", label %" + lEnd + ".s, label %" + lInt);
+    emit("  " + lInt + ":");
+    {
+      std::string res = T();
+      emit("  " + res + " = xor i64 " + xp + ", -1");
+      numPhiStore(ph, res, "0");
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ".s:");
+    // Unary slow path: box the operand, call the unary helper, unbox.
+    {
+      std::string lb = numToAval(xp, xf, x.safe), rr = T();
+      emit("  " + rr + " = call i64 @a.bnot.fast(i64 " + lb + ")");
+      std::string un = T(), up = T(), uf = T();
+      emit("  " + un + " = call { i64, i64 } @a.unboxnum(i64 " + rr + ")");
+      emit("  " + up + " = extractvalue { i64, i64 } " + un + ", 0");
+      emit("  " + uf + " = extractvalue { i64, i64 } " + un + ", 1");
+      numPhiStore(ph, up, uf);
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return numPhiLoad(ph);
+  }
+
+  RVal numNot(const RVal& x) {
+    // `not` -> Bool: int -> (p == 0), double -> (d == 0.0) — matches
+    // a.not.fast's intp/dd paths including NaN -> false.
+    const std::string& xp = x.v;
+    const std::string& xf = x.f;
+    // flag==2 -> boxed aval: logical not via a.not.fast -> Bool. When the
+    // operand is proven flag!=2 that branch is dead.
+    if (x.safe) {
+      std::string fi = flagIsDouble(xf);
+      std::string db = T(), dz = T(), iz = T(), c = T();
+      emit("  " + db + " = bitcast i64 " + xp + " to double");
+      emit("  " + dz + " = fcmp oeq double " + db + ", 0.000000e+00");
+      emit("  " + iz + " = icmp eq i64 " + xp + ", 0");
+      emit("  " + c + " = select i1 " + fi + ", i1 " + dz + ", i1 " + iz);
+      return rvBool(c);
+    }
+    std::string isB = T(), lB = newLabel("nnb"), lN = newLabel("nnn"),
+                lEnd = newLabel("nne");
+    emit("  " + isB + " = icmp eq i64 " + xf + ", 2");
+    emit("  br i1 " + isB + ", label %" + lB + ", label %" + lN);
+    std::string ph = boolPhi();
+    emit("  " + lB + ":");
+    {
+      std::string rr = T(), c = T();
+      emit("  " + rr + " = call i64 @a.not.fast(i64 " + xp + ")");
+      emit("  " + c + " = icmp eq i64 " + rr + ", " + kTrue);
+      boolPhiStore(ph, c);
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lN + ":");
+    {
+      std::string fi = flagIsDouble(xf);
+      std::string db = T(), dz = T(), iz = T(), c = T();
+      emit("  " + db + " = bitcast i64 " + xp + " to double");
+      emit("  " + dz + " = fcmp oeq double " + db + ", 0.000000e+00");
+      emit("  " + iz + " = icmp eq i64 " + xp + ", 0");
+      emit("  " + c + " = select i1 " + fi + ", i1 " + dz + ", i1 " + iz);
+      boolPhiStore(ph, c);
+      emit("  br label %" + lEnd);
+    }
+    emit("  " + lEnd + ":");
+    return rvBool(boolPhiLoad(ph));
+  }
+
+  // Condition -> i1 for if/while/do-while/ternary/match guards.
+  std::string condI1(const Expr* e) {
+    RVal rv = evalRaw(e);
+    if (rv.kind == 2) return rv.v;
+    if (rv.kind == 1) {
+      // flag==2 -> payload is a boxed aval: a.truthy. When the operand is
+      // proven flag!=2 that branch is dead. Otherwise numeric truthiness:
+      // int -> p != 0, double -> d != 0.0 (une: NaN is truthy, matching
+      // a_truthy/a.not.fast).
+      if (rv.safe) {
+        std::string fi = flagIsDouble(rv.f);
+        std::string db = T(), dz = T(), iz = T(), t = T();
+        emit("  " + db + " = bitcast i64 " + rv.v + " to double");
+        emit("  " + dz + " = fcmp une double " + db + ", 0.000000e+00");
+        emit("  " + iz + " = icmp ne i64 " + rv.v + ", 0");
+        emit("  " + t + " = select i1 " + fi + ", i1 " + dz + ", i1 " + iz);
+        return t;
+      }
+      std::string isB = T(), lB = newLabel("ncb"), lN = newLabel("ncn"),
+                  lEnd = newLabel("nce");
+      emit("  " + isB + " = icmp eq i64 " + rv.f + ", 2");
+      emit("  br i1 " + isB + ", label %" + lB + ", label %" + lN);
+      std::string ph = alloca("i1");
+      emit("  " + lB + ":");
+      {
+        std::string t = T();
+        emit("  " + t + " = call i1 @a.truthy(i64 " + rv.v + ")");
+        emit("  store i1 " + t + ", ptr " + ph);
+        emit("  br label %" + lEnd);
+      }
+      emit("  " + lN + ":");
+      {
+        std::string fi = flagIsDouble(rv.f);
+        std::string db = T(), dz = T(), iz = T(), t = T();
+        emit("  " + db + " = bitcast i64 " + rv.v + " to double");
+        emit("  " + dz + " = fcmp une double " + db + ", 0.000000e+00");
+        emit("  " + iz + " = icmp ne i64 " + rv.v + ", 0");
+        emit("  " + t + " = select i1 " + fi + ", i1 " + dz + ", i1 " + iz);
+        emit("  store i1 " + t + ", ptr " + ph);
+        emit("  br label %" + lEnd);
+      }
+      emit("  " + lEnd + ":");
+      std::string r = T();
+      emit("  " + r + " = load i1, ptr " + ph);
+      return r;
+    }
+    std::string t = T();
+    emit("  " + t + " = call i1 @a.truthy(i64 " + rv.v + ")");
+    return t;
   }
 
   std::string evalBinary(const BinaryExpr& x) {
@@ -2489,9 +4066,7 @@ slow:
       emitPatternTest(arm.pattern, subj, nextArm);
       bindPatternVariables(arm.pattern, subj);
       if (arm.guard) {
-        std::string gv = eval(arm.guard.get());
-        std::string gt = T();
-        emit("  " + gt + " = call i1 @a.truthy(i64 " + gv + ")");
+        std::string gt = condI1(arm.guard.get());
         std::string pass = newLabel("guard.ok");
         emit("  br i1 " + gt + ", label %" + pass + ", label %" + nextArm);
         emit("  " + pass + ":");
@@ -2542,9 +4117,7 @@ slow:
   }
 
   std::string evalTernary(const TernaryExpr& x) {
-    std::string cv = eval(x.cond.get());
-    std::string t = T();
-    emit("  " + t + " = call i1 @a.truthy(i64 " + cv + ")");
+    std::string t = condI1(x.cond.get());
     std::string lT = newLabel("tern.t"), lE = newLabel("tern.e"),
                 lEnd = newLabel("tern.end");
     std::string phi = alloca("i64");
@@ -2816,24 +4389,23 @@ slow:
   std::string evalLambda(const LambdaExpr& x) {
     // Captures: every visible Local/Param binding (innermost wins, sorted for
     // determinism). Globals/builtins are not captured.
-    std::map<std::string, std::string> caps;  // name -> alloca
+    std::map<std::string, LlBinding> caps;  // name -> binding (boxed on capture)
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it)
       for (auto& kv : *it)
         if ((kv.second.kind == BKind::Local || kv.second.kind == BKind::Param) &&
             !caps.count(kv.first))
-          caps[kv.first] = kv.second.slot;
+          caps[kv.first] = kv.second;
     PendingLambda pl;
     pl.expr = &x;
     pl.moduleId = curModuleId_;
     pl.cname = "__a_lam_" + moduleTag(curModuleId_ < 0 ? 0 : curModuleId_) + "_" +
                std::to_string(lamCounter_++);
-    for (auto& kv : caps) pl.captures.push_back(kv);
+    for (auto& kv : caps) pl.captures.push_back({kv.first, ""});
     lambdas_.push_back(pl);
-    // env = a_closure_env_new(n); a_env_set(env, i, load cap)
+    // env = a_closure_env_new(n); a_env_set(env, i, boxed cap)
     std::string env = callRt("a_closure_env_new", {std::to_string(pl.captures.size())});
     for (std::size_t i = 0; i < pl.captures.size(); ++i) {
-      std::string v = T();
-      emit("  " + v + " = load i64, ptr " + pl.captures[i].second);
+      std::string v = bindingValue(caps[pl.captures[i].first]);
       callRt("a_env_set", {env, std::to_string(i), v});
     }
     return fixFnonNew("", pl.cname, env, "<lambda>");
@@ -3494,6 +5066,7 @@ slow:
     resetGlobalScope(moduleId);
     pushScope();
     bindModuleImports(moduleId);
+    analyzeModRawSafety(moduleId, mod.program->statements);
     inFunctionBody_ = false;
     deferStack_.emplace_back();
     for (const StmtPtr& s : mod.program->statements) emitStmt(*s);
