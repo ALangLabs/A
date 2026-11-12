@@ -334,11 +334,14 @@ aval Vm::callValue(aval fn, std::vector<aval>& args, Scope* scope) {
 aval vmCall(uint64_t fnKey, Scope* capture, std::vector<aval>& args) {
   VmFn& f = g_vm.fns[fnKey];
   if (f.kind == VmFn::Kind::PyCall) {
-    // from python:<mod> import name -> py_call(mod, name, args...)
+    // from python:<mod> import name -> py_call(mod, name, nkw, args...).
+    // Kwargs are rejected earlier (vmParamNames is empty for PyCall), so
+    // every arg arriving here is positional.
     std::vector<aval> full;
-    full.reserve(args.size() + 2);
+    full.reserve(args.size() + 3);
     full.push_back(a_str_new(f.pyModule.data(), f.pyModule.size()));
     full.push_back(a_str_new(f.pyMember.data(), f.pyMember.size()));
+    full.push_back(a_mkint(0));
     for (aval a : args) full.push_back(a);
     return a_bi_call(A_BI_PY_CALL, (uint64_t)full.size(), full.data());
   }
@@ -1045,10 +1048,24 @@ aval Vm::evalCall(const CallExpr& c, Scope* scope) {
     }
     auto pi = g_vm.pyModOf.find(obj);
     if (pi != g_vm.pyModOf.end()) {
+      // py_call protocol: [module, member, nkw, pos..., (kname, kval)*].
+      std::vector<aval> pos;
+      std::vector<std::pair<std::string, aval>> kw;
+      for (const CallArg& a : c.args) {
+        aval v = eval(a.value.get(), scope);
+        if (a.name.empty()) pos.push_back(v);
+        else kw.emplace_back(a.name, v);
+      }
       std::vector<aval> full;
+      full.reserve(pos.size() + kw.size() * 2 + 3);
       full.push_back(a_str_new(pi->second.data(), pi->second.size()));
       full.push_back(a_str_new(f.field.data(), f.field.size()));
-      for (const CallArg& a : c.args) full.push_back(eval(a.value.get(), scope));
+      full.push_back(a_mkint((int64_t)kw.size()));
+      for (aval v : pos) full.push_back(v);
+      for (auto& kv : kw) {
+        full.push_back(a_str_new(kv.first.data(), kv.first.size()));
+        full.push_back(kv.second);
+      }
       VmCallGuard g(full);
       return a_bi_call(A_BI_PY_CALL, (uint64_t)full.size(), full.data());
     }
@@ -1251,6 +1268,9 @@ aval vmReadTarget(const Expr* target, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Field) {
     const auto& x = static_cast<const FieldExpr&>(*target);
     aval obj = vm.eval(x.object.get(), scope);
+    if (g_vm.moduleOf.count(obj) || g_vm.nativeOf.count(obj) ||
+        g_vm.pyModOf.count(obj))
+      vmUnsupported("module attribute assignment is not supported in --vm mode");
     return a_getattr(obj, x.field.c_str());
   }
   vmUnsupported("unsupported assignment target");
@@ -1272,6 +1292,9 @@ void vmWriteTarget(const Expr* target, aval v, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Field) {
     const auto& x = static_cast<const FieldExpr&>(*target);
     aval obj = vm.eval(x.object.get(), scope);
+    if (g_vm.moduleOf.count(obj) || g_vm.nativeOf.count(obj) ||
+        g_vm.pyModOf.count(obj))
+      vmUnsupported("module attribute assignment is not supported in --vm mode");
     a_setattr(obj, x.field.c_str(), v);
     return;
   }
@@ -1436,15 +1459,13 @@ FlowRes Vm::execStmt(const Stmt* s, Scope* scope) {
     case StmtKind::FromImport:
       return {};  // bound ahead of execution by bindModuleImports
     case StmtKind::StructDecl:
-      vmUnsupported("struct declarations are not supported in --vm mode");
     case StmtKind::EnumDecl:
-      vmUnsupported("enum declarations are not supported in --vm mode");
     case StmtKind::TraitDecl:
-      vmUnsupported("trait declarations are not supported in --vm mode");
     case StmtKind::ImplDecl:
-      vmUnsupported("impl declarations are not supported in --vm mode");
     case StmtKind::TypeAlias:
-      vmUnsupported("type alias declarations are not supported in --vm mode");
+      // Declarations have no runtime effect. The declared names stay unbound,
+      // so any actual use fails lookup and falls back to the native backend.
+      return {};
   }
   vmUnsupported("unsupported statement kind");
 }
@@ -1862,26 +1883,6 @@ static int runProgramVm(const ModuleGraph& graph, const SemaResult& sema,
     g_vmExec = nullptr;
     return 1;
   }
-}
-
-bool programNeedsNative(const ModuleGraph& graph) {
-  for (const Module& mod : graph.modules) {
-    if (!mod.program) continue;
-    for (const StmtPtr& s : mod.program->statements) {
-      if (!s) continue;
-      switch (s->kind) {
-        case StmtKind::StructDecl:
-        case StmtKind::EnumDecl:
-        case StmtKind::TraitDecl:
-        case StmtKind::ImplDecl:
-        case StmtKind::TypeAlias:
-          return true;
-        default:
-          break;
-      }
-    }
-  }
-  return false;
 }
 
 int runProgram(const ModuleGraph& graph, const SemaResult& sema,

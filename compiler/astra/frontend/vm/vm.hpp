@@ -25,11 +25,6 @@ namespace a::vm {
 int runProgram(const ModuleGraph& graph, const SemaResult& sema,
                bool testMode, const std::string& testFilter);
 
-// Returns true when the program uses constructs the VM cannot execute
-// (struct/enum/trait/impl/type-alias declarations). Callers should route
-// such programs to the native backend so `--vm` has parity with `a run`.
-bool programNeedsNative(const ModuleGraph& graph);
-
 // Sentinel returned by runProgram when the program hit a construct the VM
 // cannot execute mid-run; callers should re-run through the native backend.
 inline constexpr int kVmFallbackToNative = -100;

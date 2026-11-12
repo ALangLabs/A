@@ -1321,15 +1321,13 @@ void Compiler::compileStmt(const Stmt* s) {
       if (!topLevel) return;  // nested imports are no-ops (tree-walker parity)
       return;
     case StmtKind::StructDecl:
-      bcUnsupported("struct declarations are not supported in --vm mode");
     case StmtKind::EnumDecl:
-      bcUnsupported("enum declarations are not supported in --vm mode");
     case StmtKind::TraitDecl:
-      bcUnsupported("trait declarations are not supported in --vm mode");
     case StmtKind::ImplDecl:
-      bcUnsupported("impl declarations are not supported in --vm mode");
     case StmtKind::TypeAlias:
-      bcUnsupported("type alias declarations are not supported in --vm mode");
+      // Declarations have no runtime effect; the names are not pre-scanned,
+      // so uses fail compilation and fall back to the tree-walker/native.
+      return;
   }
   bcUnsupported("unsupported statement kind");
 }

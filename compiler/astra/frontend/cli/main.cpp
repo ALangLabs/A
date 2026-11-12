@@ -171,8 +171,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     std::string arg = argv[i];
     // Python-style passthrough: once `run <file>` or `test <path>` is seen,
     // everything after belongs to the program (exported via A_ARGS).
+    // `--filter` stays a compiler option for `test` even after the path.
     if (positional.size() >= 2 &&
-        (positional[0] == "run" || positional[0] == "test")) {
+        (positional[0] == "run" ||
+         (positional[0] == "test" && arg != "--filter" &&
+          arg.rfind("--filter=", 0) != 0))) {
       positional.push_back(arg);
       continue;
     }

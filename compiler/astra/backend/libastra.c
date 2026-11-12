@@ -831,7 +831,10 @@ static int astra_compile(ASTRAState *s1, int filetype, const char *str, int fd)
                 if (filetype & (AFF_TYPE_ASM | AFF_TYPE_ASMPP)) {
                     astra_assemble(s1, !!(filetype & AFF_TYPE_ASMPP));
                 } else {
-                    astragen_compile(s1);
+                    astra_error_noabort("C compilation is not supported: astra assembles "
+                                ".s/.S sources and links objects (the A frontend "
+                                "emits assembly; runtime objects are built by a "
+                                "system/cross C compiler)");
                 }
                 astraelf_end_file(s1);
             }

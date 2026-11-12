@@ -19,12 +19,12 @@ of truth:
   order) and the `a test` filter.
 - `mtag` is `stableTag()` of the module's **weakly-canonicalized path**
   (`AsmEmitter::moduleTag`), matching §1.
-- **Cache layout (now `_acache_`, `__pycache__`-like):** by default, artifacts
-  live in `_acache_/` next to source modules (per-module `<key>.o`/`.sym`, and
-  run/precheck binaries near the entry, e.g. `run.<key>`, `pre.<key>`).
-  `A_CACHE_DIR` overrides with a central root for CI/tests (run entries in
-  `$A_CACHE_DIR`, objects in `dirname($A_CACHE_DIR)/obj`, preserving legacy
-  override layout for compatibility).
+- **Cache layout (central user-cache dir):** all artifacts live under one
+  root — `$A_CACHE_DIR` when set, else the platform user-cache directory
+  (`~/.cache/a`, `~/Library/Caches/a`, `%LOCALAPPDATA%\a\cache`). Objects go
+  to `<root>/obj/<key>.o`; run/precheck binaries are content-addressed in
+  the root. Unit keys hash absolute module paths, so sharing the cache
+  across projects is safe.
 - `A_NO_CACHE=1` disables caching; `A_DEBUG_UNITS=1` prints per-unit
   emit/reuse counts; exercised by `tests/integration/cache_test.sh`.
 

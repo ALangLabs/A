@@ -57,7 +57,12 @@ faster dev builds).
   driver; linking needs a target sysroot via
   `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
   anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
-  paths that must be rewritten relative to the sysroot lib dir).
+  paths that must be rewritten relative to the sysroot lib dir). The
+  runtime/support archives (`libaruntime-<arch>.a`, `libastra1-<arch>.a`)
+  are built once at cmake time by a C compiler for the target — the
+  system `cc` for the host, or a detected `<arch>-gcc`/`A_RUNTIME_CC_<ARCH>`
+  override for cross targets; without one the configure warns and
+  `a build --target` fails at link time.
   There is no C emitter — every target compiles A → assembly → machine
   code, and an emitter decline is a hard error. `A_CODEGEN=asm` forces the
   assembly emitter (a decline is a hard error); `A_CODEGEN=c` is rejected.
@@ -116,22 +121,28 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
   the build fails at the astra step (there is no C fallback on any target).
 
 Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
+`A_RUNTIME_CC_<ARCH>` (cross C compiler used at cmake time to build the
+runtime archives; e.g. `A_RUNTIME_CC_ARM64=aarch64-linux-gnu-gcc`),
 `A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm` to
 force the assembly emitter; `c` is rejected — the C emitter was removed), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`,
 `A_NO_CACHE` (disable caches), `A_CACHE_DIR` (override cache root for CI/tests;
-by default caches live in `_acache_/` next to source files, like Python's
-`__pycache__`),
+by default caches live in the platform user-cache directory —
+`$XDG_CACHE_HOME/a` or `~/.cache/a` on Linux, `~/Library/Caches/a` on macOS,
+`%LOCALAPPDATA%\a\cache` on Windows),
 `A_GC` (`0` disables the garbage collector), `A_GC_STATS` (`1` prints
 per-collection stats to stderr), `A_GC_DEBUG` (`1` enables collector
 stage markers).
 
-## Cache (`_acache_`, `__pycache__`-like)
+## Cache (central user-cache directory)
 
-A stores compilation caches in `_acache_/` directories next to source files
-(like Python's `__pycache__`): per-module compiled object/symbol artifacts for
-incremental builds, plus content-addressed run/precheck binaries for `a run`,
-`a build`, and `a test`. `A_CACHE_DIR` overrides the cache root for isolated
-runs (CI/tests). `A_NO_CACHE=1` disables caching; `A_SPLIT_UNITS=0` forces the
+A stores compilation caches under a single central root — the platform
+user-cache directory by default (`$XDG_CACHE_HOME/a` or `~/.cache/a` on
+Linux, `~/Library/Caches/a` on macOS, `%LOCALAPPDATA%\a\cache` on Windows),
+or `$A_CACHE_DIR` when set: per-module compiled objects under `<root>/obj/`
+for incremental builds, plus content-addressed run/precheck binaries for
+`a run`, `a build`, and `a test`. Source trees are never polluted. Unit
+keys are content+path hashed, so projects can share the cache safely.
+`A_NO_CACHE=1` disables caching; `A_SPLIT_UNITS=0` forces the
 single-unit compile path; `A_DEBUG_UNITS=1` prints per-unit emit/reuse.
 
 ### Run cache

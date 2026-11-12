@@ -315,7 +315,15 @@ aval bcInvoke(std::uint32_t codeIdx, aval env, std::uint32_t nargs, const aval* 
       case Op::GetField:
         sl[in.a] = bcGetField(sl[in.b], c.names[in.c]);
         break;
-      case Op::SetField: a_setattr(sl[in.a], c.names[in.c].c_str(), sl[in.c]); break;
+      case Op::SetField: {
+        aval obj = sl[in.a];
+        if (g_bc.moduleOf.count(obj) || g_bc.nativeOf.count(obj) ||
+            g_bc.pyModOf.count(obj))
+          throw VmUnsupported{
+              "module attribute assignment is not supported in --vm mode"};
+        a_setattr(obj, c.names[in.c].c_str(), sl[in.c]);
+        break;
+      }
       case Op::Slice:
         sl[in.a] = a_slice(sl[in.b], sl[in.b + 1], sl[in.b + 2], sl[in.b + 3]);
         break;
@@ -363,9 +371,8 @@ aval bcInvoke(std::uint32_t codeIdx, aval env, std::uint32_t nargs, const aval* 
           int bid = builtinRuntimeId(c.names[in.c]);
           if (bid >= 0) v = a_builtin((std::uint64_t)bid);
           else {
-            std::fprintf(stderr, "error: module '%d' has no member '%s'\n",
-                         in.b, c.names[in.c].c_str());
-            throw std::runtime_error("unresolved from-import");
+            throw VmUnsupported{"unresolved from-import '" +
+                                c.names[in.c] + "'"};
           }
         }
         g_bc.modules[c.moduleId].vars[in.a] = v;
@@ -404,7 +411,7 @@ aval bcGetField(aval obj, const std::string& field) {
     if (f != m.slotOf.end()) return m.vars[f->second];
     int bid = builtinRuntimeId(field);
     if (bid >= 0) return a_builtin((std::uint64_t)bid);
-    throw std::runtime_error("unknown module member '" + field + "'");
+    throw VmUnsupported{"unknown module member '" + field + "'"};
   }
   auto ni = g_bc.nativeOf.find(obj);
   if (ni != g_bc.nativeOf.end()) {
@@ -421,11 +428,11 @@ aval bcGetField(aval obj, const std::string& field) {
     }
     int bid = builtinRuntimeId(field);
     if (bid >= 0) return a_builtin((std::uint64_t)bid);
-    throw std::runtime_error("unknown native module member '" + field + "'");
+    throw VmUnsupported{"unknown native module member '" + field + "'"};
   }
   auto pi = g_bc.pyModOf.find(obj);
   if (pi != g_bc.pyModOf.end()) {
-    throw std::runtime_error("python module member access unsupported");
+    throw VmUnsupported{"python module member access unsupported"};
   }
   return a_getattr(obj, field.c_str());
 }
@@ -444,7 +451,7 @@ aval bcCallMethod(aval obj, const std::string& field, std::uint32_t nargs,
       int bid = builtinRuntimeId(field);
       if (bid >= 0) return a_bi_call((std::uint64_t)bid, (std::uint64_t)nargs,
                                      argv);
-      throw std::runtime_error("unknown module member '" + field + "'");
+      throw VmUnsupported{"unknown module member '" + field + "'"};
     }
     return bcCallValue(v, nargs, argv);
   }
@@ -456,12 +463,12 @@ aval bcCallMethod(aval obj, const std::string& field, std::uint32_t nargs,
       bid = builtinRuntimeId(*fn);
     if (bid < 0) bid = builtinRuntimeId(field);
     if (bid < 0)
-      throw std::runtime_error("native module function not supported: " + mod +
-                               "." + field);
+      throw VmUnsupported{"native module function not supported: " + mod +
+                           "." + field};
     return a_bi_call((std::uint64_t)bid, (std::uint64_t)nargs, argv);
   }
   if (g_bc.pyModOf.count(obj))
-    throw std::runtime_error("python module call unsupported");
+    throw VmUnsupported{"python module call unsupported"};
   return a_method(obj, field.c_str(), (std::uint64_t)nargs,
                   (std::uint64_t)nkw, argv);
 }
@@ -589,6 +596,10 @@ int execute(const ModuleGraph& graph, bool testMode,
       return 0;
     }
     return runTests(tests);
+  } catch (VmUnsupported&) {
+    // Capability gap discovered at run time: let the caller fall back to
+    // the native backend (mirrors the tree-walker's VmUnsupported path).
+    return kVmFallbackToNative;
   } catch (const std::exception& e) {
     std::fprintf(stderr, "error: %s\n", e.what());
     return 1;

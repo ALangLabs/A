@@ -25,7 +25,7 @@ entry main():
 EOF
 
 run() { "$A_BIN" run "$SRC1"; }
-bins() { find "$CACHE_DIR" -type f ! -name '*.diag' | wc -l | tr -d ' '; }
+bins() { find "$CACHE_DIR" -type f ! -name '*.diag' ! -path "$CACHE_DIR/obj/*" | wc -l | tr -d ' '; }
 
 # Cold run: correct output, exactly one cache entry (plus its .diag sidecar).
 [[ "$(run)" == "3" ]] || { echo "FAIL: cold run output" >&2; exit 1; }
@@ -52,7 +52,7 @@ EOF
 # Runs only when per-module units are enabled (default); with A_SPLIT_UNITS=0
 # the single-unit path is the fallback and emit-count assertions do not apply.
 if [[ "${A_SPLIT_UNITS:-1}" != "0" && "${A_SPLIT_UNITS:-1}" != "off" && "${A_SPLIT_UNITS:-1}" != "no" ]]; then
-  OBJ_DIR="$(dirname "$CACHE_DIR")/obj"
+  OBJ_DIR="$CACHE_DIR/obj"
   PROJ_DIR="$TMP_DIR/proj"
   mkdir -p "$PROJ_DIR/lib"
   ENTRY="$PROJ_DIR/main.a"
