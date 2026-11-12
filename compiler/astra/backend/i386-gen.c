@@ -451,319 +451,6 @@ ST_FUNC void store(int r, SValue *v)
     }
 }
 
-static void gadd_sp(int val)
-{
-    if (val == (signed char)val) {
-        o(0xc483);
-        g(val);
-    } else {
-        oad(0xc481, val); /* add $xxx, %esp */
-    }
-}
-
-#if defined ASTRA_TARGET_PE || defined CONFIG_ASTRA_PIC
-static void gen_static_call(int v)
-{
-    Sym *sym;
-
-    sym = external_helper_sym(v);
-    oad(0xe8, -4);
-    greloc(cur_text_section, sym, ind - 4, R_386_PC32);
-}
-#endif
-
-/* 'is_jmp' is '1' if it is a jump */
-static void gcall_or_jmp(int is_jmp)
-{
-    int r;
-    if ((vtop->r & (VT_VALMASK|VT_LVAL|VT_SYM)) == (VT_CONST|VT_SYM)) {
-        /* constant and relocation case */
-#if defined CONFIG_ASTRA_PIC
-	if (!(vtop->sym->type.t & VT_STATIC)) {
-	    get_pc_thunk(TREG_EBX, 1);
-            oad(0xe8 + is_jmp, vtop->c.i - 4); /* call/jmp im */
-            greloc(cur_text_section, vtop->sym, ind - 4, R_386_PLT32);
-            return;
-	}
-#endif
-        oad(0xe8 + is_jmp, vtop->c.i - 4); /* call/jmp im */
-        greloc(cur_text_section, vtop->sym, ind - 4, R_386_PC32);
-    } else {
-        /* otherwise, indirect call */
-        r = gv(RC_INT);
-        o(0xff); /* call/jmp *r */
-        o(0xd0 + r + (is_jmp << 4));
-    }
-}
-
-static const uint8_t fastcall_regs[3] = { TREG_EAX, TREG_EDX, TREG_ECX };
-static const uint8_t fastcallw_regs[2] = { TREG_ECX, TREG_EDX };
-
-/* Return the number of registers needed to return the struct, or 0 if
-   returning via struct pointer. */
-ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret, int *ret_align, int *regsize)
-{
-#if defined(ASTRA_TARGET_PE) || TARGETOS_FreeBSD || TARGETOS_OpenBSD
-    int size, align, nregs;
-    *ret_align = 1; // Never have to re-align return values for x86
-    *regsize = 4;
-    size = type_size(vt, &align);
-    if (size > 8 || (size & (size - 1)))
-        return 0;
-    nregs = 1;
-    if (size == 8)
-        ret->t = VT_INT, nregs = 2;
-    else if (size == 4)
-        ret->t = VT_INT;
-    else if (size == 2)
-        ret->t = VT_SHORT;
-    else
-        ret->t = VT_BYTE;
-    ret->ref = NULL;
-    return nregs;
-#else
-    *ret_align = 1; // Never have to re-align return values for x86
-    return 0;
-#endif
-}
-
-/* Generate function call. The function address is pushed first, then
-   all the parameters in call order. This functions pops all the
-   parameters and the function address. */
-ST_FUNC void gfunc_call(int nb_args)
-{
-    int size, align, r, args_size, i, func_call;
-    Sym *func_sym;
-
-
-    save_regs(nb_args + 1);
-
-    args_size = 0;
-    for(i = 0;i < nb_args; i++) {
-        if ((vtop->type.t & VT_BTYPE) == VT_STRUCT) {
-            size = type_size(&vtop->type, &align);
-            /* align to stack align size */
-            size = (size + 3) & ~3;
-            /* allocate the necessary size on stack */
-#ifdef ASTRA_TARGET_PE
-            if (size >= 4096) {
-                save_reg(TREG_EDX);
-                r = get_reg(RC_EAX);
-                oad(0x68, size); // push size
-                /* cannot call normal 'alloca' with bound checking */
-                gen_static_call(tok_alloc_const("__alloca"));
-                gadd_sp(4);
-            } else
-#endif
-            {
-                oad(0xec81, size); /* sub $xxx, %esp */
-                /* generate structure store */
-                r = get_reg(RC_INT);
-                o(0xe089 + (r << 8)); /* mov %esp, r */
-            }
-            vset(&vtop->type, r | VT_LVAL, 0);
-            vswap();
-            vstore();
-            args_size += size;
-        } else if (is_float(vtop->type.t)) {
-            gv(RC_FLOAT); /* only one float register */
-            if ((vtop->type.t & VT_BTYPE) == VT_FLOAT)
-                size = 4;
-            else if ((vtop->type.t & VT_BTYPE) == VT_DOUBLE)
-                size = 8;
-            else
-                size = 12;
-            oad(0xec81, size); /* sub $xxx, %esp */
-            if (size == 12)
-                o(0x7cdb);
-            else
-                o(0x5cd9 + size - 4); /* fstp[s|l] 0(%esp) */
-            g(0x24);
-            g(0x00);
-            args_size += size;
-        } else {
-            /* simple type (currently always same size) */
-            /* XXX: implicit cast ? */
-            r = gv(RC_INT);
-            if ((vtop->type.t & VT_BTYPE) == VT_LLONG) {
-                size = 8;
-                o(0x50 + vtop->r2); /* push r */
-            } else {
-                size = 4;
-            }
-            o(0x50 + r); /* push r */
-            args_size += size;
-        }
-        vtop--;
-    }
-
-    func_sym = vtop->type.ref;
-    func_call = func_sym->f.func_call;
-    /* fast call case */
-    if ((func_call >= FUNC_FASTCALL1 && func_call <= FUNC_FASTCALL3) ||
-        func_call == FUNC_FASTCALLW || func_call == FUNC_THISCALL) {
-        int fastcall_nb_regs;
-        const uint8_t *fastcall_regs_ptr;
-        if (func_call == FUNC_FASTCALLW) {
-            fastcall_regs_ptr = fastcallw_regs;
-            fastcall_nb_regs = 2;
-        } else if (func_call == FUNC_THISCALL) {
-            fastcall_regs_ptr = fastcallw_regs;
-            fastcall_nb_regs = 1;
-        } else {
-            fastcall_regs_ptr = fastcall_regs;
-            fastcall_nb_regs = func_call - FUNC_FASTCALL1 + 1;
-        }
-        for(i = 0;i < fastcall_nb_regs; i++) {
-            if (args_size <= 0)
-                break;
-            o(0x58 + fastcall_regs_ptr[i]); /* pop r */
-            /* XXX: incorrect for struct/floats */
-            args_size -= 4;
-        }
-    }
-#if !defined(ASTRA_TARGET_PE) && !TARGETOS_FreeBSD || TARGETOS_OpenBSD
-    else if ((vtop->type.ref->type.t & VT_BTYPE) == VT_STRUCT)
-        args_size -= 4;
-#endif
-
-    gcall_or_jmp(0);
-
-    if (args_size && func_call != FUNC_STDCALL && func_call != FUNC_THISCALL && func_call != FUNC_FASTCALLW)
-        gadd_sp(args_size);
-    vtop--;
-}
-
-#ifdef ASTRA_TARGET_PE
-#define FUNC_PROLOG_SIZE (10 + !!USE_EBX)
-#else
-#define FUNC_PROLOG_SIZE (9 + !!USE_EBX)
-#endif
-
-/* generate function prolog of type 't' */
-ST_FUNC void gfunc_prolog(Sym *func_sym)
-{
-    CType *func_type = &func_sym->type;
-    int addr, align, size, func_call, fastcall_nb_regs;
-    int param_index, param_addr;
-    const uint8_t *fastcall_regs_ptr;
-    Sym *sym;
-    CType *type;
-
-    sym = func_type->ref;
-    func_call = sym->f.func_call;
-    addr = 8;
-    loc = 0;
-    func_vc = 0;
-
-    if (func_call >= FUNC_FASTCALL1 && func_call <= FUNC_FASTCALL3) {
-        fastcall_nb_regs = func_call - FUNC_FASTCALL1 + 1;
-        fastcall_regs_ptr = fastcall_regs;
-    } else if (func_call == FUNC_FASTCALLW) {
-        fastcall_nb_regs = 2;
-        fastcall_regs_ptr = fastcallw_regs;
-    } else if (func_call == FUNC_THISCALL) {
-        fastcall_nb_regs = 1;
-        fastcall_regs_ptr = fastcallw_regs;
-    } else {
-        fastcall_nb_regs = 0;
-        fastcall_regs_ptr = NULL;
-    }
-    param_index = 0;
-
-    ind += FUNC_PROLOG_SIZE;
-    func_sub_sp_offset = ind;
-    /* if the function returns a structure, then add an
-       implicit pointer parameter */
-#if defined(ASTRA_TARGET_PE) || TARGETOS_FreeBSD || TARGETOS_OpenBSD
-    size = type_size(&func_vt,&align);
-    if (((func_vt.t & VT_BTYPE) == VT_STRUCT)
-        && (size > 8 || (size & (size - 1)))) {
-#else
-    if ((func_vt.t & VT_BTYPE) == VT_STRUCT) {
-#endif
-        /* XXX: fastcall case ? */
-        func_vc = addr;
-        addr += 4;
-        param_index++;
-    }
-    /* define parameters */
-    while ((sym = sym->next) != NULL) {
-        type = &sym->type;
-        size = type_size(type, &align);
-        size = (size + 3) & ~3;
-#ifdef FUNC_STRUCT_PARAM_AS_PTR
-        /* structs are passed as pointer */
-        if ((type->t & VT_BTYPE) == VT_STRUCT) {
-            size = 4;
-        }
-#endif
-        if (param_index < fastcall_nb_regs) {
-            /* save FASTCALL register */
-            loc -= 4;
-            /* movl */
-            gen_modrm(0x89, fastcall_regs_ptr[param_index], VT_LOCAL, NULL, loc);
-            param_addr = loc;
-        } else {
-            param_addr = addr;
-            addr += size;
-        }
-        gfunc_set_param(sym, param_addr, 0);
-        param_index++;
-    }
-    func_ret_sub = 0;
-    /* pascal type call or fastcall ? */
-    if (func_call == FUNC_STDCALL || func_call == FUNC_FASTCALLW || func_call == FUNC_THISCALL)
-        func_ret_sub = addr - 8;
-#if !defined(ASTRA_TARGET_PE) && !TARGETOS_FreeBSD || TARGETOS_OpenBSD
-    else if (func_vc)
-        func_ret_sub = 4;
-#endif
-
-}
-
-/* generate function epilog */
-ST_FUNC void gfunc_epilog(void)
-{
-    addr_t v, saved_ind;
-
-
-    /* align local size to word & save local variables */
-    v = (-loc + 3) & -4;
-
-#if USE_EBX
-    gen_modrm(0x8b, TREG_EBX, VT_LOCAL, NULL, -(v+4));
-#endif
-
-    o(0xc9); /* leave */
-    if (func_ret_sub == 0) {
-        o(0xc3); /* ret */
-    } else {
-        o(0xc2); /* ret n */
-        g(func_ret_sub);
-        g(func_ret_sub >> 8);
-    }
-    saved_ind = ind;
-    ind = func_sub_sp_offset - FUNC_PROLOG_SIZE;
-#ifdef ASTRA_TARGET_PE
-    if (v >= 4096) {
-        oad(0xb8, v); /* mov stacksize, %eax */
-        gen_static_call(TOK___chkstk); /* call __chkstk, (does the stackframe too) */
-    } else
-#endif
-    {
-        o(0xe58955);  /* push %ebp, mov %esp, %ebp */
-        o(0xec81);  /* sub esp, stacksize */
-        gen_le32(v);
-#ifdef ASTRA_TARGET_PE
-        o(0x90);  /* adjust to FUNC_PROLOG_SIZE */
-#endif
-    }
-#if USE_EBX
-    o(0x53); /* push ebx */
-#endif
-    ind = saved_ind;
-}
 
 /* generate a jump to a label */
 ST_FUNC int gjmp(int t)
@@ -1171,50 +858,39 @@ ST_FUNC void gen_increment_tcov (SValue *sv)
 /* computed goto support */
 ST_FUNC void ggoto(void)
 {
-    gcall_or_jmp(1);
-    vtop--;
+    astra_error("C goto is not supported");
 }
 
 /* bound check support functions */
 
 /* Save the stack pointer onto the stack */
-ST_FUNC void gen_vla_sp_save(int addr) {
-    /* mov %esp,addr(%ebp)*/
-    gen_modrm(0x89, TREG_ESP, VT_LOCAL, NULL, addr);
-}
-
-/* Restore the SP from a location on the stack */
-ST_FUNC void gen_vla_sp_restore(int addr) {
-    gen_modrm(0x8b, TREG_ESP, VT_LOCAL, NULL, addr);
-}
-
-/* Subtract from the stack pointer, and push the resulting value onto the stack */
-ST_FUNC void gen_vla_alloc(CType *type, int align) {
-    int use_call = 0;
-
-#ifdef ASTRA_TARGET_PE    /* alloca does more than just adjust %rsp on Windows */
-    use_call = 1;
-#endif
-    if (use_call)
-    {
-        vpush_helper_func(TOK_alloca);
-        vswap(); /* Move alloca ref past allocation size */
-        gfunc_call(1);
-    }
-    else {
-        int r;
-        r = gv(RC_INT); /* allocation size */
-        /* sub r,%rsp */
-        o(0x2b);
-        o(0xe0 | r);
-        /* We align to 16 bytes rather than align */
-        /* and ~15, %esp */
-        o(0xf0e483);
-        vpop();
-    }
-}
-
 /* end of X86 code generator */
 /*************************************************************/
+
+/* C-call/VA machinery removed; stubs satisfy dead C-only paths in the
+   shared expression parser (unreachable for assembly input). */
+ST_FUNC void gfunc_call(int nb_args)
+{
+    (void)nb_args;
+    astra_error("C function calls are not supported");
+}
+
+ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret, int *align, int *regsize)
+{
+    (void)vt; (void)variadic; (void)ret; (void)align; (void)regsize;
+    return 0;
+}
+
+ST_FUNC void gen_va_start(void)
+{
+    astra_error("C varargs are not supported");
+}
+
+ST_FUNC void gen_va_arg(CType *t)
+{
+    (void)t;
+    astra_error("C varargs are not supported");
+}
+
 #endif
 /*************************************************************/

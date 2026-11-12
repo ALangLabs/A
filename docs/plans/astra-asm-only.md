@@ -1,12 +1,17 @@
 # Plan: make astra an asm/link-only backend (no C compiler)
 
-> **Status (implemented):** Phase 1 done; Phase 2 done *functionally* —
-> `astra_compile` rejects all non-asm input, so no entry point can compile
-> C. The TCC-derived C frontend files (`astragen.c`, `*-gen.c`) were kept
-> because they also contain infrastructure the assembler/linker shares
-> (symbol table, `expr_const`, `greloca`, per-arch emission helpers);
-> physical removal is a follow-up extraction, not required for correctness.
-> Phase 3 docs done; CI needs no change (host-only builds).
+> **Status (implemented):** Phase 1 done; Phase 2 done — C input is
+> rejected at `astra_compile`, AND the dead C-only code was physically
+> stripped (~5.5k lines): `astragen.c` lost its statement/declaration/
+> initializer/function-definition layer (kept: symtab, SValue stack, the
+> expression parser the assembler shares for operands, `expr_const` for
+> `#if`), and every `*-gen.c` lost its C-call ABI machinery
+> (`gfunc_*`, `classify_*`, arg passing, struct copy, VLA) keeping only
+> emission helpers (`g`/`o`/`oad`/`gen_le*`/`gen_modrm*`/`gen_opi/f`/
+> `gen_cvt_*`/`gjmp*`). C-only call sites that remain reachable from the
+> shared expression parser are stubbed to error (compound literals,
+> statement exprs, `_Static_assert`, va_arg, C calls/goto). Phase 3 docs
+> done; CI needs no change (host-only builds).
 
 Goal: astra stops being a TinyCC fork that compiles C. It becomes the
 assembler + linker + runtime-packaging driver for A's emitted `.s`/`.S`
