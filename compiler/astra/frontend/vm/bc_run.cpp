@@ -317,11 +317,20 @@ aval bcInvoke(std::uint32_t codeIdx, aval env, std::uint32_t nargs, const aval* 
         break;
       case Op::SetField: {
         aval obj = sl[in.a];
-        if (g_bc.moduleOf.count(obj) || g_bc.nativeOf.count(obj) ||
-            g_bc.pyModOf.count(obj))
+        auto mi = g_bc.moduleOf.find(obj);
+        if (mi != g_bc.moduleOf.end()) {
+          BcModule& m = g_bc.modules[mi->second];
+          auto f = m.slotOf.find(c.names[in.b]);
+          if (f == m.slotOf.end())
+            throw VmUnsupported{"module has no member '" + c.names[in.b] +
+                                "'"};
+          m.vars[f->second] = sl[in.c];
+          break;
+        }
+        if (g_bc.nativeOf.count(obj) || g_bc.pyModOf.count(obj))
           throw VmUnsupported{
               "module attribute assignment is not supported in --vm mode"};
-        a_setattr(obj, c.names[in.c].c_str(), sl[in.c]);
+        a_setattr(obj, c.names[in.b].c_str(), sl[in.c]);
         break;
       }
       case Op::Slice:

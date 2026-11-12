@@ -17,7 +17,6 @@ faster dev builds).
 | `a test [file\|dir]` | Run `fn test_*()` in a file, or recursively discover test files in a directory/codebase (default: `.`). `--filter <substr>` selects matching test names (in scan mode, files with no matches are skipped). |
 | `a fmt <file.a>` | Format to stdout; `-w` writes in place, `--check` exits nonzero if unformatted, `--indent <n>`. |
 | `a doc <file.a>` | Generate docs (markdown; `--json`, `-o <file>`). |
-| `a ir <file.a>` | Print the typed SSA IR; `--opt` or `-O*` runs optimization passes. |
 | `a repl` | Interactive REPL — self-hosted A shell on a TTY, line REPL when piped. |
 | `a version` / `a help` | Version and usage. |
 
@@ -33,42 +32,21 @@ faster dev builds).
   `run`/`test`/`repl`. `--vm` interprets the AST in-process through the
   `aval` runtime (no Astra assemble/link step); `--native` is the default
   AOT path. `--vm` is host-only and rejected for `build`/`check`/`fmt`/
-  `doc`/`ir` and non-host `--target`s. VM v1 gap: struct/enum/trait/impl/
+  `doc` and non-host `--target`s. VM v1 gap: struct/enum/trait/impl/
   type-alias declarations are unsupported.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.a --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single
   file, a filter that matches no tests is an error; in directory scan mode,
   files with no matching tests are skipped and an error is reported only if
-  no tests match anywhere. The filter is part of the run-cache key, so
-  different filters never share a cached binary.
-- `--target <arch>` — cross-compile target: `x86_64`
-  (default; x86-64 assembly emitter on Linux/macOS SysV, Win64 MS-ABI
-  native emitter on Windows), `i386`, `arm`
-  (ARMv7 hard-float), `aarch64`/`arm64`, `riscv64`, `i8086` (bare metal).
-  An optional `-linux`/`-windows`/`-macos` suffix is accepted but must match
-  the host OS — Astra drivers are built per-OS. Host OSes: Linux, macOS,
-  and Windows (x86-64/arm64). The astra driver set differs per host:
-  Linux builds `x86_64 i386 arm arm64 riscv64 i8086`, macOS `x86_64 arm64`,
-  Windows `x86_64 i386 arm64`. x86-64 on Linux/macOS uses the dedicated
-  `emitAsm` emitter; every other target/OS uses the native per-arch
-  emitter (`emitNative` in `codegen_native.cpp`, including Win64/MS-ABI
-  for `x86_64-windows`), then calls the matching `astra-<arch>`
-  driver; linking needs a target sysroot via
-  `A_SYSROOT`/`A_SYSROOT_<ARCH>` (e.g. Debian `*-cross` packages extracted
-  anywhere — note their `libc.so`/`libm.so` linker scripts use absolute
-  paths that must be rewritten relative to the sysroot lib dir). The
-  runtime/support archives (`libaruntime-<arch>.a`, `libastra1-<arch>.a`)
-  are built once at cmake time by a C compiler for the target — the
-  system `cc` for the host, or a detected `<arch>-gcc`/`A_RUNTIME_CC_<ARCH>`
-  override for cross targets; without one the configure warns and
-  `a build --target` fails at link time.
-  There is no C emitter — every target compiles A → assembly → machine
-  code, and an emitter decline is a hard error. `A_CODEGEN=asm` forces the
-  assembly emitter (a decline is a hard error); `A_CODEGEN=c` is rejected.
-  `a run` executes natively
-  (i8086 via qemu-system-i386 on Linux); `a test`/`a repl` reject non-host
-  targets.
+  no tests match anywhere.
+- `--target <arch>` — the LLVM backend is host-only: the host arch is
+  the only supported target today (`x86_64`, `aarch64`/`arm64`);
+  non-host targets are rejected with a clear error. A lowers to LLVM IR
+  (`frontend/llvm/`), then `opt -O<n>` → `llc -filetype=obj` → `clang`
+  links against `libaruntime.a` (tools found via `A_LLVM_OPT`/`A_LLVM_LLC`/
+  `A_LLVM_CC` or PATH). `a run` executes natively; `a test`/`a repl`
+  require the host target.
 
 ### Host platform notes
 
@@ -123,60 +101,19 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
 Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
 `A_RUNTIME_CC_<ARCH>` (cross C compiler used at cmake time to build the
 runtime archives; e.g. `A_RUNTIME_CC_ARM64=aarch64-linux-gnu-gcc`),
-`A_SYSROOT`, `A_SYSROOT_<ARCH>`, `A_TARGET`, `A_CODEGEN` (`asm` to
-force the assembly emitter; `c` is rejected — the C emitter was removed), `A_DEBUG_SRC`, `A_DEBUG_NATIVE`, `A_JOBS`,
-`A_NO_CACHE` (disable caches), `A_CACHE_DIR` (override cache root for CI/tests;
-by default caches live in the platform user-cache directory —
-`$XDG_CACHE_HOME/a` or `~/.cache/a` on Linux, `~/Library/Caches/a` on macOS,
-`%LOCALAPPDATA%\a\cache` on Windows),
+`A_TARGET`, `A_LLVM_CC`/`A_LLVM_OPT`/`A_LLVM_LLC`, `A_DEBUG_SRC`,
+`A_JOBS`,
 `A_GC` (`0` disables the garbage collector), `A_GC_STATS` (`1` prints
 per-collection stats to stderr), `A_GC_DEBUG` (`1` enables collector
 stage markers).
 
-## Cache (central user-cache directory)
+## Cache
 
-A stores compilation caches under a single central root — the platform
-user-cache directory by default (`$XDG_CACHE_HOME/a` or `~/.cache/a` on
-Linux, `~/Library/Caches/a` on macOS, `%LOCALAPPDATA%\a\cache` on Windows),
-or `$A_CACHE_DIR` when set: per-module compiled objects under `<root>/obj/`
-for incremental builds, plus content-addressed run/precheck binaries for
-`a run`, `a build`, and `a test`. Source trees are never polluted. Unit
-keys are content+path hashed, so projects can share the cache safely.
-`A_NO_CACHE=1` disables caching; `A_SPLIT_UNITS=0` forces the
-single-unit compile path; `A_DEBUG_UNITS=1` prints per-unit emit/reuse.
-
-### Run cache
-
-`a run` and the REPL reuse a content-addressed compiled binary across
-invocations. Two keys are involved:
-
-- the **pre-parse key** lets a hit skip the frontend entirely. It follows
-  the entry's imports textually through the same candidate tables the module
-  loader uses (entry dir, `-I` dirs, `A_PATH`, the stdlib package layouts),
-  hashing the content of every module reached and marking every candidate
-  that was checked and absent, so creating a shadowing file changes the key.
-  Only the real dependency graph is touched: a directory holding thousands of
-  unrelated `.a` files, or `/tmp`, neither slows the check nor disables it.
-  A module is re-hashed only while it is reachable, and imports the scanner
-  cannot classify fall back to the frontend rather than trusting a partial key.
-- the **binary key** hashes every module source, the runtime files, the astra
-  binary, target/opt level, codegen-forcing environment and toolchain version.
-
-A warm run costs one dependency check plus an `execve` of the cached binary.
-On the development box that is ~10 ms end to end (`python3 -c pass` is ~20 ms);
-`a build` produces a binary that starts in ~1 ms, and the difference is the
-dependency stat/hash pass, which is what keeps `a run` honest after an edit.
-Set `A_NO_CACHE=1` to always recompile. Covered by
-`tests/integration/cache_test.sh` (the `run-cache` CTest entry).
-
-`a run <file.a>` additionally skips the frontend on repeat runs via
-a depfile-style precheck: a bounded stat snapshot of every `.a`
-file under the entry dir, module search dirs, and the stdlib
-(plus the per-string deps recorded on the first compile). On a hit
-it execs the cached binary directly and replays the recorded
-compile-time diagnostics (sidecar `.diag`), so warnings like unused
-variables fire exactly as on a cold run. Any source, module, or
-search-path change yields a fresh key.
+Compilation caching was removed — every `a run`/`a build`/`a test`
+compiles fresh and writes nothing beside your sources. `A_SPLIT_UNITS=0`
+still forces the single-unit compile path; `A_DEBUG_UNITS=1` prints
+per-unit emit info. `A_NO_CACHE`, `A_CACHE_DIR`, and the `run-cache`
+CTest entry no longer exist.
 
 ## Editor support
 

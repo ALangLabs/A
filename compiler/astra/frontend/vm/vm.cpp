@@ -9,7 +9,9 @@
 //
 // Known v1 limitations (all report "error: ... is not supported in --vm
 // mode" and exit 1, except where noted):
-//   * struct/class, enum, trait, impl and type-alias declarations
+//   * trait, impl and type-alias declarations (type-level only; struct/class
+//     and enum work: instances are runtime AStruct values, variants are
+//     int avals or {__tag,__name} dicts — same shapes as native)
 //   * python: module interop is partially supported (member calls route
 //     through the py_call builtin; bare `import python:x` binds a marker)
 //   * `import prelude` sees an empty module (the prelude is skipped exactly
@@ -59,6 +61,7 @@ extern "C" {
 // not have to include a_runtime_internal.h (POSIX-only).
 aval fnon_new_raw(uint64_t entry, aval env, const char *name, uint32_t flags,
                   uint64_t nparams);
+aval a_struct_new(aval name, aval methods, aval methodFns);
 void a_gc_mark_aval(aval v);
 void a_gc_add_root_cb(void (*fn)(void));
 }
@@ -88,7 +91,7 @@ struct Scope {
 // defined in (stored in the closure env so calls routed through a_call —
 // e.g. from map/filter — rebuild the same parent chain).
 struct VmFn {
-  enum class Kind { Decl, Lambda, PyCall } kind = Kind::Decl;
+  enum class Kind { Decl, Lambda, PyCall, StructCtor } kind = Kind::Decl;
   const FnDecl* decl = nullptr;
   const LambdaExpr* lambda = nullptr;
   Scope* capture = nullptr;
@@ -97,6 +100,8 @@ struct VmFn {
   // the runtime py_call builtin with argv = [module, member, args...].
   std::string pyModule;
   std::string pyMember;
+  // Kind::StructCtor: the StructDecl this ctor builds instances for.
+  const StructDecl* sdecl = nullptr;
 };
 
 struct VmState {
@@ -115,6 +120,32 @@ struct VmState {
   std::unordered_map<aval, std::string> pyModOf;   // aval -> python module name
   std::unordered_map<const FnDecl*, uint64_t> declFnKey;
   std::unordered_map<int, Scope*> moduleScopes;
+  // Struct/class support: per-decl runtime triple passed to a_struct_new
+  // (display name, method-name list, method-name->fn dict) plus the field
+  // order used to place ctor arguments, and the ctor callable aval itself.
+  struct VmStructInfo {
+    aval name = A_NONE;
+    aval methods = A_NONE;
+    aval methodFns = A_NONE;
+    std::vector<std::string> fieldNames;
+  };
+  std::unordered_map<const StructDecl*, VmStructInfo> structInfo;
+  std::unordered_map<const StructDecl*, aval> structCtor;
+  // Enum support: the enum name binds to a dict of variant-name -> value
+  // (simple variants are int avals; algebraic variants are {__tag,__name}
+  // dicts, matching the native backend). enumInfo lets `Enum.Variant(args)`
+  // calls rebuild a fresh variant dict with payload fields.
+  struct VmEnumVar {
+    std::int64_t value = 0;
+    int tag = 0;
+    bool algebraic = false;
+    std::vector<std::string> payloadFields;
+  };
+  struct VmEnumInfo {
+    std::unordered_map<std::string, VmEnumVar> variants;
+  };
+  std::unordered_map<aval, VmEnumInfo> enumInfo;
+  std::unordered_map<std::string, std::int64_t> enumVarVals;  // short name
 
   const ModuleGraph* graph = nullptr;
   const SemaResult* sema = nullptr;
@@ -128,6 +159,24 @@ constexpr uint64_t kVmMissing = A_TAG;  // codegen's kMissing sentinel
 
 [[noreturn]] void vmUnsupported(const std::string& what) {
   throw VmUnsupported{what};
+}
+
+// Constant-fold an enum variant value expression (int literal, unary minus,
+// or a reference to an earlier variant by short name). Mirrors the native
+// backend's evalConstInt; unknown shapes fall back to `fallback`.
+std::int64_t vmEnumConst(const Expr* e, std::int64_t fallback) {
+  if (!e) return fallback;
+  if (e->kind == ExprKind::IntLit)
+    return static_cast<const IntLitExpr*>(e)->value;
+  if (e->kind == ExprKind::Unary) {
+    const UnaryExpr* u = static_cast<const UnaryExpr*>(e);
+    if (u->op == "-") return -vmEnumConst(u->operand.get(), 0);
+  }
+  if (e->kind == ExprKind::Ident) {
+    auto it = g_vm.enumVarVals.find(static_cast<const IdentExpr*>(e)->name);
+    if (it != g_vm.enumVarVals.end()) return it->second;
+  }
+  return fallback;
 }
 
 // New transient scope: owned by activeScopes until its ScopeGuard pops it.
@@ -333,6 +382,23 @@ aval Vm::callValue(aval fn, std::vector<aval>& args, Scope* scope) {
 // callValue and through vmTrampoline when native code calls back.
 aval vmCall(uint64_t fnKey, Scope* capture, std::vector<aval>& args) {
   VmFn& f = g_vm.fns[fnKey];
+  if (f.kind == VmFn::Kind::StructCtor) {
+    // Struct/class constructor: build the runtime AStruct (fields live in
+    // its embedded dict; methodFns powers a_method dispatch). Args arrive
+    // in field-declaration order; missing fields become A_NONE.
+    auto sit = g_vm.structInfo.find(f.sdecl);
+    if (sit == g_vm.structInfo.end())
+      vmUnsupported("struct constructor for an undeclared type");
+    VmState::VmStructInfo& info = sit->second;
+    aval obj = a_struct_new(info.name, info.methods, info.methodFns);
+    for (std::size_t i = 0; i < info.fieldNames.size(); ++i) {
+      aval v = i < args.size() ? args[i] : A_NONE;
+      aval key = a_str_new(info.fieldNames[i].data(),
+                           info.fieldNames[i].size());
+      a_dict_set(obj, key, v);
+    }
+    return obj;
+  }
   if (f.kind == VmFn::Kind::PyCall) {
     // from python:<mod> import name -> py_call(mod, name, nkw, args...).
     // Kwargs are rejected earlier (vmParamNames is empty for PyCall), so
@@ -1004,8 +1070,40 @@ aval Vm::evalCall(const CallExpr& c, Scope* scope) {
       return a_bi_call((uint64_t)bid, (uint64_t)args.size(), args.data());
     }
   }
-  if (c.calleeStruct)
-    vmUnsupported("struct constructor calls are not supported in --vm mode");
+  if (c.calleeStruct) {
+    // Struct/class constructor call: order args into field-declaration
+    // order (named args land on their field, positional fill the rest) and
+    // invoke the ctor callable bound by the StructDecl statement.
+    auto sit = g_vm.structCtor.find(c.calleeStruct);
+    if (sit == g_vm.structCtor.end())
+      vmUnsupported("struct constructor calls are not supported in --vm mode");
+    auto iit = g_vm.structInfo.find(c.calleeStruct);
+    std::size_t nfields =
+        iit != g_vm.structInfo.end() ? iit->second.fieldNames.size() : 0;
+    std::vector<aval> ordered(nfields, A_NONE);
+    std::size_t nextPos = 0;
+    for (const CallArg& a : c.args) {
+      aval v = eval(a.value.get(), scope);
+      std::size_t idx;
+      if (!a.name.empty()) {
+        idx = nfields;
+        if (iit != g_vm.structInfo.end())
+          for (std::size_t i = 0; i < nfields; ++i)
+            if (iit->second.fieldNames[i] == a.name) { idx = i; break; }
+        if (idx == nfields)
+          vmUnsupported("struct '" + std::string(c.calleeStruct->name) +
+                        "' has no field '" + a.name + "'");
+      } else {
+        idx = nextPos++;
+      }
+      if (idx >= nfields)
+        vmUnsupported("too many arguments to struct '" +
+                      std::string(c.calleeStruct->name) + "'");
+      ordered[idx] = v;
+    }
+    VmCallGuard g(ordered);
+    return callValue(sit->second, ordered, scope);
+  }
 
   // 4. Field callee: module member call or generic a_method dispatch.
   if (c.callee->kind == ExprKind::Field) {
@@ -1068,6 +1166,38 @@ aval Vm::evalCall(const CallExpr& c, Scope* scope) {
       }
       VmCallGuard g(full);
       return a_bi_call(A_BI_PY_CALL, (uint64_t)full.size(), full.data());
+    }
+    // Algebraic enum variant construction: Enum.Variant(args...). Build a
+    // fresh {__tag,__name} dict and store payload fields by name (positional
+    // args follow payloadFields order; named args match field names).
+    auto ei = g_vm.enumInfo.find(obj);
+    if (ei != g_vm.enumInfo.end()) {
+      auto vi = ei->second.variants.find(f.field);
+      if (vi != ei->second.variants.end() && vi->second.algebraic) {
+        const VmState::VmEnumVar& ev = vi->second;
+        aval d = a_dict_new();
+        aval tk = a_str_new("__tag", 5);
+        a_dict_set(d, tk, a_mkint(ev.tag));
+        aval nk = a_str_new("__name", 6);
+        aval nv = a_str_new(f.field.data(), f.field.size());
+        a_dict_set(d, nk, nv);
+        std::size_t pos = 0;
+        for (const CallArg& a : c.args) {
+          aval v = eval(a.value.get(), scope);
+          std::string fname;
+          if (!a.name.empty()) {
+            fname = a.name;
+          } else if (pos < ev.payloadFields.size()) {
+            fname = ev.payloadFields[pos++];
+          } else {
+            vmUnsupported("too many arguments to enum variant '" + f.field +
+                          "'");
+          }
+          aval fk = a_str_new(fname.data(), fname.size());
+          a_dict_set(d, fk, v);
+        }
+        return d;
+      }
     }
     // Generic method call: a_method(obj, name, n, nkw, argv).
     std::vector<aval> argv;
@@ -1268,8 +1398,14 @@ aval vmReadTarget(const Expr* target, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Field) {
     const auto& x = static_cast<const FieldExpr&>(*target);
     aval obj = vm.eval(x.object.get(), scope);
-    if (g_vm.moduleOf.count(obj) || g_vm.nativeOf.count(obj) ||
-        g_vm.pyModOf.count(obj))
+    auto mi = g_vm.moduleOf.find(obj);
+    if (mi != g_vm.moduleOf.end()) {
+      aval v;
+      Scope* ms = g_vm.moduleScopes[mi->second];
+      if (!vmScopeGet(ms, x.field, v)) v = A_NONE;
+      return v;
+    }
+    if (g_vm.nativeOf.count(obj) || g_vm.pyModOf.count(obj))
       vmUnsupported("module attribute assignment is not supported in --vm mode");
     return a_getattr(obj, x.field.c_str());
   }
@@ -1292,8 +1428,13 @@ void vmWriteTarget(const Expr* target, aval v, Scope* scope, Vm& vm) {
   if (target->kind == ExprKind::Field) {
     const auto& x = static_cast<const FieldExpr&>(*target);
     aval obj = vm.eval(x.object.get(), scope);
-    if (g_vm.moduleOf.count(obj) || g_vm.nativeOf.count(obj) ||
-        g_vm.pyModOf.count(obj))
+    auto mi = g_vm.moduleOf.find(obj);
+    if (mi != g_vm.moduleOf.end()) {
+      Scope* ms = g_vm.moduleScopes[mi->second];
+      vmScopeSet(ms, x.field, v);
+      return;
+    }
+    if (g_vm.nativeOf.count(obj) || g_vm.pyModOf.count(obj))
       vmUnsupported("module attribute assignment is not supported in --vm mode");
     a_setattr(obj, x.field.c_str(), v);
     return;
@@ -1458,8 +1599,86 @@ FlowRes Vm::execStmt(const Stmt* s, Scope* scope) {
     case StmtKind::Import:
     case StmtKind::FromImport:
       return {};  // bound ahead of execution by bindModuleImports
-    case StmtKind::StructDecl:
-    case StmtKind::EnumDecl:
+    case StmtKind::StructDecl: {
+      const auto& st = static_cast<const StructDecl&>(*s);
+      int mid = g_vm.curModule;
+      // Build the runtime class triple once per declaration: display name,
+      // sorted method-name list, and method-name -> callable dict (the dict
+      // is what a_method consults for T_STRUCT receivers).
+      VmState::VmStructInfo info;
+      for (const FieldDecl& fd : st.fields) info.fieldNames.push_back(fd.name);
+      std::string disp = st.name;
+      std::size_t sep = disp.rfind("::");
+      if (sep != std::string::npos) disp = disp.substr(sep + 2);
+      info.name = a_str_new(disp.data(), disp.size());
+      std::vector<std::string> mnames;
+      for (const auto& mp : st.methods) mnames.push_back(mp->name);
+      std::sort(mnames.begin(), mnames.end());
+      std::vector<aval> mitems;
+      mitems.reserve(mnames.size());
+      for (const std::string& mn : mnames)
+        mitems.push_back(a_str_new(mn.data(), mn.size()));
+      info.methods = a_list_new((uint64_t)mitems.size(),
+                                mitems.empty() ? nullptr : mitems.data());
+      info.methodFns = a_dict_new();
+      // Register each method FnDecl like a top-level fn; a_method prepends
+      // the receiver, which lands in the method's explicit `self` param.
+      for (const auto& mp : st.methods) {
+        const FnDecl* md = mp.get();
+        uint64_t key = vmAddFn(VmFn{.kind = VmFn::Kind::Decl, .decl = md,
+                                    .capture = scope, .moduleId = mid,
+                                    .pyModule = "", .pyMember = ""});
+        g_vm.declFnKey[md] = key;
+        aval callable = vmMakeCallable(key, scope, md->name.c_str());
+        aval mk = a_str_new(md->name.data(), md->name.size());
+        a_dict_set(info.methodFns, mk, callable);
+      }
+      g_vm.structInfo[&st] = info;
+      VmFn ctor{.kind = VmFn::Kind::StructCtor, .capture = scope,
+                .moduleId = mid, .pyModule = "", .pyMember = "",
+                .sdecl = &st};
+      uint64_t ck = vmAddFn(std::move(ctor));
+      aval ctorVal = vmMakeCallable(ck, scope, st.name.c_str());
+      g_vm.structCtor[&st] = ctorVal;
+      vmScopeDeclare(scope, st.name, ctorVal);
+      return {};
+    }
+    case StmtKind::EnumDecl: {
+      const auto& st = static_cast<const EnumDecl&>(*s);
+      bool alg = st.isAlgebraic();
+      VmState::VmEnumInfo info;
+      aval dict = a_dict_new();
+      std::int64_t next = 0;
+      int tag = 0;
+      for (const EnumVariant& v : st.variants) {
+        std::int64_t val = v.value ? vmEnumConst(v.value.get(), next) : next;
+        next = val + 1;
+        VmState::VmEnumVar ev;
+        ev.value = val;
+        ev.tag = tag++;
+        ev.algebraic = alg;
+        for (const FieldDecl& f : v.fields) ev.payloadFields.push_back(f.name);
+        info.variants[v.name] = ev;
+        g_vm.enumVarVals[v.name] = val;
+        aval va;
+        if (!alg) {
+          va = a_mkint(val);
+        } else {
+          // {__tag, __name} dict — same shape the native backend emits.
+          va = a_dict_new();
+          aval tk = a_str_new("__tag", 5);
+          a_dict_set(va, tk, a_mkint(ev.tag));
+          aval nk = a_str_new("__name", 6);
+          aval nv = a_str_new(v.name.data(), v.name.size());
+          a_dict_set(va, nk, nv);
+        }
+        aval kk = a_str_new(v.name.data(), v.name.size());
+        a_dict_set(dict, kk, va);
+      }
+      g_vm.enumInfo[dict] = std::move(info);
+      vmScopeDeclare(scope, st.name, dict);
+      return {};
+    }
     case StmtKind::TraitDecl:
     case StmtKind::ImplDecl:
     case StmtKind::TypeAlias:

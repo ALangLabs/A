@@ -29,7 +29,7 @@
 #endif
 namespace a {
 namespace {
-PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.vm=c.vm; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; return p; }
+PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.vm=c.vm; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; p.backend=c.backend; return p; }
 bool readAll(const std::string& path,std::string& t,std::ostream& e){
   std::error_code ec;
   if(std::filesystem::is_directory(path,ec)){ e<<"error: '"<<path<<"' is a directory, not a source file\n"; return false; }
@@ -111,8 +111,8 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
     e<<"warning: could not locate stdlib/std/repl/main.a; using line REPL\n";
   }
 #endif
-  // Line-based REPL: each complete input is compiled and run by Astra as a
-  // fresh process (top-level bindings do not persist between inputs).
+  // Line-based REPL: each complete input is compiled and run by the LLVM
+  // toolchain as a fresh process (top-level bindings do not persist).
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";
   ReplSession session;
   PipelineConfig pc=toP(c); pc.checkOnly=false;
@@ -134,8 +134,7 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
   o<<"\n";
   return 0;
 }
-int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,const std::string& /*backend*/,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
-int emitIRFile(const std::string& p,const DriverConfig& c,bool opt,std::ostream& o,std::ostream& e){ return emitIRPipeline(p,toP(c),opt,o,e); }
+int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
 int formatFile(const std::string& p,const FormatFileOptions& opt,std::ostream& o,std::ostream& e){
   std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink;
   // formatSource lexes/parses with fileId 0; register the file so parse

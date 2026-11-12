@@ -22,8 +22,8 @@ compiles A straight to native machine code.
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
   and links a real executable through the bundled **Astra** backend (a TinyCC
   fork). `a run` does the same and executes it. x86-64 SysV (Linux, macOS)
-  uses a dedicated x86-64 assembly emitter; x86-64 Windows uses a Win64
-  MS-ABI native emitter; every other target tries its own native assembly
+  lowers to LLVM IR (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang`
+  (host targets; cross-compile is not yet supported)
   emitter first (a declined construct is a hard error — there is no C
   fallback).
 - **Multi-target builds** — `a build --target <arch>` cross-compiles for
@@ -43,15 +43,15 @@ compiles A straight to native machine code.
   a `dlopen`'d libpython bridge (NumPy, PyTorch, …), including zero-copy
   buffer-protocol views.
 - **Native ML kernels** — Mojo-inspired kernels (`matmul` block-tiled, fused
-  `attention`/`softmax`, FMA hot loops, and an IR `fuseFma` contraction pass).
-- **First-class tooling** — `a fmt`, `a doc`, `a ir`, a REPL, a full **LSP**
+  `attention`/`softmax`, FMA hot loops).
+- **First-class tooling** — `a fmt`, `a doc`, a REPL, a full **LSP**
   server (`a-lsp`), and a VS Code extension.
 - **Package manager** — `apm` (`apm/apm`), `pip` for A: install, update,
   publish, and run third-party packages written in A itself, with a
   registry index, `apm.json` manifests, and `apm.lock.json` pinning.
   See [`apm/`](apm/README.md).
-- **LLVM-style optimization pipeline** — constant folding, DCE, inlining, LICM,
-  CSE, instcombine, SCCP, and `-O0`…`-Ofast` levels over a typed SSA IR.
+- **LLVM-style optimization pipeline** — `-O0`…`-Ofast` levels forwarded to
+  the LLVM backend.
 
 ## 🚀 Quick start
 
@@ -110,7 +110,6 @@ Or use the helper script: `tooling/build/build.sh`.
 | `a test [file|dir]` | Discover and run `fn test_*()` in a file, or recursively in a directory/codebase (default: `.`); `--filter <substr>` selects by name |
 | `a fmt <file.a>` | Format source (`-w` in place, `--check` for CI) |
 | `a doc <file.a>` | Generate documentation (`--json` supported) |
-| `a ir <file.a>` | Print the typed SSA IR (`--opt` / `-O*` to optimize) |
 | `a repl` | Interactive REPL (self-hosted shell on a TTY) |
 
 Common flags: `-I <dir>` module search path, `--stdlib <dir>`, `-j/--jobs`,
@@ -160,7 +159,7 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 
 ```mermaid
 flowchart LR
-    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · codegen"]
+    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
     fe --> s["x86-64 / per-arch asm"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
@@ -170,8 +169,8 @@ flowchart LR
 
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
-  analysis, typed SSA IR + optimizer, and the native code emitters
-  (`emitAsm` for x86-64 SysV, `emitNative` per-arch incl. the Win64 MS ABI
+  analysis, and the native code emitters
+  (`emitLLVM` -> LLVM IR -> opt/llc/clang
   for `x86_64-windows`).
 - **`compiler/astra/backend/`** — **Astra**, a TinyCC fork: the `astra` driver,
   the `libastra` library API, per-target code generators (x86-64, ARM, AArch64,

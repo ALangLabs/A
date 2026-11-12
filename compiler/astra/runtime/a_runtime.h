@@ -536,6 +536,34 @@ void a_runtime_init(void);                      /* idempotent */
 /* object predicates used by codegen-free helpers */
 int a_obj_is_instance(aval v, const char *type_name); /* isinstance-ish */
 
+/* ---- exported fast paths (implemented in fastpath.c) ----
+ * Same semantics as the static inline fast paths above, but callable from
+ * non-C codegen (the LLVM backend emits calls to these instead of the
+ * *_slow entry points). Each handles the inline-int / double cases inline
+ * and tail-calls the corresponding *_slow variant otherwise. */
+aval a_add_fast(aval l, aval r);
+aval a_sub_fast(aval l, aval r);
+aval a_mul_fast(aval l, aval r);
+aval a_div_fast(aval l, aval r);
+aval a_floordiv_fast(aval l, aval r);
+aval a_mod_fast(aval l, aval r);
+aval a_pow_fast(aval l, aval r);
+aval a_eq_fast(aval l, aval r);
+aval a_ne_fast(aval l, aval r);
+aval a_lt_fast(aval l, aval r);
+aval a_le_fast(aval l, aval r);
+aval a_gt_fast(aval l, aval r);
+aval a_ge_fast(aval l, aval r);
+aval a_neg_fast(aval v);
+aval a_bnot_fast(aval v);
+aval a_not_fast(aval v);
+aval a_truthy_raw_fast(aval v);
+aval a_band_fast(aval l, aval r);
+aval a_bor_fast(aval l, aval r);
+aval a_bxor_fast(aval l, aval r);
+aval a_shl_fast(aval l, aval r);
+aval a_shr_fast(aval l, aval r);
+
 #endif /* ASTRA_A_RUNTIME_H */
 
 /* codegen-support helpers */
