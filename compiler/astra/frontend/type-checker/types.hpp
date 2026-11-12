@@ -40,6 +40,10 @@ enum class TypeKind {
   // First-class byte buffer (Bytes(...)): a growable char buffer. Indexing
   // yields i64 0..255, iteration yields bytes, and len() is O(1).
   Bytes,
+  // Fixed-width numeric SIMD vector `vector[T, N]` (also spelled `simd[T, N]`):
+  // N lanes of numeric element type T, lowered to a native LLVM `<N x ty>`
+  // vector inside expressions and boxed as a list of N avals at boundaries.
+  Vector,
   Var,
 };
 
@@ -114,6 +118,13 @@ inline TypePtr typeArray(TypePtr elem, std::int64_t length = -1) {
   auto type = makeType(TypeKind::Array);
   type->elem = std::move(elem);
   type->length = length;
+  return type;
+}
+
+inline TypePtr typeVector(TypePtr elem, std::int64_t lanes) {
+  auto type = makeType(TypeKind::Vector);
+  type->elem = std::move(elem);
+  type->length = lanes;
   return type;
 }
 
@@ -217,6 +228,11 @@ inline bool isNumericType(const TypePtr& type) {
   return t && (t->kind == TypeKind::Int || t->kind == TypeKind::Float);
 }
 
+inline bool isVectorType(const TypePtr& type) {
+  TypePtr t = resolveType(type);
+  return t && t->kind == TypeKind::Vector;
+}
+
 inline TypePtr builtinTypeByName(const std::string& name) {
   if (name == "bool") return typeBool();
   if (name == "char") return typeChar();
@@ -269,6 +285,9 @@ inline std::string typeName(const TypePtr& type) {
       }
       return typeName(current) + dims;
     }
+    case TypeKind::Vector:
+      return "vector[" + typeName(t->elem) + ", " +
+             std::to_string(t->length) + "]";
     case TypeKind::Range: return "range<" + typeName(t->elem) + ">";
     case TypeKind::Optional: return typeName(t->elem) + "?";
     case TypeKind::Result: return "Result<" + typeName(t->elem) + ", " + typeName(t->errorType) + ">";

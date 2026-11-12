@@ -79,7 +79,17 @@ TypeExprPtr Parser::parseTypeExpr() {
     named->name = std::move(name);
     if (match(Tok::Lt)) {
       while (!check(Tok::Gt) && !check(Tok::Eof)) {
-        named->typeArgs.push_back(parseTypeExpr());
+        // Integer literals are allowed as type arguments for comptime
+        // parameters such as the lane count in `vector[float, 4]`.
+        if (check(Tok::Int)) {
+          const Token& lit = advance();
+          auto konst = std::make_unique<ConstTypeExpr>();
+          konst->span = lit.span;
+          konst->value = lit.intValue;
+          named->typeArgs.push_back(std::move(konst));
+        } else {
+          named->typeArgs.push_back(parseTypeExpr());
+        }
         if (!match(Tok::Comma)) break;
       }
       expect(Tok::Gt, "'>' after type arguments");

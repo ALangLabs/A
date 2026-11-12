@@ -288,6 +288,11 @@ class Sema {
   void checkLambdaAgainst(LambdaExpr& expr, TypePtr expected);
   void checkArgAgainst(Expr& expr, TypePtr expected, const std::string& context);
   void checkFixedArrayLength(Expr& value, TypePtr expected);
+  // When `expected` is vector[T, N] and the already-inferred `expr` is an
+  // array literal of N elements or a numeric scalar, accept it as a vector
+  // (broadcast for scalars) and rewrite expr.inferredType so the backend
+  // emits unboxed <N x ty> IR. Returns false when no coercion applied.
+  bool coerceVectorInit(Expr& expr, TypePtr expected);
 
   TypePtr checkFunctionValueCall(const std::string& name, TypePtr fnType, CallExpr& call);
 

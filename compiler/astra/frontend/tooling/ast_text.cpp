@@ -73,6 +73,9 @@ std::string typeText(const TypeExpr* type) {
   if (const auto* set = dynamic_cast<const SetTypeExpr*>(type)) {
     return "{" + typeText(set->element.get()) + "}";
   }
+  if (const auto* konst = dynamic_cast<const ConstTypeExpr*>(type)) {
+    return std::to_string(konst->value);
+  }
   if (const auto* fn = dynamic_cast<const FunctionTypeExpr*>(type)) {
     std::string text = "fn(";
     for (std::size_t i = 0; i < fn->params.size(); ++i) {

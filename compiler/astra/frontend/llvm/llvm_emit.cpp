@@ -45,6 +45,11 @@ struct LlBinding {
   std::string slot;   // Local/Param: alloca name
   std::string slotF;  // numMode==1: alloca i1 holding the is-double flag
   int numMode = 0;    // 1 = unboxed numeric: slot=i64 payload, slotF=i1 flag
+  int vecMode = 0;    // 1 = unboxed SIMD vector: slot=alloca <N x ty>
+  std::string vecTy;  // vecMode: LLVM vector type, e.g. "<4 x double>"
+  int vecN = 0;       // vecMode: lane count
+  bool vecFloat = false;  // vecMode: lanes are float/double (else i64)
+  std::string vecLane;  // vecMode: LLVM lane type ("i64"/"double"/"float")
   bool rawSafe = false;  // numMode: flag provably never 2 (boxed aval)
   FnInfo* fn = nullptr;
   StructInfo* st = nullptr;
@@ -925,6 +930,39 @@ slow:
 
 )LLVM";
     emitFastHelpers();
+    emitVecHelpers();
+  }
+
+  // ---- SIMD vector helpers ----------------------------------------------------
+  // aval -> lane value for vector unboxing. a.unboxnum yields {payload, flag}
+  // with flag 0 = int payload, 1 = double bits, 2 = boxed aval (non-numeric;
+  // treated as its raw payload — vector lanes are always numeric in practice).
+  void emitVecHelpers() {
+    helpers_ << R"LLVM(define internal i64 @a.vlane.i64(i64 %v) {
+entry:
+  %un = call { i64, i64 } @a.unboxnum(i64 %v)
+  %p = extractvalue { i64, i64 } %un, 0
+  %f = extractvalue { i64, i64 } %un, 1
+  %isD = icmp eq i64 %f, 1
+  %db = bitcast i64 %p to double
+  %di = fptosi double %db to i64
+  %r = select i1 %isD, i64 %di, i64 %p
+  ret i64 %r
+}
+
+define internal double @a.vlane.f64(i64 %v) {
+entry:
+  %un = call { i64, i64 } @a.unboxnum(i64 %v)
+  %p = extractvalue { i64, i64 } %un, 0
+  %f = extractvalue { i64, i64 } %un, 1
+  %isI = icmp eq i64 %f, 0
+  %db = bitcast i64 %p to double
+  %si = sitofp i64 %p to double
+  %r = select i1 %isI, double %si, double %db
+  ret double %r
+}
+
+)LLVM";
   }
 
   // ---- numeric fast-path helpers ------------------------------------------
@@ -1483,6 +1521,35 @@ oth:
       TypePtr ptype =
           (!hasDefault && pd) ? numericParamType(f, i - paramOffset)
                               : nullptr;
+      if (!ptype && !hasDefault && pd) {
+        // Sema-typed vector parameter: unbox the boxed list argument into a
+        // native <N x ty> alloca.
+        TypePtr vt = vectorParamType(f, i - paramOffset);
+        if (vt) {
+          VecMeta m;
+          if (vecMeta(vt, m)) {
+            std::string slot = alloca(m.vecTy);
+            std::string g = T(), v = T();
+            emit("  " + g + " = getelementptr i64, ptr %argv, i64 " +
+                 std::to_string(i + 1));
+            emit("  " + v + " = load i64, ptr " + g);
+            RVal u = vecUnboxRVal(v, m);
+            std::string uv = vecLoad(u);
+            vecStore(slot, uv, m.vecTy);
+            paramSlots.push_back(slot);
+            LlBinding b;
+            b.kind = BKind::Param;
+            b.slot = slot;
+            b.vecMode = 1;
+            b.vecTy = m.vecTy;
+            b.vecN = m.n;
+            b.vecFloat = m.isFloat;
+            b.vecLane = m.laneTy;
+            scopes_.back()[f->paramNames[i]] = b;
+            continue;
+          }
+        }
+      }
       if (ptype) {
         std::string slot = alloca("i64");
         std::string slotF = alloca("i64");
@@ -2142,6 +2209,29 @@ oth:
       recordDrop(b, dropFn);
       return;
     }
+    if (rv.kind == 3) {
+      // Unboxed SIMD vector local: slot is an alloca of <N x ty>. Copy into
+      // a fresh alloca so `let w = v` does not alias v's slot.
+      std::string slot = alloca(rv.vt);
+      std::string cur = T();
+      emit("  " + cur + " = load " + rv.vt + ", ptr " + rv.v);
+      vecStore(slot, cur, rv.vt);
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = slot;
+      b.vecMode = 1;
+      b.vecTy = rv.vt;
+      b.vecN = rv.vn;
+      b.vecFloat = rv.vf;
+      b.vecLane = rv.vf ? (rv.vt.find(" x float>") != std::string::npos
+                              ? "float"
+                              : "double")
+                        : "i64";
+      b.dropFn = dropFn;
+      bind(let.name, b);
+      recordDrop(b, dropFn);
+      return;
+    }
     std::string v = boxRVal(rv);
     std::string slot = alloca("i64");
     emit("  store i64 " + v + ", ptr " + slot);
@@ -2236,7 +2326,17 @@ oth:
         // RAII: drop the previous owned value before overwriting (the new
         // value was already evaluated above, matching AsmEmitter ordering).
         dropOld(*b);
-        if (isNumBinding(*b)) {
+        if (isVecBinding(*b)) {
+          TypePtr vt = vecExprType(as.value.get());
+          if (rv.kind == 3 || vt) {
+            // Vector (or vector-typed boxed) value: store unboxed.
+            vecStoreBinding(*b, rv);
+          } else {
+            // Rebinding to a non-vector (Python-style): demote to a plain
+            // boxed i64 binding.
+            demoteVecBinding(*b, boxRVal(rv));
+          }
+        } else if (isNumBinding(*b)) {
           if (rv.kind == 1) {
             storeNumBinding(*b, rv);
           } else {
@@ -2255,6 +2355,10 @@ oth:
       std::string v = boxRVal(rv);
       if (target->kind == ExprKind::Index) {
         const IndexExpr& ix = static_cast<const IndexExpr&>(*target);
+        if (vecExprType(ix.object.get())) {
+          emitVecIndexAssign(ix, as.value.get());
+          return;
+        }
         std::string obj = eval(ix.object.get());
         std::string idx = eval(ix.index.get());
         callRt("a_setitem", {obj, idx, v});
@@ -2315,6 +2419,26 @@ oth:
             bv = boxRVal(res);
           }
           storeNumBoxed(*b, bv);
+        }
+        updateDrop(*b);
+        return;
+      }
+      if (isVecBinding(*b)) {
+        // v op= x on a vector binding: element-wise vector op.
+        VecMeta m = bindingVecMeta(*b);
+        RVal cur = rvVec(b->slot, b->vecTy, b->vecN, b->vecFloat);
+        RVal rhs = evalRaw(as.value.get());
+        RVal res = vecArithOp(as.binop, nullptr, cur, as.value.get(), rhs,
+                              &m);
+        if (res.kind == 3) {
+          std::string vv = vecLoad(res);
+          VecMeta rm;
+          rm.vecTy = res.vt; rm.n = res.vn; rm.isFloat = res.vf;
+          rm.isF32 = res.vt.find(" x float>") != std::string::npos;
+          rm.laneTy = !res.vf ? "i64" : (rm.isF32 ? "float" : "double");
+          vecStore(b->slot, vecCast(vv, rm, m), m.vecTy);
+        } else {
+          demoteVecBinding(*b, boxRVal(res));
         }
         updateDrop(*b);
         return;
@@ -2672,6 +2796,9 @@ oth:
       case BKind::Local:
       case BKind::Param:
       case BKind::Capture: {
+        if (isVecBinding(b)) {
+          return boxRVal(rvVec(b.slot, b.vecTy, b.vecN, b.vecFloat));
+        }
         if (isNumBinding(b)) {
           RVal r = loadNumBinding(b);
           return boxRVal(r);
@@ -2789,23 +2916,124 @@ oth:
   // RVal is the raw counterpart of eval(): kind 0 = boxed aval (i64, `v`),
   // kind 1 = unboxed number (`v` = i64 payload, `f` = i1 is-double flag; an
   // int payload is the int64 value, a double payload is the raw double bits),
-  // kind 2 = i1 boolean (`v`). kind -1 = "unsupported, use the boxed path".
+  // kind 2 = i1 boolean (`v`), kind 3 = unboxed SIMD vector (`v` = alloca name
+  // holding `<N x ty>`; `vt` = LLVM vector type, `vn` = lanes, `vf` = float
+  // lanes). kind -1 = "unsupported, use the boxed path".
   struct RVal {
     int kind = 0;
     std::string v;
     std::string f;
     bool safe = false;  // kind 1: flag provably never 2 (boxed aval in slot)
+    std::string vt;     // kind 3: LLVM vector type "<N x ty>"
+    int vn = 0;         // kind 3: lane count
+    bool vf = false;    // kind 3: lanes are floating point
   };
-  static RVal rvBoxed(const std::string& v) { return {0, v, "", false}; }
-  static RVal rvNum(const std::string& v, const std::string& f) {
-    return {1, v, f, true};
+  static RVal rvBoxed(const std::string& v) {
+    RVal r;
+    r.v = v;
+    return r;
   }
-  static RVal rvBool(const std::string& v) { return {2, v, "", false}; }
-  static RVal rvBad() { return {-1, "", "", false}; }
+  static RVal rvNum(const std::string& v, const std::string& f) {
+    RVal r;
+    r.kind = 1;
+    r.v = v;
+    r.f = f;
+    r.safe = true;
+    return r;
+  }
+  static RVal rvBool(const std::string& v) {
+    RVal r;
+    r.kind = 2;
+    r.v = v;
+    return r;
+  }
+  static RVal rvBad() {
+    RVal r;
+    r.kind = -1;
+    return r;
+  }
+  RVal rvVec(const std::string& slot, const std::string& vt, int n,
+             bool isFloat) {
+    RVal r;
+    r.kind = 3;
+    r.v = slot;
+    r.vt = vt;
+    r.vn = n;
+    r.vf = isFloat;
+    return r;
+  }
+
+  // ---- SIMD vectors -----------------------------------------------------------
+  // `vector[T, N]` values are native LLVM `<N x ty>` vectors inside
+  // expressions (RVal kind 3, held in an alloca so they survive branches and
+  // get mem2reg-promoted to SSA). At ABI boundaries they box to a plain A
+  // list of N avals — the runtime needs no new type.
+  struct VecMeta {
+    std::string laneTy;  // "i64" | "double" | "float"
+    std::string vecTy;   // "<N x laneTy>"
+    int n = 0;
+    bool isFloat = false;
+    bool isF32 = false;
+  };
+  // Lane LLVM type for a vector element type (Int -> i64, Float -> f64/f32).
+  static bool vecLaneInfo(const TypePtr& elem, std::string& laneTy,
+                          bool& isFloat, bool& isF32) {
+    TypePtr e = resolveType(elem);
+    if (!e) return false;
+    if (e->kind == TypeKind::Int) {
+      laneTy = "i64";
+      isFloat = false;
+      isF32 = false;
+      return true;
+    }
+    if (e->kind == TypeKind::Float) {
+      isFloat = true;
+      isF32 = e->bits == 32;
+      laneTy = isF32 ? "float" : "double";
+      return true;
+    }
+    return false;
+  }
+  bool vecMeta(const TypePtr& vecType, VecMeta& m) {
+    TypePtr t = resolveType(vecType);
+    if (!t || t->kind != TypeKind::Vector || t->length < 1) return false;
+    m.n = (int)t->length;
+    if (!vecLaneInfo(t->elem, m.laneTy, m.isFloat, m.isF32)) return false;
+    m.vecTy = "<" + std::to_string(m.n) + " x " + m.laneTy + ">";
+    return true;
+  }
+  // The vector type of an expression, or nullptr. Reads the type Sema
+  // recorded on the AST node (Expr::inferredType).
+  TypePtr vecExprType(const Expr* e) {
+    if (!e || !e->inferredType) return nullptr;
+    TypePtr t = resolveType(e->inferredType);
+    if (t && t->kind == TypeKind::Vector) return t;
+    return nullptr;
+  }
+  bool isVecBinding(const LlBinding& b) const {
+    return b.vecMode == 1 &&
+           (b.kind == BKind::Local || b.kind == BKind::Param ||
+            b.kind == BKind::Capture);
+  }
+  // Sema-typed vector parameter type, nullptr otherwise.
+  TypePtr vectorParamType(const FnInfo* f, std::size_t declIdx) {
+    if (!f->decl) return nullptr;
+    auto it = sema_.fnParamTypes.find(f->decl);
+    if (it == sema_.fnParamTypes.end() || declIdx >= it->second.size())
+      return nullptr;
+    TypePtr t = resolveType(it->second[declIdx]);
+    if (t && t->kind == TypeKind::Vector) return t;
+    return nullptr;
+  }
 
   // Box any RVal into an aval i64 (emits code for non-trivial kinds).
   std::string boxRVal(const RVal& r) {
     if (r.kind == 0) return r.v;
+    if (r.kind == 3) return vecBox(r);
+    if (r.kind < 0) {
+      fail("internal error: unsupported raw value in boxRVal");
+      return kNone;
+    }
     if (r.kind == 2) {
       std::string t = T();
       emit("  " + t + " = select i1 " + r.v + ", i64 " + kTrue +
@@ -2883,9 +3111,743 @@ oth:
     return nullptr;
   }
 
+  // ---- SIMD vector emission ---------------------------------------------------
+  // Value-level helpers: all take/return LLVM SSA value names of the lane or
+  // vector type (never avals). RVal kind 3 carries an alloca pointer.
+
+  // Load the <N x ty> value held by a kind-3 RVal's alloca.
+  std::string vecLoad(const RVal& r) {
+    std::string v = T();
+    emit("  " + v + " = load " + r.vt + ", ptr " + r.v);
+    return v;
+  }
+  void vecStore(const std::string& alloca, const std::string& val,
+                const std::string& vt) {
+    emit("  store " + vt + " " + val + ", ptr " + alloca);
+  }
+  // <N x ty> splat of a lane-typed value.
+  std::string vecSplatValue(const VecMeta& m, const std::string& laneVal) {
+    std::string cur = "zeroinitializer";
+    for (int i = 0; i < m.n; ++i) {
+      std::string t = T();
+      emit("  " + t + " = insertelement " + m.vecTy + " " + cur + ", " +
+           m.laneTy + " " + laneVal + ", i32 " + std::to_string(i));
+      cur = t;
+    }
+    return cur;
+  }
+  // aval -> lane-typed value via the @a.vlane.* IR helpers (handles int,
+  // double, and boxed-aval payloads inside a.unboxnum).
+  std::string avalToLane(const std::string& aval, const VecMeta& m) {
+    if (!m.isFloat) {
+      std::string r = T();
+      emit("  " + r + " = call i64 @a.vlane.i64(i64 " + aval + ")");
+      return r;
+    }
+    std::string r = T();
+    emit("  " + r + " = call double @a.vlane.f64(i64 " + aval + ")");
+    if (m.isF32) {
+      std::string t = T();
+      emit("  " + t + " = fptrunc double " + r + " to float");
+      return t;
+    }
+    return r;
+  }
+  // lane-typed value -> aval (a_i64n for ints, a.mdouble for floats).
+  std::string laneToAval(const std::string& lane, const VecMeta& m) {
+    if (!m.isFloat) {
+      std::string r = T();
+      emit("  " + r + " = call i64 @a_i64n(i64 " + lane + ")");
+      return r;
+    }
+    std::string d = lane;
+    if (m.isF32) {
+      d = T();
+      emit("  " + d + " = fpext float " + lane + " to double");
+    }
+    std::string r = T();
+    emit("  " + r + " = call i64 @a.mdouble(double " + d + ")");
+    return r;
+  }
+  // Scalar RVal -> lane-typed value name. Handles raw nums (flag tri-state,
+  // including flag==2 boxed-aval payloads), boxed avals, and bools.
+  std::string scalarToLane(const RVal& r, const VecMeta& m) {
+    if (r.kind == 3) {
+      // Defensive: a vector where a scalar was expected — take lane 0.
+      std::string v = vecLoad(r);
+      std::string t = T();
+      emit("  " + t + " = extractelement " + r.vt + " " + v +
+           ", i32 0");
+      return t;
+    }
+    if (r.kind == 0) return avalToLane(r.v, m);
+    if (r.kind == 2) {
+      std::string i = T();
+      emit("  " + i + " = select i1 " + r.v + ", i64 1, i64 0");
+      if (!m.isFloat) return i;
+      std::string d = T();
+      emit("  " + d + " = sitofp i64 " + i + " to double");
+      if (m.isF32) {
+        std::string t = T();
+        emit("  " + t + " = fptrunc double " + d + " to float");
+        return t;
+      }
+      return d;
+    }
+    // kind 1 raw num (or kind -1 boxed fallback already aval): payload+flag.
+    if (r.kind == 1) {
+      // flag==2 means the payload slot holds a boxed aval.
+      std::string isB = T(), lB = newLabel("vbx"), lR = newLabel("vrl"),
+                  lE = newLabel("vbe");
+      emit("  " + isB + " = icmp eq i64 " + r.f + ", 2");
+      emit("  br i1 " + isB + ", label %" + lB + ", label %" + lR);
+      std::string phi = alloca(m.laneTy);
+      emit("  " + lB + ":");
+      {
+        std::string lv = avalToLane(r.v, m);
+        emit("  store " + m.laneTy + " " + lv + ", ptr " + phi);
+        emit("  br label %" + lE);
+      }
+      emit("  " + lR + ":");
+      {
+        std::string lv;
+        if (!m.isFloat) {
+          // int lane: flag==1 -> fptosi(double bits) else payload
+          std::string isD = T(), db = T(), di = T(), sel = T();
+          emit("  " + isD + " = icmp eq i64 " + r.f + ", 1");
+          emit("  " + db + " = bitcast i64 " + r.v + " to double");
+          emit("  " + di + " = fptosi double " + db + " to i64");
+          emit("  " + sel + " = select i1 " + isD + ", i64 " + di +
+               ", i64 " + r.v);
+          lv = sel;
+        } else {
+          std::string d = numAsDouble(r.v, r.f);
+          if (m.isF32) {
+            lv = T();
+            emit("  " + lv + " = fptrunc double " + d + " to float");
+          } else {
+            lv = d;
+          }
+        }
+        emit("  store " + m.laneTy + " " + lv + ", ptr " + phi);
+        emit("  br label %" + lE);
+      }
+      emit("  " + lE + ":");
+      std::string out = T();
+      emit("  " + out + " = load " + m.laneTy + ", ptr " + phi);
+      return out;
+    }
+    // Fallback: box whatever we have and treat as aval.
+    return avalToLane(boxRVal(r), m);
+  }
+  // Splat a scalar RVal into a fresh <N x ty> alloca -> kind-3 RVal.
+  RVal vecBroadcast(const VecMeta& m, const RVal& scalar) {
+    std::string lane = scalarToLane(scalar, m);
+    std::string val = vecSplatValue(m, lane);
+    std::string slot = alloca(m.vecTy);
+    vecStore(slot, val, m.vecTy);
+    return rvVec(slot, m.vecTy, m.n, m.isFloat);
+  }
+  // Cast a <N x ty> value between lane representations (i64 <-> double/float).
+  std::string vecCast(const std::string& val, const VecMeta& from,
+                      const VecMeta& to) {
+    if (from.laneTy == to.laneTy && from.n == to.n) return val;
+    if (from.n != to.n) return val;  // sema prevents this; keep value as-is
+    std::string r = T();
+    if (!from.isFloat && to.isFloat) {
+      emit("  " + r + " = sitofp " + from.vecTy + " " + val + " to " +
+           to.vecTy);
+    } else if (from.isFloat && !to.isFloat) {
+      emit("  " + r + " = fptosi " + from.vecTy + " " + val + " to " +
+           to.vecTy);
+    } else if (from.isF32 && !to.isF32) {
+      emit("  " + r + " = fpext " + from.vecTy + " " + val + " to " +
+           to.vecTy);
+    } else {
+      emit("  " + r + " = fptrunc " + from.vecTy + " " + val + " to " +
+           to.vecTy);
+    }
+    return r;
+  }
+  // Boxed aval (a list of N avals) -> fresh kind-3 RVal.
+  RVal vecUnboxRVal(const std::string& aval, const VecMeta& m) {
+    std::string slot = alloca(m.vecTy);
+    std::string cur = "zeroinitializer";
+    for (int i = 0; i < m.n; ++i) {
+      std::string iv = avalIntLit(i);
+      std::string el = callRt("a_getitem", {aval, iv});
+      std::string lane = avalToLane(el, m);
+      std::string t = T();
+      emit("  " + t + " = insertelement " + m.vecTy + " " + cur + ", " +
+           m.laneTy + " " + lane + ", i32 " + std::to_string(i));
+      cur = t;
+    }
+    vecStore(slot, cur, m.vecTy);
+    return rvVec(slot, m.vecTy, m.n, m.isFloat);
+  }
+  // kind-3 RVal -> aval: build a list of N boxed lanes.
+  std::string vecBox(const RVal& r) {
+    VecMeta m;
+    m.vecTy = r.vt;
+    m.n = r.vn;
+    m.isFloat = r.vf;
+    m.isF32 = false;  // f32 lanes are widened to f64 avals anyway
+    // Recover lane type: vf + vt string contains "float" vs "double".
+    m.laneTy = r.vt.find("float") != std::string::npos ? "float" : "";
+    if (!r.vf) m.laneTy = "i64";
+    else m.laneTy = (r.vt.find(" x float>") != std::string::npos) ? "float"
+                                                                 : "double";
+    m.isF32 = m.laneTy == "float";
+    std::string v = vecLoad(r);
+    std::string av = argvArray(r.vn);
+    for (int i = 0; i < r.vn; ++i) {
+      std::string t = T();
+      emit("  " + t + " = extractelement " + r.vt + " " + v + ", i32 " +
+           std::to_string(i));
+      argvStore(av, i, laneToAval(t, m));
+    }
+    return callRtA("a_list_new", "ip",
+                   {std::to_string(r.vn), av});
+  }
+  // Element access bounds check shared by v[i] reads/writes: idx is i64,
+  // negative wraps by +N; out-of-range panics like list indexing.
+  std::string vecIndexI32(const std::string& idxI64, int n,
+                          const std::string& /*what*/) {
+    std::string neg = T(), adj = T(), sel = T(), k = T();
+    emit("  " + neg + " = icmp slt i64 " + idxI64 + ", 0");
+    emit("  " + adj + " = add i64 " + idxI64 + ", " + std::to_string(n));
+    emit("  " + sel + " = select i1 " + neg + ", i64 " + adj + ", i64 " +
+         idxI64);
+    // Unsigned compare catches negatives (huge) and >= n.
+    std::string ok = T(), lOk = newLabel("vidx"), lBad = newLabel("vidxb");
+    emit("  " + ok + " = icmp ult i64 " + sel + ", " + std::to_string(n));
+    emit("  br i1 " + ok + ", label %" + lOk + ", label %" + lBad);
+    emit("  " + lBad + ":");
+    {
+      std::string msg = cstrGlobal("vector index out of bounds", true);
+      emit("  call i64 @a_panic_msg(ptr " + msg + ")");
+      emit("  unreachable");
+    }
+    emit("  " + lOk + ":");
+    emit("  " + k + " = trunc i64 " + sel + " to i32");
+    return k;
+  }
+  // i64 index value from a scalar RVal (kind 1 num / kind 0 aval / kind 2).
+  std::string indexToI64(const RVal& r) {
+    VecMeta im;
+    im.laneTy = "i64";
+    im.isFloat = false;
+    im.isF32 = false;
+    im.n = 1;
+    im.vecTy = "<1 x i64>";
+    return scalarToLane(r, im);
+  }
+  // Horizontal reduction over a <N x ty> value: op 0 = add, 1 = min, 2 = max.
+  // Uses a shufflevector halving tree for power-of-two N, scalar chain else.
+  std::string vecReduce(int op, const std::string& vecVal,
+                        const std::string& vecTy, const VecMeta& m) {
+    int n = m.n;
+    std::string cur = vecVal;
+    std::string curTy = vecTy;
+    if ((n & (n - 1)) == 0 && n > 1) {
+      int width = n;
+      while (width > 1) {
+        int half = width / 2;
+        std::string loMask = "<" + std::to_string(half) + " x i32> <";
+        std::string hiMask = "<" + std::to_string(half) + " x i32> <";
+        for (int i = 0; i < half; ++i) {
+          if (i) { loMask += ", "; hiMask += ", "; }
+          loMask += "i32 " + std::to_string(2 * i);
+          hiMask += "i32 " + std::to_string(2 * i + 1);
+        }
+        loMask += ">";
+        hiMask += ">";
+        std::string lo = T(), hi = T();
+        emit("  " + lo + " = shufflevector " + curTy + " " + cur + ", " +
+             curTy + " poison, " + loMask);
+        emit("  " + hi + " = shufflevector " + curTy + " " + cur + ", " +
+             curTy + " poison, " + hiMask);
+        std::string nextTy = "<" + std::to_string(half) + " x " + m.laneTy +
+                             ">";
+        std::string t;
+        if (op == 0) {
+          t = T();
+          emit("  " + t + " = " + (m.isFloat ? "fadd" : "add") + " " +
+               nextTy + " " + lo + ", " + hi);
+        } else {
+          // min/max via compare + select (works for int and float lanes).
+          std::string cmp = T();
+          std::string pred = m.isFloat ? (op == 1 ? "olt" : "ogt")
+                                       : (op == 1 ? "slt" : "sgt");
+          std::string cc = m.isFloat ? "fcmp" : "icmp";
+          emit("  " + cmp + " = " + cc + " " + pred + " " + nextTy + " " + lo +
+               ", " + hi);
+          t = vecReduceSelect(lo, hi, cmp, nextTy, half);
+        }
+        cur = t;
+        curTy = nextTy;
+        width = half;
+      }
+      std::string t = T();
+      emit("  " + t + " = extractelement " + curTy + " " + cur + ", i32 0");
+      return t;
+    }
+    // Non-power-of-two: extract + scalar chain.
+    std::string acc;
+    for (int i = 0; i < n; ++i) {
+      std::string t = T();
+      emit("  " + t + " = extractelement " + vecTy + " " + vecVal +
+           ", i32 " + std::to_string(i));
+      if (i == 0) {
+        acc = t;
+        continue;
+      }
+      std::string r = T();
+      if (op == 0) {
+        emit("  " + r + " = " + (m.isFloat ? "fadd" : "add") + " " +
+             m.laneTy + " " + acc + ", " + t);
+      } else if (op == 1) {
+        std::string c = T(), s = T();
+        emit("  " + c + " = " + (m.isFloat ? "fcmp olt" : "icmp slt") +
+             " " + m.laneTy + " " + t + ", " + acc);
+        emit("  " + s + " = select i1 " + c + ", " + m.laneTy + " " + t +
+             ", " + m.laneTy + " " + acc);
+        r = s;
+      } else {
+        std::string c = T(), s = T();
+        emit("  " + c + " = " + (m.isFloat ? "fcmp ogt" : "icmp sgt") +
+             " " + m.laneTy + " " + t + ", " + acc);
+        emit("  " + s + " = select i1 " + c + ", " + m.laneTy + " " + t +
+             ", " + m.laneTy + " " + acc);
+        r = s;
+      }
+      acc = r;
+    }
+    return acc;
+  }
+  // select for vector min/max: <N x i1> cond picks lo else hi.
+  std::string vecReduceSelect(const std::string& lo, const std::string& hi,
+                              const std::string& cmp,
+                              const std::string& nextTy, int lanes) {
+    std::string selTy = "<" + std::to_string(lanes) + " x i1>";
+    std::string t = T();
+    emit("  " + t + " = select " + selTy + " " + cmp + ", " + nextTy + " " +
+         lo + ", " + nextTy + " " + hi);
+    return t;
+  }
+  // Binary arithmetic on two kind-3-ish operands -> kind-3 RVal.
+  // lexpr/rexpr are the AST operands (for vecExprType); l/r their RVals.
+  // Exactly one of (expr vector-typed) determines broadcast vs elementwise.
+  RVal vecArithOp(BinOp op, const Expr* lexpr, const RVal& l,
+                  const Expr* rexpr, const RVal& r,
+                  const VecMeta* outOverride = nullptr) {
+    VecMeta out;
+    if (outOverride) {
+      out = *outOverride;
+    } else {
+      TypePtr outT = vecExprType(lexpr) ? vecExprType(lexpr)
+                                        : vecExprType(rexpr);
+      if (!outT || !vecMeta(outT, out)) return rvBad();
+    }
+    // Load/cast each operand to the output vector type. A kind-3 RVal is a
+    // vector operand (element-wise); anything else is a broadcast scalar.
+    auto operandVec = [&](const Expr* /*e*/, const RVal& rv,
+                          const VecMeta& /*unused*/) -> std::string {
+      if (rv.kind == 3) {
+        VecMeta rm;
+        rm.vecTy = rv.vt;
+        rm.n = rv.vn;
+        rm.isFloat = rv.vf;
+        rm.isF32 = rv.vt.find(" x float>") != std::string::npos;
+        rm.laneTy = !rv.vf ? "i64" : (rm.isF32 ? "float" : "double");
+        return vecCast(vecLoad(rv), rm, out);
+      }
+      // Scalar -> splat.
+      std::string lane = scalarToLane(rv, out);
+      return vecSplatValue(out, lane);
+    };
+    std::string lv = operandVec(lexpr, l, out);
+    std::string rv = operandVec(rexpr, r, out);
+    std::string res;
+    bool fl = out.isFloat;
+    switch (op) {
+      case BinOp::Add: res = fl ? "fadd" : "add"; break;
+      case BinOp::Sub: res = fl ? "fsub" : "sub"; break;
+      case BinOp::Mul: res = fl ? "fmul" : "mul"; break;
+      case BinOp::Div: res = fl ? "fdiv" : "sdiv"; break;
+      case BinOp::FloorDiv: res = fl ? "fdiv" : "sdiv"; break;
+      case BinOp::Mod: res = fl ? "" : "srem"; break;
+      default: return rvBad();
+    }
+    std::string t = T();
+    if (!res.empty()) {
+      emit("  " + t + " = " + res + " " + out.vecTy + " " + lv + ", " + rv);
+    } else {
+      // float % : per-lane fmod(double, double).
+      int n = out.n;
+      std::string slot = alloca(out.vecTy);
+      for (int i = 0; i < n; ++i) {
+        std::string a = T(), b = T();
+        emit("  " + a + " = extractelement " + out.vecTy + " " + lv +
+             ", i32 " + std::to_string(i));
+        emit("  " + b + " = extractelement " + out.vecTy + " " + rv +
+             ", i32 " + std::to_string(i));
+        std::string da = a, db = b;
+        if (out.isF32) {
+          da = T(); db = T();
+          emit("  " + da + " = fpext float " + a + " to double");
+          emit("  " + db + " = fpext float " + b + " to double");
+        }
+        std::string fm = T();
+        emit("  " + fm + " = call double @fmod(double " + da + ", double " +
+             db + ")");
+        std::string lane = fm;
+        if (out.isF32) {
+          lane = T();
+          emit("  " + lane + " = fptrunc double " + fm + " to float");
+        }
+        if (i == 0) {
+          std::string z = T();
+          emit("  " + z + " = insertelement " + out.vecTy +
+               " zeroinitializer, " + out.laneTy + " " + lane +
+               ", i32 0");
+          vecStore(slot, z, out.vecTy);
+        } else {
+          std::string prev = T(), cur = T();
+          emit("  " + prev + " = load " + out.vecTy + ", ptr " + slot);
+          emit("  " + cur + " = insertelement " + out.vecTy + " " + prev +
+               ", " + out.laneTy + " " + lane + ", i32 " +
+               std::to_string(i));
+          vecStore(slot, cur, out.vecTy);
+        }
+      }
+      std::string ld = T();
+      emit("  " + ld + " = load " + out.vecTy + ", ptr " + slot);
+      return rvVec(slot, out.vecTy, out.n, out.isFloat);
+    }
+    std::string slot = alloca(out.vecTy);
+    vecStore(slot, t, out.vecTy);
+    return rvVec(slot, out.vecTy, out.n, out.isFloat);
+  }
+  // evalRawVecBinary: element-wise vector op, or scalar-binary broadcast.
+  RVal evalRawVecBinary(const BinaryExpr& x) {
+    TypePtr outT = vecExprType(&x);
+    bool lVec = vecExprType(x.lhs.get()) != nullptr;
+    bool rVec = vecExprType(x.rhs.get()) != nullptr;
+    if (!lVec && !rVec) {
+      // Scalar arithmetic coerced to a vector (splat broadcast).
+      RVal s = evalRawNoVec(&x);
+      VecMeta m;
+      if (!vecMeta(outT, m)) return rvBad();
+      if (s.kind == 1 || s.kind == 2) return vecBroadcast(m, s);
+      if (s.kind == 0) return vecUnboxRVal(s.v, m);
+      return rvBad();
+    }
+    RVal l = evalRaw(x.lhs.get());
+    RVal r = evalRaw(x.rhs.get());
+    // Scalar side may arrive boxed (kind 0) — vecArithOp handles via
+    // scalarToLane. kind 3 only when the operand is itself vector-typed.
+    return vecArithOp(x.binop, x.lhs.get(), l, x.rhs.get(), r);
+  }
+  RVal evalRawVecUnary(const UnaryExpr& x, const Expr* e) {
+    if (x.op == "-" && vecExprType(x.operand.get())) {
+      RVal v = evalRaw(x.operand.get());
+      if (v.kind != 3) return rvBoxed(evalFallback(e));
+      VecMeta m;
+      vecMeta(vecExprType(e), m);
+      std::string cur = vecLoad(v);
+      // Cast operand to result meta if needed.
+      VecMeta om;
+      om.vecTy = v.vt; om.n = v.vn; om.isFloat = v.vf;
+      om.isF32 = v.vt.find(" x float>") != std::string::npos;
+      om.laneTy = !v.vf ? "i64" : (om.isF32 ? "float" : "double");
+      cur = vecCast(cur, om, m);
+      std::string t = T();
+      if (m.isFloat) {
+        emit("  " + t + " = fneg " + m.vecTy + " " + cur);
+      } else {
+        emit("  " + t + " = sub " + m.vecTy + " zeroinitializer, " + cur);
+      }
+      std::string slot = alloca(m.vecTy);
+      vecStore(slot, t, m.vecTy);
+      return rvVec(slot, m.vecTy, m.n, m.isFloat);
+    }
+    // Scalar unary coerced to vector (e.g. `-x` splat): broadcast.
+    RVal s = evalRawNoVec(e);
+    VecMeta m;
+    vecMeta(vecExprType(e), m);
+    if (s.kind == 1 || s.kind == 2) return vecBroadcast(m, s);
+    if (s.kind == 0) return vecUnboxRVal(s.v, m);
+    return rvBad();
+  }
+  RVal evalRawVecIdent(const IdentExpr& x) {
+    LlBinding* b = lookup(x.name);
+    VecMeta m;
+    vecMeta(vecExprType(&x), m);
+    if (b && isVecBinding(*b)) {
+      // Hand out the binding's own alloca so v[i] = x mutates in place.
+      return rvVec(b->slot, b->vecTy, b->vecN, b->vecFloat);
+    }
+    if (b && isNumBinding(*b)) {
+      RVal n = loadNumBinding(*b);
+      return vecBroadcast(m, n);
+    }
+    // Globals, boxed locals, module values: boxed list -> unbox.
+    std::string av = evalIdent(x);
+    return vecUnboxRVal(av, m);
+  }
+  // VecMeta view of a vecMode binding.
+  VecMeta bindingVecMeta(const LlBinding& b) {
+    VecMeta m;
+    m.vecTy = b.vecTy;
+    m.n = b.vecN;
+    m.isFloat = b.vecFloat;
+    m.isF32 = b.vecLane == "float";
+    m.laneTy = b.vecLane.empty() ? (b.vecFloat ? "double" : "i64")
+                                 : b.vecLane;
+    return m;
+  }
+  // Store an RVal into a vecMode binding's <N x ty> alloca. Accepts kind-3
+  // vectors (cast if lane types differ), kind-1/2 scalars (broadcast), and
+  // kind-0 boxed avals (unbox as a list of lanes).
+  void vecStoreBinding(LlBinding& b, const RVal& rv) {
+    VecMeta m = bindingVecMeta(b);
+    if (rv.kind == 3) {
+      std::string v = vecLoad(rv);
+      VecMeta rm;
+      rm.vecTy = rv.vt;
+      rm.n = rv.vn;
+      rm.isFloat = rv.vf;
+      rm.isF32 = rv.vt.find(" x float>") != std::string::npos;
+      rm.laneTy = !rv.vf ? "i64" : (rm.isF32 ? "float" : "double");
+      v = vecCast(v, rm, m);
+      vecStore(b.slot, v, m.vecTy);
+      return;
+    }
+    if (rv.kind == 1 || rv.kind == 2) {
+      // Scalar broadcast (annotated `v = 2.0`-style coercions reach here
+      // only when sema kept the vector type).
+      RVal splat = vecBroadcast(m, rv);
+      std::string v = vecLoad(splat);
+      vecStore(b.slot, v, m.vecTy);
+      return;
+    }
+    if (rv.kind == 0) {
+      // Boxed aval: a list of N lanes -> unbox into the slot.
+      RVal u = vecUnboxRVal(rv.v, m);
+      std::string v = vecLoad(u);
+      vecStore(b.slot, v, m.vecTy);
+      return;
+    }
+    fail("internal error: cannot store raw value into vector binding");
+  }
+  // Rebind a vecMode binding to a plain boxed i64 value (Python-style type
+  // change). The old <N x ty> alloca is simply abandoned.
+  void demoteVecBinding(LlBinding& b, const std::string& aval) {
+    std::string slot = alloca("i64");
+    emit("  store i64 " + aval + ", ptr " + slot);
+    b.vecMode = 0;
+    b.vecTy.clear();
+    b.vecN = 0;
+    b.vecFloat = false;
+    b.vecLane.clear();
+    b.slot = slot;
+    b.slotF.clear();
+    b.numMode = 0;
+    b.rawSafe = false;
+  }
+  // evalRawVec: produce a kind-3 RVal for an expression Sema typed as
+  // vector[T, N].
+  RVal evalRawVec(const Expr* e) {
+    VecMeta m;
+    vecMeta(vecExprType(e), m);
+    switch (e->kind) {
+      case ExprKind::ArrayLit:
+        return vecFromList(*static_cast<const ArrayLitExpr*>(e), m);
+      case ExprKind::Ident:
+        return evalRawVecIdent(*static_cast<const IdentExpr*>(e));
+      case ExprKind::Unary:
+        return evalRawVecUnary(*static_cast<const UnaryExpr*>(e), e);
+      case ExprKind::Binary:
+        return evalRawVecBinary(*static_cast<const BinaryExpr*>(e));
+      default:
+        break;
+    }
+    // Everything else (calls returning vectors, ternaries, index-into-map
+    // of vectors, coerced scalars): boxed aval -> unbox, or splat.
+    RVal r = evalRawNoVec(e);
+    if (r.kind == 1 || r.kind == 2) return vecBroadcast(m, r);
+    if (r.kind == 0) return vecUnboxRVal(r.v, m);
+    return rvBad();
+  }
+  // [e0, ..., eN-1] literal coerced to vector[T, N]: insertelement chain.
+  RVal vecFromList(const ArrayLitExpr& x, const VecMeta& m) {
+    std::string slot = alloca(m.vecTy);
+    std::string cur = "zeroinitializer";
+    for (int i = 0; i < m.n; ++i) {
+      RVal er = evalRaw(x.elements[static_cast<std::size_t>(i)].get());
+      std::string lane = scalarToLane(er, m);
+      std::string t = T();
+      emit("  " + t + " = insertelement " + m.vecTy + " " + cur + ", " +
+           m.laneTy + " " + lane + ", i32 " + std::to_string(i));
+      cur = t;
+    }
+    vecStore(slot, cur, m.vecTy);
+    return rvVec(slot, m.vecTy, m.n, m.isFloat);
+  }
+  // v[i] read on a vector-typed object -> scalar num RVal (kind 1).
+  RVal evalRawVecIndex(const IndexExpr& x) {
+    TypePtr ot = vecExprType(x.object.get());
+    VecMeta m;
+    vecMeta(ot, m);
+    RVal obj = evalRaw(x.object.get());
+    if (obj.kind != 3) return rvBoxed(evalFallback(&x));
+    std::string vv = vecLoad(obj);
+    RVal idx = evalRaw(x.index.get());
+    std::string i64 = indexToI64(idx);
+    std::string i32 = vecIndexI32(i64, m.n, "index");
+    std::string lane = T();
+    emit("  " + lane + " = extractelement " + m.vecTy + " " + vv +
+         ", i32 " + i32);
+    // lane value -> raw num RVal: int stays i64; float bitcasts to i64 bits.
+    if (!m.isFloat) return rvNum(lane, "0");
+    std::string d = lane;
+    if (m.isF32) {
+      d = T();
+      emit("  " + d + " = fpext float " + lane + " to double");
+    }
+    std::string bits = T();
+    emit("  " + bits + " = bitcast double " + d + " to i64");
+    return rvNum(bits, "1");
+  }
+  // v[i] = x on a vector-typed object: insertelement into the vector alloca.
+  // Only vecMode bindings own an unboxed slot; every other vector value is a
+  // boxed list, where a_setitem mutates the shared list object in place.
+  void emitVecIndexAssign(const IndexExpr& ix, const Expr* value) {
+    LlBinding* vb = nullptr;
+    if (ix.object->kind == ExprKind::Ident) {
+      vb = lookup(static_cast<const IdentExpr*>(ix.object.get())->name);
+    }
+    if (!vb || !isVecBinding(*vb)) {
+      // Boxed path: evalFallback yields the stored aval (the shared list
+      // object) without the unbox/rebox roundtrip evalRaw would do.
+      std::string o = evalFallback(ix.object.get());
+      std::string iv = eval(ix.index.get());
+      std::string vv = eval(value);
+      callRt("a_setitem", {o, iv, vv});
+      return;
+    }
+    VecMeta m = bindingVecMeta(*vb);
+    RVal obj = rvVec(vb->slot, vb->vecTy, vb->vecN, vb->vecFloat);
+    std::string vv = vecLoad(obj);
+    RVal idx = evalRaw(ix.index.get());
+    std::string i64 = indexToI64(idx);
+    std::string i32 = vecIndexI32(i64, m.n, "index");
+    // Element type meta (single lane) for the stored value.
+    VecMeta em = m;
+    em.vecTy = "<1 x " + m.laneTy + ">";
+    RVal vr = evalRaw(value);
+    std::string lane = scalarToLane(vr, em);
+    std::string t = T();
+    emit("  " + t + " = insertelement " + m.vecTy + " " + vv + ", " +
+         m.laneTy + " " + lane + ", i32 " + i32);
+    vecStore(obj.v, t, m.vecTy);
+  }
+  // Vector intrinsic methods: sum/min/max/dot/to_list. Returns kind-1 num
+  // RVal for reductions, kind-0 boxed for to_list; handled=false otherwise.
+  RVal evalVecIntrinsic(const Expr* objExpr, const std::string& field,
+                        const CallExpr& call, bool& handled) {
+    handled = false;
+    TypePtr ot = vecExprType(objExpr);
+    if (!ot) return rvBad();
+    VecMeta m;
+    if (!vecMeta(ot, m)) return rvBad();
+    if (field == "to_list") {
+      handled = true;
+      RVal obj = evalRaw(objExpr);
+      return rvBoxed(vecBox(obj));
+    }
+    int redOp = -1;
+    if (field == "sum") redOp = 0;
+    else if (field == "min") redOp = 1;
+    else if (field == "max") redOp = 2;
+    else if (field == "dot") {
+      if (call.args.size() != 1) return rvBad();
+      handled = true;
+      RVal l = evalRaw(objExpr);
+      RVal r = evalRaw(call.args[0].value.get());
+      // product vector -> horizontal add (manual: mul then reduce).
+      TypePtr outT = ot;
+      VecMeta out;
+      vecMeta(outT, out);
+      auto operandVec = [&](const Expr* /*e*/, const RVal& rv,
+                            const VecMeta& /*u*/) -> std::string {
+        if (rv.kind == 3) {
+          VecMeta rm;
+          rm.vecTy = rv.vt; rm.n = rv.vn; rm.isFloat = rv.vf;
+          rm.isF32 = rv.vt.find(" x float>") != std::string::npos;
+          rm.laneTy = !rv.vf ? "i64" : (rm.isF32 ? "float" : "double");
+          return vecCast(vecLoad(rv), rm, out);
+        }
+        return vecSplatValue(out, scalarToLane(rv, out));
+      };
+      std::string lv = operandVec(objExpr, l, out);
+      std::string rv2 = operandVec(call.args[0].value.get(), r, out);
+      std::string t = T();
+      emit("  " + t + " = " + (out.isFloat ? "fmul" : "mul") + " " +
+           out.vecTy + " " + lv + ", " + rv2);
+      std::string lane = vecReduce(0, t, out.vecTy, out);
+      if (!out.isFloat) return rvNum(lane, "0");
+      std::string d = lane;
+      if (out.isF32) {
+        d = T();
+        emit("  " + d + " = fpext float " + lane + " to double");
+      }
+      std::string bits = T();
+      emit("  " + bits + " = bitcast double " + d + " to i64");
+      return rvNum(bits, "1");
+    }
+    if (redOp < 0) return rvBad();
+    handled = true;
+    RVal obj = evalRaw(objExpr);
+    if (obj.kind != 3) return rvBad();
+    std::string vv = vecLoad(obj);
+    VecMeta rm;
+    rm.vecTy = obj.vt; rm.n = obj.vn; rm.isFloat = obj.vf;
+    rm.isF32 = obj.vt.find(" x float>") != std::string::npos;
+    rm.laneTy = !obj.vf ? "i64" : (rm.isF32 ? "float" : "double");
+    std::string lane = vecReduce(redOp, vv, obj.vt, rm);
+    if (!rm.isFloat) return rvNum(lane, "0");
+    std::string d = lane;
+    if (rm.isF32) {
+      d = T();
+      emit("  " + d + " = fpext float " + lane + " to double");
+    }
+    std::string bits = T();
+    emit("  " + bits + " = bitcast double " + d + " to i64");
+    return rvNum(bits, "1");
+  }
+  // evalRaw entry for Call exprs: vector intrinsic methods stay unboxed.
+  RVal evalRawCall(const CallExpr& x, const Expr* e) {
+    if (auto* f = dynamic_cast<FieldExpr*>(x.callee.get())) {
+      bool handled = false;
+      RVal r = evalVecIntrinsic(f->object.get(), f->field, x, handled);
+      if (handled) return r;
+    }
+    return rvBoxed(evalFallback(e));
+  }
+
   // evalRaw: boxed eval() plus a raw numeric fast path for literals,
   // identifiers bound to numMode slots, unary/binary numeric ops.
   RVal evalRaw(const Expr* e) {
+    if (!e) return rvBoxed(kNone);
+    if (TypePtr vt = vecExprType(e)) {
+      (void)vt;
+      return evalRawVec(e);
+    }
+    return evalRawNoVec(e);
+  }
+  RVal evalRawNoVec(const Expr* e) {
     if (!e) return rvBoxed(kNone);
     switch (e->kind) {
       case ExprKind::IntLit:
@@ -2904,6 +3866,13 @@ oth:
         return evalRawUnary(*static_cast<const UnaryExpr*>(e), e);
       case ExprKind::Binary:
         return evalRawBinary(*static_cast<const BinaryExpr*>(e), e);
+      case ExprKind::Index: {
+        const auto& x = *static_cast<const IndexExpr*>(e);
+        if (vecExprType(x.object.get())) return evalRawVecIndex(x);
+        break;
+      }
+      case ExprKind::Call:
+        return evalRawCall(*static_cast<const CallExpr*>(e), e);
       default:
         break;
     }
@@ -4792,6 +5761,13 @@ oth:
   // dispatch with a_method fallback; everything else goes to a_method.
   std::string evalMethodDispatch(const Expr* objExpr, const std::string& field,
                                  const CallExpr& call) {
+    // Vector intrinsics (sum/min/max/dot/to_list) — safety net for any path
+    // that bypasses evalRaw's Call handling.
+    if (vecExprType(objExpr)) {
+      bool handled = false;
+      RVal r = evalVecIntrinsic(objExpr, field, call, handled);
+      if (handled) return boxRVal(r);
+    }
     TypePtr ot = resolveType(objExpr->inferredType);
     FnInfo* method = nullptr;
     if (ot && ot->kind == TypeKind::Struct) {

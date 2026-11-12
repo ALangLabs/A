@@ -42,6 +42,13 @@ struct FunctionTypeExpr : TypeExpr {
   TypeExprPtr returnType;
 };
 
+// Integer literal in type-argument position: the `4` in `vector[float, 4]`.
+// Only meaningful to types that take a comptime lane count; other consumers
+// treat it as an error.
+struct ConstTypeExpr : TypeExpr {
+  std::int64_t value = 0;
+};
+
 struct ParamDecl {
   std::string name;
   Span span;

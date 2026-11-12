@@ -21,6 +21,60 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
 
+  // Fixed-width SIMD vectors: lane reductions and conversions. These are
+  // compiler intrinsics lowered to native <N x ty> IR by the LLVM backend.
+  if (object->kind == TypeKind::Vector) {
+    if (rejectNamed()) return typeError();
+    auto noArgs = [&](const char* usage) {
+      if (call.args.size() != 0) {
+        sink_.error(call.span,
+                    "Method '" + method + "' expects " + usage +
+                        ", found " + std::to_string(call.args.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        return false;
+      }
+      return true;
+    };
+    if (method == "sum" || method == "min" || method == "max") {
+      if (!noArgs("no arguments")) return typeError();
+      return object->elem;
+    }
+    if (method == "to_list") {
+      if (!noArgs("no arguments")) return typeError();
+      return typeArray(object->elem);
+    }
+    if (method == "dot") {
+      if (call.args.size() != 1) {
+        sink_.error(call.span,
+                    "Method 'dot' expects 1 argument (vector), found " +
+                        std::to_string(call.args.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        return typeError();
+      }
+      TypePtr argType = inferExpr(*call.args[0].value);
+      TypePtr arg = resolveType(argType);
+      if (!arg || arg->kind != TypeKind::Vector ||
+          arg->length != object->length) {
+        sink_.error(call.args[0].value->span,
+                    "'dot' expects a vector[" + typeName(object->elem) + ", " +
+                        std::to_string(object->length) + "].");
+        return typeError();
+      }
+      if (!unify(arg->elem, object->elem)) {
+        reportMismatch(argType, object, call.args[0].value->span, "in 'dot'");
+        return typeError();
+      }
+      return object->elem;
+    }
+    sink_.error(field.fieldSpan,
+                "vector[" + typeName(object->elem) + ", " +
+                    std::to_string(object->length) +
+                    "] has no method '" + method + "'.",
+                "Vector methods: sum(), min(), max(), dot(other), to_list().");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    return typeError();
+  }
+
   if (object->kind == TypeKind::Struct) {
     auto structIt = structs_.find(object->structName);
     if (structIt == structs_.end()) return typeError();

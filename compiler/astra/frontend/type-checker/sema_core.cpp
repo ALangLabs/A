@@ -255,6 +255,7 @@ bool Sema::occursIn(TypePtr var, TypePtr type) {
     case TypeKind::Range:
     case TypeKind::Optional:
     case TypeKind::Result:
+    case TypeKind::Vector:
       return occursIn(var, type->elem) || occursIn(var, type->errorType);
     case TypeKind::Map:
     case TypeKind::Set:
@@ -371,6 +372,8 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     case TypeKind::Array:
       if (a->length >= 0 && b->length >= 0 && a->length != b->length) return false;
       return unify(a->elem, b->elem);
+    case TypeKind::Vector:
+      return a->length == b->length && unify(a->elem, b->elem);
     case TypeKind::Range:
     case TypeKind::Optional:
       return unify(a->elem, b->elem);
@@ -518,6 +521,41 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
         return typeError();
       }
       return typeOptional(resolveTypeExpr(*named->typeArgs[0]));
+    }
+    // Fixed-width SIMD vectors: `vector[T, N]` (alias `simd[T, N]`) where T
+    // is a numeric element type and N is a comptime lane count (1..64).
+    if ((named->name == "vector" || named->name == "simd") &&
+        !named->typeArgs.empty()) {
+      if (named->typeArgs.size() != 2) {
+        sink_.error(named->span,
+                    "'" + named->name + "' takes two type arguments: " +
+                        named->name + "[T, N] (element type, lane count).");
+        return typeError();
+      }
+      TypePtr elem = resolveTypeExpr(*named->typeArgs[0]);
+      TypePtr elemResolved = resolveType(elem);
+      if (!elemResolved ||
+          (elemResolved->kind != TypeKind::Int &&
+           elemResolved->kind != TypeKind::Float)) {
+        sink_.error(named->typeArgs[0]->span,
+                    "Vector element type must be numeric (int or float), found " +
+                        typeName(elem) + ".");
+        return typeError();
+      }
+      auto* lanesArg = dynamic_cast<ConstTypeExpr*>(named->typeArgs[1].get());
+      if (!lanesArg) {
+        sink_.error(named->typeArgs[1]->span,
+                    "Vector lane count must be an integer literal, e.g. " +
+                        named->name + "[float, 4].");
+        return typeError();
+      }
+      if (lanesArg->value < 1 || lanesArg->value > 64) {
+        sink_.error(named->typeArgs[1]->span,
+                    "Vector lane count must be between 1 and 64, found " +
+                        std::to_string(lanesArg->value) + ".");
+        return typeError();
+      }
+      return typeVector(elem, lanesArg->value);
     }
     std::string unknownType = "Unknown type '" + named->name + "'.";
     if (std::string sug = suggestName(named->name); !sug.empty())

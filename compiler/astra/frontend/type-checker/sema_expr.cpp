@@ -248,6 +248,10 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
   }
 
   TypePtr resolved = resolveType(operand);
+  if (expr.op == "-") {
+    // Element-wise negation on fixed-width vectors.
+    if (resolved->kind == TypeKind::Vector) return operand;
+  }
   if (expr.op == "~") {
     if (resolved->kind == TypeKind::Int) return operand;
     if (resolved->kind == TypeKind::Var && constrainVar(operand, Constraint::Integer)) {
@@ -431,6 +435,74 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
         return typeError();
       default:
         return typeBool();  // dynamic: runtime compares
+    }
+  }
+
+  // Fixed-width vectors: element-wise arithmetic between two vectors of the
+  // same lane count, or between a vector and a numeric scalar (broadcast).
+  // Comparisons were already handled above ('=='/'!=' compare the boxed
+  // list representation); ordered comparisons on vectors are rejected there.
+  {
+    TypePtr lv = resolveType(lhs);
+    TypePtr rv = resolveType(rhs);
+    const bool lVec = lv && lv->kind == TypeKind::Vector;
+    const bool rVec = rv && rv->kind == TypeKind::Vector;
+    if (lVec || rVec) {
+      const std::string vname = typeName(lVec ? lv : rv);
+      bool ok = true;
+      if (lVec && rVec) {
+        if (lv->length != rv->length) {
+          sink_.error(expr.opSpan,
+                      "Cannot apply '" + op + "' to vectors with different "
+                      "lane counts (" + std::to_string(lv->length) + " vs " +
+                      std::to_string(rv->length) + ").");
+          ok = false;
+        } else if (!unify(lv->elem, rv->elem)) {
+          sink_.error(expr.opSpan,
+                      "Cannot apply '" + op + "' to vectors with element "
+                      "types " + typeName(lv->elem) + " and " +
+                      typeName(rv->elem) + ".");
+          ok = false;
+        }
+      } else {
+        // Vector OP scalar (or scalar OP vector): the scalar broadcasts.
+        TypePtr scalarSide = lVec ? rhs : lhs;
+        TypePtr sc = resolveType(scalarSide);
+        if (sc->kind == TypeKind::Var) {
+          constrainVar(scalarSide, Constraint::Numeric);
+        } else if (!isNumericType(sc)) {
+          sink_.error(expr.opSpan,
+                      "Operator '" + op + "' on " + vname +
+                          " requires a numeric scalar operand, found " +
+                          typePhrase(sc) + ".");
+          ok = false;
+        }
+      }
+      if (!ok) return typeError();
+      if (op == "**") {
+        sink_.error(expr.opSpan,
+                    "Operator '**' is not supported on vectors.");
+        return typeError();
+      }
+      // Result element type: the vector operand's element, promoted to
+      // float when a float scalar broadcasts into an int vector.
+      TypePtr vecSide = lVec ? lv : rv;
+      TypePtr scalarSide = lVec ? rv : lv;
+      TypePtr elem = vecSide->elem;
+      if (!rVec || !lVec) {
+        TypePtr sc = resolveType(scalarSide);
+        if (sc && sc->kind == TypeKind::Float &&
+            resolveType(elem)->kind == TypeKind::Int) {
+          elem = typeFloat(64);
+        }
+      } else {
+        TypePtr le = resolveType(lv->elem), re = resolveType(rv->elem);
+        if ((le && le->kind == TypeKind::Float) ||
+            (re && re->kind == TypeKind::Float)) {
+          elem = typeFloat(64);
+        }
+      }
+      return typeVector(elem, vecSide->length);
     }
   }
 
