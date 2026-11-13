@@ -443,6 +443,11 @@ const char *type_name_error_cstr(aval v);
 aval a_type_name(aval v);
 int a_obj_is_instance(aval v, const char *type_name);
 void format_into(Buf *b, aval v, int quote);
+/* Shortest-round-trip double rendering shared by str() and json.stringify:
+   writes into caller buffer (>= 72 bytes), returns length. Integral-looking
+   results get a trailing ".0"; NaN/Inf render as "nan"/"inf" (json.c maps
+   non-finite to null before calling). */
+size_t fmt_double_render(double d, char *tmp);
 aval a_str(aval v);
 aval a_repr(aval v);
 int truthy(aval v);

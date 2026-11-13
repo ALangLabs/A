@@ -78,12 +78,37 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
   if (object->kind == TypeKind::Struct) {
     auto structIt = structs_.find(object->structName);
     if (structIt == structs_.end()) return typeError();
+    // Generic classes instantiate per type-argument combination: the stored
+    // field/method types reference the class's shared type-parameter vars, so
+    // each use must substitute this object's actual type arguments (and fresh
+    // vars for any type parameters the member declares itself) before
+    // checking. Without this the first call site would bind the shared vars
+    // for every other instantiation in the module.
+    const StructSym& structSym = structIt->second;
+    auto memberMapping = [&]() {
+      std::unordered_map<TypePtr, TypePtr> mapping;
+      for (std::size_t i = 0; i < structSym.typeParamVars.size(); ++i) {
+        if (i < object->params.size()) {
+          mapping[structSym.typeParamVars[i]] = object->params[i];
+        } else {
+          TypePtr fresh = freshVar(Constraint::None, structSym.typeParamVars[i]->varSpan,
+                                   "type parameter '" + structSym.typeParams[i] + "'");
+          fresh->allowUnresolved = true;
+          mapping[structSym.typeParamVars[i]] = fresh;
+        }
+      }
+      return mapping;
+    };
     auto methodIt = structIt->second.methods.find(method);
     if (methodIt == structIt->second.methods.end()) {
       for (const auto& fieldEntry : structIt->second.fields) {
         if (fieldEntry.first != method) continue;
         TypePtr fieldType = resolveType(fieldEntry.second);
         if (fieldType->kind == TypeKind::Function) {
+          if (!structSym.typeParamVars.empty()) {
+            return checkFunctionValueCall(method, instantiateType(fieldType, memberMapping()),
+                                          call);
+          }
           return checkFunctionValueCall(method, fieldEntry.second, call);
         }
         sink_.error(field.fieldSpan,
@@ -99,7 +124,31 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       return typeError();
     }
     if (rejectNamed()) return typeError();
-    const FnSig& sig = methodIt->second;
+    // Instantiate the stored signature for this object's type arguments so
+    // each generic-class instantiation is checked independently (see the
+    // memberMapping comment above). The method's own type parameters (those
+    // beyond the class's) get fresh vars per call, like generic functions.
+    FnSig effective = methodIt->second;
+    if (!effective.typeParamVars.empty()) {
+      auto mapping = memberMapping();
+      for (std::size_t i = structSym.typeParamVars.size();
+           i < effective.typeParamVars.size(); ++i) {
+        TypePtr var = effective.typeParamVars[i];
+        TypePtr fresh = freshVar(var->constraint, var->varSpan,
+                                 var->varDescription.empty() ? "type parameter"
+                                                             : var->varDescription,
+                                 var->allowDefault);
+        fresh->allowUnresolved = var->allowUnresolved;
+        mapping[var] = fresh;
+      }
+      std::vector<TypePtr> params;
+      params.reserve(effective.paramTypes.size());
+      for (const auto& p : effective.paramTypes)
+        params.push_back(instantiateType(p, mapping));
+      effective.paramTypes = std::move(params);
+      effective.retType = instantiateType(effective.retType, mapping);
+    }
+    const FnSig& sig = effective;
     std::size_t total = sig.paramTypes.size();
     std::size_t expected = total - 1;  // exclude self
     // self is always required, so user-facing required count is requiredArgs()-1.

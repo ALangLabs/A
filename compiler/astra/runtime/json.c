@@ -336,9 +336,12 @@ static void json_write(Buf *b, aval v, int pretty, int depth) {
     if (a_is_double(v)) {
         double d = a_double_val(v);
         if (!isfinite(d)) { buf_adds(b, "null"); return; }
-        char tmp[40];
-        snprintf(tmp, sizeof(tmp), "%.17g", d);
-        buf_adds(b, tmp);
+        /* Shortest-round-trip rendering, same as str()/Python repr, so
+           json.dumps(0.1) is "0.1" not "0.10000000000000001". Integral
+           floats keep the ".0" suffix (Python json.dumps(1.0) -> "1.0"). */
+        char tmp[72];
+        size_t n = fmt_double_render(d, tmp);
+        buf_addn(b, tmp, n);
         return;
     }
     AObj *o = obj_of(v);

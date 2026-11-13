@@ -2557,6 +2557,15 @@ oth:
     recordDrop(b, dropFn);
   }
   bool inFunctionBody_ = false;
+  // Scope depth at which a module's top-level statements run (emitModInit
+  // pushes one body scope over the global frame). Deeper scopes are block
+  // bodies (if/while/for/do/loop/match arms) whose bindings are
+  // block-scoped, matching sema and the VM.
+  int moduleBodyScopeDepth_ = -1;
+  bool inModuleBlockScope() const {
+    return !inFunctionBody_ && moduleBodyScopeDepth_ >= 0 &&
+           (int)scopes_.size() > moduleBodyScopeDepth_;
+  }
 
   void emitAssign(const AssignStmt& as) {
     const Expr* target = as.target.get();
@@ -2592,8 +2601,11 @@ oth:
           b = nullptr;
         if (!b) {
           // Bare `name = v` in a function body declares a new local
-          // (Python-style); at module level it targets the global slot.
-          if (inFunctionBody_) {
+          // (Python-style). The same holds inside a block nested under a
+          // module's top-level statements (if/while/for bodies): sema scopes
+          // those bindings to the block, so they are locals too. Only at the
+          // module top level itself does `name = v` target the global slot.
+          if (inFunctionBody_ || inModuleBlockScope()) {
             if (rv.kind == 1) {
               std::string slot = alloca("i64");
               std::string slotF = alloca("i64");
@@ -6358,6 +6370,7 @@ oth:
     curModuleId_ = moduleId;
     resetGlobalScope(moduleId);
     pushScope();
+    moduleBodyScopeDepth_ = (int)scopes_.size();
     bindModuleImports(moduleId);
     analyzeModRawSafety(moduleId, mod.program->statements);
     inFunctionBody_ = false;
@@ -6371,6 +6384,7 @@ oth:
     clearDeferFrames();
     inFunctionBody_ = true;
     curModuleId_ = savedModule;
+    moduleBodyScopeDepth_ = -1;
     scopes_.clear();
     std::ostringstream head;
     for (auto& kv : pendingAllocas_)

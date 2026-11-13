@@ -594,11 +594,16 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
 }
 
 TypePtr Sema::instantiateType(TypePtr type, const std::unordered_map<TypePtr, TypePtr>& mapping) {
+  if (!type) return type;
+  // Consult the mapping on the unresolved node first: a mapped type variable
+  // must substitute even if it has already been linked by an earlier use.
+  auto direct = mapping.find(type);
+  if (direct != mapping.end()) return direct->second;
   type = resolveType(type);
   if (!type) return type;
+  auto resolved = mapping.find(type);
+  if (resolved != mapping.end()) return resolved->second;
   if (type->kind == TypeKind::Var) {
-    auto it = mapping.find(type);
-    if (it != mapping.end()) return it->second;
     // create a fresh var preserving constraints
     TypePtr fresh = makeType(TypeKind::Var);
     fresh->varId = nextVarId_++;

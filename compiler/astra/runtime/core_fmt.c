@@ -226,7 +226,7 @@ static int fmt_dbl_min_prec(double d, char *tmp) {
 /* Render a double into tmp (caller provides >= 72 bytes) and return the
    length. Same output as the old format_double_buf Buf version, including
    the trailing ".0" for integral-looking results. */
-static size_t fmt_double_render(double d, char *tmp) {
+size_t fmt_double_render(double d, char *tmp) {
     if (isnan(d)) { memcpy(tmp, "nan", 4); return 3; }
     if (isinf(d)) {
         if (d < 0) { memcpy(tmp, "-inf", 5); return 4; }
