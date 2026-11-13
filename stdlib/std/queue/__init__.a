@@ -19,24 +19,42 @@ import std:time
 
 """
 Queue<T>: bounded FIFO queue.
-`items` is public for inspection; prefer the methods.
+`items` is public for inspection; prefer the methods. `head` is the
+index of the oldest live element — consumed slots stay in `items`
+until an amortized compaction (keeps get()/try_get() O(1) instead of
+list.pop(0)'s O(n) memmove).
 """
 class Queue<T>:
     items: [T]
     maxsize: i64
     unfinished: i64
+    head: i64
+
+    """_live() -> number of waiting items (Python `qsize()`)."""
+    fn _live(self):
+        return len(self.items) - self.head
+
+    """_pop_front(self) -> oldest item; compacts when the dead prefix
+    dominates the backing list (amortized O(1))."""
+    fn _pop_front(self) -> T:
+        v = self.items[self.head]
+        self.head = self.head + 1
+        if self.head > 64 and self.head * 2 > len(self.items):
+            self.items = self.items[self.head..]
+            self.head = 0
+        return v
 
     """_check_open / capacity helpers."""
     fn full(self):
-        return self.maxsize > 0 and len(self.items) >= self.maxsize
+        return self.maxsize > 0 and self._live() >= self.maxsize
 
     """empty(self) -> true when no items are waiting."""
     fn empty(self):
-        return len(self.items) == 0
+        return self._live() == 0
 
     """qsize(self) -> number of waiting items (Python `qsize()`)."""
     fn qsize(self):
-        return len(self.items)
+        return self._live()
 
     """size(self) -> alias of qsize."""
     fn size(self):
@@ -67,23 +85,23 @@ class Queue<T>:
     (Python `get_nowait` -> queue.Empty).
     """
     fn get(self) -> T:
-        if len(self.items) == 0:
+        if self._live() == 0:
             core.panic("Queue is empty")
-        return self.items.pop(0)
+        return self._pop_front()
 
     """
     try_get(self) -> oldest item or None when empty (non-blocking).
     """
     fn try_get(self):
-        if len(self.items) == 0:
+        if self._live() == 0:
             return None
-        return self.items.pop(0)
+        return self._pop_front()
 
     """peek(self) -> oldest item without removing; None when empty."""
     fn peek(self):
-        if len(self.items) == 0:
+        if self._live() == 0:
             return None
-        return self.items[0]
+        return self.items[self.head]
 
     """
     task_done(self) -> mark one unfinished task complete; panics when
@@ -105,17 +123,19 @@ class Queue<T>:
     """clear(self) -> drop all waiting items (unfinished count kept)."""
     fn clear(self):
         self.items = []
+        self.head = 0
 
     """to_list(self) -> copy of the waiting items, oldest first."""
     fn to_list(self):
-        return self.items.copy()
+        return self.items[self.head..]
 
 """
-queue_new(maxsize = 0) -> empty unbounded (or bounded when maxsize > 0)
-Queue. `maxsize <= 0` means infinite capacity.
+queue_new<T>(maxsize = 0) -> empty unbounded (or bounded when maxsize > 0)
+Queue. `maxsize <= 0` means infinite capacity. T is inferred per call
+site from later put()/get() use.
 """
-fn queue_new(maxsize = 0):
-    return Queue([], maxsize, 0)
+fn queue_new<T>(maxsize = 0) -> Queue<T>:
+    return Queue([], maxsize, 0, 0)
 
 # -- LifoQueue -----------------------------------------------------------------
 #
@@ -195,8 +215,8 @@ class LifoQueue<T>:
     fn to_list(self):
         return self.items.copy()
 
-"""lifo_queue_new(maxsize = 0) -> empty LifoQueue (bounded when maxsize > 0)."""
-fn lifo_queue_new(maxsize = 0):
+"""lifo_queue_new<T>(maxsize = 0) -> empty LifoQueue (bounded when maxsize > 0)."""
+fn lifo_queue_new<T>(maxsize = 0) -> LifoQueue<T>:
     return LifoQueue([], maxsize, 0)
 
 # -- PriorityQueue --------------------------------------------------------------
@@ -319,6 +339,6 @@ class PriorityQueue<T>:
             out.append(item)
         return out
 
-"""priority_queue_new(maxsize = 0) -> empty PriorityQueue."""
-fn priority_queue_new(maxsize = 0):
+"""priority_queue_new<T>(maxsize = 0) -> empty PriorityQueue."""
+fn priority_queue_new<T>(maxsize = 0) -> PriorityQueue<T>:
     return PriorityQueue([], maxsize, 0, 0)

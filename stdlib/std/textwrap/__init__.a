@@ -10,50 +10,30 @@
 #   * `wrap(text, width)`, `fill(text, width)`, `shorten(text, width, placeholder)`.
 #   * Hyphen-aware breaking, sentence-end fixing, max_lines, tabsize
 #     options are limited/omitted.
+#
+# Implementation note: word splitting, line splitting, substringing, tab
+# expansion and final joins all go through native string methods
+# (`.split()`, `.splitlines(true)`, slices, `.expandtabs()`, `.join()`),
+# which are C-fast. The previous per-character loops built rope views
+# that made concatenation pathologically slow on larger inputs.
 
 fn _substr(s, start, end):
-    out = ""
-    i = start
     src = str(s)
     n = len(src)
-    e = end
-    if e > n:
-        e = n
-    while i < e:
-        out = out + str(src[i])
-        i = i + 1
-    return out
-
-fn _is_ws(ch):
-    if ch == " ":
-        return true
-    if ch == "\t":
-        return true
-    if ch == "\n":
-        return true
-    if ch == "\r":
-        return true
-    return false
+    if start < 0:
+        start = 0
+    if end > n:
+        end = n
+    if end < start:
+        end = start
+    return src[start..end]
 
 fn _split_words_ws(text):
-    out = []
-    cur = ""
-    src = str(text)
-    i = 0
-    while i < len(src):
-        ch = str(src[i])
-        if _is_ws(ch):
-            if len(cur) > 0:
-                out.append(cur)
-                cur = ""
-        else:
-            cur = cur + ch
-        i = i + 1
-    if len(cur) > 0:
-        out.append(cur)
-    return out
+    # native split() collapses whitespace runs (incl. \v \f, matching
+    # Python's \s-based wordsep more closely than the old " \t\n\r" set)
+    return str(text).split()
 
-fn wrap(text, width):
+fn wrap(text, width) -> [String]:
     "Wrap text to width columns (simple whitespace wrapping). Returns list of lines."
     wlimit = int(width)
     if wlimit < 1:
@@ -85,40 +65,16 @@ fn wrap(text, width):
 
 fn fill(text, width):
     "Wrap text and join lines with newlines."
-    lines = wrap(text, width)
-    out = ""
-    i = 0
-    while i < len(lines):
-        if i > 0:
-            out = out + "\n"
-        out = out + str(lines[i])
-        i = i + 1
-    return out
-
-fn _split_on_nl_keep(s):
-    out = []
-    cur = ""
-    i = 0
-    src = str(s)
-    while i < len(src):
-        ch = str(src[i])
-        cur = cur + ch
-        if ch == "\n":
-            out.append(cur)
-            cur = ""
-        i = i + 1
-    if len(cur) > 0:
-        out.append(cur)
-    return out
+    return "\n".join(wrap(text, width))
 
 fn _strip_nl(s):
     src = str(s)
     if src.endswith("\r\n"):
-        return _substr(src, 0, len(src) - 2)
+        return src.removesuffix("\r\n")
     if src.endswith("\n"):
-        return _substr(src, 0, len(src) - 1)
+        return src.removesuffix("\n")
     if src.endswith("\r"):
-        return _substr(src, 0, len(src) - 1)
+        return src.removesuffix("\r")
     return src
 
 fn _nl_of(s):
@@ -131,54 +87,39 @@ fn _nl_of(s):
         return "\r"
     return ""
 
-fn _is_indent_ch(ch):
-    if ch == " ":
-        return true
-    if ch == "\t":
-        return true
-    return false
+fn _is_blank_line(s):
+    # a line is blank when it is empty or all whitespace
+    return str(s).strip() == ""
 
 fn _leading_ws(s):
-    out = ""
-    src = str(s)
+    # count leading ' '/\t via char iteration (yields flat chars, stops early)
     i = 0
-    while i < len(src):
-        ch = str(src[i])
-        if _is_indent_ch(ch):
-            out = out + ch
+    for c in str(s):
+        sc = str(c)
+        if sc == " " or sc == "\t":
             i = i + 1
         else:
             break
-    return out
-
-fn _is_blank_line(s):
-    src = str(s)
-    i = 0
-    while i < len(src):
-        ch = str(src[i])
-        if _is_ws(ch):
-            i = i + 1
-        else:
-            return false
-    return true
+    return _substr(s, 0, i)
 
 fn _common_prefix(a, b):
-    out = ""
+    # margin/leading-ws strings are short; chars() gives flat O(1) indexing
+    ca = str(a).chars()
+    cb = str(b).chars()
     i = 0
-    sa = str(a)
-    sb = str(b)
-    while i < len(sa) and i < len(sb):
-        if sa[i] == sb[i]:
-            out = out + str(sa[i])
-            i = i + 1
-        else:
+    lim = len(ca)
+    if len(cb) < lim:
+        lim = len(cb)
+    while i < lim:
+        if str(ca[i]) != str(cb[i]):
             break
-    return out
+        i = i + 1
+    return _substr(a, 0, i)
 
 fn dedent(text):
     "Remove common leading whitespace from all non-empty lines."
     s = str(text)
-    raw_lines = _split_on_nl_keep(s)
+    raw_lines = s.splitlines(true)
     has_margin = false
     margin = ""
     i = 0
@@ -197,36 +138,37 @@ fn dedent(text):
         return s
     if margin == "":
         return s
-    out = ""
+    mlen = len(margin)
+    parts = []
     i = 0
     while i < len(raw_lines):
         ln = str(raw_lines[i])
         content = _strip_nl(ln)
         nl = _nl_of(ln)
         if content.startswith(margin):
-            out = out + _substr(content, len(margin), len(content)) + nl
+            parts.append(_substr(content, mlen, len(content)) + nl)
         else:
-            out = out + ln
+            parts.append(ln)
         i = i + 1
-    return out
+    return "".join(parts)
 
 fn indent(text, prefix):
     "Add prefix to the beginning of selected non-empty lines."
     s = str(text)
     p = str(prefix)
-    lines = _split_on_nl_keep(s)
-    out = ""
+    lines = s.splitlines(true)
+    parts = []
     i = 0
     while i < len(lines):
         ln = str(lines[i])
         content = _strip_nl(ln)
         nl = _nl_of(ln)
         if not _is_blank_line(content):
-            out = out + p + content + nl
+            parts.append(p + content + nl)
         else:
-            out = out + ln
+            parts.append(ln)
         i = i + 1
-    return out
+    return "".join(parts)
 
 fn shorten(text, width, placeholder):
     "Collapse whitespace, truncate to width, appending placeholder if truncated."
@@ -261,7 +203,7 @@ fn shorten(text, width, placeholder):
         i = i + 1
     return line
 
-fn _indent_lines(lines, first_prefix, rest_prefix):
+fn _indent_lines(lines, first_prefix, rest_prefix) -> [String]:
     out = []
     i = 0
     while i < len(lines):
@@ -278,7 +220,7 @@ wrap_indented(text, width, initial_indent, subsequent_indent)
 line carries initial_indent, the rest subsequent_indent, and `width`
 includes the indent (body is wrapped at width minus the wider indent).
 """
-fn wrap_indented(text, width, initial_indent, subsequent_indent):
+fn wrap_indented(text, width, initial_indent, subsequent_indent) -> [String]:
     w = int(width)
     if w < 1:
         w = 1
@@ -296,16 +238,9 @@ fn wrap_indented(text, width, initial_indent, subsequent_indent):
 fill_indented(text, width, initial_indent, subsequent_indent)
 -> fill() with indents; lines joined by newlines.
 """
-fn fill_indented(text, width, initial_indent, subsequent_indent):
+fn fill_indented(text, width, initial_indent, subsequent_indent) -> String:
     lines = wrap_indented(text, width, initial_indent, subsequent_indent)
-    out = ""
-    i = 0
-    while i < len(lines):
-        if i > 0:
-            out = out + "\n"
-        out = out + str(lines[i])
-        i = i + 1
-    return out
+    return "\n".join(lines)
 
 # -- TextWrapper ---------------------------------------------------------------
 #
@@ -322,27 +257,10 @@ fn fill_indented(text, width, initial_indent, subsequent_indent):
 
 """
 _expand_tabs(s, tabsize) -> replace each '\t' with spaces to the next
-multiple-of-tabsize column (Python expandtabs semantics).
+multiple-of-tabsize column (Python expandtabs semantics — native).
 """
 fn _expand_tabs(s, tabsize):
-    out = ""
-    col = 0
-    cs = s.chars()
-    i = 0
-    while i < len(cs):
-        ch = str(cs[i])
-        if ch == "\t":
-            nsp = tabsize - (col % tabsize)
-            j = 0
-            while j < nsp:
-                out = out + " "
-                j = j + 1
-            col = col + nsp
-        else:
-            out = out + ch
-            col = col + 1
-        i = i + 1
-    return out
+    return str(s).expandtabs(tabsize)
 
 """
 _fix_sentences(s) -> double the space after '.', '!', '?' when followed
@@ -367,29 +285,28 @@ fn _fix_sentences(s):
 
 """
 _split_hyphens(w) -> split a word after each '-' so wrapping can break
-there (Python break_on_hyphens approximation).
+there (Python break_on_hyphens approximation). Equivalent to the old
+char loop but built on the native split: "a--b" -> ["a-", "-", "b"].
 """
 fn _split_hyphens(w):
+    parts = str(w).split("-")
     out = []
-    cur = ""
-    cs = w.chars()
+    last = len(parts) - 1
     i = 0
-    while i < len(cs):
-        ch = str(cs[i])
-        cur = cur + ch
-        if ch == "-":
-            out.append(cur)
-            cur = ""
+    while i < len(parts):
+        piece = str(parts[i])
+        if i < last:
+            piece = piece + "-"
+        if len(piece) > 0:
+            out.append(piece)
         i = i + 1
-    if len(cur) > 0:
-        out.append(cur)
     return out
 
 """
 _wrap_core(text, wlimit, break_long_words, break_on_hyphens)
 -> list of wrapped lines honouring the break options.
 """
-fn _wrap_core(text, wlimit, break_long_words, break_on_hyphens):
+fn _wrap_core(text, wlimit, break_long_words, break_on_hyphens) -> [String]:
     if wlimit < 1:
         wlimit = 1
     raw = _split_words_ws(text)
@@ -457,7 +374,7 @@ class TextWrapper:
         return t
 
     """wrap(self, text) -> array of wrapped lines (Python .wrap())."""
-    fn wrap(self, text):
+    fn wrap(self, text) -> [String]:
         t = self._prepare(text)
         w = self.width
         if w < 1:
@@ -473,16 +390,8 @@ class TextWrapper:
         return _indent_lines(lines, ip, sp)
 
     """fill(self, text) -> wrapped text joined by newlines."""
-    fn fill(self, text):
-        lines = self.wrap(text)
-        out = ""
-        i = 0
-        while i < len(lines):
-            if i > 0:
-                out = out + "\n"
-            out = out + str(lines[i])
-            i = i + 1
-        return out
+    fn fill(self, text) -> String:
+        return "\n".join(self.wrap(text))
 
 """
 TextWrapper_new(width = 70, initial_indent = "",

@@ -1,4 +1,4 @@
-# std.json.dumps — Python `json.dumps`/`json.loads` port (pure A).
+# std.json.dumps — Python `json.dumps`/`json.loads` port.
 #
 # This file lives next to (not inside) `__init__.a` because `import json`
 # inside the package `__init__` would resolve to the package itself
@@ -22,6 +22,20 @@
 #     are converted with str() (Python converts int keys too).
 #   * ensure_ascii (default true, Python parity) escapes non-ASCII as
 #     \uXXXX (surrogate pairs above U+FFFF); pass false for raw UTF-8.
+#
+# Performance: the default call `dumps(v)` (and `dumps(v, ensure_ascii =
+# false)`) delegates to the native `json.stringify`, which is C-speed.
+# Two documented deviations apply on that fast path only:
+#   * float formatting uses the native shortest-round-trip-free "%.17g"
+#     style rather than str()'s Python-repr style, so e.g. dumps(0.1)
+#     may print more digits than Python's json.dumps (still valid JSON,
+#     parses back to the same double);
+#   * with ensure_ascii = true, output containing non-ASCII characters
+#     is re-serialized by the pure-A path below (native stringify always
+#     emits raw UTF-8), detected with the native `String.isascii()` scan.
+# `indent >= 0`, `sort_keys`, custom `separators`, or non-ASCII output
+# with ensure_ascii = true all take the pure-A serializer (parity
+# features the native module does not expose).
 #
 # `loads(text)` -> parsed value; panics on invalid JSON (Python raises
 # JSONDecodeError — A has no exceptions).
@@ -48,7 +62,7 @@ fn _jnum(x):
     return str(i!)
 
 """_jhex(n) -> 4-digit lowercase hex of n (0 <= n < 65536)."""
-fn _jhex(n):
+fn _jhex(n: i64) -> str:
     digits = "0123456789abcdef"
     out = ""
     i = 0
@@ -66,12 +80,11 @@ _jescape(s, ensure_ascii) -> JSON-quoted string: escapes '"', '\\', \n,
 ensure_ascii is true, characters above U+007F are escaped as \uXXXX
 (surrogate pairs above U+FFFF), matching Python json.dumps.
 """
-fn _jescape(s, ensure_ascii):
+fn _jescape(s: str, ensure_ascii: bool) -> str:
     out = "\""
     cs = s.chars()
-    i = 0
-    while i < len(cs):
-        ch = str(cs[i])
+    for c in cs:
+        ch = str(c)
         if ch == "\"":
             out = out + "\\\""
         elif ch == "\\":
@@ -102,14 +115,13 @@ fn _jescape(s, ensure_ascii):
                 out = out + ch
         else:
             out = out + ch
-        i = i + 1
     out = out + "\""
     return out
 
 # _ord8(ch) -> code point of a single char as i64, for the \u00XX escape.
 # Uses std.bytes.ord (UTF-8 codepoint decode); only called for chars
 # below U+0020 where the result is exact.
-fn _ord8(ch):
+fn _ord8(ch: str) -> i64:
     o = bytes.ord(ch)
     if o == None:
         return 0
@@ -133,13 +145,8 @@ fn _all_str_keys(ks):
     return true
 
 """_pad(n) -> n spaces (indent unit builder)."""
-fn _pad(n):
-    out = ""
-    i = 0
-    while i < n:
-        out = out + " "
-        i = i + 1
-    return out
+fn _pad(n: i64) -> str:
+    return " ".repeat(n)
 
 """
 _dump(value, indent, sort_keys, item_sep, key_sep, depth, ensure_ascii) -> JSON text.
@@ -147,7 +154,7 @@ indent < 0 -> single line; indent >= 0 -> newline + (depth+1)*indent
 spaces before each element and depth*indent before the closing
 bracket (Python's indent semantics).
 """
-fn _dump(value, indent, sort_keys, item_sep, key_sep, depth, ensure_ascii):
+fn _dump(value, indent: i64, sort_keys: bool, item_sep: str, key_sep: str, depth: i64, ensure_ascii: bool) -> str:
     kind = json.kind(value)
     if kind == "null":
         return "null"
@@ -226,6 +233,16 @@ defaults (", "/": " compact, ","/": " when indent >= 0).
 pass false to emit raw UTF-8.
 """
 fn dumps(value, indent = -1, sort_keys = false, separators = None, ensure_ascii = true):
+    # Fast path: default compact output goes through the native C
+    # serializer. Parity features native json lacks (indent, sort_keys,
+    # custom separators, ensure_ascii escapes) keep the pure-A path.
+    if indent < 0 and sort_keys == false and separators == None:
+        s = json.stringify(value)
+        # ensure_ascii = true requires \uXXXX for non-ASCII; the native
+        # serializer always emits raw UTF-8, so only ASCII output can be
+        # returned directly. isascii() is a native byte scan.
+        if ensure_ascii == false or s.isascii():
+            return s
     item_sep = ", "
     key_sep = ": "
     if indent >= 0:

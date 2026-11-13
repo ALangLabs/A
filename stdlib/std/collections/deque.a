@@ -319,7 +319,7 @@ deque() -> empty unbounded deque (Python `deque()`). The element type
 is inferred from later use; for a typed empty deque prefer
 `deque_of`/`deque_bounded` on a typed list.
 """
-fn deque():
+fn deque<T>() -> Deque<T>:
     return Deque([], [], 0, -1)
 
 """deque_of(xs) -> deque from a list (Python `deque(iterable)`)."""

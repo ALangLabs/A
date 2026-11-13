@@ -52,10 +52,9 @@ class Counter:
 
     """_bump(k, delta) -> new count after adding delta (private helper)."""
     fn _bump(self, k, delta):
-        n = 0
-        if k in self.counts:
-            n = self.counts[k]
-        n = n + delta
+        # dict.get is a single lookup; `k in counts` + `counts[k]` + set
+        # would hash the key three times per increment.
+        n = self.counts.get(k, 0) + delta
         self.counts[k] = n
         return n
 
@@ -149,9 +148,7 @@ class Counter:
     `__missing__`).
     """
     fn get(self, k):
-        if k in self.counts:
-            return self.counts[k]
-        return 0
+        return self.counts.get(k, 0)
 
     """set(k, n) -> assign an exact count (Python `c[k] = n`)."""
     fn set(self, k, n):

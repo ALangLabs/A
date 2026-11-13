@@ -3,41 +3,17 @@
 fn table(headers: [str], rows: [[str]]) -> str:
     width = len(headers)
     lines = []
-    header_text = ""
+    lines.append(" | ".join(headers))
+    # One "---" cell per column, "-|-" between them.
+    sep_cells = []
     i = 0
     while i < width:
-        if i > 0:
-            header_text = header_text + " | "
-        header_text = header_text + headers[i]
+        sep_cells.append("---")
         i = i + 1
-    lines.append(header_text)
-    sep = ""
-    i = 0
-    while i < width:
-        if i > 0:
-            sep = sep + "-|-"
-        sep = sep + "---"
-        i = i + 1
-    lines.append(sep)
-    r = 0
-    while r < len(rows):
-        line = ""
-        c = 0
-        while c < width:
-            if c > 0:
-                line = line + " | "
-            line = line + str(rows[r][c])
-            c = c + 1
-        lines.append(line)
-        r = r + 1
-    out = ""
-    i = 0
-    while i < len(lines):
-        if i > 0:
-            out = out + "\n"
-        out = out + lines[i]
-        i = i + 1
-    return out
+    lines.append("-|-".join(sep_cells))
+    for r in rows:
+        lines.append(" | ".join(r))
+    return "\n".join(lines)
 
 fn join_rows(rows: [i64]) -> str:
     out = []

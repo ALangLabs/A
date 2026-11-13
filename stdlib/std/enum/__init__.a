@@ -328,13 +328,9 @@ class FlagSpec:
         return self._spec.unique()
 
 fn _names_from_string(s):
-    t = s.replace(",", " ")
-    raw = t.split(" ")
-    out = []
-    for p in raw:
-        if p != "":
-            out.append(p)
-    return out
+    # native split() collapses whitespace runs (Python splits the names
+    # string on whitespace too, after ',' -> ' ')
+    return str(s).replace(",", " ").split()
 
 fn _names_from_json_list(arr):
     out = []

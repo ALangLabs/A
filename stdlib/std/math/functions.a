@@ -206,11 +206,12 @@ dist(p, q) -> Euclidean distance between two equal-length numeric
 arrays (Python math.dist). Panics on length mismatch.
 """
 fn dist(p, q):
-    if len(p) != len(q):
+    np = len(p)
+    if np != len(q):
         core.panic("dist: points must have the same dimension")
     ss = 0.0
     i = 0
-    while i < len(p):
+    while i < np:
         d = (p[i] + 0.0) - (q[i] + 0.0)
         ss = ss + d * d
         i = i + 1

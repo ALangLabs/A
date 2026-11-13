@@ -188,7 +188,13 @@ fn Fraction_new(n: i64, d: i64):
 fn Fraction_from_int(v: i64):
     return _mk(v, 1)
 
-"""Fraction_from_float(f) -> exact binary ratio of the double f."""
+"""
+Fraction_from_float(f) -> exact binary ratio of the double f.
+Panics on infinity and when the exact ratio needs a numerator or
+ denominator beyond i64 (|binary exponent| too large — e.g. 1e-4,
+ whose exact double has denominator 2^66). Python's bigint Fraction
+ has no such limit; previously these cases silently overflowed.
+"""
 fn Fraction_from_float(f: f64):
     if f == 0.0:
         return _mk(0, 1)
@@ -197,7 +203,18 @@ fn Fraction_from_float(f: f64):
     if x < 0:
         sign = -1
         x = -x
+    if x > 1.7976931348623157e308:
+        core.panic("Fraction: cannot convert infinity")
     e = 0
+    # Normalise x into [0.5, 1) by powers of two. Scaling by 2^30 chunks is
+    # exact (power-of-two multiply/divide never rounds), cutting the loop
+    # count ~30x for extreme exponents; the tail loops below finish the job.
+    while x >= 1073741824.0:
+        x = x / 1073741824.0
+        e = e + 30
+    while x < 9.313225746154785e-10:
+        x = x * 1073741824.0
+        e = e - 30
     while x >= 1.0:
         x = x / 2.0
         e = e + 1
@@ -206,6 +223,11 @@ fn Fraction_from_float(f: f64):
         e = e - 1
     m = int(x * 9007199254740992.0)
     shift = e - 53
+    # m is in [2^52, 2^53); keep m*2^shift and 2^-shift inside i64.
+    # Python's bigint Fraction handles these extremes; we panic instead
+    # of silently overflowing (previously produced wrong ratios).
+    if shift > 10 or shift < -62:
+        core.panic("Fraction: float magnitude out of i64 range")
     if shift >= 0:
         return _mk(sign * m * _pow2i(shift), 1)
     return _mk(sign * m, _pow2i(-shift))

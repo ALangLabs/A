@@ -26,36 +26,30 @@ import std:terminal
 
 """
 _srange(s, a, b) -> substring s[a:b] in characters (end exclusive,
-clamped). A strings have no slice syntax here, so this walks chars().
+clamped). Delegates to the native char-based slice; the clamps keep
+the old walk-based semantics (negatives clamp to the start, not the
+end like Python slicing).
 """
 fn _srange(s, a, b):
-    cs = s.chars()
-    n = len(cs)
+    n = len(s)
     if a < 0:
         a = 0
     if b > n:
         b = n
-    out = ""
-    i = a
-    while i < b:
-        out = out + str(cs[i])
-        i = i + 1
-    return out
+    if a >= b or b <= 0:
+        return ""
+    return s[a..b]
 
 """
-_slen(s) -> length of s in characters.
+_slen(s) -> length of s in characters (native len is already
+code-point based for strings).
 """
 fn _slen(s):
-    return len(s.chars())
+    return len(s)
 
 """_nul(k) -> k NUL characters (gap padding for cursor writes)."""
 fn _nul(k):
-    out = ""
-    i = 0
-    while i < k:
-        out = out + "\x00"
-        i = i + 1
-    return out
+    return "\x00" * k
 
 """
 StringIO: in-memory text stream with a cursor (Python io.StringIO).
@@ -84,7 +78,15 @@ class StringIO:
         if self.pos > oldlen:
             # cursor beyond end: pad the gap with NUL (CPython behaviour)
             self.data = self.data + _nul(self.pos - oldlen)
-        self.data = _srange(self.data, 0, self.pos) + text + _srange(self.data, self.pos + n, _slen(self.data))
+            oldlen = self.pos
+        if self.pos == oldlen:
+            # Append at end: a single concat. String slicing scans from
+            # the start for the char boundary, so the generic
+            # prefix+text+suffix form is O(n) per write; concat is not.
+            self.data = self.data + text
+        else:
+            # Overwrite in the middle: splice text over [pos, pos+n).
+            self.data = self.data[0..self.pos] + text + self.data[self.pos + n..]
         self.pos = self.pos + n
         return n
 
@@ -140,14 +142,10 @@ class StringIO:
     fn readline(self):
         self._check()
         n = _slen(self.data)
-        cs = self.data.chars()
-        i = self.pos
+        idx = self.data.find("\n", self.pos)
         end = n
-        while i < n:
-            if str(cs[i]) == "\n":
-                end = i + 1
-                break
-            i = i + 1
+        if idx >= 0:
+            end = idx + 1
         out = _srange(self.data, self.pos, end)
         self.pos = end
         return out
@@ -155,9 +153,24 @@ class StringIO:
     """readlines(self) -> all remaining lines as an array."""
     fn readlines(self):
         self._check()
+        n = _slen(self.data)
+        if self.pos >= n:
+            return []
+        # One tail slice + one native split beats per-line find+slice
+        # (each mid-string slice rescans from position 0).
+        rest = self.data[self.pos..]
+        self.pos = n
+        parts = rest.split("\n")
+        np = len(parts)
         out = []
-        while self.pos < _slen(self.data):
-            out.append(self.readline())
+        i = 0
+        while i < np:
+            p = parts[i]
+            if i < np - 1:
+                out.append(p + "\n")
+            elif p != "":
+                out.append(p)
+            i = i + 1
         return out
 
     """
@@ -232,12 +245,22 @@ class BytesIO:
         self._check()
         n = len(bs)
         end = self.pos + n
-        need = _bytes_pad(self.data, end)
-        i = 0
-        while i < n:
-            need[self.pos + i] = bs[i]
-            i = i + 1
-        self.data = need
+        if self.pos == len(self.data):
+            # Pure append: grow via append() so capacity doubles
+            # amortized instead of copying the buffer every write.
+            i = 0
+            while i < n:
+                self.data.append(bs[i])
+                i = i + 1
+        else:
+            # Overwrite/gap write: pad with zero bytes only when the
+            # write reaches past the current end.
+            if end > len(self.data):
+                self.data = _bytes_pad(self.data, end)
+            i = 0
+            while i < n:
+                self.data[self.pos + i] = bs[i]
+                i = i + 1
         self.pos = end
         return n
 
@@ -285,11 +308,7 @@ class BytesIO:
         end = n
         if size >= 0 and self.pos + size < end:
             end = self.pos + size
-        out = []
-        i = self.pos
-        while i < end:
-            out.append(self.data[i])
-            i = i + 1
+        out = self.data[self.pos..end]
         self.pos = end
         return out
 
@@ -304,11 +323,7 @@ class BytesIO:
                 end = i + 1
                 break
             i = i + 1
-        out = []
-        j = self.pos
-        while j < end:
-            out.append(self.data[j])
-            j = j + 1
+        out = self.data[self.pos..end]
         self.pos = end
         return out
 

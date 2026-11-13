@@ -227,12 +227,8 @@ fn repeat_seq(a, n):
     # spelled mul there). Strings repeat via concatenation, other iterables
     # are copied element-wise `n` times into a fresh array.
     if (a + "") == a:
-        out = ""
-        i = 0
-        while i < n:
-            out = out + a
-            i = i + 1
-        return out
+        # native str.repeat is C-fast (rope-friendly); repeat(n<=0) -> ""
+        return a.repeat(n)
     out = []
     i = 0
     while i < n:

@@ -32,15 +32,18 @@ import std:json
 import std:binary
 import std:core
 
-"""_slice(s, start, end) -> substring s[start:end] (chars, end exclusive)."""
+"""_slice(s, start, end) -> substring s[start:end] (chars, end exclusive;
+native slice with clamping — the old per-char loop built rope views)."""
 fn _slice(s, start, end):
-    cs = s.chars()
-    out = ""
-    i = start
-    while i < end and i < len(cs):
-        out = out + str(cs[i])
-        i = i + 1
-    return out
+    src = str(s)
+    n = len(src)
+    if start < 0:
+        start = 0
+    if end > n:
+        end = n
+    if end < start:
+        end = start
+    return src[start..end]
 
 """_floordiv(a, b) -> floor(a / b) for b > 0."""
 fn _floordiv(a, b):
@@ -74,23 +77,23 @@ fn _py_str_repr(s):
     quote = "'"
     if s.contains("'") and not s.contains("\""):
         quote = "\""
-    out = quote
+    parts = [quote]
     for c in s:
         sc = str(c)
         if sc == "\\":
-            out = out + "\\\\"
+            parts.append("\\\\")
         elif sc == quote:
-            out = out + "\\" + quote
+            parts.append("\\" + quote)
         elif sc == "\n":
-            out = out + "\\n"
+            parts.append("\\n")
         elif sc == "\t":
-            out = out + "\\t"
+            parts.append("\\t")
         elif sc == "\r":
-            out = out + "\\r"
+            parts.append("\\r")
         else:
-            out = out + sc
-    out = out + quote
-    return out
+            parts.append(sc)
+    parts.append(quote)
+    return "".join(parts)
 
 """_seq_kind(x) -> "set" | "tuple" | "other" for kind=="array" non-lists."""
 fn _seq_kind(x):
@@ -366,8 +369,7 @@ class PrettyPrinter:
         chunk = avail - 2
         if chunk < 4:
             chunk = 4
-        cs = st.chars()
-        n = len(cs)
+        n = len(st)
         inner_indent = indent + 1
         sep = "\n" + " ".repeat(inner_indent)
         i = 0
@@ -376,11 +378,7 @@ class PrettyPrinter:
             take = chunk
             if n - i < take:
                 take = n - i
-            piece = ""
-            j = 0
-            while j < take:
-                piece = piece + str(cs[i + j])
-                j = j + 1
+            piece = _slice(st, i, i + take)
             if not first:
                 buf.put(sep)
             buf.put(_py_str_repr(piece))

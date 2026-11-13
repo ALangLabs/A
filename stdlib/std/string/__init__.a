@@ -7,6 +7,12 @@
 #   * `capwords(s, sep)` takes exactly 2 args (A has no default params).
 #     Pass `None` for `sep` to get whitespace splitting/collapsing behavior.
 #   * Only ASCII constants are provided.
+#
+# Implementation note: all splitting/casing/joining goes through native
+# string methods (`.split()`, `.capitalize()`, `.join()`, `.find()`,
+# slices) which are C-fast. Manual per-character indexing builds rope
+# views that make downstream concatenation pathologically slow, so the
+# hot paths avoid `s[i]` loops entirely.
 
 whitespace = " \t\n\r"
 ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
@@ -18,100 +24,25 @@ octdigits = "01234567"
 punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_~"
 printable = digits + ascii_letters + punctuation + whitespace
 
-fn _is_space_char(ch):
-    if ch == " ":
-        return true
-    if ch == "\t":
-        return true
-    if ch == "\n":
-        return true
-    if ch == "\r":
-        return true
-    return false
-
-fn _capitalize_word(w):
-    if len(w) == 0:
-        return w
-    s = str(w)
-    first = str(s[0]).upper()
-    rest = ""
-    i = 1
-    while i < len(s):
-        rest = rest + str(s[i]).lower()
-        i = i + 1
-    return first + rest
-
-fn _split_whitespace_runs(s):
-    out = []
-    cur = ""
-    src = str(s)
-    i = 0
-    while i < len(src):
-        ch = str(src[i])
-        if _is_space_char(ch):
-            if len(cur) > 0:
-                out.append(cur)
-                cur = ""
-        else:
-            cur = cur + ch
-        i = i + 1
-    if len(cur) > 0:
-        out.append(cur)
-    return out
-
-fn _split_on_sep(s, sep):
-    src = str(s)
-    sp = str(sep)
-    if sp == "":
-        return [src]
-    out = []
-    cur = ""
-    i = 0
-    seplen = len(sp)
-    srclen = len(src)
-    while i < srclen:
-        if i + seplen <= srclen:
-            # compare slice
-            is_match = true
-            j = 0
-            while j < seplen:
-                if str(src[i + j]) != str(sp[j]):
-                    is_match = false
-                    break
-                j = j + 1
-            if is_match:
-                out.append(cur)
-                cur = ""
-                i = i + seplen
-                continue
-        cur = cur + str(src[i])
-        i = i + 1
-    out.append(cur)
-    return out
-
 fn capwords(s, sep):
     "Capitalize words using split/capitalize/join. Pass None for whitespace behavior."
-    words = []
-    join_sep = " "
+    src = str(s)
     if sep == None:
-        words = _split_whitespace_runs(str(s))
-        join_sep = " "
-    else:
-        join_sep = str(sep)
-        words = _split_on_sep(str(s), join_sep)
+        # Python: s.split(None) splits on whitespace runs and discards them.
+        caps = []
+        for w in src.split():
+            caps.append(str(w).capitalize())
+        return " ".join(caps)
+    sp = str(sep)
+    if sp == "":
+        # A's str.split("") raises "empty separator"; Python's capwords
+        # would raise ValueError on s.split("") too. The previous port
+        # capitalized the whole string — keep that behaviour.
+        return src.capitalize()
     caps = []
-    i = 0
-    while i < len(words):
-        caps.append(_capitalize_word(words[i]))
-        i = i + 1
-    out = ""
-    i = 0
-    while i < len(caps):
-        if i > 0:
-            out = out + join_sep
-        out = out + caps[i]
-        i = i + 1
-    return out
+    for w in src.split(sp):
+        caps.append(str(w).capitalize())
+    return sp.join(caps)
 
 # --- string.Template port -------------------------------------------------------
 #
@@ -127,6 +58,12 @@ fn capwords(s, sep):
 #     only malformed '${...}' forms panic.
 #   * The mapping must be an A map/dict; attribute-style objects are not
 #     supported.
+#
+# Implementation: literal runs between placeholders are emitted as native
+# slices and the result is built with one `"".join(parts)` — no per-char
+# string indexing. `cs = s.chars()` materializes flat chars once so
+# identifier scanning indexes a plain array, not the (possibly rope)
+# source string.
 
 import std:core
 
@@ -142,47 +79,41 @@ fn _tmpl_is_id_start(ch):
 fn _tmpl_is_id_char(ch):
     return _tmpl_is_alpha(ch) or _tmpl_is_digit(ch) or ch == "_"
 
-fn _tmpl_braced(src, i, n, delim, mapping, safe, out):
-    # src[i] == '{'; find closing '}' from i+1. Returns new index or -1.
-    key = ""
-    j = i + 1
-    while j < n:
-        ch = str(src[j])
-        if ch == "\}":
-            if len(key) == 0:
-                core.panic("Template: invalid placeholder")
-            if key in mapping:
-                out[0] = out[0] + str(mapping[key])
-                return j + 1
-            if safe:
-                return -1
-            core.panic("Template: key '" + key + "' not found")
-            return -1
-        key = key + ch
-        j = j + 1
-    core.panic("Template: invalid placeholder (unterminated brace)")
+fn _tmpl_braced(s, i, n, mapping, safe, parts):
+    # s[i] == '{'; find closing '}' from i+1. Returns new index or -1.
+    close = s.find("\}", i + 1)
+    if close < 0:
+        core.panic("Template: invalid placeholder (unterminated brace)")
+    key = s[i + 1..close]
+    if len(key) == 0:
+        core.panic("Template: invalid placeholder")
+    if key in mapping:
+        parts.append(str(mapping[key]))
+        return close + 1
+    if safe:
+        return -1
+    core.panic("Template: key '" + key + "' not found")
     return -1
 
-fn _tmpl_named(src, i, n, mapping, safe, out):
-    # src[i] is the delimiter; read an identifier starting at i+1.
-    key = ""
+fn _tmpl_named(s, cs, i, n, mapping, safe, parts):
+    # cs[i] is the delimiter; read an identifier starting at i+1.
+    # `cs` is the flat char array of `s`, so indexing is O(1).
     j = i + 1
-    first = true
+    start = j
     while j < n:
-        ch = str(src[j])
-        if first:
+        ch = str(cs[j])
+        if j == start:
             if not _tmpl_is_id_start(ch):
                 break
         else:
             if not _tmpl_is_id_char(ch):
                 break
-        key = key + ch
-        first = false
         j = j + 1
-    if len(key) == 0:
+    if j == start:
         return -1
+    key = s[start..j]
     if key in mapping:
-        out[0] = out[0] + str(mapping[key])
+        parts.append(str(mapping[key]))
         return j
     if safe:
         return -1
@@ -192,31 +123,38 @@ fn _tmpl_named(src, i, n, mapping, safe, out):
 fn _template_substitute(src, delim, mapping, safe):
     s = str(src)
     d = str(delim)
+    if len(d) != 1:
+        return s
     n = len(s)
-    out = [""]
+    cs = s.chars()
+    parts = []
     i = 0
     while i < n:
-        ch = str(s[i])
-        if ch == d and len(d) == 1:
-            if i + 1 < n and str(s[i + 1]) == d:
-                out[0] = out[0] + d
-                i = i + 2
-                continue
-            nxt = -1
-            if i + 1 < n and str(s[i + 1]) == "\{":
-                nxt = _tmpl_braced(s, i + 1, n, d, mapping, safe, out)
-            else:
-                nxt = _tmpl_named(s, i, n, mapping, safe, out)
-            if nxt < 0:
-                # safe_substitute: emit the '$' literally and continue
-                out[0] = out[0] + d
-                i = i + 1
-                continue
-            i = nxt
+        # jump to the next delimiter (native find is C-fast)
+        idx = s.find(d, i)
+        if idx < 0:
+            break
+        if idx > i:
+            parts.append(s[i..idx])
+        if idx + 1 < n and str(cs[idx + 1]) == d:
+            # "$$" -> literal delimiter
+            parts.append(d)
+            i = idx + 2
             continue
-        out[0] = out[0] + ch
-        i = i + 1
-    return out[0]
+        nxt = -1
+        if idx + 1 < n and str(cs[idx + 1]) == "\{":
+            nxt = _tmpl_braced(s, idx + 1, n, mapping, safe, parts)
+        else:
+            nxt = _tmpl_named(s, cs, idx, n, mapping, safe, parts)
+        if nxt < 0:
+            # safe_substitute: emit the delimiter literally and continue
+            parts.append(d)
+            i = idx + 1
+            continue
+        i = nxt
+    if i < n:
+        parts.append(s[i..n])
+    return "".join(parts)
 
 """
 Template: string.Template port — `$name`/`${name}` substitution.
@@ -265,10 +203,12 @@ fn maketrans(frm, to):
     b = str(to)
     if len(a) != len(b):
         core.panic("maketrans: 'from' and 'to' strings must have equal length")
+    ca = a.chars()
+    cb = b.chars()
     table = {}
     i = 0
-    while i < len(a):
-        table[str(a[i])] = str(b[i])
+    while i < len(ca):
+        table[str(ca[i])] = str(cb[i])
         i = i + 1
     return table
 
@@ -278,18 +218,14 @@ translate(s, table) -> s with each character replaced per `table`
 None values delete the character (Python str.translate).
 """
 fn translate(s, table):
-    src = str(s)
-    out = ""
-    i = 0
-    while i < len(src):
-        ch = str(src[i])
+    parts = []
+    for c in str(s):
+        ch = str(c)
         if ch in table:
             v = table[ch]
             if v == None:
-                i = i + 1
                 continue
-            out = out + str(v)
+            parts.append(str(v))
         else:
-            out = out + ch
-        i = i + 1
-    return out
+            parts.append(ch)
+    return "".join(parts)

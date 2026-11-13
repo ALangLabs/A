@@ -122,7 +122,7 @@ class UserList<T>:
         return self.data.last()
 
 """user_list() -> empty UserList."""
-fn user_list():
+fn user_list<T>() -> UserList<T>:
     return UserList([])
 
 """user_list_of(xs) -> UserList wrapping an existing list."""

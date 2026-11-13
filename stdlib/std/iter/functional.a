@@ -19,12 +19,12 @@ fn zip_apply<T>(f: fn(T, T) -> T, a: [T], b: [T]) -> [T]:
     return out
 
 fn take<T>(n: i64, xs: [T]) -> [T]:
-    out = []
-    i = 0
-    while i < n and i < len(xs):
-        out.append(xs[i])
-        i = i + 1
-    return out
+    m = n
+    if m < 0:
+        m = 0
+    if m > len(xs):
+        m = len(xs)
+    return xs[0..m]
 
 fn enumerate_pairs(xs: [i64]) -> [[i64]]:
     out = []
@@ -42,13 +42,9 @@ chain(lists) -> flattened array of all elements of the arrays in `lists`.
 """
 fn chain(lists):
     out = []
-    i = 0
-    while i < len(lists):
-        j = 0
-        while j < len(lists[i]):
-            out.append(lists[i][j])
-            j = j + 1
-        i = i + 1
+    for sub in lists:
+        for x in sub:
+            out.append(x)
     return out
 
 """
@@ -60,12 +56,10 @@ fn _prod_rec(i, acc, lists, out):
     if i == len(lists):
         out.append(acc.copy())
     else:
-        j = 0
-        while j < len(lists[i]):
-            acc.append(lists[i][j])
+        for v in lists[i]:
+            acc.append(v)
             _prod_rec(i + 1, acc, lists, out)
             acc.pop()
-            j = j + 1
 
 fn product(lists):
     out = []
@@ -77,29 +71,29 @@ fn product(lists):
 
 """
 _perm_rec / combinations helpers: `pre` is the in-progress selection,
-`rem`/`xs` the remaining pool, `r` the target size, `out` the result.
+`used` marks consumed positions in `xs`, `r` the target size, `out` the
+result. The used-flag formulation avoids allocating a fresh "remaining"
+array at every recursion node (the old rest-array version was O(n) extra
+allocation per node).
 """
-fn _perm_rec(pre, rem, r, out):
-    if len(pre) == r:
+fn _perm_rec(depth, xs, used, pre, r, out):
+    if depth == r:
         out.append(pre.copy())
     else:
         i = 0
-        while i < len(rem):
-            v = rem[i]
-            rest = []
-            j = 0
-            while j < len(rem):
-                if j != i:
-                    rest.append(rem[j])
-                j = j + 1
-            pre.append(v)
-            _perm_rec(pre, rest, r, out)
-            pre.pop()
+        while i < len(xs):
+            if not used[i]:
+                used[i] = true
+                pre.append(xs[i])
+                _perm_rec(depth + 1, xs, used, pre, r, out)
+                pre.pop()
+                used[i] = false
             i = i + 1
 
 """
 permutations(xs, r = -1) -> array of arrays: r-length orderings of xs.
 r defaults to len(xs); r > len(xs) -> []; r < 0 (other than -1) panics.
+Same lexicographic order as the previous rest-array implementation.
 """
 fn permutations(xs, r = -1):
     n = len(xs)
@@ -110,7 +104,12 @@ fn permutations(xs, r = -1):
     out = []
     if r > n:
         return out
-    _perm_rec([], xs.copy(), r, out)
+    used = []
+    i = 0
+    while i < n:
+        used.append(false)
+        i = i + 1
+    _perm_rec(0, xs, used, [], r, out)
     return out
 
 fn _comb_rec(start, pre, xs, r, out, with_replacement):
@@ -246,11 +245,7 @@ fn dropwhile(pred, xs):
     i = 0
     while i < len(xs) and pred(xs[i]):
         i = i + 1
-    out = []
-    while i < len(xs):
-        out.append(xs[i])
-        i = i + 1
-    return out
+    return xs[i..]
 
 """
 pairwise(xs) -> [[x0,x1],[x1,x2],...] consecutive pairs (Python 3.10+).
@@ -470,13 +465,19 @@ fn zip_longest_all(lists, fill = None):
         if len(lists[i]) > n:
             n = len(lists[i])
         i = i + 1
+    # hoist per-input lengths: len() inside the r*j loop was O(n*k) calls
+    lens = []
+    i = 0
+    while i < k:
+        lens.append(len(lists[i]))
+        i = i + 1
     out = []
     r = 0
     while r < n:
         p = []
         j = 0
         while j < k:
-            if r < len(lists[j]):
+            if r < lens[j]:
                 p.append(lists[j][r])
             else:
                 p.append(fill)

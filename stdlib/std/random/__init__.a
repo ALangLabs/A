@@ -43,17 +43,27 @@ import std:math
 # (toolchain quirk), so named constants would silently break there.
 
 """
+_pm_step(st) -> next Park-Miller state (i64 in [1, 2147483646]).
+Shared by the Random methods and the module-level scalar fast paths so
+both produce the identical stream for a given state.
+"""
+fn _pm_step(st):
+    return (st * 48271) % 2147483647
+
+"""
 _next_raw(self) -> i64 in [1, 2147483646]; advances the Park-Miller state.
 """
 fn _next_raw(self):
-    self.state = (self.state * 48271) % 2147483647
+    self.state = _pm_step(self.state)
     return self.state
 
 """
 _next31(self) -> i64 in [0, 2^31-2]; one uniform 31-bit-ish draw.
+Steps the state directly (inlined _next_raw) to save a call per draw.
 """
 fn _next31(self):
-    return _next_raw(self) - 1
+    self.state = _pm_step(self.state)
+    return self.state - 1
 
 """
 _randbelow(self, n) -> i64 in [0, n); rejection sampling so there is no
@@ -448,6 +458,64 @@ fn _load():
 fn _store(r):
     _gstate = r.state + 0.0
 
+# -- scalar fast paths ---------------------------------------------------------
+#
+# The scalar helpers below operate on `_gstate` directly (i64 domain; the
+# Park-Miller state < 2^31 is exact in the float-typed module var). They
+# consume draws in exactly the same order as the Random methods, so the
+# module-level stream is bit-identical to before — but each call avoids
+# constructing a temporary Random instance (~20x faster for draw-heavy
+# loops). The complex distribution wrappers below still round-trip through
+# _load()/_store() because they need several draws per call.
+
+"""_gload_i() -> i64 global state; seeds from the wall clock when unset."""
+fn _gload_i():
+    s = _gstate + 0.0
+    if s <= 0.0:
+        s = (time.now() % 2147483646) + 1.0
+        _gstate = s
+    return int(s)
+
+"""_gstore_i(st) -> persist an advanced i64 state back to _gstate."""
+fn _gstore_i(st):
+    _gstate = st + 0.0
+
+"""_gunif() -> float in [0.0, 1.0); same two-draw sequence as Random._u62."""
+fn _gunif():
+    st = _gload_i()
+    st = _pm_step(st)
+    hi = st - 1
+    st = _pm_step(st)
+    lo = st - 1
+    _gstore_i(st)
+    # hi * 2^31 + lo  (< 2^62, safe); / 2^62 -> [0, 1)
+    return float(hi * 2147483648 + lo) / 4611686018427387904.0
+
+"""
+_grandbelow(n) -> i64 in [0, n) from the global stream; identical draws to
+Random._randbelow, including the no-draw n == 1 case.
+"""
+fn _grandbelow(n):
+    if n <= 0:
+        core.panic("randbelow: n must be positive")
+    st = _gload_i()  # also performs the lazy wall-clock seed
+    if n == 1:
+        return 0  # no draw consumed (matches Random._randbelow)
+    if n > 2147483646:
+        # Range wider than one draw: single modulo draw (negligible bias).
+        st = _pm_step(st)
+        v = (st - 1) % n
+        _gstore_i(st)
+        return v
+    limit = (2147483646 / n) * n
+    while true:
+        st = _pm_step(st)
+        x = st - 1
+        if x < limit:
+            _gstore_i(st)
+            return x % n
+    return 0  # unreachable; satisfies the return checker
+
 """seed(s = None) -> reseed the global stream."""
 fn seed(s = None):
     r = _load()
@@ -456,94 +524,165 @@ fn seed(s = None):
 
 """random() -> float in [0.0, 1.0) from the global stream."""
 fn random():
-    r = _load()
-    v = r.random()
-    _store(r)
-    return v
+    return _gunif()
 
 """randint(a, b) -> i64 in [a, b] inclusive."""
 fn randint(a, b):
-    r = _load()
-    v = r.randint(a, b)
-    _store(r)
-    return v
+    if b < a:
+        core.panic("randint: empty range")
+    return a + _grandbelow(b - a + 1)
 
 """randrange(start, stop = None, step = 1) -> i64 (Python semantics)."""
 fn randrange(start, stop = None, step = 1):
-    r = _load()
-    v = r.randrange(start, stop, step)
-    _store(r)
-    return v
+    if step == 0:
+        core.panic("randrange: step is 0")
+    lo = start
+    hi = stop
+    if hi == None:
+        hi = start
+        lo = 0
+    if step > 0:
+        width = hi - lo
+        if width <= 0:
+            core.panic("randrange: empty range")
+        count = (width + step - 1) / step
+        if count <= 0:
+            core.panic("randrange: empty range")
+        return lo + step * _grandbelow(count)
+    # negative step: values lo, lo+step, ... while > hi
+    span = lo - hi
+    if span <= 0:
+        core.panic("randrange: empty range")
+    count = (span - step - 1) / (-step)
+    if count <= 0:
+        core.panic("randrange: empty range")
+    return lo + step * _grandbelow(count)
 
 """choice(seq) -> random element of a non-empty array."""
 fn choice(seq):
-    r = _load()
-    v = r.choice(seq)
-    _store(r)
-    return v
+    n = len(seq)
+    if n == 0:
+        core.panic("choice: empty sequence")
+    return seq[_grandbelow(n)]
 
 """choices(seq, k) -> array of k independent choices."""
 fn choices(seq, k):
-    r = _load()
-    v = r.choices(seq, k)
-    _store(r)
-    return v
+    n = len(seq)
+    if n == 0:
+        core.panic("choices: empty sequence")
+    out = []
+    i = 0
+    while i < k:
+        out.append(seq[_grandbelow(n)])
+        i = i + 1
+    return out
 
 """choices_weighted(seq, weights, k) -> weighted choices (global stream)."""
 fn choices_weighted(seq, weights, k):
-    r = _load()
-    v = r.choices_weighted(seq, weights, k)
-    _store(r)
-    return v
+    if len(seq) == 0:
+        core.panic("choices_weighted: empty sequence")
+    if len(weights) != len(seq):
+        core.panic("choices_weighted: weights must match population length")
+    total = 0.0
+    for x in weights:
+        total = total + (x + 0.0)
+    if total <= 0.0:
+        core.panic("choices_weighted: total weight must be positive")
+    # cumulative weights for linear-scan selection
+    cum = []
+    acc = 0.0
+    for x in weights:
+        acc = acc + (x + 0.0)
+        cum.append(acc)
+    nc = len(cum)
+    out = []
+    i = 0
+    while i < k:
+        u = _gunif() * total
+        j = 0
+        while j < nc - 1 and cum[j] < u:
+            j = j + 1
+        out.append(seq[j])
+        i = i + 1
+    return out
 
 """sample(population, k) -> new array of k unique elements."""
 fn sample(population, k):
-    r = _load()
-    v = r.sample(population, k)
-    _store(r)
-    return v
+    n = len(population)
+    if k < 0 or k > n:
+        core.panic("sample: k out of range")
+    pool = population.copy()
+    out = []
+    i = 0
+    while i < k:
+        j = i + _grandbelow(n - i)
+        tmp = pool[i]
+        pool[i] = pool[j]
+        pool[j] = tmp
+        out.append(pool[i])
+        i = i + 1
+    return out
 
 """shuffle(x) -> x shuffled in place (also returned)."""
 fn shuffle(x):
-    r = _load()
-    v = r.shuffle(x)
-    _store(r)
-    return v
+    n = len(x)
+    i = n - 1
+    while i > 0:
+        j = _grandbelow(i + 1)
+        tmp = x[i]
+        x[i] = x[j]
+        x[j] = tmp
+        i = i - 1
+    return x
 
 """shuffled(x) -> new array with x's elements shuffled."""
 fn shuffled(x):
-    r = _load()
-    v = r.shuffled(x)
-    _store(r)
-    return v
+    out = x.copy()
+    return shuffle(out)
 
 """uniform(a, b) -> float in [a, b]."""
 fn uniform(a, b):
-    r = _load()
-    v = r.uniform(a, b)
-    _store(r)
-    return v
+    # `x + 0.0` coerces int->float; float() miscompiles on float args
+    # inside class methods (backend quirk).
+    return (a + 0.0) + ((b + 0.0) - (a + 0.0)) * _gunif()
 
 """triangular(low, high, mode) -> float (sum-of-uniforms distribution)."""
 fn triangular(low, high, mode):
-    r = _load()
-    v = r.triangular(low, high, mode)
-    _store(r)
-    return v
+    u = _gunif()
+    lo = low + 0.0
+    hi = high + 0.0
+    mo = mode + 0.0
+    fc = (mo - lo) / (hi - lo)
+    if u < fc:
+        return lo + math.sqrt((mo - lo) * (hi - lo) * u)
+    return hi - math.sqrt((hi - mo) * (hi - lo) * (1.0 - u))
 
 """getrandbits(k) -> i64 with k random bits (1 <= k <= 62)."""
 fn getrandbits(k):
-    r = _load()
-    v = r.getrandbits(k)
-    _store(r)
-    return v
+    if k < 1 or k > 62:
+        core.panic("getrandbits: k must be in [1, 62]")
+    st = _gload_i()
+    if k <= 31:
+        st = _pm_step(st)
+        v = (st - 1) % _pow2(k)
+        _gstore_i(st)
+        return v
+    hi_bits = k - 31
+    st = _pm_step(st)
+    hi = (st - 1) % _pow2(hi_bits)
+    st = _pm_step(st)
+    lo = st - 1
+    _gstore_i(st)
+    return hi * 2147483648 + lo
 
 """randbytes(n) -> [i64] of n bytes in 0..255."""
 fn randbytes(n):
-    r = _load()
-    v = r.randbytes(n)
-    _store(r)
-    return v
+    out = []
+    i = 0
+    while i < n:
+        out.append(_grandbelow(256))
+        i = i + 1
+    return out
 
 """gauss(mu, sigma) -> normally distributed float (global stream)."""
 fn gauss(mu, sigma):

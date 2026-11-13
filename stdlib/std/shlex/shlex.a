@@ -33,18 +33,17 @@ fn _str_chars(s):
         out.append(str(c))
     return out
 
-"""_join_chars(cs, start, end) -> string of cs[start:end] (end exclusive)."""
-fn _join_chars(cs, start, end):
-    out = ""
-    i = start
-    while i < end and i < len(cs):
-        out = out + cs[i]
-        i = i + 1
-    return out
-
-"""_slice(s, start, end) -> substring s[start:end] in characters."""
+"""_slice(s, start, end) -> substring s[start:end] in characters (native slice)."""
 fn _slice(s, start, end):
-    return _join_chars(_str_chars(s), start, end)
+    src = str(s)
+    n = len(src)
+    if start < 0:
+        start = 0
+    if end > n:
+        end = n
+    if end < start:
+        end = start
+    return src[start..end]
 
 """_is_abs(path) -> true for POSIX-absolute paths ('/' prefix)."""
 fn _is_abs(path):
@@ -55,7 +54,7 @@ fn _dirname(path):
     i = path.rfind("/")
     if i < 0:
         return ""
-    return _slice(path, 0, i)
+    return path[0..i]
 
 """_join_path(dir, name) -> dir + "/" + name (dir "" -> name)."""
 fn _join_path(dir, name):
@@ -343,12 +342,12 @@ fn Shlex_new(source, posix, punctuation_chars):
         wordchars = wordchars + "ßàáâãäåæçèéêëìíîïðñòóôõöøùúûüýþÿÀÁÂÃÄÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞ"
     if pc != "":
         wordchars = wordchars + "~-./*?="
-        kept = ""
+        kept = []
         for c in wordchars:
             sc = str(c)
             if not (sc in pc):
-                kept = kept + sc
-        wordchars = kept
+                kept.append(sc)
+        wordchars = "".join(kept)
     eof = None
     if not posix:
         eof = ""

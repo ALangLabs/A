@@ -205,66 +205,80 @@ fn _strftime(dt, fmt):
                    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
     days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
     days_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
-    out = ""
+    # Calendar values are loop-invariant: compute the civil-day number
+    # and everything derived from it ONCE instead of letting each
+    # %j/%U/%W/%w/%u/%a/%A code re-run _days_from_civil.
+    z = _days_from_civil(dt.year, dt.month, dt.day)
+    yday_v = z - _days_from_civil(dt.year, 1, 1) + 1
+    r = (z + 3) % 7
+    dowm = r
+    if dowm < 0:
+        dowm = dowm + 7
+    dows = (dowm + 1) % 7
+    w_sun = (yday_v - 1 - dows + 7) / 7
+    w_mon = (yday_v - 1 - dowm + 7) / 7
+    # Accumulate fragments and join once — `out = out + c` per char is
+    # O(len^2) in string copies; join is a single native pass.
+    parts = []
     i = 0
     n = len(fmt)
     while i < n:
         c = str(fmt[i])
         if c != "%" or i + 1 >= n:
-            out = out + c
+            parts.append(c)
             i = i + 1
             continue
         code = str(fmt[i + 1])
         i = i + 2
         if code == "Y":
-            out = out + _pad4(dt.year)
+            parts.append(_pad4(dt.year))
         elif code == "y":
-            out = out + _pad2(dt.year % 100)
+            parts.append(_pad2(dt.year % 100))
         elif code == "m":
-            out = out + _pad2(dt.month)
+            parts.append(_pad2(dt.month))
         elif code == "d":
-            out = out + _pad2(dt.day)
+            parts.append(_pad2(dt.day))
         elif code == "H":
-            out = out + _pad2(dt.hour)
+            parts.append(_pad2(dt.hour))
         elif code == "M":
-            out = out + _pad2(dt.minute)
+            parts.append(_pad2(dt.minute))
         elif code == "S":
-            out = out + _pad2(dt.second)
+            parts.append(_pad2(dt.second))
         elif code == "f":
             # Milliseconds widened to Python's 6-digit %f width.
-            out = out + _pad3(dt.millisecond) + "000"
+            parts.append(_pad3(dt.millisecond) + "000")
         elif code == "j":
-            out = out + _pad3(_yday(dt))
+            parts.append(_pad3(yday_v))
         elif code == "U":
-            out = out + _pad2(_week_num(dt, false))
+            parts.append(_pad2(w_sun))
         elif code == "W":
-            out = out + _pad2(_week_num(dt, true))
+            parts.append(_pad2(w_mon))
         elif code == "w":
-            out = out + str(_dow_sun(dt))
+            parts.append(str(dows))
         elif code == "u":
-            out = out + str(_dow_mon(dt) + 1)
+            parts.append(str(dowm + 1))
         elif code == "a":
-            out = out + days_abbr[_dow_mon(dt)]
+            parts.append(days_abbr[dowm])
         elif code == "A":
-            out = out + days[_dow_mon(dt)]
+            parts.append(days[dowm])
         elif code == "b" or code == "h":
-            out = out + months_abbr[dt.month - 1]
+            parts.append(months_abbr[dt.month - 1])
         elif code == "B":
-            out = out + months[dt.month - 1]
+            parts.append(months[dt.month - 1])
         elif code == "p":
             if dt.hour < 12:
-                out = out + "AM"
+                parts.append("AM")
             else:
-                out = out + "PM"
+                parts.append("PM")
         elif code == "z":
-            out = out + "+0000"
+            parts.append("+0000")
         elif code == "Z":
-            out = out + "UTC"
+            parts.append("UTC")
         elif code == "%":
-            out = out + "%"
+            parts.append("%")
         else:
-            out = out + "%" + code
-    return out
+            parts.append("%" + code)
+    return parts.join("")
 
 # -- public API -----------------------------------------------------------------
 
@@ -475,24 +489,24 @@ class _Strp:
     yday
     hour12
     pm
+    cps
 
+    # _ch works on code points: `cps` is the text pre-converted to an
+    # [i64] of code points once, so _ch is a plain list index returning
+    # the code point (or -1 at end of input) with no per-char ord call
+    # or string allocation. Callers advance `pos` directly once a code
+    # point is validated.
     fn _ch(self):
-        if self.pos >= len(self.text):
-            return ""
-        return str(self.text[self.pos])
-
-    fn _take(self):
-        c = self._ch()
-        if c != "":
-            self.pos = self.pos + 1
-        return c
+        if self.pos >= len(self.cps):
+            return -1
+        return self.cps[self.pos]
 
     fn _eat_ws(self):
         # format whitespace matches a (possibly empty) whitespace run
         while true:
             c = self._ch()
-            if c == " " or c == "\t" or c == "\n" or c == "\r":
-                self._take()
+            if c == 32 or c == 9 or c == 10 or c == 13:
+                self.pos = self.pos + 1
             else:
                 break
         return 0
@@ -502,11 +516,11 @@ class _Strp:
         n = 0
         while n < maxd:
             c = self._ch()
-            if c < "0" or c > "9":
+            if c < 48 or c > 57:
                 break
-            v = v * 10 + (bytes.ord(c) ?? 0) - 48
+            v = v * 10 + c - 48
             n = n + 1
-            self._take()
+            self.pos = self.pos + 1
         if n == 0:
             self.failed = true
             return 0
@@ -514,66 +528,68 @@ class _Strp:
 
     fn _alpha(self):
         # consume a run of ASCII letters -> lowercase string
-        out = ""
+        parts = []
         while true:
-            c = self._ch()
-            cp = bytes.ord(c) ?? 0
+            cp = self._ch()
             if cp < 65 or (cp > 90 and cp < 97) or cp > 122:
                 break
-            out = out + str(c).lower()
-            self._take()
-        return out
+            if cp < 97:
+                cp = cp + 32
+            parts.append(bytes.chr(cp)!)
+            self.pos = self.pos + 1
+        return parts.join("")
 
     fn _parse_fmt(self, fmt):
+        fcs = str(fmt).chars()
         i = 0
-        n = len(fmt)
+        n = len(fcs)
         while i < n and not self.failed:
-            fc = str(fmt[i])
-            if fc == "%":
+            fc = fcs[i]
+            if fc == '%':
                 i = i + 1
                 if i >= n:
                     self.failed = true
                     break
-                code = str(fmt[i])
+                code = fcs[i]
                 i = i + 1
                 self._code(code)
-            elif fc == " " or fc == "\t":
+            elif fc == ' ' or fc == '\t':
                 self._eat_ws()
                 i = i + 1
             else:
-                if self._ch() != fc:
+                if self._ch() != (bytes.ord(fc) ?? -1):
                     self.failed = true
                 else:
-                    self._take()
+                    self.pos = self.pos + 1
                 i = i + 1
         return 0
 
     fn _code(self, code):
-        if code == "Y":
+        if code == 'Y':
             self.year = self._num(4)
-        elif code == "y":
+        elif code == 'y':
             v = self._num(2)
             if v >= 69:
                 self.year = 1900 + v
             else:
                 self.year = 2000 + v
-        elif code == "m":
+        elif code == 'm':
             self.month = self._num(2)
-        elif code == "d":
+        elif code == 'd':
             self.day = self._num(2)
-        elif code == "H":
+        elif code == 'H':
             self.hour = self._num(2)
-        elif code == "M":
+        elif code == 'M':
             self.minute = self._num(2)
-        elif code == "S":
+        elif code == 'S':
             self.second = self._num(2)
-        elif code == "I":
+        elif code == 'I':
             self.hour12 = self._num(2)
-        elif code == "f":
+        elif code == 'f':
             self.milli = self._frac()
-        elif code == "j":
+        elif code == 'j':
             self.yday = self._num(3)
-        elif code == "p":
+        elif code == 'p':
             w = self._alpha()
             if w == "pm":
                 self.pm = true
@@ -581,77 +597,85 @@ class _Strp:
                 self.pm = false
             else:
                 self.failed = true
-        elif code == "a" or code == "A":
+        elif code == 'a' or code == 'A':
             self._alpha()
-        elif code == "b" or code == "B" or code == "h":
+        elif code == 'b' or code == 'B' or code == 'h':
             w = self._alpha()
             self.month = _month_from_name(w)
             if self.month == 0:
                 self.failed = true
-        elif code == "z":
+        elif code == 'z':
             self._tz()
-        elif code == "Z":
+        elif code == 'Z':
             self._alpha()
-        elif code == "w" or code == "u":
+        elif code == 'w' or code == 'u':
             self._num(1)
-        elif code == "U" or code == "W":
+        elif code == 'U' or code == 'W':
             self._num(2)
-        elif code == "%":
-            if self._ch() != "%":
+        elif code == '%':
+            if self._ch() != 37:
                 self.failed = true
             else:
-                self._take()
-        elif code == "F":
+                self.pos = self.pos + 1
+        elif code == 'F':
             self._parse_fmt("%Y-%m-%d")
-        elif code == "T":
+        elif code == 'T':
             self._parse_fmt("%H:%M:%S")
-        elif code == "D":
+        elif code == 'D':
             self._parse_fmt("%m/%d/%y")
-        elif code == "R":
+        elif code == 'R':
             self._parse_fmt("%H:%M")
-        elif code == "r":
+        elif code == 'r':
             self._parse_fmt("%I:%M:%S %p")
-        elif code == "c" or code == "x" or code == "X":
-            core.panic("strptime: %" + code + " (locale format) is not supported")
+        elif code == 'c' or code == 'x' or code == 'X':
+            core.panic("strptime: %" + str(code) + " (locale format) is not supported")
         else:
-            core.panic("strptime: unsupported format code %" + code)
+            core.panic("strptime: unsupported format code %" + str(code))
         return 0
 
     fn _frac(self):
         # %f: 1-6 digits -> milliseconds (first three digits, right-padded)
-        ds = ""
+        ds = 0
         n = 0
         while n < 6:
             c = self._ch()
-            if c < "0" or c > "9":
+            if c < 48 or c > 57:
                 break
-            ds = ds + c
+            ds = ds * 10 + c - 48
             n = n + 1
-            self._take()
+            self.pos = self.pos + 1
         if n == 0:
             self.failed = true
             return 0
-        if len(ds) <= 3:
-            while len(ds) < 3:
-                ds = ds + "0"
+        if n <= 3:
+            # short fraction: right-pad with zeros (".5" -> 500 ms)
+            while n < 3:
+                ds = ds * 10
+                n = n + 1
         else:
-            ds = ds[0..3]
-        return int(ds)
+            # keep only the first three digits
+            div = 1
+            k = 3
+            while k < n:
+                div = div * 10
+                k = k + 1
+            ds = ds / div
+        return ds
 
     fn _tz(self):
         # %z: consume and ignore (UTC only). Accepts +HHMM/-HHMM or 'Z'.
         c = self._ch()
-        if c == "Z" or c == "z":
-            self._take()
-        elif c == "+" or c == "-":
-            self._take()
+        if c == 90 or c == 122:  # 'Z' or 'z'
+            self.pos = self.pos + 1
+        elif c == 43 or c == 45:  # '+' or '-'
+            self.pos = self.pos + 1
             i = 0
             while i < 4 and not self.failed:
                 d = self._ch()
-                if d < "0" or d > "9":
+                if d < 48 or d > 57:
                     self.failed = true
                 else:
-                    self._take()
+                    self.pos = self.pos + 1
                     i = i + 1
         else:
             self.failed = true
@@ -688,7 +712,11 @@ Returns None on any mismatch or out-of-range field (Python raises
 ValueError); trailing unparsed text also yields None.
 """
 fn strptime(text, fmt) -> DateTime?:
-    sp = _Strp(str(text), 0, false, 1900, 1, 1, 0, 0, 0, 0, 0, -1, false)
+    t = str(text)
+    cps = []
+    for c in t.chars():
+        cps.append(bytes.ord(c) ?? -1)
+    sp = _Strp(t, 0, false, 1900, 1, 1, 0, 0, 0, 0, 0, -1, false, cps)
     sp._parse_fmt(str(fmt))
     if sp.failed or sp.pos != len(sp.text):
         return None
