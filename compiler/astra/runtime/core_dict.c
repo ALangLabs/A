@@ -49,13 +49,20 @@ static inline int dict_key_eq(aval a, aval b) {
        and mixed kinds still fall through to values_equal, which owns the
        cross-kind rules (a char never equals a str). */
     AObj *oa = obj_of(a);
-    if (oa && oa->type == T_STR) {
+    if (oa && (oa->type == T_STR || oa->type == T_ROPE)) {
         AObj *ob = obj_of(b);
-        if (ob && ob->type == T_STR) {
+        if (ob && (ob->type == T_STR || ob->type == T_ROPE)) {
             if (oa->len != ob->len) return 0;
-            return oa->len == 0 ||
-                   memcmp(((AStr *)oa)->data, ((AStr *)ob)->data,
-                          (size_t)oa->len) == 0;
+            if (oa->type == T_STR && ob->type == T_STR)
+                return oa->len == 0 ||
+                       memcmp(((AStr *)oa)->data, ((AStr *)ob)->data,
+                              (size_t)oa->len) == 0;
+            /* A rope involved: compare the flattened bytes (str_data
+               caches the flatten, so repeat probes stay cheap). */
+            uint64_t la, lb;
+            const char *pa = str_data(a, &la), *pb = str_data(b, &lb);
+            return la == lb &&
+                   (la == 0 || memcmp(pa, pb, (size_t)la) == 0);
         }
     }
     return values_equal(a, b);
@@ -87,15 +94,26 @@ static uint64_t dict_key_hash(aval k) {
     if (a_is_none(k) || k == A_TRUE || k == A_FALSE)
         return mix64(k ^ UINT64_C(0x517cc1b727220a95));
     AObj *o = obj_of(k);
-    if (o && (o->type == T_STR || o->type == T_CHAR)) {
-        /* FNV-1a over the bytes, then final mix. */
+    if (o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE)) {
+        /* FNV-1a over the bytes, then final mix. A rope hashes exactly like
+           the T_STR it flattens to (same tag, same bytes). */
         uint64_t h = UINT64_C(0xcbf29ce484222325);
-        const char *p = ((AStr *)o)->data;
-        for (uint32_t i = 0; i < o->len; ++i) {
+        uint64_t n;
+        const char *p;
+        if (o->type == T_ROPE) {
+            AStr *f = astr_flat(k);
+            p = f->data;
+            n = f->h.len;
+        } else {
+            p = ((AStr *)o)->data;
+            n = o->len;
+        }
+        for (uint32_t i = 0; i < n; ++i) {
             h ^= (unsigned char)p[i];
             h *= UINT64_C(0x100000001b3);
         }
-        return mix64(h ^ ((uint64_t)o->type << 56));
+        uint32_t tag_t = o->type == T_ROPE ? T_STR : o->type;
+        return mix64(h ^ ((uint64_t)tag_t << 56));
     }
     /* complex/unhashable-by-value keys: one shared domain (see above) */
     return UINT64_C(0x9e3779b97f4a7c15);
@@ -202,6 +220,56 @@ int64_t dict_find(ADict *d, aval k) {
         return -1;
     }
     return dict_find_h(d, k, dict_key_hash(k));
+}
+
+/* Lookup by raw C-string bytes without materializing an AStr key.
+   Produces exactly the hash dict_key_hash computes for a T_STR key
+   (FNV-1a over the bytes, final mix tagged with T_STR), and accepts only
+   stored T_STR pairs whose bytes match — which is precisely
+   dict_key_eq's answer for a string needle: values_equal's cross-kind
+   rules mean no non-str key can equal a string, and two strings compare
+   by length+bytes. Used by method/attribute dispatch, where the method
+   name arrives as a C string and allocating a temporary AStr per call
+   was pure overhead. */
+int64_t dict_find_cstr(ADict *d, const char *s, uint64_t len) {
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    for (uint64_t i = 0; i < len; ++i) {
+        h ^= (unsigned char)s[i];
+        h *= UINT64_C(0x100000001b3);
+    }
+    h = mix64(h ^ ((uint64_t)T_STR << 56));
+    if (d->scap == 0) {
+        for (uint64_t i = 0; i < d->h.len; ++i) {
+            AObj *o = obj_of(d->pairs[i].k);
+            if (o && (o->type == T_STR || o->type == T_ROPE) && o->len == len &&
+                (len == 0 ||
+                 memcmp(o->type == T_ROPE
+                            ? astr_flat(d->pairs[i].k)->data
+                            : ((AStr *)o)->data,
+                        s, (size_t)len) == 0))
+                return (int64_t)i;
+        }
+        return -1;
+    }
+    uint64_t mask = d->scap - 1;
+    uint64_t sl = h & mask;
+    const uint32_t tag = dict_tag(h);
+    for (;;) {
+        uint64_t w = d->slots[sl];
+        if (!w) return -1;
+        if ((uint32_t)(w >> 32) == tag) {
+            uint32_t i = (uint32_t)w - 1;
+            AObj *o = obj_of(d->pairs[i].k);
+            if (o && (o->type == T_STR || o->type == T_ROPE) && o->len == len &&
+                (len == 0 ||
+                 memcmp(o->type == T_ROPE
+                            ? astr_flat(d->pairs[i].k)->data
+                            : ((AStr *)o)->data,
+                        s, (size_t)len) == 0))
+                return (int64_t)i;
+        }
+        sl = (sl + 1) & mask;
+    }
 }
 
 void dict_put(ADict *d, aval k, aval v) {

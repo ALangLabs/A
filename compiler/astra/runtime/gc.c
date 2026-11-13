@@ -253,6 +253,57 @@ static void ht_put(uint32_t idx) {
     }
 }
 
+/* Single-probe insert for a_gc_register: probes the hash once and either
+   inserts idx or reports a conflict. Returns 1 when idx is now in the
+   table (a same-start entry pointing at a non-USED slot — possible only
+   inside the in-sweep stale-hash window — is overwritten in place, which
+   keeps g_htcount correct since it referenced no live block anyway).
+   Returns 0 when a USED block already owns this start address;
+   *conflict receives its slot and the caller must blk_delist() it before
+   ht_put()ing idx. This replaces the old ht_find()+ht_put() pair, halving
+   the hash work on every xmalloc/xrealloc. */
+static int ht_claim(uint32_t idx, uint32_t *conflict) {
+    ht_grow_if_needed();
+    if (!g_htcap) { *conflict = GC_NONE; return 0; }
+    uintptr_t start = g_blk[idx].start;
+    uint32_t mask = g_htcap - 1;
+    uint32_t s = (uint32_t)(gc_mix(start) & mask);
+    uint32_t tomb = GC_NONE;
+    uint64_t probes = 0, lim = (uint64_t)g_htcap * 2 + 16;
+    for (;;) {
+        uint32_t e = g_ht[s];
+        if (!e) {
+            uint32_t at = tomb != GC_NONE ? tomb : s;
+            ++g_htcount;
+            if (tomb != GC_NONE) --g_httomb;
+            g_ht[at] = idx + 1;
+            return 1;
+        }
+        if (e == UINT32_MAX) {
+            if (tomb == GC_NONE) tomb = s;
+        } else {
+            uint32_t es = e - 1;
+            if (g_blk[es].start == start) {
+                /* es == idx means the hash still references the slot we
+                   just claimed (stale remnant from an in-sweep fast
+                   delist): overwrite it — it is our own entry. */
+                if (es != idx && (g_blk[es].flags & GC_F_USED)) {
+                    *conflict = es;
+                    return 0;
+                }
+                g_ht[s] = idx + 1;   /* overwrite stale same-start entry */
+                return 1;
+            }
+        }
+        s = (s + 1) & mask;
+        if (++probes > lim) {
+            fprintf(stderr, "[gc] ht_claim STUCK start=%p cap=%u count=%u tomb=%u nblk=%u\n",
+                    (void *)start, g_htcap, g_htcount, g_httomb, g_nblk);
+            abort();
+        }
+    }
+}
+
 static void ht_del(uintptr_t start) {
     if (!g_htcap) return;
     uint32_t mask = g_htcap - 1;
@@ -446,6 +497,12 @@ typedef struct {
 static GCArenaRange *g_arena_ranges;
 static size_t g_narena, g_caparena;
 static uint64_t g_next_arena_id = 1;
+/* Conservative [min,max) envelope over all arena ranges. Grown on every
+   a_gc_note_arena and never shrunk (a reclaimed range only widens the
+   gap the prefilter must scan — still correct). Lets
+   gc_arena_containing reject non-arena pointers with two compares when
+   the program has carved many bump chunks. */
+static uintptr_t g_arena_pmin = UINTPTR_MAX, g_arena_pmax = 0;
 
 static GCArenaRange *gc_arena_by_id(uint64_t id) {
     for (size_t i = 0; i < g_narena; ++i)
@@ -454,6 +511,7 @@ static GCArenaRange *gc_arena_by_id(uint64_t id) {
 }
 
 static GCArenaRange *gc_arena_containing(uintptr_t p) {
+    if (p < g_arena_pmin || p >= g_arena_pmax) return NULL;
     for (size_t i = 0; i < g_narena; ++i)
         if (p >= g_arena_ranges[i].lo && p < g_arena_ranges[i].hi)
             return &g_arena_ranges[i];
@@ -509,6 +567,8 @@ void a_gc_note_arena(void *p, size_t n, int mapped) {
     r->mapped = mapped;
     r->active = 0;
     r->candidate = 0;
+    if (r->lo < g_arena_pmin) g_arena_pmin = r->lo;
+    if (r->hi > g_arena_pmax) g_arena_pmax = r->hi;
     (void)gc_register_chunk_block(p, n, id);
 }
 
@@ -1190,10 +1250,13 @@ static void gc_collect(void) {
         return;
     }
 
-    /* Sweep: collect dead objects first, then release them. */
+    /* Sweep: collect dead objects first, then release them. The dead
+       list is a persistent grow-only buffer — a malloc/free pair per
+       collection showed up in churn-heavy profiles. */
     t0 = g_prof ? gc_now_s() : 0.0;
-    uint32_t *dead = NULL;
-    size_t ndead = 0, capdead = 0;
+    static uint32_t *dead;
+    static size_t capdead;
+    size_t ndead = 0;
     for (uint32_t i = 0; i < g_nblk; ++i) {
         GCBlock *b = &g_blk[i];
         if (!(b->flags & GC_F_USED)) continue;
@@ -1252,6 +1315,9 @@ static void gc_collect(void) {
                 if (nd) { dead = nd; capdead = nc; }
             }
             if (ndead < capdead) dead[ndead++] = i;
+            /* If the grow failed we simply skip queueing this object:
+               it stays registered and unmarked, so the next collection
+               retries it. Same conservative fallback as before. */
         } else {
             /* Unmarked object or non-object block: delist only. This is a
                deliberate conservative fallback because root scanning can
@@ -1274,7 +1340,6 @@ static void gc_collect(void) {
         blk_delist_fast(idx);
         pool_release(obj, sz);
     }
-    gc_raw_free(dead);
 #if defined(__GLIBC__)
     /* The pool above is bounded; everything else just went back to libc.
        Churn otherwise leaves glibc's retained free chunks as the RSS
@@ -1369,14 +1434,6 @@ void a_gc_maybe_collect(void) {
 void a_gc_register(void *p, size_t n) {
     if (!gc_enabled() || !p) return;
     gc_ensure_init();
-    /* If a stale entry still claims this start address (a block that was
-       released without delisting, then the address was reused), drop it
-       first — otherwise two USED slots would share a start: the hash maps
-       to only one of them and g_nused inflates without bound. */
-    {
-        uint32_t old = ht_find((uintptr_t)p);
-        if (old != GC_NONE) blk_delist(old);
-    }
     uint32_t i = blk_alloc_slot();
     if (i == GC_NONE) return;
     GCBlock *b = &g_blk[i];
@@ -1386,7 +1443,15 @@ void a_gc_register(void *p, size_t n) {
     b->next = 0;
     b->arena_id = 0;
     b->region = 0;
-    ht_put(i);
+    /* Single hash probe covers both jobs the old ht_find()+ht_put() pair
+       did: if a stale entry still claims this start address (a block that
+       was released without delisting, then the address was reused), the
+       conflict slot is reported and dropped before we insert. */
+    uint32_t conflict = GC_NONE;
+    if (!ht_claim(i, &conflict)) {
+        blk_delist(conflict);
+        ht_put(i);
+    }
     ++g_nused;
     g_alloc_bytes += n ? n : 1;
     if (getenv("A_GC_TRACE") && n >= ((size_t)256 << 10)) {
@@ -1403,6 +1468,18 @@ void a_gc_register(void *p, size_t n) {
 
 void a_gc_reregister(void *oldp, void *newp, size_t n) {
     if (!gc_enabled()) return;
+    /* realloc() that kept the same address (in-place grow/shrink, common
+       for top-of-heap and mremap-able blocks): the block keeps its slot,
+       flags (incl. GC_F_NOSCAN) and hash entry — only the scanned extent
+       changes. One lookup instead of delist+register's three probes. */
+    if (oldp == newp && newp) {
+        uint32_t i = ht_find((uintptr_t)newp);
+        if (i != GC_NONE && (g_blk[i].flags & GC_F_USED)) {
+            g_blk[i].end = g_blk[i].start + (n ? n : 1);
+            g_alloc_bytes += n ? n : 1;
+            return;
+        }
+    }
     int noscan = 0;
     if (oldp) {
         uint32_t i = ht_find((uintptr_t)oldp);
@@ -1531,6 +1608,44 @@ void a_gc_set_region(void *p, uint32_t depth) {
     uint32_t i = ht_find((uintptr_t)p);
     if (i == GC_NONE) return;
     g_blk[i].region = depth;
+}
+
+/* Single-lookup escape check for region.c's a_region_store: returns
+   nonzero when storing `child` into `container` must promote the child —
+   i.e. the old a_gc_obj_region()+a_gc_obj_old() pair would have answered
+   "container is untracked (region 0), sits in a shallower region, or is
+   already OLD". One hash probe instead of up to two; the stale-slot case
+   (hash entry whose block was fast-delisted mid-sweep) answers "promote",
+   the conservative direction. */
+int a_gc_region_escape(void *container, uint32_t depth) {
+    if (!gc_enabled() || !container) return 0;
+    uint32_t i = ht_find((uintptr_t)container);
+    if (i == GC_NONE) return 1;          /* untracked container: promote */
+    GCBlock *b = &g_blk[i];
+    if (!(b->flags & GC_F_USED)) return 1; /* stale slot: stay conservative */
+    if (b->flags & GC_F_OLD) return 1;
+    return b->region == 0 || b->region < depth;
+}
+
+/* Single-lookup promote step for region.c's a_promote worklist: returns 1
+   when p was newly marked GC_F_OLD (the caller then pushes p's aval
+   children), 0 when p must be skipped — untracked, not a GC object,
+   arena-resident, pinned, or already OLD (which doubles as the visited
+   marker, exactly like the old regionable+obj_old+promote_block triple,
+   but with one hash probe and one arena-range scan instead of three
+   probes). */
+int a_gc_promote_visit(void *p) {
+    if (!gc_enabled() || !p || g_in_gc) return 0;
+    uint32_t i = ht_find((uintptr_t)p);
+    if (i == GC_NONE) return 0;
+    GCBlock *b = &g_blk[i];
+    if ((b->flags & (GC_F_USED | GC_F_OBJ)) != (GC_F_USED | GC_F_OBJ))
+        return 0;
+    if (b->flags & GC_F_OLD) return 0;   /* already promoted: visited */
+    if (gc_in_arena((uintptr_t)p)) return 0;
+    if (gc_obj_pinned(p)) return 0;
+    b->flags |= GC_F_OLD;
+    return 1;
 }
 
 uint32_t a_gc_obj_region(void *p) {

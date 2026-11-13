@@ -7,7 +7,7 @@ aval method_no_method(aval obj, const char *name) {
 
 aval str_case_map(aval v, int mode) {
     /* mode: 0 lower, 1 upper, 2 capitalize, 3 title, 4 swapcase */
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     AStr *r = (AStr *)xmalloc(sizeof(AStr) + (size_t)s->h.len + 1);
     r->h.type = T_STR;
     r->h.len = s->h.len;
@@ -31,18 +31,28 @@ aval str_case_map(aval v, int mode) {
     return mkobj(&r->h);
 }
 
-int is_space_byte(unsigned char c) { return isspace(c) != 0; }
+int is_space_byte(unsigned char c) {
+    /* The runtime never calls setlocale, so the C locale applies: isspace
+       is exactly 0x09-0x0D and 0x20, and bytes >= 0x80 are never space.
+       This runs inside the per-byte whitespace-split loops, where the
+       ctype call's __ctype_b_loc TLS lookup dominated. */
+    return c == 0x20 || (c >= 0x09 && c <= 0x0D);
+}
 
 aval str_strip_impl(aval v, int left, int right) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint32_t a = 0, b = s->h.len;
     if (left) while (a < b && is_space_byte((unsigned char)s->data[a])) ++a;
     if (right) while (b > a && is_space_byte((unsigned char)s->data[b - 1])) --b;
+    /* Nothing trimmed: return the input (immutable, so aliasing is safe —
+       same convention as replace()). Avoids an alloc+copy for the common
+       already-clean string. */
+    if (a == 0 && b == s->h.len) return v;
     return a_str_new(s->data + a, (uint64_t)(b - a));
 }
 
 AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t n = s->h.len;
     AVec out = { NULL, 0, 0 };
     if (a_is_none(sep)) {
@@ -148,7 +158,7 @@ AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
 }
 
 aval str_replace(aval v, aval oldv, aval newv, int64_t count) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t on, nn, sn = s->h.len;
     const char *op = str_data(oldv, &on), *np = str_data(newv, &nn);
     const char *sp = s->data;
@@ -173,28 +183,32 @@ aval str_replace(aval v, aval oldv, aval newv, int64_t count) {
 }
 
 int str_pred(aval v, int pred) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     if (s->h.len == 0) return 0;
     int has_lower = 0, has_upper = 0, prev_alpha = 0, title_ok = 1;
+    /* ASCII-only classification: in the C locale (setlocale is never
+       called) every ctype predicate used here is false for bytes >= 0x80,
+       so range checks are exact and skip the per-byte __ctype_b_loc call. */
     for (uint32_t i = 0; i < s->h.len; ++i) {
         unsigned char c = (unsigned char)s->data[i];
+        int alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
         switch (pred) {
-            case 0: if (!isdigit(c)) return 0; break;                 /* isdigit */
-            case 1: if (!isalpha(c)) return 0; break;                 /* isalpha */
-            case 2: if (!isspace(c)) return 0; break;                 /* isspace */
-            case 3: if (!isalnum(c)) return 0; break;                 /* isalnum */
+            case 0: if (c < '0' || c > '9') return 0; break;          /* isdigit */
+            case 1: if (!alpha) return 0; break;                      /* isalpha */
+            case 2: if (!(c == 0x20 || (c >= 0x09 && c <= 0x0D))) return 0; break; /* isspace */
+            case 3: if (!alpha && (c < '0' || c > '9')) return 0; break; /* isalnum */
             case 4: /* islower */
-                if (isupper(c)) return 0;
-                if (islower(c)) has_lower = 1;
+                if (c >= 'A' && c <= 'Z') return 0;
+                if (c >= 'a' && c <= 'z') has_lower = 1;
                 break;
             case 5: /* isupper */
-                if (islower(c)) return 0;
-                if (isupper(c)) has_upper = 1;
+                if (c >= 'a' && c <= 'z') return 0;
+                if (c >= 'A' && c <= 'Z') has_upper = 1;
                 break;
             case 6: /* istitle */
-                if (isalpha(c)) {
-                    if (islower(c) && !prev_alpha) title_ok = 0;
-                    if (isupper(c) && prev_alpha) title_ok = 0;
+                if (alpha) {
+                    if (c >= 'a' && c <= 'z' && !prev_alpha) title_ok = 0;
+                    if (c >= 'A' && c <= 'Z' && prev_alpha) title_ok = 0;
                     prev_alpha = 1;
                 } else prev_alpha = 0;
                 break;
@@ -208,7 +222,7 @@ int str_pred(aval v, int pred) {
 
 aval str_affix(aval v, int64_t width, aval fillv, int mode) {
     /* mode 0 ljust, 1 rjust, 2 center, 3 zfill */
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t n = s->h.len;
     char fill = ' ';
     if (!a_is_none(fillv)) {

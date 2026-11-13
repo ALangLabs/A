@@ -6,9 +6,9 @@
 
 AStr *str_of(aval v, const char *what) {
     AObj *o = obj_of(v);
-    if (!o || (o->type != T_STR && o->type != T_CHAR))
+    if (!o || (o->type != T_STR && o->type != T_CHAR && o->type != T_ROPE))
         panicf("%s must be str, not '%s'", what, type_name_cstr(v));
-    return (AStr *)o;
+    return astr_flat(v);
 }
 
 /* Small immutable strings are bump-allocated from 1 MiB chunks: str(int)
@@ -77,9 +77,11 @@ aval a_str_new_uninit(uint64_t len) {
 /* Writable view of a string's storage, for native code that fills the buffer
    it just allocated (net.recv_body reads a body straight into the string). */
 char *str_mut_data(aval v, uint64_t *len) {
+    AObj *o = obj_of(v);
     AStr *s = str_of(v, "string");
     if (len) *len = s->h.len;
     astr_cp_uncache(s);  /* the caller is about to overwrite bytes */
+    if (o->type == T_ROPE) astr_cp_uncache((AStr *)o); /* rope cp cache too */
     return s->data;
 }
 
@@ -201,6 +203,14 @@ const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
         return h + *pos;
     }
     if (from > hn || nn > hn - from) return NULL;
+    /* Single-byte needle (very common: count("o"), split(" "), replace):
+       one memchr is the whole search — skip the memcmp-per-hit loop. */
+    if (nn == 1) {
+        const void *hit = memchr(h + from, n[0], hn - from);
+        if (!hit) return NULL;
+        *pos = (size_t)((const char *)hit - h);
+        return (const char *)hit;
+    }
     /* memchr for the first byte (SIMD in libc) instead of memcmp at every
        offset: a 200 KB contains() miss cost 2 ms with the naive loop. */
     size_t i = from;
@@ -208,7 +218,11 @@ const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
         const void *hit = memchr(h + i, n[0], hn - nn - i + 1);
         if (!hit) return NULL;
         size_t cand = (size_t)((const char *)hit - h);
-        if (memcmp(h + cand, n, nn) == 0) {
+        /* Cheap last-byte check before the memcmp call: when the first
+           byte is common but the tail differs (e.g. "ab" in "aaaa..."),
+           most candidates die here without entering memcmp. */
+        if (h[cand + nn - 1] == n[nn - 1] &&
+            memcmp(h + cand, n, nn) == 0) {
             *pos = cand;
             return h + cand;
         }
@@ -281,5 +295,180 @@ aval str_repeat(aval s, int64_t count) {
         filled += c;
     }
     return outv;
+}
+
+/* ------------------------------------------------------------------ */
+/* ropes: O(1) string concatenation for append loops                    */
+/* ------------------------------------------------------------------ */
+
+static int astr_is_strkind(AObj *o) {
+    return o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE);
+}
+
+aval a_str_cat(aval l, aval r) {
+    AObj *lo = obj_of(l), *ro = obj_of(r);
+    if (!astr_is_strkind(lo) || !astr_is_strkind(ro))
+        panicf("string concat operands must be str");
+    uint64_t ln = lo->len, rn = ro->len;
+    if (ln + rn > (uint64_t)UINT32_MAX) panicf("string too large");
+    if (lo->type != T_ROPE && ro->type != T_ROPE &&
+        ln + rn <= A_STR_ROPE_MIN) {
+        /* Small result: same exact-size copy the old concat_str did. */
+        aval outv = a_str_new_uninit(ln + rn);
+        AStr *o = (AStr *)obj_of(outv);
+        if (ln) memcpy(o->data, astr_flat(l)->data, (size_t)ln);
+        if (rn) memcpy(o->data + ln, astr_flat(r)->data, (size_t)rn);
+        return outv;
+    }
+    ARope *p = (ARope *)xmalloc(sizeof(ARope));
+    p->h.type = T_ROPE;
+    p->h.len = (uint32_t)(ln + rn);
+    p->h.cap = 0;
+    p->left = l;
+    p->right = r;
+    p->flat = A_NONE;
+    return mkobj(&p->h);
+}
+
+/* Flatten a rope into its canonical flat AStr (cached in r->flat).
+   Iterative in-order traversal: append loops build ropes tens of
+   thousands of nodes deep, so recursion would overflow the C stack.
+   A rope child that already has a flat is a leaf (one memcpy); sharing
+   (DAG shapes like `s = s + s`) is handled naturally — a shared subtree
+   with a cached flat is copied once per occurrence, which is exactly
+   what the output requires. */
+static void rope_flatten(ARope *r) {
+    if (r->flat != A_NONE) return;
+    aval fv = a_str_new_uninit(r->h.len);
+    AStr *f = (AStr *)obj_of(fv);
+    char *d = f->data;
+    size_t n = 0, cap = 256;
+    AObj **st = (AObj **)xmalloc(cap * sizeof(AObj *));
+    st[n++] = &r->h;
+    while (n) {
+        AObj *o = st[--n];
+        if (o->type == T_ROPE) {
+            ARope *q = (ARope *)o;
+            if (q->flat != A_NONE) {
+                AStr *fs = (AStr *)obj_of(q->flat);
+                memcpy(d, fs->data, (size_t)q->h.len);
+                d += q->h.len;
+                continue;
+            }
+            if (n + 2 > cap) {
+                cap *= 2;
+                st = (AObj **)xrealloc(st, cap * sizeof(AObj *));
+            }
+            /* Push right first so left is visited first (in-order). */
+            st[n++] = obj_of(q->right);
+            st[n++] = obj_of(q->left);
+            continue;
+        }
+        AStr *s = (AStr *)o;
+        if (s->h.len) memcpy(d, s->data, (size_t)s->h.len);
+        d += s->h.len;
+    }
+    free(st);
+    r->flat = fv;
+}
+
+AStr *astr_flat(aval v) {
+    AObj *o = obj_of(v);
+    if (o && o->type == T_ROPE) {
+        ARope *r = (ARope *)o;
+        rope_flatten(r);
+        return (AStr *)obj_of(r->flat);
+    }
+    return (AStr *)o;
+}
+
+/* Code-point count of a flat string-kind object: cache hit, else a u8_count
+   scan cached in the cap word (same scheme a_len always used). Returns
+   UINT32_MAX for an unflattened rope — callers that need the count go
+   through a_str_cpcount/rope_cp instead. */
+static uint32_t astr_cp_flat(AObj *o) {
+    AStr *s = (AStr *)o;
+    uint32_t c = astr_cp_cached(s);
+    if (c) return c - 1u;
+    uint32_t cp = (uint32_t)u8_count(s->data, s->h.len);
+    astr_cp_cache(s, cp);
+    return cp;
+}
+
+/* cp of any string-kind object; UINT32_MAX when `o` is a rope whose count
+   has not been computed yet. */
+static uint32_t astr_cp_known(AObj *o) {
+    if (o->type == T_ROPE) {
+        uint32_t c = astr_cp_cached((AStr *)o);
+        return c ? c - 1u : UINT32_MAX;
+    }
+    return astr_cp_flat(o);
+}
+
+/* Code-point count of a rope, cached per node in h.cap's high half
+   (cp+1, 0 = unknown — same layout as AStr). Computed by an iterative
+   post-order pass so deep append chains cannot overflow the C stack and
+   shared subtrees (DAGs) are counted once. Amortized O(1): each rope
+   node's count is computed at most once, from children's cached counts
+   plus one u8_count per flat leaf. */
+static uint32_t rope_cp(ARope *root) {
+    uint32_t c = astr_cp_cached((AStr *)root);
+    if (c) return c - 1u;
+    typedef struct { AObj *o; uint32_t expanded; } CpFr;
+    size_t n = 0, cap = 256;
+    CpFr *st = (CpFr *)xmalloc(cap * sizeof(CpFr));
+    st[n++] = (CpFr){ &root->h, 0 };
+    while (n) {
+        CpFr f = st[--n];
+        AObj *o = f.o;
+        if (o->type != T_ROPE) continue;
+        ARope *q = (ARope *)o;
+        uint32_t lc = astr_cp_known(obj_of(q->left));
+        uint32_t rc = astr_cp_known(obj_of(q->right));
+        if (lc != UINT32_MAX && rc != UINT32_MAX) {
+            astr_cp_cache((AStr *)q, lc + rc);
+            continue;
+        }
+        if (!f.expanded) {
+            if (n + 1 > cap) {
+                cap *= 2;
+                st = (CpFr *)xrealloc(st, cap * sizeof(CpFr));
+            }
+            st[n++] = (CpFr){ o, 1 };
+            /* Push rope children whose count is still unknown; flat
+               children and already-counted ropes resolve via astr_cp_known
+               when the expanded frame is revisited. */
+            AObj *kids[2] = { obj_of(q->left), obj_of(q->right) };
+            for (int i = 0; i < 2; ++i) {
+                AObj *k = kids[i];
+                if (k->type == T_ROPE && astr_cp_cached((AStr *)k) == 0) {
+                    if (n + 1 > cap) {
+                        cap *= 2;
+                        st = (CpFr *)xrealloc(st, cap * sizeof(CpFr));
+                    }
+                    st[n++] = (CpFr){ k, 0 };
+                }
+            }
+        } else {
+            /* Children were processed above this frame: their counts are
+               cached now, so this resolves. If a child is somehow still
+               unknown (cannot happen — every unknown rope child was
+               pushed), leave the node uncached rather than storing a
+               wrong count. */
+            lc = astr_cp_known(obj_of(q->left));
+            rc = astr_cp_known(obj_of(q->right));
+            if (lc != UINT32_MAX && rc != UINT32_MAX)
+                astr_cp_cache((AStr *)q, lc + rc);
+        }
+    }
+    free(st);
+    c = astr_cp_cached((AStr *)root);
+    return c ? c - 1u : 0;
+}
+
+uint32_t a_str_cpcount(aval v) {
+    AObj *o = obj_of(v);
+    if (o->type == T_ROPE) return rope_cp((ARope *)o);
+    return astr_cp_flat(o);
 }
 

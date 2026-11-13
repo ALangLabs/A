@@ -17,7 +17,7 @@ indent/dedent = indentation changes after ":" introduce block suites
 Keywords include `fn`, `if`, `elif`, `else`, `while`, `for`, `in`, `loop`,
 `do`, `break`, `continue`, `return`, `defer`, `class`, `metaclass`, `enum`,
 `trait`, `impl`, `type`, `where`, `comptime`, `import`, `from`, `as`,
-`match`, `pass`, `self`, `and`, `or`, `not`. `None` and constructors like
+`match`, `pass`, `self`, `and`, `or`, `not`, `extern`. `None` and constructors like
 `Some`/`Ok`/`Err` are capitalized builtins.
 
 ## Literals
@@ -90,6 +90,7 @@ if x > 5:
 
 ```ebnf
 fn_decl      = "fn" identifier [ generics ] "(" [ params ] ")" [ "->" type ] suite ;
+extern_decl  = "extern" [ "C" ] "fn" identifier "(" [ params ] ")" [ "->" type ] [ "=" STRING ] NEWLINE ;
 class_decl   = "class" identifier [ generics ] ":" NEWLINE INDENT { member } DEDENT ;
 enum_decl    = "enum" identifier [ generics ] ":" ... ;
 entry_decl   = "entry" identifier "(" ")" suite ;

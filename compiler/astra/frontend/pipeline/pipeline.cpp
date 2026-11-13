@@ -414,6 +414,11 @@ inline std::string absCachePath(const std::string& path) {
   return ec ? path : abs;
 }
 
+// Defined below with the LLVM backend; the run cache folds the resolved
+// tool paths into its key so toolchain upgrades invalidate binaries.
+std::string findLLVMTool(const char* envName,
+                         std::initializer_list<const char*> names);
+
 namespace run_cache {
 
 inline std::uint64_t mixBytes(std::uint64_t h, const std::string& s) {
@@ -448,6 +453,22 @@ inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
   h = mixBytes(h, p);
   h = mixInt(h, sz);
   return mixInt(h, mt);
+}
+
+// Fold the resolved LLVM tool binaries (opt/llc/clang) into the cache key:
+// a toolchain upgrade must invalidate cached binaries even when sources,
+// runtime and the `a` binary itself are unchanged.
+inline void mixLLVMToolStats(std::uint64_t& h) {
+  const std::string opt = findLLVMTool(
+      "A_LLVM_OPT", {"opt", "opt-18", "opt-17", "opt-16", "opt-15"});
+  const std::string llc = findLLVMTool(
+      "A_LLVM_LLC", {"llc", "llc-18", "llc-17", "llc-16", "llc-15"});
+  const std::string cc = findLLVMTool(
+      "A_LLVM_CC",
+      {"clang", "clang-18", "clang-17", "clang-16", "clang-15"});
+  if (!opt.empty()) h = mixFileStat(h, opt);
+  if (!llc.empty()) h = mixFileStat(h, llc);
+  if (!cc.empty()) h = mixFileStat(h, cc);
 }
 
 // Runtime C/headers are compiled into every binary, so a change to any of
@@ -553,10 +574,10 @@ inline bool cacheDirOverridden() {
 }
 inline std::string cacheDir() { return defaultCacheRoot(); }
 
-// Compilation caching was removed: every run/build compiles fresh. The
-// cache machinery below is kept only as unreachable fallback code.
+// Run/build caching is content-addressed and on by default; A_NO_CACHE=1
+// disables it (useful when chasing heisenbugs or benchmarking cold compiles).
 inline bool disabled() {
-  return true;
+  return std::getenv("A_NO_CACHE") != nullptr;
 }
 
 // Computes the content-addressed cache path, or leaves Plan inactive when
@@ -593,6 +614,7 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   h = mixBytes(h, runtimeDir);
   mixRuntimeSources(h, runtimeC);
   h = mixFileStat(h, runtimeDir + "/libaruntime.a");
+  mixLLVMToolStats(h);
   // Module sources: entry first-class (inline "<repl>"/"-c" sources come
   // from entrySource), every other module must read from disk.
   const ModuleGraph& g = *m.graph;
@@ -857,6 +879,7 @@ inline std::string precheckKey(const std::string& path,
   std::uint64_t h2 = ps.h;
   mixRuntimeSources(h2, runtimeC);
   h2 = mixFileStat(h2, runtimeDir + "/libaruntime.a");
+  mixLLVMToolStats(h2);
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
                 static_cast<unsigned long long>(h2));
@@ -1407,6 +1430,32 @@ std::string findLLVMTool(const char* envName,
   if (const char* e = std::getenv(envName); e && *e) {
     found = e;
   } else {
+    // Bundled toolchain first: tools shipped next to the `a` executable
+    // (release packages stage opt/llc/clang under llvm-tools/ or bin/)
+    // win over whatever happens to be on PATH.
+    const std::string self = run_cache::selfExePath();
+    if (!self.empty()) {
+      std::string dir = self;
+      auto pos = dir.find_last_of("/\\");
+      if (pos != std::string::npos) {
+        dir = dir.substr(0, pos);
+        for (const std::string& base :
+             {dir + "/llvm-tools", dir + "/bin", dir}) {
+          for (const char* n : names) {
+            std::string cand = base + "/" + n;
+            std::error_code ec;
+            if (!std::filesystem::exists(cand, ec)) continue;
+#ifndef _WIN32
+            if (access(cand.c_str(), X_OK) != 0) continue;
+#endif
+            found = cand;
+            break;
+          }
+          if (!found.empty()) break;
+        }
+      }
+    }
+    if (found.empty()) {
     const char* pathEnv = std::getenv("PATH");
 #ifdef _WIN32
     const char delim = ';';
@@ -1427,6 +1476,7 @@ std::string findLLVMTool(const char* envName,
         found = cand;
         break;
       }
+    }
     }
   }
   cache.emplace(key, found);

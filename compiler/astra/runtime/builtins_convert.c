@@ -34,19 +34,34 @@ aval bi_abs(uint64_t n, aval *argv) {
     return A_NONE;
 }
 
+/* Borrow array storage for already-materialized list/tuple/set values;
+   anything else is collected through the iterator protocol. Mirrors
+   iterable_arr() in builtins_collect.c (static there). */
+static AArr *minmax_arr(aval v, aval *tmp) {
+    AObj *o = obj_of(v);
+    if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET))
+        return (AArr *)o;
+    *tmp = collect_iterable(v);
+    return (AArr *)obj_of(*tmp);
+}
+
 static aval minmax(uint64_t n, aval *argv, int is_min, const char *name) {
     if (n == 0) panicf("%s expected at least 1 argument, got 0", name);
     aval best;
     uint64_t start = 0;
     if (n == 1) {
-        aval tmp = collect_iterable(argv[0]);
-        AArr *a = (AArr *)obj_of(tmp);
+        aval tmp;
+        AArr *a = minmax_arr(argv[0], &tmp);
         if (a->h.len == 0) panicf("%s() arg is an empty sequence", name);
-        best = a->items[0];
+        /* arr_elem reads packed int64 storage too (a->items is NULL for
+           packed lists); borrowing the source also skips the collect
+           copy the iterator protocol used to make. */
+        best = arr_elem(a, 0);
         start = 1;
         for (uint64_t i = start; i < a->h.len; ++i) {
-            aval c = a_lt(a->items[i], best);
-            if (truthy(is_min ? c : a_lt(best, a->items[i]))) best = a->items[i];
+            aval cur = arr_elem(a, i);
+            aval c = a_lt(cur, best);
+            if (truthy(is_min ? c : a_lt(best, cur))) best = cur;
         }
         return best;
     }

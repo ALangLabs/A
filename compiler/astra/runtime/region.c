@@ -42,6 +42,12 @@
  */
 #include "a_runtime_internal.h"
 
+/* gc.c single-lookup helpers (declared here rather than in
+   a_runtime_internal.h so the shared header stays untouched while the
+   escape/promotion fast paths evolve). */
+int a_gc_region_escape(void *container, uint32_t depth);
+int a_gc_promote_visit(void *p);
+
 typedef struct ARegion {
     void **objs;            /* growable list of object pointers born here */
     uint32_t n, cap;
@@ -152,8 +158,36 @@ void a_region_note_obj(void *p) {
 /* Push every aval field of `ob` that is a heap object onto the worklist.
    Mirrors the object graph coverage of gc_free_obj_interior plus the
    aval-carrying fields (env slots, result value, iter src/lookahead,
-   view parent, closure env, struct name/methods/methodFns). */
-static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap) {
+   view parent, closure env, struct name/methods/methodFns).
+   The worklist starts on the caller's stack buffer (`stk`, cap entries)
+   and moves to the heap only when it outgrows it — most promotions are
+   small, and the old code paid an xmalloc+free pair per a_promote call. */
+#define REGION_WL_STACK 64
+
+static void region_wl_reserve(void ***wl, size_t *n, size_t *cap,
+                              void *stk) {
+    if (*n < *cap) return;
+    size_t nc = *cap ? *cap * 2 : 16;
+    void **nw;
+    if (*wl == stk) {
+        /* Untracked on purpose, like the heap worklist: a GC-scanned
+           pointer list would pin every young object it mentions. */
+        nw = (void **)xmalloc(nc * sizeof(void *));
+        memcpy(nw, *wl, *n * sizeof(void *));
+    } else {
+        nw = (void **)xrealloc(*wl, nc * sizeof(void *));
+    }
+    *wl = nw;
+    *cap = nc;
+}
+
+#define REGION_PUSH(ptr) do { \
+        region_wl_reserve(wl, n, cap, stk); \
+        (*wl)[(*n)++] = (ptr); \
+    } while (0)
+
+static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap,
+                                 void *stk) {
     aval v = A_NONE;
     uint32_t len = 0;
     switch (ob->type) {
@@ -162,14 +196,7 @@ static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap) {
             if (a->items)
                 for (uint32_t i = 0; i < a->h.len; ++i) {
                     v = a->items[i];
-                    if (a_is_ptr(v)) {
-                        if (*n == *cap) {
-                            size_t nc = *cap ? *cap * 2 : 64;
-                            void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                            *wl = nw; *cap = nc;
-                        }
-                        (*wl)[(*n)++] = obj_of(v);
-                    }
+                    if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
                 }
             break;
         }
@@ -179,14 +206,7 @@ static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap) {
                 aval pair[2] = { d->pairs[i].k, d->pairs[i].v };
                 for (int j = 0; j < 2; ++j) {
                     v = pair[j];
-                    if (a_is_ptr(v)) {
-                        if (*n == *cap) {
-                            size_t nc = *cap ? *cap * 2 : 64;
-                            void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                            *wl = nw; *cap = nc;
-                        }
-                        (*wl)[(*n)++] = obj_of(v);
-                    }
+                    if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
                 }
             }
             if (ob->type == T_STRUCT) {
@@ -194,14 +214,7 @@ static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap) {
                 aval extra[3] = { s->name, s->methods, s->methodFns };
                 for (int j = 0; j < 3; ++j) {
                     v = extra[j];
-                    if (a_is_ptr(v)) {
-                        if (*n == *cap) {
-                            size_t nc = *cap ? *cap * 2 : 64;
-                            void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                            *wl = nw; *cap = nc;
-                        }
-                        (*wl)[(*n)++] = obj_of(v);
-                    }
+                    if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
                 }
             }
             break;
@@ -211,100 +224,74 @@ static void region_push_children(AObj *ob, void ***wl, size_t *n, size_t *cap) {
             len = e->h.len;
             for (uint32_t i = 0; i < len; ++i) {
                 v = e->slots[i];
-                if (a_is_ptr(v)) {
-                    if (*n == *cap) {
-                        size_t nc = *cap ? *cap * 2 : 64;
-                        void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                        *wl = nw; *cap = nc;
-                    }
-                    (*wl)[(*n)++] = obj_of(v);
-                }
+                if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
             }
             break;
         }
         case T_RESULT:
             v = ((AResult *)ob)->value;
-            if (a_is_ptr(v)) {
-                if (*n == *cap) {
-                    size_t nc = *cap ? *cap * 2 : 64;
-                    void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                    *wl = nw; *cap = nc;
-                }
-                (*wl)[(*n)++] = obj_of(v);
-            }
+            if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
             break;
         case T_ITER: {
             AIter *it = (AIter *)ob;
             aval pair[2] = { it->src, it->lookahead };
             for (int j = 0; j < 2; ++j) {
                 v = pair[j];
-                if (a_is_ptr(v)) {
-                    if (*n == *cap) {
-                        size_t nc = *cap ? *cap * 2 : 64;
-                        void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                        *wl = nw; *cap = nc;
-                    }
-                    (*wl)[(*n)++] = obj_of(v);
-                }
+                if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
             }
             break;
         }
         case T_VIEW:
             v = ((AView *)ob)->parent;
-            if (a_is_ptr(v)) {
-                if (*n == *cap) {
-                    size_t nc = *cap ? *cap * 2 : 64;
-                    void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                    *wl = nw; *cap = nc;
-                }
-                (*wl)[(*n)++] = obj_of(v);
-            }
+            if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
             break;
         case T_FNON:
             v = ((AFnon *)ob)->env;
-            if (a_is_ptr(v)) {
-                if (*n == *cap) {
-                    size_t nc = *cap ? *cap * 2 : 64;
-                    void **nw = (void **)xrealloc(*wl, nc * sizeof(void *));
-                    *wl = nw; *cap = nc;
-                }
-                (*wl)[(*n)++] = obj_of(v);
+            if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
+            break;
+        case T_ROPE: {
+            ARope *r = (ARope *)ob;
+            aval kids[3] = { r->left, r->right, r->flat };
+            for (int j = 0; j < 3; ++j) {
+                v = kids[j];
+                if (a_is_ptr(v)) REGION_PUSH(obj_of(v));
             }
             break;
+        }
         default:
             break;  /* T_STR/T_CHAR/T_RANGE/T_INT64/T_BYTES/T_ARENA/T_PYOBJ/T_PYBUF */
     }
+#undef REGION_PUSH
 }
 
 /* Mark `v`'s object (and everything reachable through its aval fields)
    GC_F_OLD so no region sweep reclaims it. Iterative worklist: the OLD
-   flag doubles as the visited marker, so cycles terminate. */
+   flag doubles as the visited marker, so cycles terminate. Each visited
+   node costs ONE registry lookup via a_gc_promote_visit (the old code
+   ran regionable + obj_old + promote_block — three hash probes). */
 void a_promote(aval v) {
     if (!regions_on() || !a_is_ptr(v)) return;
     AObj *root = obj_of(v);
     if (!root) return;
-    void **wl = NULL;
-    size_t n = 0, cap = 0;
-    wl = (void **)xmalloc(sizeof(void *));
-    cap = 1;
+    void *stk[REGION_WL_STACK];
+    void **wl = stk;
+    size_t n = 0, cap = REGION_WL_STACK;
     wl[n++] = root;
     while (n) {
         AObj *ob = (AObj *)wl[--n];
-        if (!a_gc_regionable(ob)) continue;   /* arena/untracked: immortal */
-        if (a_gc_obj_old(ob)) continue;       /* already promoted: visited */
-        a_gc_promote_block(ob);
-        region_push_children(ob, &wl, &n, &cap);
+        if (!a_gc_promote_visit(ob)) continue;  /* arena/untracked/already OLD */
+        region_push_children(ob, &wl, &n, &cap, stk);
     }
-    free(wl);
+    if (wl != stk) free(wl);
 }
 
 /* Write barrier: `child` aval is being stored into heap object
    `container` (the object header pointer, == the registered block start
    for every runtime object type). Promotes the child iff the container
-   can outlive the child's region. */
+   can outlive the child's region. a_gc_region_escape folds the old
+   region+OLD double lookup into a single hash probe. */
 void a_region_store(void *container, aval child) {
     if (!regions_on() || !a_is_ptr(child) || !container) return;
-    uint32_t cr = a_gc_obj_region(container);
-    if (cr == 0 || cr < g_region_depth || a_gc_obj_old(container))
+    if (a_gc_region_escape(container, g_region_depth))
         a_promote(child);
 }

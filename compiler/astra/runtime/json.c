@@ -22,7 +22,7 @@ static const char *json_kind_of(aval v) {
     AObj *o = obj_of(v);
     if (!o) return "unknown";
     switch (o->type) {
-        case T_STR: case T_CHAR: return "string";
+        case T_STR: case T_CHAR: case T_ROPE: return "string";
         case T_LIST: case T_TUPLE: case T_SET: return "array";
         case T_DICT: case T_STRUCT: return "object";
         default: return "unknown";
@@ -344,7 +344,7 @@ static void json_write(Buf *b, aval v, int pretty, int depth) {
     AObj *o = obj_of(v);
     if (!o) panicf("json: value is not serializable");
     switch (o->type) {
-        case T_STR: case T_CHAR:
+        case T_STR: case T_CHAR: case T_ROPE:
             json_escape_str(b, v);
             return;
         case T_LIST: case T_TUPLE: case T_SET: {
@@ -450,7 +450,7 @@ aval bi_json_len(uint64_t n, aval *argv) {
     if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET ||
               is_dict_t(o->type)))
         return mkint_full((int64_t)o->len);
-    if (o && (o->type == T_STR || o->type == T_CHAR)) {
+    if (o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE)) {
         uint64_t sl;
         const char *sp = str_data(v, &sl);
         return mkint_full((int64_t)u8_count(sp, sl));
@@ -487,7 +487,7 @@ aval bi_json_as_str(uint64_t n, aval *argv) {
     want_args("json.as_str", n, 1, 1);
     aval v = json_unwrap(argv[0]);
     AObj *o = obj_of(v);
-    if (o && (o->type == T_STR || o->type == T_CHAR)) return a_some_new(v);
+    if (o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE)) return a_some_new(v);
     return A_NONE;
 }
 

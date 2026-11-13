@@ -23,6 +23,37 @@ fn greet(name: String) -> String:
   `fn same(a: Point, b: Point) -> bool where Equatable:`.
 - Lambdas: `double = fn(n) => n * 2`; `(fn(x, y) => x + y)(20, 22)`.
 
+## Extern functions (C FFI)
+
+`extern fn` declares a C function with no body; calls lower to a direct C
+call (LLVM `declare` + `call`), bypassing the A runtime ABI:
+
+```python
+extern fn strlen(s: str) -> int
+extern "C" fn abs(x: int) -> int
+extern fn malloc(size: int) -> Pointer
+extern fn free(p: Pointer)
+extern fn my_pow(x: float, y: float) -> float = "pow"   # rename the C symbol
+```
+
+- `extern "C"` is accepted (only `"C"` linkage exists); `= "name"` renames
+  the symbol when the A name differs from the C name.
+- Every parameter needs a type annotation; no generics, `where`, `comptime`,
+  variadic `*args`, or default values.
+- Type mapping: `int`/`i8`–`i64`/`u8`–`u64`/`char` ↔ C integers (`i64`
+  args, width-matched returns), `float`/`f32`/`f64` ↔ `float`/`double`,
+  `bool` ↔ C `_Bool`, `str` ↔ `char *` (NUL-terminated; `-> str` boxes the
+  result via `strlen`+`a_str_new`), `Pointer` ↔ raw address as `i64`,
+  `Bytes` ↔ `unsigned char *` (params only). `-> void` or no return
+  annotation means void.
+- Symbols resolve at link time: libc functions (`strlen`, `malloc`,
+  `getenv`, …) work with zero extra flags. Functions in user libraries need
+  the library linked into the final binary (e.g. via a wrapper object);
+  there is no `-l` flag plumbing yet.
+- Not supported: C callbacks (function pointers), C variadic functions,
+  structs-by-value, and `Bytes` return values. Using an extern fn as a
+  first-class value is not supported either — call it directly.
+
 ## Classes
 
 ```python

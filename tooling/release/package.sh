@@ -48,6 +48,36 @@ for lib in "$BUILD_DIR"/astralib*; do
   [ -d "$lib" ] && cp -R "$lib" "$root/"
 done
 
+# LLVM toolchain: the `a` binary discovers opt/llc/clang under
+# <exe>/llvm-tools/ before PATH (see findLLVMTool in pipeline.cpp), so
+# release bundles ship the tools that were used to build — no system LLVM
+# required on the target machine.
+llvm_dir="$root/bin/llvm-tools"
+mkdir -p "$llvm_dir"
+for tool in opt llc clang; do
+  resolved="$(command -v "$tool" 2>/dev/null || true)"
+  [ -n "$resolved" ] && cp "$resolved" "$llvm_dir/$tool"
+done
+# Versioned fallbacks when only suffixed binaries exist (opt-18 etc.).
+if [ ! -f "$llvm_dir/opt" ]; then
+  for v in 18 17 16 15; do
+    resolved="$(command -v "opt-$v" 2>/dev/null || true)"
+    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/opt"; break; }
+  done
+fi
+if [ ! -f "$llvm_dir/llc" ]; then
+  for v in 18 17 16 15; do
+    resolved="$(command -v "llc-$v" 2>/dev/null || true)"
+    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/llc"; break; }
+  done
+fi
+if [ ! -f "$llvm_dir/clang" ]; then
+  for v in 18 17 16 15; do
+    resolved="$(command -v "clang-$v" 2>/dev/null || true)"
+    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/clang"; break; }
+  done
+fi
+
 # Standard library (drop _acache_ build artifacts and stray objects).
 cp -R "$ROOT_DIR/stdlib" "$root/stdlib"
 find "$root/stdlib" -type d -name _acache_ -prune -exec rm -rf {} + 2>/dev/null || true

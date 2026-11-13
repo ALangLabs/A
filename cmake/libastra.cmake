@@ -273,6 +273,29 @@ foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
         VERBATIM)
     list(APPEND ASTRA_RT_OBJS "${rt_obj}")
 endforeach()
+# Vendored mimalloc (compiler/astra/runtime/vendor/mimalloc): compiled as a
+# single TU exposing mi_* symbols. Not yet wired into the GC allocator —
+# kept as a ready fast allocator for runtime allocation paths.
+set(ASTRA_MIMALLOC_SRC "${CMAKE_SOURCE_DIR}/compiler/astra/runtime/vendor/mimalloc/src/static.c")
+if(EXISTS "${ASTRA_MIMALLOC_SRC}")
+    set(mimalloc_obj "${ASTRA_BUILD}/obj/cc_rt_mimalloc.o")
+    # MI_MALLOC_OVERRIDE interposes malloc/calloc/realloc/free/posix_memalign
+    # so every runtime allocation (xmalloc/xrealloc/GC blocks) runs on
+    # mimalloc's size-classed allocator. POSIX hosts only: the Win32 CRT
+    # pairing (_aligned_malloc/_aligned_free) is not override-safe.
+    set(ASTRA_MIMALLOC_DEFS "")
+    if(NOT WIN32)
+        set(ASTRA_MIMALLOC_DEFS -DMI_MALLOC_OVERRIDE=1)
+    endif()
+    add_custom_command(OUTPUT "${mimalloc_obj}"
+        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${ASTRA_MIMALLOC_DEFS}
+                -I${CMAKE_SOURCE_DIR}/compiler/astra/runtime/vendor/mimalloc/include
+                -c "${ASTRA_MIMALLOC_SRC}" -o "${mimalloc_obj}"
+        DEPENDS "${ASTRA_MIMALLOC_SRC}"
+        COMMENT "system runtime mimalloc"
+        VERBATIM)
+    list(APPEND ASTRA_RT_OBJS "${mimalloc_obj}")
+endif()
 set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
 add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
     COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}

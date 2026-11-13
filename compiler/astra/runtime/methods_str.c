@@ -154,18 +154,26 @@ static int64_t str_find_bounded(const char *h, uint64_t lim, aval needle,
    exactly, then fill with memcpy runs. The Buf version paid realloc
    growth plus buf_take's full extra copy on every call. */
 static aval str_replace_fast(aval v, aval oldv, aval newv, int64_t count) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t on, nn, sn = s->h.len;
     const char *op = str_data(oldv, &on), *np = str_data(newv, &nn);
     const char *sp = s->data;
     if (on == 0) panicf("The 'replace' target must not be empty.");
     if (count < 0) count = INT64_MAX;
-    /* pass 1: count non-overlapping matches (same scan order as before) */
+    /* pass 1: count non-overlapping matches (same scan order as before).
+       For large inputs also record each match offset so pass 2 can fill
+       from the table instead of re-running the search — rescanning costs
+       a second full find_bytes pass. For small inputs the AVec malloc
+       costs more than the rescan, so positions are only recorded when
+       sn >= 4096. */
+    int use_hits = sn >= 4096;
+    AVec hits = { NULL, 0, 0 };
     uint64_t pos = 0, matches = 0;
     while ((int64_t)matches < count && pos + on <= sn) {
         size_t p;
         if (!find_bytes(sp + pos, (size_t)(sn - pos), op, (size_t)on, 0, &p))
             break;
+        if (use_hits) avec_push(&hits, mkint_full((int64_t)(pos + p)));
         ++matches;
         pos += p + on;
     }
@@ -176,27 +184,45 @@ static aval str_replace_fast(aval v, aval oldv, aval newv, int64_t count) {
         panicf("string too large");
     uint64_t out_len = sn - matches * on + matches * nn;
     if (out_len > UINT32_MAX) panicf("string too large");
-    /* pass 2: fill */
+    /* pass 2: fill — from the recorded offsets on large inputs, or by
+       re-running the same non-overlapping scan on small ones */
     aval outv = a_str_new_uninit(out_len);
     AStr *o = (AStr *)obj_of(outv);
     char *d = o->data;
-    pos = 0;
-    uint64_t last = 0, done = 0;
-    while (done < matches) {
-        size_t p;
-        find_bytes(sp + pos, (size_t)(sn - pos), op, (size_t)on, 0, &p);
-        uint64_t at = pos + p;
-        if (at > last) {
-            memcpy(d, sp + last, (size_t)(at - last));
-            d += at - last;
+    uint64_t last = 0;
+    if (use_hits) {
+        for (uint64_t k = 0; k < matches; ++k) {
+            uint64_t at = (uint64_t)int_val_full(hits.p[k]);
+            if (at > last) {
+                memcpy(d, sp + last, (size_t)(at - last));
+                d += at - last;
+            }
+            if (nn) {
+                memcpy(d, np, (size_t)nn);
+                d += nn;
+            }
+            last = at + on;
         }
-        if (nn) {
-            memcpy(d, np, (size_t)nn);
-            d += nn;
+        free(hits.p);
+    } else {
+        pos = 0;
+        uint64_t done = 0;
+        while (done < matches) {
+            size_t p;
+            find_bytes(sp + pos, (size_t)(sn - pos), op, (size_t)on, 0, &p);
+            uint64_t at = pos + p;
+            if (at > last) {
+                memcpy(d, sp + last, (size_t)(at - last));
+                d += at - last;
+            }
+            if (nn) {
+                memcpy(d, np, (size_t)nn);
+                d += nn;
+            }
+            pos = at + on;
+            last = pos;
+            ++done;
         }
-        pos = at + on;
-        last = pos;
-        ++done;
     }
     if (last < sn) {
         memcpy(d, sp + last, (size_t)(sn - last));
@@ -221,13 +247,40 @@ static int asc_islower(int c) { return c >= 'a' && c <= 'z'; }
    4 swapcase) but allocated through a_str_new_uninit so small results
    come from the bump arena instead of a fresh xmalloc each call. */
 static aval str_case_fast(aval v, int mode) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t n = s->h.len;
     aval outv = a_str_new_uninit(n);
     AStr *r = (AStr *)obj_of(outv);
     const unsigned char *d = (const unsigned char *)s->data;
     unsigned char *o = (unsigned char *)r->data;
+    /* Dedicated loops for lower/upper (the hot case ops): no per-byte mode
+       dispatch. Bytes >= 128 fall through to the ctype calls exactly as
+       the generic loop did (identity in the C locale). */
+    if (mode == 0 || mode == 1) {
+        int changed = 1;
+        if (mode == 0) {
+            for (uint64_t i = 0; i < n; ++i) {
+                unsigned char c = d[i];
+                unsigned char oc = c < 128 ? (unsigned char)asc_lower(c)
+                                           : (unsigned char)tolower(c);
+                if (oc != c) changed = 0;
+                o[i] = oc;
+            }
+        } else {
+            for (uint64_t i = 0; i < n; ++i) {
+                unsigned char c = d[i];
+                unsigned char oc = c < 128 ? (unsigned char)asc_upper(c)
+                                           : (unsigned char)toupper(c);
+                if (oc != c) changed = 0;
+                o[i] = oc;
+            }
+        }
+        /* changed==1 means every byte mapped to itself: return the input
+           (immutable -> alias safe) instead of the fresh copy. */
+        return changed ? v : outv;
+    }
     int prev_alpha = 0;
+    int changed = 1;
     for (uint64_t i = 0; i < n; ++i) {
         unsigned char c = d[i];
         unsigned char oc;
@@ -264,34 +317,62 @@ static aval str_case_fast(aval v, int mode) {
             }
         }
         prev_alpha = c < 128 ? asc_isalpha(oc) != 0 : (isalpha(oc) != 0);
+        if (oc != c) changed = 0;
         o[i] = oc;
     }
-    return outv;
+    /* Case op that changed nothing (e.g. lower() on lowercase text):
+       return the input — strings are immutable, aliasing is safe.
+       (changed==1 means no byte differed.) */
+    return changed ? v : outv;
+}
+
+/* Shared field-boundary scan for both passes of str_format_obj: returns
+   the index of the field's closing '}' (fields were already validated by
+   pass 1, so ':'/'!' can only appear where pass 1 rejected them). */
+static uint64_t fmt_field_end(const char *s, uint64_t slen, uint64_t j) {
+    while (j < slen && s[j] != '}' && s[j] != ':' && s[j] != '!') ++j;
+    return j;
 }
 
 /* "{}".format / "{0}".format / "{name}".format — positional and named
-   fields with {{ }} escapes, like Python's str.format (no format specs). */
+   fields with {{ }} escapes, like Python's str.format (no format specs).
+   Two passes like join_items_aval: pass 1 validates the fields, renders
+   each argument once (a_str) and measures the exact output size; pass 2
+   fills one exact-size AStr. The old single-pass Buf version paid buffer
+   growth reallocs plus buf_take's full second copy on every call. */
 static aval str_format_obj(aval self, uint64_t n, aval *argv) {
     uint64_t slen;
     const char *s = str_data(self, &slen);
-    Buf b;
-    buf_init(&b);
+    /* Rendered field values: a stack array covers the common <=16-field
+       case without a malloc; AVec spills for larger field counts. */
+    enum { FMT_STACK = 16 };
+    aval stack_args[FMT_STACK];
+    AVec rendered = { NULL, 0, 0 };
+    uint64_t nfields = 0;
+    uint64_t total = 0;
     uint64_t autoIdx = 0;
     for (uint64_t i = 0; i < slen; ++i) {
         char c = s[i];
         if (c == '}') {
-            if (i + 1 < slen && s[i + 1] == '}') { buf_addc(&b, '}'); ++i; continue; }
+            if (i + 1 < slen && s[i + 1] == '}') { ++total; ++i; continue; }
             panicf("single '}' in format string");
         }
-        if (c != '{') { buf_addc(&b, c); continue; }
-        if (i + 1 < slen && s[i + 1] == '{') { buf_addc(&b, '{'); ++i; continue; }
+        if (c != '{') {
+            /* Literal run up to the next brace: count it in one scan. */
+            uint64_t j = i + 1;
+            while (j < slen && s[j] != '{' && s[j] != '}') ++j;
+            total += j - i;
+            if (total > UINT32_MAX) panicf("string too large");
+            i = j - 1;
+            continue;
+        }
+        if (i + 1 < slen && s[i + 1] == '{') { ++total; ++i; continue; }
         // Parse field: {name} or {index}; no format specs supported.
-        uint64_t j = i + 1;
-        uint64_t fieldStart = j;
-        while (j < slen && s[j] != '}' && s[j] != ':' && s[j] != '!') ++j;
+        uint64_t j = fmt_field_end(s, slen, i + 1);
         if (j >= slen || s[j] != '}') {
             panicf("unsupported or unterminated '{}' field in format string");
         }
+        uint64_t fieldStart = i + 1;
         uint64_t flen = j - fieldStart;
         aval arg;
         if (flen == 0) {
@@ -311,18 +392,54 @@ static aval str_format_obj(aval self, uint64_t n, aval *argv) {
         }
         aval sv = a_str(arg);
         uint64_t vlen;
-        const char *vs = str_data(sv, &vlen);
-        buf_addn(&b, vs, vlen);
+        str_data(sv, &vlen);
+        if (nfields < FMT_STACK) stack_args[nfields] = sv;
+        else avec_push(&rendered, sv);
+        ++nfields;
+        total += vlen;
+        if (total > UINT32_MAX) panicf("string too large");
         i = j;
     }
     (void)autoIdx;
-    return buf_take(&b);
+    /* pass 2: literal bytes and rendered args interleaved, in field order */
+    aval outv = a_str_new_uninit(total);
+    AStr *o = (AStr *)obj_of(outv);
+    char *d = o->data;
+    size_t ri = 0;
+    for (uint64_t i = 0; i < slen; ++i) {
+        char c = s[i];
+        if (c == '}') {
+            if (i + 1 < slen && s[i + 1] == '}') { *d++ = '}'; ++i; continue; }
+            panicf("single '}' in format string");  /* unreachable: pass 1 */
+        }
+        if (c != '{') {
+            uint64_t j = i + 1;
+            while (j < slen && s[j] != '{' && s[j] != '}') ++j;
+            memcpy(d, s + i, j - i);
+            d += j - i;
+            i = j - 1;
+            continue;
+        }
+        if (i + 1 < slen && s[i + 1] == '{') { *d++ = '{'; ++i; continue; }
+        uint64_t j = fmt_field_end(s, slen, i + 1);
+        if (j >= slen || s[j] != '}')
+            panicf("unsupported or unterminated '{}' field in format string");
+        uint64_t vlen;
+        aval rv = ri < FMT_STACK ? stack_args[ri] : rendered.p[ri - FMT_STACK];
+        const char *vs = str_data(rv, &vlen);
+        if (vlen) memcpy(d, vs, (size_t)vlen);
+        d += vlen;
+        ++ri;
+        i = j;
+    }
+    free(rendered.p);
+    return outv;
 }
 
 /* str_affix with memset padding instead of per-byte buf_addc. Same modes
    (0 ljust, 1 rjust, 2 center, 3 zfill) and byte-count semantics. */
 static aval str_affix_fast(aval v, int64_t width, aval fillv, int mode) {
-    AStr *s = (AStr *)obj_of(v);
+    AStr *s = astr_flat(v);
     uint64_t n = s->h.len;
     char fill = ' ';
     if (!a_is_none(fillv)) {
@@ -356,7 +473,7 @@ static aval str_affix_fast(aval v, int64_t width, aval fillv, int mode) {
 }
 
 aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
-        AStr *s = (AStr *)obj_of(obj);
+        AStr *s = astr_flat(obj);
         if (!strcmp(name, "upper")) { want_args(name, n, 0, 0); return str_case_fast(obj, 1); }
         if (!strcmp(name, "lower")) { want_args(name, n, 0, 0); return str_case_fast(obj, 0); }
         if (!strcmp(name, "capitalize")) { want_args(name, n, 0, 0); return str_case_fast(obj, 2); }
@@ -392,6 +509,7 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
                         ((unsigned char)s->data[b - 1] & 31)) & 1u)
                     --b;
             }
+            if (a == 0 && b == s->h.len) return obj;  /* nothing trimmed */
             return a_str_new(s->data + a, (uint64_t)(b - a));
         }
         if (!strcmp(name, "split") || !strcmp(name, "rsplit")) {
@@ -497,6 +615,19 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
                 panicf("Substring not found.");
             return mkint_full(r);
         }
+        if (!strcmp(name, "contains")) {
+            want_args(name, n, 1, 1);
+            if (kind_of(argv[0]) != K_STR && kind_of(argv[0]) != K_CHAR) return a_bool(0);
+            AStr *hay = astr_flat(obj);
+            AStr *needle = astr_flat(argv[0]);
+            if (needle->h.len == 0) return a_bool(1);
+            if (needle->h.len > hay->h.len) return a_bool(0);
+            /* memchr-based search: the memcmp-at-every-offset loop cost 1.7 ms
+               per miss on a 200 KB haystack (~120 MB/s vs memmem's ~10 GB/s). */
+            size_t pos = 0;
+            return a_bool(find_bytes(hay->data, hay->h.len, needle->data,
+                                     needle->h.len, 0, &pos) != NULL);
+        }
         if (!strcmp(name, "count")) {
             want_args(name, n, 1, 3);
             int64_t st = n >= 2 ? expect_int64(argv[1], "start") : 0;
@@ -504,10 +635,12 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             if (en < 0) en += (int64_t)s->h.len;
             if (en < 0) en = 0;
             if (en > (int64_t)s->h.len) en = (int64_t)s->h.len;
-            aval hay = obj;
-            if (en < (int64_t)s->h.len) hay = a_str_new(s->data, (uint64_t)en);
-            uint64_t hn, nn;
-            const char *h = str_data(hay, &hn), *nd = str_data(argv[0], &nn);
+            /* Search the [0, en) prefix in place: the old code copied the
+               prefix into a fresh AStr on every count(s, start, end) call. */
+            uint64_t hn = (uint64_t)en;
+            const char *h = s->data;
+            uint64_t nn;
+            const char *nd = str_data(argv[0], &nn);
             int64_t count = 0, pos = st < 0 ? st + (int64_t)hn : st;
             if (pos < 0) pos = 0;
             if (nn == 0) return mkint_full((int64_t)hn + 1 > pos ? (int64_t)hn - pos + 1 : 0);
@@ -534,21 +667,37 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
         if (!strcmp(name, "isdecimal") || !strcmp(name, "isnumeric")) {
             want_args(name, n, 0, 0);
             if (!s->h.len) return A_FALSE;
-            for (uint64_t q = 0; q < s->h.len; ++q) if (!isdigit((unsigned char)s->data[q])) return A_FALSE;
+            /* ASCII digits only: in the C locale isdigit(c>=0x80)==0. */
+            for (uint64_t q = 0; q < s->h.len; ++q) {
+                unsigned char c = (unsigned char)s->data[q];
+                if (c < '0' || c > '9') return A_FALSE;
+            }
             return A_TRUE;
         }
         if (!strcmp(name, "isidentifier")) {
             want_args(name, n, 0, 0);
             if (!s->h.len) return A_FALSE;
-            if (!isalpha((unsigned char)s->data[0]) && s->data[0] != '_') return A_FALSE;
-            for (uint64_t q = 1; q < s->h.len; ++q)
-                if (!isalnum((unsigned char)s->data[q]) && s->data[q] != '_') return A_FALSE;
+            /* ASCII alpha/underscore/digit: bytes >= 0x80 fail both
+               isalpha and isalnum in the C locale, as before. */
+            unsigned char c0 = (unsigned char)s->data[0];
+            int alpha0 = (c0 >= 'A' && c0 <= 'Z') || (c0 >= 'a' && c0 <= 'z');
+            if (!alpha0 && c0 != '_') return A_FALSE;
+            for (uint64_t q = 1; q < s->h.len; ++q) {
+                unsigned char c = (unsigned char)s->data[q];
+                int alpha = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
+                if (!alpha && !(c >= '0' && c <= '9') && c != '_')
+                    return A_FALSE;
+            }
             return A_TRUE;
         }
         if (!strcmp(name, "isprintable")) {
             want_args(name, n, 0, 0);
             if (!s->h.len) return A_TRUE;
-            for (uint64_t q = 0; q < s->h.len; ++q) if (!isprint((unsigned char)s->data[q])) return A_FALSE;
+            /* isprint in the C locale is exactly 0x20..0x7E. */
+            for (uint64_t q = 0; q < s->h.len; ++q) {
+                unsigned char c = (unsigned char)s->data[q];
+                if (c < 0x20 || c >= 0x7f) return A_FALSE;
+            }
             return A_TRUE;
         }
         if (!strcmp(name, "expandtabs")) {
@@ -558,18 +707,28 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             Buf b;
             buf_init(&b);
             int64_t col = 0;
-            for (uint64_t q = 0; q < s->h.len; ++q) {
+            uint64_t q = 0;
+            while (q < s->h.len) {
                 char c = s->data[q];
                 if (c == '\t') {
                     int64_t spaces = tab - (col % tab);
                     buf_pad(&b, ' ', (uint64_t)spaces);
                     col += spaces;
+                    ++q;
                 } else if (c == '\n' || c == '\r') {
                     buf_addc(&b, c);
                     col = 0;
+                    ++q;
                 } else {
-                    buf_addc(&b, c);
-                    ++col;
+                    /* Plain run: one memcpy instead of buf_addc per byte.
+                       col counts bytes, exactly as the per-byte loop did. */
+                    uint64_t j = q + 1;
+                    while (j < s->h.len && s->data[j] != '\t' &&
+                           s->data[j] != '\n' && s->data[j] != '\r')
+                        ++j;
+                    buf_addn(&b, s->data + q, j - q);
+                    col += (int64_t)(j - q);
+                    q = j;
                 }
             }
             return buf_take(&b);
@@ -615,17 +774,24 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             uint64_t start = 0;
             uint64_t i = 0;
             while (i < s->h.len) {
-                char c = s->data[i];
-                if (c == '\n' || c == '\r') {
-                    uint64_t br_end = i + 1;
-                    if (c == '\r' && br_end < s->h.len && s->data[br_end] == '\n') br_end++;
-                    uint64_t end = keep ? br_end : i;
-                    a_list_push(lst, a_str_new(s->data + start, end - start));
-                    i = br_end;
-                    start = br_end;
-                } else {
-                    ++i;
-                }
+                /* Find the next break with two SIMD memchr scans (one per
+                   break byte) instead of a per-byte loop — ~10x faster on
+                   large texts. Earliest hit wins; \r\n still counts as one
+                   break exactly as before. */
+                const char *pn = memchr(s->data + i, '\n', s->h.len - i);
+                const char *pr = memchr(s->data + i, '\r', s->h.len - i);
+                const char *hit;
+                if (pn && pr) hit = pn < pr ? pn : pr;
+                else hit = pn ? pn : pr;
+                if (!hit) break;
+                uint64_t bi = (uint64_t)(hit - s->data);
+                char c = *hit;
+                uint64_t br_end = bi + 1;
+                if (c == '\r' && br_end < s->h.len && s->data[br_end] == '\n') br_end++;
+                uint64_t end = keep ? br_end : bi;
+                a_list_push(lst, a_str_new(s->data + start, end - start));
+                i = br_end;
+                start = br_end;
             }
             if (start < s->h.len)
                 a_list_push(lst, a_str_new(s->data + start, s->h.len - start));
@@ -665,19 +831,6 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
                memcpy calls than the old per-repeatition Buf loop, and no
                Buf growth + buf_take double copy. */
             return str_repeat(obj, cnt);
-        }
-        if (!strcmp(name, "contains")) {
-            want_args(name, n, 1, 1);
-            if (kind_of(argv[0]) != K_STR && kind_of(argv[0]) != K_CHAR) return a_bool(0);
-            AStr *hay = (AStr *)obj_of(obj);
-            AStr *needle = (AStr *)obj_of(argv[0]);
-            if (needle->h.len == 0) return a_bool(1);
-            if (needle->h.len > hay->h.len) return a_bool(0);
-            /* memchr-based search: the memcmp-at-every-offset loop cost 1.7 ms
-               per miss on a 200 KB haystack (~120 MB/s vs memmem's ~10 GB/s). */
-            size_t pos = 0;
-            return a_bool(find_bytes(hay->data, hay->h.len, needle->data,
-                                     needle->h.len, 0, &pos) != NULL);
         }
         return method_no_method(obj, name);
 }

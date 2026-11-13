@@ -48,7 +48,7 @@ aval bi_unsafe_get(uint64_t n, aval *argv) {
         if (i < 0 || (uint64_t)i >= a->h.len) panicf("unsafe.get: index out of bounds");
         return a->items[i];
     }
-    if (o && (o->type == T_STR || o->type == T_CHAR)) {
+    if (o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE)) {
         uint64_t len;
         const char *p = str_data(argv[0], &len);
         if (i < 0 || (uint64_t)i >= len) panicf("unsafe.get: index out of bounds");

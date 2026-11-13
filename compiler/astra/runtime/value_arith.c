@@ -137,14 +137,17 @@ static size_t i64_digits(int64_t v, char *tmp) {
    filenames): both fit one exact-size allocation, so they skip the Buf path
    whose growth reallocs and second copy dominated the measurement. */
 static aval concat_str(aval strv, aval other, int str_left) {
-    uint64_t sn;
-    const char *sp = str_data(strv, &sn);
+    AObj *so = obj_of(strv);
+    int str_rope = so && so->type == T_ROPE;
+    uint64_t sn = so ? so->len : 0;
     char tmp[24];
     const char *tp = NULL;
     uint64_t tn = 0;
     char rev[24];
+    int other_is_str = 0;
     if (kind_of(other) == K_STR) {
-        tp = str_data(other, &tn);
+        other_is_str = 1;
+        tn = obj_of(other)->len;
     } else if (is_int_val(other)) {
         int64_t v = int_val_full(other);
         size_t nd = i64_digits(v, rev);
@@ -154,7 +157,22 @@ static aval concat_str(aval strv, aval other, int str_left) {
         tp = tmp;
         tn = (uint64_t)o;
     }
-    if (tp) {
+    if (other_is_str || tp) {
+        AObj *oo = other_is_str ? obj_of(other) : NULL;
+        int other_rope = oo && oo->type == T_ROPE;
+        /* Rope fast path: either side already a rope (append loops) or the
+           result is large enough that repeated re-copying dominates. The
+           `other` operand is materialized to a string aval first so the
+           rope stays a plain two-child tree. */
+        if (str_rope || other_rope || sn + tn > A_STR_ROPE_MIN) {
+            aval ov;
+            if (other_is_str) ov = other;
+            else ov = a_str_new(tp, tn);
+            return str_left ? a_str_cat(strv, ov) : a_str_cat(ov, strv);
+        }
+        const char *sp = str_data(strv, &sn);
+        if (!other_is_str) tp = tmp;
+        else tp = str_data(other, &tn);
         if ((uint64_t)UINT32_MAX - sn < tn) panicf("string too large");
         aval outv = a_str_new_uninit(sn + tn);
         AStr *o = (AStr *)obj_of(outv);
@@ -170,6 +188,16 @@ static aval concat_str(aval strv, aval other, int str_left) {
     }
     Buf b;
     buf_init(&b);
+    if (str_rope) {
+        /* Formatting a non-string operand into a rope keeps `s += x`
+           O(1) even when x is a float/list/etc. */
+        format_into(&b, other, 0);
+        aval ov = buf_take(&b);
+        return str_left ? a_str_cat(strv, ov) : a_str_cat(ov, strv);
+    }
+    uint64_t sn2;
+    const char *sp = str_data(strv, &sn2);
+    sn = sn2;
     if (str_left) {
         buf_addn(&b, sp, (size_t)sn);
         format_into(&b, other, 0);

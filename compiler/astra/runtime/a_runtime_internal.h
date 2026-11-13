@@ -190,10 +190,32 @@ typedef struct AObj {
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
     T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
-    T_PYBUF, T_STRUCT, T_BYTES
+    T_PYBUF, T_STRUCT, T_BYTES, T_ROPE
 };
 
 typedef struct { AObj h; char data[]; } AStr;
+
+/* Rope string: the result of concatenating two string-kind values when the
+   combined size is large (or either side is already a rope). Keeping the
+   concat as a tree makes `s += x` / `s = s + x` loops O(1) per append
+   instead of O(n) bytes copied per step; the tree is flattened lazily into
+   a canonical AStr on first read (str_data/str_of/astr_flat).
+   - h.type   = T_ROPE
+   - h.len    = total BYTE length (same meaning as AStr.h.len)
+   - h.cap    = code-point cache, identical layout to AStr: high 32 bits
+                hold cp+1 (0 = not computed), low 32 bits unused.
+   - left/right = the two concatenated string-kind avals (T_STR/T_CHAR/
+                T_ROPE); byte order is left followed by right.
+   - flat     = A_NONE until flattened, then the aval of the canonical
+                AStr every reader goes through.
+   Ropes are immutable like AStr, so sharing/aliasing is always safe. */
+typedef struct { AObj h; aval left, right, flat; } ARope;
+
+/* Concatenations whose result is smaller than this stay on the flat
+   exact-size path: a rope node costs an allocation plus a later flatten
+   copy, which only pays off once the same buffer would otherwise be
+   re-copied (the `s += x` loop shape). */
+#define A_STR_ROPE_MIN ((uint64_t)2048)
 
 /* len() on a string is a code-point count, i.e. a UTF-8 scan. The result is
    cached in the otherwise-unused high half of the string's cap word (the low
@@ -350,6 +372,14 @@ aval bi_net_recv_buf(uint64_t n, aval *argv);
 aval bi_net_recv_buf_all(uint64_t n, aval *argv);
 aval a_str_new_uninit(uint64_t len);
 aval a_char_new(const char *p, uint64_t len);
+/* Rope-aware string accessors: astr_flat accepts any string-kind value
+   (T_STR/T_CHAR/T_ROPE) and returns the flat AStr readers may use;
+   str_of/str_data route through it. a_str_cat concatenates two string-kind
+   avals, producing a rope for large results. a_str_cpcount is the cached
+   code-point count used by len(). */
+AStr *astr_flat(aval v);
+aval a_str_cat(aval l, aval r);
+uint32_t a_str_cpcount(aval v);
 const char *str_data(aval v, uint64_t *len);
 int u8_len(unsigned char c);
 uint64_t u8_count(const char *p, uint64_t n);

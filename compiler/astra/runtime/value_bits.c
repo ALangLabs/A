@@ -1,5 +1,8 @@
 #include "a_runtime_internal.h"
 
+/* Packed-int fast path for `in` on sequences (methods_helpers.c). */
+int seq_contains(aval v, aval item);
+
 /* ------------------------------------------------------------------ */
 /* bitwise / shifts / membership                                       */
 /* ------------------------------------------------------------------ */
@@ -102,13 +105,8 @@ aval a_contains(aval cont, aval item) {
         }
         case K_LIST:
         case K_TUPLE:
-        case K_SET: {
-            AArr *a = (AArr *)obj_of(cont);
-            arr_ensure_aval(a);
-            for (uint64_t i = 0; i < a->h.len; ++i)
-                if (values_equal(a->items[i], item)) return A_TRUE;
-            return A_FALSE;
-        }
+        case K_SET:
+            return bool_aval(seq_contains(cont, item));
         case K_DICT: {
             ADict *d = (ADict *)obj_of(cont);
             return bool_aval(dict_find(d, item) >= 0);

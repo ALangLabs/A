@@ -185,6 +185,29 @@ aval bi_sum(uint64_t n, aval *argv) {
             return mkint_full(total);
         }
     }
+    /* Serial packed-int fast path: binary_arith per element costs a call
+       plus kind dispatch for what is a bare int64 add. Run the adds
+       directly and switch to the generic double-promoting path at the
+       first overflow — bit-identical to binary_arith's int+int ->
+       mkdouble((double)a + (double)b) promotion. */
+    if (arr_packed(a) && is_int_val(acc)) {
+        int64_t s = int_val_full(acc);
+        uint64_t len = a->h.len;
+        uint64_t i = 0;
+        for (; i < len; ++i) {
+            int64_t v = a->iitems[i];
+            int64_t r = s + v;
+            /* signed overflow iff operands share a sign and the result
+               differs (two's-complement trick, no builtin needed) */
+            if (((s ^ r) & (v ^ r)) < 0) {
+                double ds = (double)s + (double)v;
+                for (++i; i < len; ++i) ds += (double)a->iitems[i];
+                return mkdouble(ds);
+            }
+            s = r;
+        }
+        return mkint_full(s);
+    }
     for (uint64_t i = 0; i < a->h.len; ++i) {
         aval item = arr_elem(a, i);
         if (!is_num(item))
@@ -224,12 +247,14 @@ aval bi_tuple(uint64_t n, aval *argv) {
     aval tmp;
     AArr *a = iterable_arr(argv[0], &tmp);
     if (arr_packed(a)) {
-        /* packed int storage has no aval items array; copy elementwise */
-        AVec v = { NULL, 0, 0 };
-        for (uint64_t i = 0; i < a->h.len; ++i)
-            avec_push(&v, mkint_full(a->iitems[i]));
-        aval r = a_tuple_new(v.len, v.p);
-        free(v.p);
+        /* packed int storage has no aval items array; copy elementwise
+           into an exact-size buffer (no AVec regrowth) */
+        uint64_t len = a->h.len;
+        aval *v = (aval *)xmalloc((size_t)(len ? len : 1) * sizeof(aval));
+        for (uint64_t i = 0; i < len; ++i)
+            v[i] = mkint_full(a->iitems[i]);
+        aval r = a_tuple_new(len, v);
+        free(v);
         return r;
     }
     return a_tuple_new(a->h.len, a->items);
@@ -238,6 +263,33 @@ aval bi_tuple(uint64_t n, aval *argv) {
 aval bi_list(uint64_t n, aval *argv) {
     want_args("list", n, 0, 1);
     if (n == 0) return a_list_new(0, NULL);
+    /* Already-materialized containers: copy the element storage directly
+       instead of round-tripping every element through the iterator
+       protocol (which also forced packed int lists back to aval). */
+    AObj *o = obj_of(argv[0]);
+    if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET)) {
+        AArr *a = (AArr *)o;
+        AArr *out = (AArr *)xmalloc(sizeof(AArr));
+        out->h.type = T_LIST;
+        out->h.len = a->h.len;
+        out->h.cap = a->h.len;
+        out->items = NULL;
+        out->iitems = NULL;
+        out->flags = 0;
+        if (arr_packed(a)) {
+            out->iitems = (int64_t *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(int64_t));
+            if (a->h.len) memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
+            arr_iitems_raw(out);
+            out->flags = ARR_F_PACKED;
+        } else {
+            out->items = (aval *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(aval));
+            if (a->h.len) {
+                if (a->items) memcpy(out->items, a->items, (size_t)a->h.len * sizeof(aval));
+                else for (uint64_t i = 0; i < a->h.len; ++i) out->items[i] = arr_elem(a, i);
+            }
+        }
+        return mkobj(&out->h);
+    }
     return collect_iterable(argv[0]);
 }
 
@@ -349,6 +401,37 @@ aval bi_ok(uint64_t n, aval *argv) { want_args("ok", n, 1, 1); return mkobj(resu
 aval bi_err(uint64_t n, aval *argv) { want_args("err", n, 1, 1); return mkobj(result_new(0, 0, argv[0])); }
 aval bi_sorted(uint64_t n, aval *argv) {
     want_args("sorted", n, 1, 1);
+    /* Fast path for already-materialized containers: copy the element
+       storage directly (identical order to what collect_iterable's
+       iterator yields) and keep packed int storage, so the sort runs on
+       int64s via sort_ints instead of avals via sort_arr — and the whole
+       iterator-protocol round trip is skipped. */
+    AObj *o = obj_of(argv[0]);
+    if (o && (o->type == T_LIST || o->type == T_TUPLE || o->type == T_SET)) {
+        AArr *a = (AArr *)o;
+        AArr *out = (AArr *)xmalloc(sizeof(AArr));
+        out->h.type = T_LIST;
+        out->h.len = a->h.len;
+        out->h.cap = a->h.len;
+        out->items = NULL;
+        out->iitems = NULL;
+        out->flags = 0;
+        if (arr_packed(a)) {
+            out->iitems = (int64_t *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(int64_t));
+            if (a->h.len) memcpy(out->iitems, a->iitems, (size_t)a->h.len * sizeof(int64_t));
+            arr_iitems_raw(out);
+            out->flags = ARR_F_PACKED;
+            sort_ints(out->iitems, out->h.len);
+        } else {
+            out->items = (aval *)xmalloc((size_t)(a->h.len ? a->h.len : 1) * sizeof(aval));
+            if (a->h.len) {
+                if (a->items) memcpy(out->items, a->items, (size_t)a->h.len * sizeof(aval));
+                else for (uint64_t i = 0; i < a->h.len; ++i) out->items[i] = arr_elem(a, i);
+            }
+            sort_arr(out->items, out->h.len);
+        }
+        return mkobj(&out->h);
+    }
     aval t = collect_iterable(argv[0]);
     AArr *a = (AArr *)obj_of(t);
     if (!a) return t;
@@ -359,28 +442,30 @@ aval bi_sorted(uint64_t n, aval *argv) {
 
 aval bi_reversed(uint64_t n, aval *argv) {
     want_args("reversed", n, 1, 1);
-    aval t = collect_iterable(argv[0]);
-    AArr *a = (AArr *)obj_of(t);
-    AVec out = { NULL, 0, 0 };
-    /* arr_elem handles packed int64 storage: a->items is NULL for packed
-       lists, so indexing it directly would dereference NULL. */
-    for (uint64_t i = a->h.len; i > 0; --i) avec_push(&out, arr_elem(a, i - 1));
-    aval r = list_from_vec(out.p, out.len, 0);
-    free(out.p);
+    aval tmp;
+    AArr *a = iterable_arr(argv[0], &tmp);
+    /* arr_elem handles packed int64 storage: ->items is NULL for packed
+       lists, so indexing it directly would dereference NULL. Fill an
+       exact-size buffer instead of growing an AVec. */
+    uint64_t len = a->h.len;
+    aval *v = (aval *)xmalloc((size_t)(len ? len : 1) * sizeof(aval));
+    for (uint64_t i = 0; i < len; ++i) v[i] = arr_elem(a, len - 1 - i);
+    aval r = list_from_vec(v, len, 0);
+    free(v);
     return r;
 }
 
 aval bi_enumerate(uint64_t n, aval *argv) {
     want_args("enumerate", n, 1, 2);
     int64_t start = n == 2 ? expect_int64(argv[1], "enumerate() start") : 0;
-    aval t = collect_iterable(argv[0]);
-    AArr *a = (AArr *)obj_of(t);
+    aval tmp;
+    AArr *a = iterable_arr(argv[0], &tmp);
     /* Deliberately serial: each element costs two small mallocs
        (AArr + items), and spreading them over pool workers measurably
        loses to glibc arena contention (~1.5x slower at 2M elements). */
     AVec out = { NULL, 0, 0 };
     for (uint64_t i = 0; i < a->h.len; ++i) {
-        aval pair[2] = { mkint_full(start + (int64_t)i), a->items[i] };
+        aval pair[2] = { mkint_full(start + (int64_t)i), arr_elem(a, i) };
         avec_push(&out, a_tuple_new(2, pair));
     }
     aval r = list_from_vec(out.p, out.len, 0);
@@ -391,20 +476,32 @@ aval bi_enumerate(uint64_t n, aval *argv) {
 aval bi_zip(uint64_t n, aval *argv) {
     if (n < 1) panicf("zip expected at least 1 argument, got 0");
     aval *cols = (aval *)xmalloc((size_t)n * sizeof(aval));
+    AArr **carr = (AArr **)xmalloc((size_t)n * sizeof(AArr *));
     uint64_t minlen = UINT64_MAX;
     for (uint64_t j = 0; j < n; ++j) {
-        cols[j] = collect_iterable(argv[j]);
-        uint64_t l = ((AArr *)obj_of(cols[j]))->h.len;
+        /* Borrow already-materialized containers; collect the rest. The
+           collected temporaries stay alive in cols[] until the rows are
+           built (same retention as before). */
+        AObj *co = obj_of(argv[j]);
+        if (co && (co->type == T_LIST || co->type == T_TUPLE || co->type == T_SET)) {
+            carr[j] = (AArr *)co;
+            cols[j] = A_NONE;
+        } else {
+            cols[j] = collect_iterable(argv[j]);
+            carr[j] = (AArr *)obj_of(cols[j]);
+        }
+        uint64_t l = carr[j]->h.len;
         if (l < minlen) minlen = l;
     }
     AVec out = { NULL, 0, 0 };
     aval *row = (aval *)xmalloc((size_t)n * sizeof(aval));
     for (uint64_t i = 0; i < minlen; ++i) {
         for (uint64_t j = 0; j < n; ++j)
-            row[j] = ((AArr *)obj_of(cols[j]))->items[i];
+            row[j] = arr_elem(carr[j], i);
         avec_push(&out, a_tuple_new(n, row));
     }
     free(row);
+    free(carr);
     free(cols);
     aval r = list_from_vec(out.p, out.len, 0);
     free(out.p);

@@ -93,11 +93,16 @@ aval collect_iterable(aval v) {
     return a_list_from_iter(v);
 }
 
+/* Defined in core_dict.c; declared here because a_runtime_internal.h is
+   shared with modules owned elsewhere. */
+int64_t dict_find_cstr(ADict *d, const char *s, uint64_t len);
+
 aval a_getattr(aval obj, const char *name) {
     if (kind_of(obj) == K_DICT) {
         ADict *d = (ADict *)obj_of(obj);
-        aval key = a_str_new(name, strlen(name));
-        int64_t i = dict_find(d, key);
+        /* dict_find_cstr hashes/probes exactly like a T_STR key but skips
+           the temporary AStr allocation a_str_new + dict_find needed. */
+        int64_t i = dict_find_cstr(d, name, strlen(name));
         if (i >= 0) return d->pairs[i].v;
     }
     AObj *o = obj_of(obj);
@@ -123,15 +128,22 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
         aval fns = ((AStruct *)po0)->methodFns;
         AObj *fo = obj_of(fns);
         if (fo && fo->type == T_DICT) {
-            aval key = a_str_new(name, strlen(name));
-            int64_t mi = dict_find((ADict *)fo, key);
+            /* Same no-allocation lookup as a_getattr: method names are C
+               strings, and methodFns keys are T_STR. */
+            ADict *fd = (ADict *)fo;
+            int64_t mi = dict_find_cstr(fd, name, strlen(name));
             if (mi >= 0) {
-                aval fn = ((ADict *)fo)->pairs[mi].v;
-                aval *av2 = (aval *)xmalloc((size_t)(n + 1) * sizeof(aval));
+                aval fn = fd->pairs[mi].v;
+                /* a_call copies argv into its own frame for A functions
+                   and builtins consume it during the call, so a stack
+                   buffer is safe for the common small-arity case. */
+                aval small[24];
+                aval *av2 = small;
+                if (n + 1 > 24) av2 = (aval *)xmalloc((size_t)(n + 1) * sizeof(aval));
                 av2[0] = obj;
                 for (uint64_t i = 0; i < n; ++i) av2[i + 1] = argv[i];
                 aval r = a_call(fn, n + 1, av2);
-                free(av2);
+                if (av2 != small) free(av2);
                 return r;
             }
         }
@@ -140,7 +152,7 @@ aval a_method(aval obj, const char *name, uint64_t n, uint64_t nkw, aval *argv) 
        the builtin container/scalar kinds are intercepted here; other
        receivers (structs reached through `var`, Python objects) keep the
        normal dispatch so user-defined `len` methods still win. */
-    if (!strcmp(name, "len")) {
+    if (name[0] == 'l' && !strcmp(name, "len")) {
         switch (kind_of(obj)) {
         case K_STR: case K_CHAR: case K_LIST: case K_TUPLE:
         case K_SET: case K_DICT: case K_VIEW: case K_BYTES:
