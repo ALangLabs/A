@@ -1,13 +1,14 @@
 #
-# The language now has `comptime` parameters (parsed; call-site specialization
-# is tracked in TODO.md) and real traits. This module keeps the runtime helpers
-# that remain useful: value tags for dispatch and constant-range builders.
+# Compile-time metaprogramming helpers. `comptime` parameters are specialized
+# at each call site (see docs/wiki/declarations.md); `comptime if`/`comptime
+# for` are resolved before type checking, so the bodies below unroll and fold
+# at compile time while remaining ordinary runtime code.
 import prelude
 import std:core
 import std:json
 
 fn comptime_version() -> str:
-    return "0.0.1"
+    return "0.1.0"
 
 fn type_tag(x) -> str:
     # Runtime tag used for dispatch; mirrors what a `where` bound checks.
@@ -44,3 +45,35 @@ fn const_range(lo: i64, hi: i64) -> [i64]:
     if hi < lo:
         core.panic("const_range: hi < lo")
     return [n for n in lo..hi + 1]
+
+# ---------------------------------------------------------------- comptime API
+
+fn repeat(comptime N: int, x):
+    # Builds a list of N copies of `x`; the `comptime for` unrolls at compile
+    # time so each specialization is straight-line code.
+    out = []
+    comptime for i in range(N):
+        out.append(x)
+    return out
+
+fn lanes(comptime N: int) -> int:
+    # Picks the smallest supported lane count >= N at compile time.
+    comptime if N <= 4:
+        return 4
+    elif N <= 8:
+        return 8
+    elif N <= 16:
+        return 16
+    else:
+        return 32
+
+fn offset(comptime N: int, base: int) -> int:
+    # Comptime arithmetic in the body: N is a literal inside each specialization.
+    return base + N * 2
+
+fn select(comptime N: int, a, b):
+    # `comptime if` chooses between two runtime expressions per specialization.
+    comptime if N % 2 == 0:
+        return a
+    else:
+        return b

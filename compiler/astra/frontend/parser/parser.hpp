@@ -40,13 +40,16 @@ class Parser {
   void synchronize();
 
   StmtPtr parseStatement();
-  StmtPtr parseFnDecl(bool entryKw = false);
+  StmtPtr parseFnDecl(bool entryKw = false, bool externFn = false);
+  StmtPtr parseExternDecl();
   StmtPtr parseStructDecl();
   StmtPtr parseEnumDecl();
   StmtPtr parseTraitDecl();
   StmtPtr parseImplDecl();
   StmtPtr parseTypeAliasDecl();
   StmtPtr parseIf();
+  StmtPtr parseComptimeIf();
+  StmtPtr parseComptimeFor();
   StmtPtr parseWhile();
   StmtPtr parseDoWhile();
   StmtPtr parseFor();

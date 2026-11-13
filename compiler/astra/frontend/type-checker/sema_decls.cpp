@@ -194,6 +194,93 @@ void Sema::registerFunctionSignature(FnDecl& decl) {
   signatures_[&decl] = std::move(sig);
 }
 
+namespace {
+
+// C-FFI type mapping: which A types may appear in `extern fn` signatures.
+// Params additionally allow Bytes (passed as a pointer to its data);
+// returns allow Void. Everything else (containers, structs, functions,
+// optionals, ...) cannot cross the C ABI.
+bool ffiParamKindOk(TypeKind k) {
+  switch (k) {
+    case TypeKind::Int:
+    case TypeKind::Float:
+    case TypeKind::Bool:
+    case TypeKind::String:
+    case TypeKind::Char:
+    case TypeKind::Pointer:
+    case TypeKind::Bytes:
+      return true;
+    default:
+      return false;
+  }
+}
+
+bool ffiReturnKindOk(TypeKind k) {
+  switch (k) {
+    case TypeKind::Void:
+    case TypeKind::Int:
+    case TypeKind::Float:
+    case TypeKind::Bool:
+    case TypeKind::String:
+    case TypeKind::Pointer:
+      return true;
+    default:
+      return false;
+  }
+}
+
+}  // namespace
+
+void Sema::checkExternDecl(FnDecl& decl, const FnSig& sig) {
+  if (!decl.typeParams.empty() || !decl.whereClause.empty() ||
+      !decl.comptimeParams.empty()) {
+    sink_.error(decl.nameSpan,
+                "extern functions cannot be generic.",
+                "Drop the type parameters; C functions have fixed signatures.");
+  }
+  for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
+    ParamDecl& param = decl.params[i];
+    const std::string what = "parameter '" + param.name + "' of extern '" +
+                             decl.name + "'";
+    if (param.variadic) {
+      sink_.error(param.span, what + " cannot be variadic.",
+                  "C variadic functions are not supported; declare a fixed "
+                  "signature instead.");
+      continue;
+    }
+    if (param.defaultValue) {
+      sink_.error(param.span, what + " cannot have a default value.",
+                  "extern declarations must list every argument.");
+      continue;
+    }
+    if (!param.type) {
+      sink_.error(param.span, what + " needs a type annotation.",
+                  "Write extern fn " + decl.name + "(" + param.name +
+                      ": int, ...).");
+      continue;
+    }
+    TypePtr t = resolveType(sig.paramTypes[i]);
+    if (t && t->kind != TypeKind::Error && t->kind != TypeKind::Var &&
+        !ffiParamKindOk(t->kind)) {
+      sink_.error(param.span,
+                  "Type '" + typeName(t) + "' cannot be passed to a C function.",
+                  "Use int/i64/u64/i32/..., float/f64/f32, bool, str, char, "
+                  "Pointer, or Bytes.");
+    }
+  }
+  if (decl.returnType) {
+    TypePtr rt = resolveType(sig.retType);
+    if (rt && rt->kind != TypeKind::Error && rt->kind != TypeKind::Var &&
+        !ffiReturnKindOk(rt->kind)) {
+      sink_.error(decl.nameSpan,
+                  "Type '" + typeName(rt) + "' cannot be returned from a C "
+                      "function.",
+                  "Use void, int/i64/u64/i32/..., float/f64/f32, bool, str, "
+                  "or Pointer.");
+    }
+  }
+}
+
 void Sema::registerMethodSignatures(StructDecl& decl) {
   const std::string q = qualified(decl.name);
   StructSym& sym = structs_[q];
@@ -413,6 +500,9 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
 
 void Sema::checkStructMethodBodies(StructDecl& decl) {
   for (auto& methodPtr : decl.methods) {
+    // `comptime` methods are only reachable through specializations (see
+    // checkModule); the unsubstituted body is not checked.
+    if (!methodPtr->comptimeParams.empty()) continue;
     auto found = signatures_.find(methodPtr.get());
     if (found == signatures_.end()) continue;
     checkFunctionBody(*methodPtr, found->second);

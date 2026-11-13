@@ -24,6 +24,7 @@ inline const std::unordered_map<std::string, Tok>& keywordTable() {
        {"enum", Tok::KwEnum},     {"do", Tok::KwDo},     {"type", Tok::KwType},
       {"trait", Tok::KwTrait},   {"where", Tok::KwWhere}, {"comptime", Tok::KwComptime},
       {"impl", Tok::KwImpl},   {"is", Tok::KwIs},   {"del", Tok::KwDel},
+      {"extern", Tok::KwExtern},
   };
   return table;
 }

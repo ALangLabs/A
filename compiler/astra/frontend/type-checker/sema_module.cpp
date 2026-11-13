@@ -453,6 +453,22 @@ void Sema::checkModule(Module& module) {
     if (auto* decl = dynamic_cast<FnDecl*>(stmt.get())) {
       auto found = functionsByName_.find(qualified(decl->name));
       if (found == functionsByName_.end() || found->second != decl) continue;
+      // `extern fn` declarations have no body to check; validate the C-FFI
+      // signature and record the types the LLVM backend marshals with.
+      if (decl->isExtern) {
+        auto sig = signatures_.find(decl);
+        if (sig != signatures_.end()) {
+          checkExternDecl(*decl, sig->second);
+          fnParamTypes_[decl] = sig->second.paramTypes;
+          fnReturnTypes_[decl] = sig->second.retType;
+        }
+        continue;
+      }
+      // Functions with `comptime` parameters are never called directly: the
+      // comptime pass rewrites every call site to a specialized clone whose
+      // body is checked instead. Checking the unsubstituted original would
+      // report errors in `comptime if` branches that no specialization keeps.
+      if (!decl->comptimeParams.empty()) continue;
       auto sig = signatures_.find(decl);
       if (sig == signatures_.end()) continue;
       checkFunctionBody(*decl, sig->second);

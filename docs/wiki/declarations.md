@@ -77,9 +77,16 @@ type UserId = i64
 id: UserId = 7
 ```
 
-`comptime` params are parsed (`fn f(comptime N: int)`) and bound as typed
-values inside the body, but call-site specialization is **not implemented**:
-the parameter is excluded from the call arity (passing an argument is an
-error) and reads as an uninitialized value at run time, so `comptime`
-functions are effectively unusable today. Constraints via `where` do work
-(see above).
+`comptime` params (`fn f(comptime N: int, x: int)`) are specialized at each
+call site: `f(4, x)` clones the function, removes the comptime parameter from
+the signature, and substitutes `N` with the literal `4` throughout the body
+before type checking, so every specialization is zero-cost ordinary code. The
+argument must be a compile-time constant (literals, constant arithmetic,
+`len`/`range`/`str`/`int`/`float`/`bool`/`abs` on constants). Comptime params
+may sit anywhere in the parameter list; all call arguments must be
+positional. Inside a body, `comptime if COND:` / `comptime for i in xs:` are
+evaluated at compile time — only the taken branch is kept and `comptime for`
+unrolls — when the condition/iterable is a compile-time constant (including
+substituted comptime params); otherwise they degrade to ordinary runtime
+`if`/`for`. Comptime params on methods, comptime types, and `reflect` are not
+implemented yet. Constraints via `where` do work (see above).

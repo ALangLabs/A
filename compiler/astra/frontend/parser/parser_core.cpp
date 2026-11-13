@@ -87,6 +87,8 @@ StmtPtr Parser::parseStatement() {
   switch (cur().kind) {
     case Tok::KwFn:
       return parseFnDecl();
+    case Tok::KwExtern:
+      return parseExternDecl();
     case Tok::KwClass:
     case Tok::KwMetaclass:
       return parseStructDecl();
@@ -111,6 +113,13 @@ StmtPtr Parser::parseStatement() {
        // alias declaration. The '(' disambiguates.
        if (peek(1).kind == Tok::LParen) return parseSimpleStatement();
        return parseTypeAliasDecl();
+    case Tok::KwComptime:
+      // `comptime if COND:` / `comptime for i in xs:` — compile-time
+      // control flow, resolved by the comptime pass before sema.
+      if (peek(1).kind == Tok::KwIf) return parseComptimeIf();
+      if (peek(1).kind == Tok::KwFor) return parseComptimeFor();
+      fail(cur().span, "Expected 'if' or 'for' after 'comptime'.",
+           "Write comptime if COND: or comptime for i in xs:.");
     case Tok::KwIf:
       return parseIf();
     case Tok::KwWhile:

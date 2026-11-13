@@ -25,6 +25,25 @@ StmtPtr Parser::parseIf() {
   return stmt;
 }
 
+StmtPtr Parser::parseComptimeIf() {
+  // `comptime` already peeked; consume it, then parse a normal `if` and tag it.
+  Span start = cur().span;
+  advance();  // 'comptime'
+  StmtPtr stmt = parseIf();
+  if (auto* node = dynamic_cast<IfStmt*>(stmt.get())) node->comptime = true;
+  stmt->span = Span::join(start, stmt->span);
+  return stmt;
+}
+
+StmtPtr Parser::parseComptimeFor() {
+  Span start = cur().span;
+  advance();  // 'comptime'
+  StmtPtr stmt = parseFor();
+  if (auto* node = dynamic_cast<ForStmt*>(stmt.get())) node->comptime = true;
+  stmt->span = Span::join(start, stmt->span);
+  return stmt;
+}
+
 StmtPtr Parser::parseWhile() {
   Span start = cur().span;
   expect(Tok::KwWhile, "'while'");

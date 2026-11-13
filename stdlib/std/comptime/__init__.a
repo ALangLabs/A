@@ -1,1 +1,1 @@
-from "comptime.a" import comptime_version, type_tag, is_int, is_float, is_string, is_array, repeat_const, const_range
+from "comptime.a" import comptime_version, type_tag, is_int, is_float, is_string, is_array, repeat_const, const_range, repeat, lanes, offset, select

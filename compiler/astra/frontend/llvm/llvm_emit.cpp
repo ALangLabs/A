@@ -106,6 +106,9 @@ class LlvmEmitter {
 
   std::unordered_map<const FnDecl*, FnInfo*> fns_;
   std::vector<FnInfo*> fnList_;
+  // FnInfos for `extern fn` C declarations: no A body is emitted; calls go
+  // straight to the C symbol (FnInfo::cname holds the extern name).
+  std::unordered_set<const FnInfo*> externFns_;
   std::unordered_map<std::string, StructInfo*> structs_;
   std::vector<StructInfo*> structList_;
   std::unordered_map<std::string, EnumVariantInfo> enums_;
@@ -397,6 +400,11 @@ class LlvmEmitter {
           for (const ParamDecl& p : fn->params) info->paramNames.push_back(p.name);
           info->variadic = !fn->params.empty() && fn->params.back().variadic;
           info->isEntry = fn->isEntry;
+          if (fn->isExtern) {
+            // C symbol name; the mangled __a_f_* cname is unused.
+            info->cname = fn->externName.empty() ? fn->name : fn->externName;
+            externFns_.insert(info);
+          }
           fns_[fn] = info;
           fnList_.push_back(info);
         } else if (s->kind == StmtKind::StructDecl) {
@@ -931,6 +939,311 @@ slow:
 )LLVM";
     emitFastHelpers();
     emitVecHelpers();
+    emitExternDecls();
+    emitExternHelpers();
+  }
+
+  // ---- C FFI (extern fn) ------------------------------------------------------
+  // Map an A signature type to the LLVM type used in the extern `declare`.
+  // Integer params always widen to i64 (the C callee reads the low bits of
+  // the argument register); narrower returns keep their width so the ABI
+  // sign/zero extension is correct. `what` is for diagnostics.
+  std::string ffiLlType(const TypePtr& type, bool isReturn,
+                        const std::string& what) {
+    TypePtr t = resolveType(type);
+    if (!t || t->kind == TypeKind::Error) {
+      fail("extern '" + what + "' has an unresolved type");
+      return isReturn ? "void" : "i64";
+    }
+    switch (t->kind) {
+      case TypeKind::Int: {
+        if (!isReturn) return "i64";
+        if (t->bits == 8) return "i8";
+        if (t->bits == 16) return "i16";
+        if (t->bits == 32) return "i32";
+        return "i64";
+      }
+      case TypeKind::Float:
+        return t->bits <= 32 ? "float" : "double";
+      case TypeKind::Bool:
+        return isReturn ? "i1" : "i32";
+      case TypeKind::String:
+        return "ptr";
+      case TypeKind::Char:
+        return "i64";
+      case TypeKind::Pointer:
+        return "i64";  // raw address as an integer
+      case TypeKind::Bytes:
+        if (!isReturn) return "ptr";
+        break;
+      case TypeKind::Void:
+        if (isReturn) return "void";
+        break;
+      case TypeKind::Var:
+        return isReturn ? "void" : "i64";
+      default:
+        break;
+    }
+    fail("type '" + typeName(t) + "' cannot cross the C ABI in extern '" +
+         what + "'");
+    return isReturn ? "void" : "i64";
+  }
+
+  void emitExternDecls() {
+    // strlen boxes `-> str` returns (C char* -> A string). Declared only
+    // when needed and skipped when the user already declares `strlen`
+    // themselves (their `declare` covers it).
+    bool needStrlen = false, userDeclaresStrlen = false;
+    for (FnInfo* f : fnList_) {
+      if (!externFns_.count(f) || !f->decl) continue;
+      auto rit = sema_.fnReturnTypes.find(f->decl);
+      if (rit == sema_.fnReturnTypes.end()) continue;
+      TypePtr rt = resolveType(rit->second);
+      if (rt && rt->kind == TypeKind::String) needStrlen = true;
+      if (f->cname == "strlen") userDeclaresStrlen = true;
+    }
+    if (needStrlen && !userDeclaresStrlen)
+      pre_ << "declare i64 @strlen(ptr)\n";
+    std::set<std::string> emitted;
+    for (FnInfo* f : fnList_) {
+      if (!externFns_.count(f) || !f->decl) continue;
+      auto pit = sema_.fnParamTypes.find(f->decl);
+      auto rit = sema_.fnReturnTypes.find(f->decl);
+      if (pit == sema_.fnParamTypes.end() ||
+          rit == sema_.fnReturnTypes.end()) {
+        fail("extern '" + f->name + "' is missing sema signature types");
+        continue;
+      }
+      TypePtr rt = resolveType(rit->second);
+      std::string sig = "declare " + ffiLlType(rit->second, true,
+                                             f->name + " return") + " @" +
+                        f->cname + "(";
+      for (std::size_t i = 0; i < pit->second.size(); ++i) {
+        if (i) sig += ", ";
+        sig += ffiLlType(pit->second[i], false,
+                         "parameter '" +
+                             (i < f->paramNames.size() ? f->paramNames[i]
+                                                       : std::to_string(i)) +
+                             "' of extern '" + f->name + "'");
+      }
+      sig += ")\n";
+      // Two A decls may alias the same C symbol (`= "sym"`); emit the
+      // declare once when the signatures are identical.
+      if (emitted.insert(sig).second) pre_ << sig;
+      (void)rt;
+    }
+  }
+
+  // Marshall an aval argument to the C value for `type`. All helpers are
+  // internal IR functions emitted by emitExternHelpers.
+  std::string ffiArgValue(const std::string& aval, const TypePtr& type) {
+    auto callI = [&](const char* sym, const char* retty) {
+      std::string r = T();
+      emit("  " + r + " = call " + retty + " @" + sym + "(i64 " + aval + ")");
+      return r;
+    };
+    TypePtr t = resolveType(type);
+    if (!t) return "0";
+    switch (t->kind) {
+      case TypeKind::Int:
+      case TypeKind::Char:
+      case TypeKind::Pointer:
+        return callI("a.ffi.i64", "i64");
+      case TypeKind::Float:
+        if (t->bits <= 32) {
+          std::string d = callI("a.ffi.f64", "double");
+          std::string r = T();
+          emit("  " + r + " = fptrunc double " + d + " to float");
+          return r;
+        }
+        return callI("a.ffi.f64", "double");
+      case TypeKind::Bool:
+        return callI("a.ffi.bool", "i32");
+      case TypeKind::String:
+        return callI("a.ffi.str", "ptr");
+      case TypeKind::Bytes:
+        return callI("a.ffi.bytes", "ptr");
+      default:
+        fail("type '" + typeName(t) + "' cannot be passed to a C function");
+        return "0";
+    }
+  }
+
+  // Convert the raw C return value `r` (of LLVM type `retLl`) into an aval.
+  std::string ffiReturnValue(const std::string& r, const std::string& retLl,
+                             const TypePtr& type) {
+    TypePtr t = resolveType(type);
+    if (!t || retLl == "void") return kNone;
+    switch (t->kind) {
+      case TypeKind::Int: {
+        std::string wide;
+        if (retLl != "i64") {
+          wide = T();
+          // Unsigned returns zero-extend; signed sign-extend.
+          emit("  " + wide + " = " + (t->isSigned ? "sext " : "zext ") +
+               retLl + " " + r + " to i64");
+        } else {
+          wide = r;
+        }
+        std::string out = T();
+        emit("  " + out + " = call i64 @a_i64n(i64 " + wide + ")");
+        return out;
+      }
+      case TypeKind::Char:
+      case TypeKind::Pointer: {
+        std::string out = T();
+        emit("  " + out + " = call i64 @a_i64n(i64 " + r + ")");
+        return out;
+      }
+      case TypeKind::Float: {
+        std::string d = r;
+        if (retLl == "float") {
+          d = T();
+          emit("  " + d + " = fpext float " + r + " to double");
+        }
+        std::string out = T();
+        emit("  " + out + " = call i64 @a.mdouble(double " + d + ")");
+        return out;
+      }
+      case TypeKind::Bool: {
+        std::string out = T();
+        emit("  " + out + " = select i1 " + r + ", i64 " + kTrue +
+             ", i64 " + kFalse);
+        return out;
+      }
+      case TypeKind::String: {
+        // char* -> A string via strlen + a_str_new.
+        std::string len = T();
+        emit("  " + len + " = call i64 @strlen(ptr " + r + ")");
+        std::string out = T();
+        emit("  " + out + " = call i64 @a_str_new(ptr " + r + ", i64 " +
+             len + ")");
+        return out;
+      }
+      default:
+        fail("type '" + typeName(t) + "' cannot be returned from a C function");
+        return kNone;
+    }
+  }
+
+  // Call an extern C function: marshal aval args to C args, call the
+  // symbol, box the C return into an aval.
+  std::string emitExternCall(FnInfo* f, const CallExpr& call) {
+    auto pit = sema_.fnParamTypes.find(f->decl);
+    auto rit = sema_.fnReturnTypes.find(f->decl);
+    if (pit == sema_.fnParamTypes.end() || rit == sema_.fnReturnTypes.end() ||
+        !f->decl) {
+      fail("extern '" + f->name + "' is missing its sema signature");
+      return kNone;
+    }
+    std::vector<std::string> ps(f->paramNames.size());
+    placeArgs(call, f->paramNames, ps, 0, -1);
+    std::string retLl = ffiLlType(rit->second, true, f->name + " return");
+    std::string args;
+    for (std::size_t i = 0; i < ps.size(); ++i) {
+      if (i) args += ", ";
+      if (ps[i].empty()) {
+        fail("missing argument " + std::to_string(i + 1) + " to extern '" +
+             f->name + "'");
+        return kNone;
+      }
+      TypePtr pt = i < pit->second.size() ? pit->second[i] : nullptr;
+      std::string ty = ffiLlType(pt, false,
+                                 "parameter '" +
+                                     (i < f->paramNames.size()
+                                          ? f->paramNames[i]
+                                          : std::to_string(i)) +
+                                     "' of extern '" + f->name + "'");
+      args += ty + " " + ffiArgValue(ps[i], pt);
+    }
+    if (retLl == "void") {
+      emit("  call void @" + f->cname + "(" + args + ")");
+      return kNone;
+    }
+    std::string r = T();
+    emit("  " + r + " = call " + retLl + " @" + f->cname + "(" + args + ")");
+    return ffiReturnValue(r, retLl, rit->second);
+  }
+
+  // Marshalling helpers for extern calls. aval layout mirrors a_runtime.h:
+  // tagged pointers have payload&0xF==0 and point at a 16-byte AObj header;
+  // AStr/ABytes store their data pointer (or inline bytes) at offset 16.
+  void emitExternHelpers() {
+    std::string msgNum = cstrGlobal("extern: expected a number", true);
+    std::string msgStr = cstrGlobal("extern: expected a string", true);
+    std::string msgBytes = cstrGlobal("extern: expected bytes", true);
+    helpers_ << "define internal i64 @a.ffi.i64(i64 %v) {\n"
+                "entry:\n"
+                "  %un = call { i64, i64 } @a.unboxnum(i64 %v)\n"
+                "  %p = extractvalue { i64, i64 } %un, 0\n"
+                "  %f = extractvalue { i64, i64 } %un, 1\n"
+                "  %isD = icmp eq i64 %f, 1\n"
+                "  %db = bitcast i64 %p to double\n"
+                "  %di = fptosi double %db to i64\n"
+                "  %isB = icmp eq i64 %f, 2\n"
+                "  br i1 %isB, label %bad, label %ok\n"
+                "bad:\n"
+                "  call i64 @a_panic_msg(ptr " << msgNum << ")\n"
+                "  unreachable\n"
+                "ok:\n"
+                "  %r = select i1 %isD, i64 %di, i64 %p\n"
+                "  ret i64 %r\n"
+                "}\n\n"
+                "define internal double @a.ffi.f64(i64 %v) {\n"
+                "entry:\n"
+                "  %un = call { i64, i64 } @a.unboxnum(i64 %v)\n"
+                "  %p = extractvalue { i64, i64 } %un, 0\n"
+                "  %f = extractvalue { i64, i64 } %un, 1\n"
+                "  %isI = icmp eq i64 %f, 0\n"
+                "  %si = sitofp i64 %p to double\n"
+                "  %db = bitcast i64 %p to double\n"
+                "  %isB = icmp eq i64 %f, 2\n"
+                "  br i1 %isB, label %bad, label %ok\n"
+                "bad:\n"
+                "  call i64 @a_panic_msg(ptr " << msgNum << ")\n"
+                "  unreachable\n"
+                "ok:\n"
+                "  %r = select i1 %isI, double %si, double %db\n"
+                "  ret double %r\n"
+                "}\n\n"
+                "define internal i32 @a.ffi.bool(i64 %v) {\n"
+                "  %t = call i1 @a.truthy(i64 %v)\n"
+                "  %r = zext i1 %t to i32\n"
+                "  ret i32 %r\n"
+                "}\n\n";
+    // Shared tagged-pointer prologue for str/bytes: verify the aval is a
+    // heap object of the expected AObj type before touching its payload.
+    auto ptrObj = [&](const char* name, int wantType, const char* bodyGo,
+                      const std::string& msg) {
+      helpers_ << "define internal ptr @" << name << "(i64 %v) {\n"
+                  "entry:\n"
+                  "  %tag = icmp uge i64 %v, -281474976710656\n"
+                  "  %pay = and i64 %v, 281474976710655\n"
+                  "  %low = and i64 %pay, 15\n"
+                  "  %isP = icmp eq i64 %low, 0\n"
+                  "  %nz = icmp ne i64 %pay, 0\n"
+                  "  %pshp = and i1 %isP, %nz\n"
+                  "  %shape = and i1 %tag, %pshp\n"
+                  "  br i1 %shape, label %chk, label %bad\n"
+                  "chk:\n"
+                  "  %op = inttoptr i64 %pay to ptr\n"
+                  "  %ty = load i32, ptr %op\n"
+                  "  %ok = icmp eq i32 %ty, " << wantType << "\n"
+                  "  br i1 %ok, label %go, label %bad\n"
+                  "go:\n" << bodyGo << "bad:\n"
+                  "  call i64 @a_panic_msg(ptr " << msg << ")\n"
+                  "  unreachable\n"
+                  "}\n\n";
+    };
+    ptrObj("a.ffi.str", 1,
+           "  %d = getelementptr i8, ptr %op, i64 16\n"
+           "  ret ptr %d\n",
+           msgStr);
+    ptrObj("a.ffi.bytes", 18,
+           "  %dp = getelementptr i8, ptr %op, i64 16\n"
+           "  %p = load ptr, ptr %dp\n"
+           "  ret ptr %p\n",
+           msgBytes);
   }
 
   // ---- SIMD vector helpers ----------------------------------------------------
@@ -1496,6 +1809,7 @@ oth:
 
   // ---- functions -------------------------------------------------------------
   void emitFunction(FnInfo* f) {
+    if (externFns_.count(f)) return;  // C declaration: no A body to emit
     allocaCounter_ = 0;
     pendingAllocas_.clear();
     fn_ = std::ostringstream();
@@ -5578,6 +5892,7 @@ oth:
         auto fit = fns_.find(call.calleeFunction);
         if (fit != fns_.end() && !fit->second->isMethod) {
           FnInfo* fi = fit->second;
+          if (externFns_.count(fi)) return emitExternCall(fi, call);
           std::vector<std::string> ps(fi->paramNames.size());
           placeArgs(call, fi->paramNames, ps, 0,
                     fi->variadic ? (int)fi->paramNames.size() - 1 : -1);
@@ -5596,6 +5911,7 @@ oth:
         }
         if (b->kind == BKind::FnValue && b->fn) {
           FnInfo* fi = b->fn;
+          if (externFns_.count(fi)) return emitExternCall(fi, call);
           std::vector<std::string> ps(fi->paramNames.size());
           placeArgs(call, fi->paramNames, ps, 0,
                     fi->variadic ? (int)fi->paramNames.size() - 1 : -1);
@@ -5634,6 +5950,7 @@ oth:
             std::string glob;
             resolveModuleCall(*mb, f.field, target, stTarget, glob);
             if (target) {
+              if (externFns_.count(target)) return emitExternCall(target, call);
               std::vector<std::string> ps(target->paramNames.size());
               placeArgs(call, target->paramNames, ps, 0,
                         target->variadic ? (int)target->paramNames.size() - 1 : -1);
@@ -6085,7 +6402,7 @@ oth:
     }
     // Function fnon values.
     for (FnInfo* f : fnList_) {
-      if (f->isMethod) continue;
+      if (f->isMethod || externFns_.count(f)) continue;
       std::string sig = fnSignatureText(f);
       std::string v = fixFnonNewEx(f->cname, kNone, f->name, sig, fnDocText(f));
       emit("  store i64 " + v + ", ptr @" + f->globalVar);
@@ -6146,7 +6463,8 @@ oth:
   void emitTestMain() {
     std::vector<FnInfo*> tests;
     for (FnInfo* f : fnList_) {
-      if (!f->isMethod && f->moduleId == graph_.entry &&
+      if (!f->isMethod && !externFns_.count(f) &&
+          f->moduleId == graph_.entry &&
           f->name.rfind("test_", 0) == 0 &&
           (testFilter_.empty() || f->name.find(testFilter_) != std::string::npos))
         tests.push_back(f);

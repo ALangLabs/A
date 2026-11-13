@@ -233,6 +233,9 @@ class Sema {
   void registerEnum(EnumDecl& decl);
   void resolveEnumPayloads(EnumDecl& decl);
   void registerFunctionSignature(FnDecl& decl);
+  // Validate an `extern fn` declaration's signature against the C-FFI type
+  // mapping and record its param/return types for the LLVM backend.
+  void checkExternDecl(FnDecl& decl, const FnSig& sig);
   void registerMethodSignatures(StructDecl& decl);
   void checkFunctionBody(FnDecl& decl, const FnSig& sig);
   void checkStructMethodBodies(StructDecl& decl);

@@ -26,7 +26,31 @@ void Parser::parseTypeParams(std::vector<std::string>& typeParams,
   expect(Tok::Gt, "'>' after type parameters");
 }
 
-StmtPtr Parser::parseFnDecl(bool entryKw) {
+StmtPtr Parser::parseExternDecl() {
+  Span start = cur().span;
+  advance();  // consume 'extern'
+  // Optional linkage specifier: `extern "C" fn ...`. Only "C" is supported
+  // (the only ABI the LLVM backend emits); anything else is rejected.
+  if (check(Tok::String)) {
+    const Token& lit = advance();
+    std::string text = decodeEscapes(lit.strValue, lit.span);
+    if (text != "C") {
+      fail(lit.span,
+           "Unsupported extern linkage '" + text + "'.",
+           "Only 'extern \"C\"' is supported.");
+    }
+  }
+  expect(Tok::KwFn, "'fn' after 'extern'");
+  // Rewind one token so parseFnDecl sees the 'fn' keyword itself.
+  --pos_;
+  StmtPtr decl = parseFnDecl(false, true);
+  if (auto* fn = dynamic_cast<FnDecl*>(decl.get())) {
+    fn->span = Span::join(start, fn->span);
+  }
+  return decl;
+}
+
+StmtPtr Parser::parseFnDecl(bool entryKw, bool externFn) {
   Span start = cur().span;
   if (entryKw) {
     advance();  // consume 'entry'
@@ -58,6 +82,9 @@ StmtPtr Parser::parseFnDecl(bool entryKw) {
         const Token& nameTok2 = expect(Tok::Ident, "a compile-time parameter name");
         param.name = nameTok2.lexeme;
         param.span = paramSpan;
+        // Position in the combined positional list: regular params seen so
+        // far plus comptime params seen so far.
+        param.position = decl->params.size() + decl->comptimeParams.size();
         if (match(Tok::Colon)) param.type = parseTypeExpr();
         decl->comptimeParams.push_back(std::move(param));
       } else {
@@ -91,6 +118,27 @@ StmtPtr Parser::parseFnDecl(bool entryKw) {
 
   // Allow either ':' or direct '=' (expression body) without requiring ':'
   ++fnDepth_;
+  if (externFn) {
+    // `extern fn name(params) -> ret` — signature only, no body. An
+    // optional `= "c_symbol"` renames the C symbol being declared.
+    decl->isExtern = true;
+    decl->externName = decl->name;
+    if (match(Tok::Eq)) {
+      if (!check(Tok::String)) {
+        fail(cur().span, "Expected a string literal C symbol name after '='.",
+             "Write extern fn name(...) -> T = \"real_c_name\".");
+      }
+      const Token& sym = advance();
+      decl->externName = decodeEscapes(sym.strValue, sym.span);
+      if (decl->externName.empty()) {
+        fail(sym.span, "The C symbol name cannot be empty.");
+      }
+    }
+    expectNewline();
+    decl->span = Span::join(start, previousSpan());
+    --fnDepth_;
+    return decl;
+  }
   if (match(Tok::Colon)) {
     if (match(Tok::Eq)) {
       auto value = parseExpression();

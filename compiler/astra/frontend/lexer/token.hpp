@@ -54,6 +54,7 @@ enum class Tok {
   KwImpl,
   KwIs,
   KwDel,
+  KwExtern,
 
   LParen,
   RParen,

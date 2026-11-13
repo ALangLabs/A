@@ -53,6 +53,7 @@ const char* tokName(Tok kind) {
     case Tok::KwWhere: return "'where'";
     case Tok::KwComptime: return "'comptime'";
     case Tok::KwImpl: return "'impl'";
+    case Tok::KwExtern: return "'extern'";
     case Tok::LParen: return "'('";
     case Tok::RParen: return "')'";
     case Tok::LBracket: return "'['";

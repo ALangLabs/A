@@ -1,4 +1,5 @@
 #include "pipeline/pipeline.hpp"
+#include "pipeline/comptime.hpp"
 #include "exe_path.hpp"
 #include <algorithm>
 #include <cerrno>
@@ -1637,6 +1638,10 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
   ModuleLoaderOptions opts; opts.modulePaths=config.modulePaths; opts.stdlibRoot=config.stdlibRoot;
   ModuleLoader loader(std::move(opts),sink); ModuleGraph graph=loader.load(path,std::move(source));
   if(!flushErrors(sink,config,diagOut,diagErr)) return {};
+  // Comptime metaprogramming: specialize `comptime` parameters at call sites
+  // and resolve `comptime if`/`comptime for` before sema sees the AST, so all
+  // backends get ordinary functions and statements.
+  runComptimePass(graph,sink); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   Sema sema(graph,sink); SemaResult result = config.jobs > 1 ? sema.analyzeParallel(config.jobs) : sema.analyze(); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   analyzeOwnership(graph,sink); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   flushFinal(sink,config,diagOut,diagErr);
