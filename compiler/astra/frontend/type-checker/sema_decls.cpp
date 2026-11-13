@@ -431,8 +431,59 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
     scopes_.push_back({});
   }
   genericParams_.clear();
-  for (std::size_t i = 0; i < decl.typeParams.size() && i < sig.typeParamVars.size(); ++i) {
-    genericParams_[decl.typeParams[i]] = sig.typeParamVars[i];
+
+  // A generic body is checked once, so it must not run against the
+  // signature's shared type-parameter vars: a body that pins T concretely
+  // (e.g. `y: i64 = x` where `x: T`) would otherwise bind the shared var and
+  // leak that instantiation into every call site and into the signature
+  // seen through function values. Check the body against fresh variables
+  // standing in for the type parameters (and fresh clones of any other
+  // signature vars, which instantiateType produces for unmapped vars), so
+  // body-time bindings stay local to this check. Non-generic functions keep
+  // the shared vars: their untyped parameters intentionally accumulate
+  // inference across the body and call sites.
+  std::unordered_map<TypePtr, TypePtr> bodyMapping;
+  std::vector<TypePtr> bodyTypeVars;
+  std::vector<TypePtr> bodyParamTypes = sig.paramTypes;
+  TypePtr bodyRetType = sig.retType;
+  if (!sig.typeParamVars.empty()) {
+    for (TypePtr var : sig.typeParamVars) {
+      TypePtr fresh = freshVar(var->constraint, var->varSpan,
+                               var->varDescription.empty() ? "type parameter"
+                                                           : var->varDescription,
+                               var->allowDefault);
+      fresh->allowUnresolved = var->allowUnresolved;
+      fresh->fromAnnotation = var->fromAnnotation;
+      bodyMapping[var] = fresh;
+      bodyTypeVars.push_back(fresh);
+    }
+    bodyParamTypes.clear();
+    bodyParamTypes.reserve(sig.paramTypes.size());
+    for (const auto& p : sig.paramTypes) {
+      bodyParamTypes.push_back(instantiateType(p, bodyMapping));
+    }
+    bodyRetType = instantiateType(sig.retType, bodyMapping);
+  }
+  // sig.typeParamVars ordering: a method's signature leads with the owning
+  // struct's type parameters, followed by the method's own; sig.typeParams
+  // lists the method's own names first, then the struct's.
+  const std::size_t ownCount = decl.typeParams.size();
+  const std::size_t totalVars = sig.typeParamVars.size();
+  const std::size_t structCount =
+      totalVars > ownCount ? totalVars - ownCount : 0;
+  if (!bodyTypeVars.empty()) {
+    for (std::size_t j = 0; j < structCount && ownCount + j < sig.typeParams.size();
+         ++j) {
+      genericParams_[sig.typeParams[ownCount + j]] = bodyTypeVars[j];
+    }
+    for (std::size_t i = 0; i < ownCount && structCount + i < totalVars; ++i) {
+      genericParams_[decl.typeParams[i]] = bodyTypeVars[structCount + i];
+    }
+  } else {
+    for (std::size_t i = 0; i < decl.typeParams.size() && i < sig.typeParamVars.size();
+         ++i) {
+      genericParams_[decl.typeParams[i]] = sig.typeParamVars[i];
+    }
   }
 
   FnDecl* savedFunction = currentFunction_;
@@ -442,28 +493,28 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
   int savedDeferDepth = deferDepth_;
 
   currentFunction_ = &decl;
-  currentReturnType_ = sig.retType;
+  currentReturnType_ = bodyRetType;
   sawReturn_ = false;
   loopDepth_ = 0;
   deferDepth_ = 0;
 
   pushScope();
-  for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
-    declareVar(decl.params[i].name, decl.params[i].span, sig.paramTypes[i], false, "parameter");
+  for (std::size_t i = 0; i < decl.params.size() && i < bodyParamTypes.size(); ++i) {
+    declareVar(decl.params[i].name, decl.params[i].span, bodyParamTypes[i], false, "parameter");
     // Annotated parameters keep their declared type on reassignment; params
     // without an annotation stay dynamically rebindable.
     if (decl.params[i].type) {
       if (VarSym* sym = lookupVar(decl.params[i].name)) {
-        sym->declaredType = sig.paramTypes[i];
+        sym->declaredType = bodyParamTypes[i];
       }
     }
   }
   // Default values are checked with earlier parameters in scope, so a
   // default may reference a preceding parameter (e.g. `fn f(a, b = a + 1)`).
-  for (std::size_t i = 0; i < decl.params.size() && i < sig.paramTypes.size(); ++i) {
+  for (std::size_t i = 0; i < decl.params.size() && i < bodyParamTypes.size(); ++i) {
     ParamDecl& param = decl.params[i];
     if (!param.defaultValue) continue;
-    checkArgAgainst(*param.defaultValue, sig.paramTypes[i],
+    checkArgAgainst(*param.defaultValue, bodyParamTypes[i],
                     "in the default value of parameter '" + param.name + "' of '" + decl.name + "'");
   }
   // `comptime N: int` parameters are bound as typed values in the body. They are
@@ -480,13 +531,13 @@ void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
 
   if (!sawReturn_) {
     // Dynamic: no return required; default to void if still unresolved.
-    TypePtr ret = resolveType(sig.retType);
-    if (ret && ret->kind == TypeKind::Var) unify(sig.retType, typeVoid());
+    TypePtr ret = resolveType(bodyRetType);
+    if (ret && ret->kind == TypeKind::Var) unify(bodyRetType, typeVoid());
   }
 
-  checkedFunctions_.push_back({&decl, sig.retType});
-  fnParamTypes_[&decl] = sig.paramTypes;
-  fnReturnTypes_[&decl] = sig.retType;
+  checkedFunctions_.push_back({&decl, bodyRetType});
+  fnParamTypes_[&decl] = bodyParamTypes;
+  fnReturnTypes_[&decl] = bodyRetType;
 
   currentFunction_ = savedFunction;
   currentReturnType_ = savedReturn;

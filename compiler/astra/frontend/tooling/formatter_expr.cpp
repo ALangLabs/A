@@ -123,7 +123,19 @@ std::string Formatter::binaryText(const BinaryExpr& binary, int parent, int inde
   }
 
 std::string Formatter::callText(const CallExpr& call, int parent, int indent) {
-    const std::string callee = exprText(*call.callee, 17, indent);
+    std::string callee = exprText(*call.callee, 17, indent);
+    if (!call.typeArgs.empty()) {
+      std::vector<std::string> targs;
+      targs.reserve(call.typeArgs.size());
+      for (const TypeExprPtr& ta : call.typeArgs)
+        targs.push_back(typeText(ta.get()));
+      callee += "<";
+      for (size_t i = 0; i < targs.size(); ++i) {
+        if (i) callee += ", ";
+        callee += targs[i];
+      }
+      callee += ">";
+    }
     std::vector<std::string> args;
     args.reserve(call.args.size());
     for (const CallArg& arg : call.args) {

@@ -78,7 +78,9 @@ TypeExprPtr Parser::parseTypeExpr() {
     }
     named->name = std::move(name);
     if (match(Tok::Lt)) {
-      while (!check(Tok::Gt) && !check(Tok::Eof)) {
+      // '>>' lexes as one token but closes two generic levels; the loop
+      // stops on it and matchTypeArgGt splits it into two '>' tokens.
+      while (!check(Tok::Gt) && !check(Tok::Shr) && !check(Tok::Eof)) {
         // Integer literals are allowed as type arguments for comptime
         // parameters such as the lane count in `vector[float, 4]`.
         if (check(Tok::Int)) {
@@ -92,7 +94,10 @@ TypeExprPtr Parser::parseTypeExpr() {
         }
         if (!match(Tok::Comma)) break;
       }
-      expect(Tok::Gt, "'>' after type arguments");
+      if (!matchTypeArgGt()) {
+        fail(cur().span, "Expected '>' after type arguments, found " +
+                             describeToken(cur()) + ".");
+      }
     }
     named->span = Span::join(named->span, previousSpan());
     type = std::move(named);

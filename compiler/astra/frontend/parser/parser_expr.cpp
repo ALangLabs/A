@@ -447,6 +447,237 @@ ExprPtr Parser::parsePrefix() {
   return parsePostfix();
 }
 
+namespace {
+
+// Token-level cursor for the `expr<T, ...>(` lookahead. It mirrors the
+// parseTypeExpr grammar without producing diagnostics or AST nodes, so a
+// failed scan simply means the '<' was a comparison operator. `gt` tracks
+// the unused half of a '>>' token that was split while closing nested
+// generic argument lists.
+struct TypeScan {
+  const std::vector<Token>* tokens = nullptr;
+  std::size_t pos = 0;
+  int gt = 0;
+
+  Tok kind() const {
+    if (gt > 0) return Tok::Gt;
+    return (*tokens)[pos].kind;
+  }
+  Tok rawKind() const { return (*tokens)[pos].kind; }
+  bool atEnd() const {
+    switch (kind()) {
+      case Tok::Eof:
+      case Tok::Newline:
+      case Tok::Indent:
+      case Tok::Dedent:
+        return true;
+      default:
+        return false;
+    }
+  }
+  bool eat(Tok k) {
+    if (kind() != k) return false;
+    if (gt > 0) {
+      --gt;
+      return true;
+    }
+    ++pos;
+    return true;
+  }
+  bool eatGt() {
+    if (gt > 0) {
+      --gt;
+      return true;
+    }
+    Tok k = rawKind();
+    if (k == Tok::Gt) {
+      ++pos;
+      return true;
+    }
+    if (k == Tok::Shr) {
+      // '>>' closes two generic levels at once.
+      ++pos;
+      gt = 1;
+      return true;
+    }
+    return false;
+  }
+};
+
+bool scanTypeArgListTokens(TypeScan& s);
+
+bool scanTypeExprTokens(TypeScan& s) {
+  const Tok k = s.kind();
+  if (k == Tok::LBracket) {
+    s.eat(Tok::LBracket);
+    if (!scanTypeExprTokens(s)) return false;
+    return s.eat(Tok::RBracket);
+  }
+  if (k == Tok::LParen) {
+    s.eat(Tok::LParen);
+    if (s.kind() != Tok::RParen) {
+      if (!scanTypeExprTokens(s)) return false;
+      while (s.eat(Tok::Comma)) {
+        if (!scanTypeExprTokens(s)) return false;
+      }
+    }
+    return s.eat(Tok::RParen);
+  }
+  if (k == Tok::LBrace) {
+    s.eat(Tok::LBrace);
+    if (!scanTypeExprTokens(s)) return false;
+    if (s.eat(Tok::Colon)) {
+      if (!scanTypeExprTokens(s)) return false;
+    }
+    return s.eat(Tok::RBrace);
+  }
+  if (k == Tok::KwFn) {
+    s.eat(Tok::KwFn);
+    if (!s.eat(Tok::LParen)) return false;
+    if (s.kind() != Tok::RParen) {
+      if (!scanTypeExprTokens(s)) return false;
+      while (s.eat(Tok::Comma)) {
+        if (!scanTypeExprTokens(s)) return false;
+      }
+    }
+    if (!s.eat(Tok::RParen)) return false;
+    if (!s.eat(Tok::Arrow)) return false;
+    return scanTypeExprTokens(s);
+  }
+  if (k != Tok::Ident) return false;
+  s.eat(Tok::Ident);
+  while (s.eat(Tok::Dot)) {
+    if (s.kind() != Tok::Ident) return false;
+    s.eat(Tok::Ident);
+  }
+  if (s.kind() == Tok::Lt) {
+    if (!scanTypeArgListTokens(s)) return false;
+  }
+  // Fixed-size suffixes: `i32[2][3]`.
+  while (s.kind() == Tok::LBracket) {
+    s.eat(Tok::LBracket);
+    if (s.kind() != Tok::Int) return false;
+    s.eat(Tok::Int);
+    if (!s.eat(Tok::RBracket)) return false;
+  }
+  while (s.eat(Tok::Question)) {
+  }
+  return true;
+}
+
+// `<` already consumed conceptually: s sits on '<'. Integer literals are
+// allowed as arguments for comptime parameters such as `vector[float, 4]`.
+bool scanTypeArgListTokens(TypeScan& s) {
+  if (!s.eat(Tok::Lt)) return false;
+  while (s.kind() != Tok::Gt && s.rawKind() != Tok::Shr && !s.atEnd()) {
+    if (s.kind() == Tok::Int) {
+      s.eat(Tok::Int);
+    } else if (!scanTypeExprTokens(s)) {
+      return false;
+    }
+    if (!s.eat(Tok::Comma)) break;
+  }
+  return s.eatGt();
+}
+
+}  // namespace
+
+std::size_t Parser::scanCallTypeArgsEnd(std::size_t pos) const {
+  constexpr std::size_t npos = ~std::size_t{0};
+  TypeScan scan{&tokens_, pos, 0};
+  if (!scanTypeArgListTokens(scan)) return npos;
+  // The '<...>' must be followed by '(' to be a call's type arguments;
+  // otherwise the '<' was a comparison operator.
+  if (scan.kind() != Tok::LParen) return npos;
+  return scan.pos;
+}
+
+void Parser::splitShrGt() {
+  // tokens_[pos_] is '>>'; rewrite it as '>' and insert a second '>' token
+  // so nested generic argument lists can consume them one at a time.
+  Token second = tokens_[pos_];
+  tokens_[pos_].kind = Tok::Gt;
+  tokens_[pos_].lexeme = ">";
+  second.kind = Tok::Gt;
+  second.lexeme = ">";
+  tokens_.insert(tokens_.begin() + static_cast<std::ptrdiff_t>(pos_) + 1,
+                 std::move(second));
+}
+
+bool Parser::matchTypeArgGt() {
+  if (check(Tok::Gt)) {
+    advance();
+    return true;
+  }
+  if (check(Tok::Shr)) {
+    splitShrGt();
+    advance();
+    return true;
+  }
+  return false;
+}
+
+ExprPtr Parser::buildCallExpr(ExprPtr callee, std::vector<CallArg> args,
+                              std::vector<TypeExprPtr> typeArgs, Span endSpan) {
+  auto call = std::make_unique<CallExpr>();
+  call->span = Span::join(callee->span, endSpan);
+  call->callee = std::move(callee);
+  call->args = std::move(args);
+  call->typeArgs = std::move(typeArgs);
+  if (auto* nav = dynamic_cast<SafeNavExpr*>(call->callee.get())) {
+    // obj?.method(args) -> (obj == None) ? None : obj.method(args).
+    // The receiver is duplicated, so it must be a plain name.
+    if (dynamic_cast<IdentExpr*>(nav->object.get()) == nullptr) {
+      fail(nav->object->span,
+           "A method call through '?.' needs a plain-name receiver.",
+           "Bind the receiver to a name first, e.g. `r = expr`.");
+    }
+    auto receiver = std::move(nav->object);
+    std::string method = nav->field;
+    Span methodSpan = nav->fieldSpan;
+    Span wholeSpan = call->span;
+    // Condition: receiver == None
+    auto cmp = std::make_unique<BinaryExpr>();
+    cmp->span = wholeSpan;
+    cmp->op = "==";
+    cmp->binop = BinOp::Eq;
+    auto lhsIdent = std::make_unique<IdentExpr>();
+    lhsIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
+    lhsIdent->span = receiver->span;
+    cmp->lhs = std::move(lhsIdent);
+    auto noneIdent = std::make_unique<IdentExpr>();
+    noneIdent->name = "None";
+    noneIdent->span = wholeSpan;
+    cmp->rhs = std::move(noneIdent);
+    // Else branch: (!receiver).method(args) — the '!' unwraps the
+    // optional before dispatch. Reuse the parsed call.
+    auto field = std::make_unique<FieldExpr>();
+    field->span = wholeSpan;
+    auto unwrap = std::make_unique<UnaryExpr>();
+    unwrap->span = wholeSpan;
+    unwrap->op = "!";
+    unwrap->postfix = true;
+    auto unwrapIdent = std::make_unique<IdentExpr>();
+    unwrapIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
+    unwrapIdent->span = receiver->span;
+    unwrap->operand = std::move(unwrapIdent);
+    field->object = std::move(unwrap);
+    field->field = method;
+    field->fieldSpan = methodSpan;
+    call->callee = std::move(field);
+    auto tern = std::make_unique<TernaryExpr>();
+    tern->span = wholeSpan;
+    tern->cond = std::move(cmp);
+    auto thenNone = std::make_unique<IdentExpr>();
+    thenNone->name = "None";
+    thenNone->span = wholeSpan;
+    tern->thenValue = std::move(thenNone);
+    tern->elseValue = std::move(call);
+    return tern;
+  }
+  return call;
+}
+
 ExprPtr Parser::parsePostfix() {
   auto expr = parsePrimary();
   while (true) {
@@ -493,65 +724,47 @@ ExprPtr Parser::parsePostfix() {
       expr = std::move(unwrap);
       continue;
     }
+    if (check(Tok::Lt)) {
+      // Explicit call-site type arguments: `f<i64>(x)`, `obj.m<T>(x)`.
+      // The lookahead requires a well-formed type list followed by '(', so
+      // `a < b` and `a < b > (c)` still parse as comparisons when the
+      // '<...>' does not have call shape.
+      constexpr std::size_t npos = ~std::size_t{0};
+      if (scanCallTypeArgsEnd(pos_) == npos) break;
+      advance();  // '<'
+      std::vector<TypeExprPtr> typeArgs;
+      while (!check(Tok::Gt) && !check(Tok::Shr) && !check(Tok::Eof)) {
+        if (check(Tok::Int)) {
+          // Comptime type argument, e.g. the lane count in `f<vector[float, 4]>`.
+          const Token& lit = advance();
+          auto konst = std::make_unique<ConstTypeExpr>();
+          konst->span = lit.span;
+          konst->value = lit.intValue;
+          typeArgs.push_back(std::move(konst));
+        } else {
+          typeArgs.push_back(parseTypeExpr());
+        }
+        if (!match(Tok::Comma)) break;
+        if (check(Tok::Gt) || check(Tok::Shr)) break;  // trailing comma
+      }
+      if (typeArgs.empty()) {
+        fail(previousSpan(), "Expected a type argument in '<>'.",
+             "Write the type arguments explicitly, e.g. f<i64>(x).");
+      }
+      if (!matchTypeArgGt()) {
+        fail(cur().span,
+             "Expected '>' after the type arguments, found " +
+                 describeToken(cur()) + ".");
+      }
+      // The scan guaranteed '(' is next.
+      auto args = parseCallArgs();
+      expr = buildCallExpr(std::move(expr), std::move(args), std::move(typeArgs),
+                           previousSpan());
+      continue;
+    }
     if (check(Tok::LParen)) {
       auto args = parseCallArgs();
-      auto call = std::make_unique<CallExpr>();
-      call->span = Span::join(expr->span, previousSpan());
-      call->callee = std::move(expr);
-      call->args = std::move(args);
-      if (auto* nav = dynamic_cast<SafeNavExpr*>(call->callee.get())) {
-        // obj?.method(args) -> (obj == None) ? None : obj.method(args).
-        // The receiver is duplicated, so it must be a plain name.
-        if (dynamic_cast<IdentExpr*>(nav->object.get()) == nullptr) {
-          fail(nav->object->span,
-               "A method call through '?.' needs a plain-name receiver.",
-               "Bind the receiver to a name first, e.g. `r = expr`.");
-        }
-        auto receiver = std::move(nav->object);
-        std::string method = nav->field;
-        Span methodSpan = nav->fieldSpan;
-        Span wholeSpan = call->span;
-        // Condition: receiver == None
-        auto cmp = std::make_unique<BinaryExpr>();
-        cmp->span = wholeSpan;
-        cmp->op = "==";
-        cmp->binop = BinOp::Eq;
-        auto lhsIdent = std::make_unique<IdentExpr>();
-        lhsIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
-        lhsIdent->span = receiver->span;
-        cmp->lhs = std::move(lhsIdent);
-        auto noneIdent = std::make_unique<IdentExpr>();
-        noneIdent->name = "None";
-        noneIdent->span = wholeSpan;
-        cmp->rhs = std::move(noneIdent);
-        // Else branch: (!receiver).method(args) — the '!' unwraps the
-        // optional before dispatch. Reuse the parsed call.
-        auto field = std::make_unique<FieldExpr>();
-        field->span = wholeSpan;
-        auto unwrap = std::make_unique<UnaryExpr>();
-        unwrap->span = wholeSpan;
-        unwrap->op = "!";
-        unwrap->postfix = true;
-        auto unwrapIdent = std::make_unique<IdentExpr>();
-        unwrapIdent->name = static_cast<IdentExpr*>(receiver.get())->name;
-        unwrapIdent->span = receiver->span;
-        unwrap->operand = std::move(unwrapIdent);
-        field->object = std::move(unwrap);
-        field->field = method;
-        field->fieldSpan = methodSpan;
-        call->callee = std::move(field);
-        auto tern = std::make_unique<TernaryExpr>();
-        tern->span = wholeSpan;
-        tern->cond = std::move(cmp);
-        auto thenNone = std::make_unique<IdentExpr>();
-        thenNone->name = "None";
-        thenNone->span = wholeSpan;
-        tern->thenValue = std::move(thenNone);
-        tern->elseValue = std::move(call);
-        expr = std::move(tern);
-        continue;
-      }
-      expr = std::move(call);
+      expr = buildCallExpr(std::move(expr), std::move(args), {}, previousSpan());
       continue;
     }
      if (check(Tok::LBracket)) {

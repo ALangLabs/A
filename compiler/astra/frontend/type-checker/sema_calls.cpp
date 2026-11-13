@@ -127,18 +127,53 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     // Instantiate the stored signature for this object's type arguments so
     // each generic-class instantiation is checked independently (see the
     // memberMapping comment above). The method's own type parameters (those
-    // beyond the class's) get fresh vars per call, like generic functions.
+    // beyond the class's) get fresh vars per call, like generic functions —
+    // or the explicit `<T, ...>` arguments when the call supplies them.
     FnSig effective = methodIt->second;
+    const std::size_t structParamCount = structSym.typeParamVars.size();
+    const std::size_t ownParamCount =
+        effective.typeParamVars.size() > structParamCount
+            ? effective.typeParamVars.size() - structParamCount
+            : 0;
+    std::vector<TypePtr> explicitTypes;
+    if (!call.typeArgs.empty()) {
+      if (ownParamCount == 0) {
+        sink_.error(call.span,
+                    "Method '" + method + "' is not generic; it takes no "
+                    "type arguments.");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+        return typeError();
+      }
+      if (call.typeArgs.size() != ownParamCount) {
+        sink_.error(call.span,
+                    "Method '" + method + "' expects " +
+                        std::to_string(ownParamCount) +
+                        " type argument(s), found " +
+                        std::to_string(call.typeArgs.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+        return typeError();
+      }
+      explicitTypes.reserve(call.typeArgs.size());
+      for (auto& ta : call.typeArgs) explicitTypes.push_back(resolveTypeExpr(*ta));
+    }
     if (!effective.typeParamVars.empty()) {
       auto mapping = memberMapping();
-      for (std::size_t i = structSym.typeParamVars.size();
+      for (std::size_t i = structParamCount;
            i < effective.typeParamVars.size(); ++i) {
         TypePtr var = effective.typeParamVars[i];
-        TypePtr fresh = freshVar(var->constraint, var->varSpan,
-                                 var->varDescription.empty() ? "type parameter"
-                                                             : var->varDescription,
-                                 var->allowDefault);
-        fresh->allowUnresolved = var->allowUnresolved;
+        std::size_t own = i - structParamCount;
+        TypePtr fresh;
+        if (own < explicitTypes.size()) {
+          fresh = explicitTypes[own];
+        } else {
+          fresh = freshVar(var->constraint, var->varSpan,
+                           var->varDescription.empty() ? "type parameter"
+                                                       : var->varDescription,
+                           var->allowDefault);
+          fresh->allowUnresolved = var->allowUnresolved;
+        }
         mapping[var] = fresh;
       }
       std::vector<TypePtr> params;
@@ -191,6 +226,17 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
                       "in argument " + std::to_string(i + 1) + " to method '" + method + "'");
     }
     return sig.retType;
+  }
+
+  // Only generic struct methods accept explicit `<T, ...>` call-site type
+  // arguments; builtin container/string methods are not generic.
+  if (!call.typeArgs.empty()) {
+    sink_.error(call.span,
+                "Method '" + method + "' on type '" + typeName(object) +
+                    "' does not take type arguments.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+    return typeError();
   }
 
   if (object->kind == TypeKind::Array) {

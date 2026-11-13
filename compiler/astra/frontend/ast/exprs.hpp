@@ -80,6 +80,9 @@ struct CallExpr : Expr {
   CallExpr() : Expr(ExprKind::Call) {}
   ExprPtr callee;
   std::vector<CallArg> args;
+  // Explicit call-site type arguments: the `<T, ...>` in `f<i64>(x)` or
+  // `obj.method<T>(x)`. Empty when the call uses inferred type arguments.
+  std::vector<TypeExprPtr> typeArgs;
 
   // Resolved lazily by the interpreter. A plain identifier callee is fixed by
   // name resolution, so the classification (function, struct, or builtin) can

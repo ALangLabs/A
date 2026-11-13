@@ -29,6 +29,15 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   // print/eprint take *objects plus Python-style keyword options
   // (sep/end/file/flush); every other builtin stays positional-only.
 
+  if (!call.typeArgs.empty()) {
+    sink_.error(call.span,
+                "'" + name + "' is a builtin function and does not take type "
+                "arguments.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+    return typeError();
+  }
+
   if (name == "print" || name == "eprint") {
     return checkPrintCall(name, call);
   }
