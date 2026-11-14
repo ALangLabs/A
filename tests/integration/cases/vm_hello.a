@@ -1,2 +1,0 @@
-print("hello from vm")
-print(6 * 7)
