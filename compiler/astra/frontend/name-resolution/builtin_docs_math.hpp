@@ -58,6 +58,9 @@ inline void addMathDocs(StringMap<BuiltinDoc>& docs) {
       {"linalg_attention", {"linalg_attention", "linalg_attention(q, k, v, nk, dk, dv) -> [f64]",
                             "Fused single-query scaled dot-product attention: scores, stable softmax, weighted sum with no intermediate lists.",
                             "attention"}},
+      {"f32s", {"f32s", "f32s(data: String | Bytes, byte_offset: int, count: int) -> [f64]",
+                "Bulk-decodes count little-endian binary32 values starting at byte_offset; the fast path for binary weight files (safetensors).",
+                "matvec, read_bytes"}},
 
       {"sin", {"sin", "sin(x) -> f64", "Sine of x, in radians."}},
       {"cos", {"cos", "cos(x) -> f64", "Cosine of x, in radians."}},

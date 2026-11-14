@@ -1,0 +1,12 @@
+# f32s: bulk little-endian binary32 -> [f64] decode from Bytes/String.
+entry main():
+    # 1.0f = 00 00 80 3F, -2.5f = 00 00 20 C0, 0.5f = 00 00 00 3F (LE)
+    b = Bytes([0, 0, 128, 63, 0, 0, 32, 192, 0, 0, 0, 63])
+    print(f32s(b, 0, 3))
+    print(f32s(b, 4, 2))
+    print(len(f32s(b, 8, 0)))
+    # string input works too (read_file is binary-safe)
+    write_bytes("f32s_tmp.bin", [0, 0, 128, 63])
+    s = read_file("f32s_tmp.bin")
+    print(f32s(s, 0, 1))
+    remove_file("f32s_tmp.bin")

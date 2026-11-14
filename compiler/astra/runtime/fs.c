@@ -3,9 +3,32 @@
 static char *read_all_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) panicf("cannot read file '%s'", path);
+    /* Regular files: take the size from fseek/ftell and do one allocation
+       plus (usually) one read. The old doubling-realloc loop re-copied the
+       whole buffer on every growth step — ~6x slower on hundred-MB files. */
     size_t cap = 4096, len = 0;
-    char *buf = (char *)xmalloc(cap + 1);
-    for (;;) {
+    char *buf = NULL;
+    int done = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            cap = (size_t)sz;
+            buf = (char *)xmalloc(cap + 1);
+            len = fread(buf, 1, cap, f);
+            if (len < cap) {
+                done = 1;   /* fread only stops short at EOF or error */
+            } else {
+                /* Exact fit is ambiguous: probe once so a file that ends
+                   exactly at `cap` does not trigger a pointless 2x realloc
+                   plus a final EOF fread. */
+                int c = fgetc(f);
+                if (c == EOF) done = 1;
+                else ungetc(c, f);
+            }
+        }
+    }
+    if (!buf) buf = (char *)xmalloc(cap + 1);   /* non-seekable stream */
+    while (!done) {
         if (len == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap + 1); }
         size_t r = fread(buf + len, 1, cap - len, f);
         len += r;
@@ -25,6 +48,49 @@ const char *path_arg(aval v, const char *what) {
 aval bi_read_file(uint64_t n, aval *argv) {
     want_args("read_file", n, 1, 1);
     const char *path = path_arg(argv[0], "path");
+    /* Fast path: a seekable file of known size is read straight into the
+       string's own storage — no intermediate buffer and no second copy.
+       This is what makes multi-hundred-MB reads (model weights, etc.)
+       practical. Anything unusual falls back to read_all_file. */
+    FILE *f = fopen(path, "rb");
+    if (!f) panicf("cannot read file '%s'", path);
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && (uint64_t)sz <= UINT32_MAX &&
+            fseek(f, 0, SEEK_SET) == 0) {
+            aval s = a_str_new_uninit((uint64_t)sz);
+            AStr *as = (AStr *)obj_of(s);
+            size_t got = fread(as->data, 1, (size_t)sz, f);
+            if (!ferror(f) && got == (size_t)sz) {
+                int c = fgetc(f);
+                if (c == EOF) { fclose(f); return s; }
+                ungetc(c, f);
+                /* File grew past ftell: keep the string and concat the
+                   tail (rope concat is lazy — no copy unless read). */
+                size_t tcap = 4096, tlen = 0;
+                char *tbuf = (char *)xmalloc(tcap + 1);
+                for (;;) {
+                    if (tlen == tcap) { tcap *= 2; tbuf = (char *)xrealloc(tbuf, tcap + 1); }
+                    size_t r = fread(tbuf + tlen, 1, tcap - tlen, f);
+                    tlen += r;
+                    if (r == 0) break;
+                }
+                int ferr = ferror(f);
+                fclose(f);
+                if (ferr) { free(tbuf); panicf("cannot read file '%s'", path); }
+                tbuf[tlen] = '\0';
+                aval tail = a_str_new(tbuf, (uint64_t)tlen);
+                free(tbuf);
+                return a_str_cat(s, tail);
+            }
+            /* Short read or error: discard and use the generic path. */
+            fclose(f);
+        } else {
+            fclose(f);
+        }
+    } else {
+        fclose(f);
+    }
     size_t len;
     char *data = read_all_file(path, &len);
     aval r = a_str_new(data, (uint64_t)len);

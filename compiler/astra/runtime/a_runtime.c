@@ -158,7 +158,8 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "os_getpagesize", os_getpagesize }, { "os_chown", os_chown },
     { "os_ismount", os_ismount }, { "os_disk_usage", os_disk_usage },
     { "os_popen", os_popen }, { "os_kill", os_kill }, { "os_exit", os_exit },
-    { "divmod", bi_divmod }
+    { "divmod", bi_divmod },
+    { "f32s", bi_f32s }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

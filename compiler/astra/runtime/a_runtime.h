@@ -203,6 +203,8 @@ enum {
     A_BI_OS_DISK_USAGE, A_BI_OS_POPEN, A_BI_OS_KILL, A_BI_OS_EXIT,
     /* Python-parity builtin (appended so existing ids stay stable) */
     A_BI_DIVMOD,
+    /* bulk little-endian f32 -> [f64] decode (appended; ids stay stable) */
+    A_BI_F32S,
     A_BI_COUNT
 };
 
