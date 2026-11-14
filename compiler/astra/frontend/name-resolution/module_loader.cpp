@@ -16,13 +16,9 @@ namespace a {
 namespace fs = std::filesystem;
 namespace {
 
-// Build the candidate file paths for a module stem, trying the canonical
-// `.astra` extension first and the legacy `.a` extension second, so old
-// sources keep resolving while new code uses `.astra`.
+// Build the candidate file paths for a module stem.
 void addSourceExtCandidates(std::vector<fs::path>& out, const fs::path& base) {
-  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
-    out.push_back(base.parent_path() / (base.filename().string() + "." + ext));
-  }
+  out.push_back(base.parent_path() / (base.filename().string() + "." + kSourceExt));
 }
 
 std::string readFile(const std::string& path) {
@@ -77,7 +73,7 @@ std::string defaultStdlibRoot() {
     if (!ec) {
       std::vector<fs::path> found;
       for (fs::path up = cwd; !up.empty(); up = up.parent_path()) { found.push_back(up / "stdlib"); if (up == up.parent_path()) break; }
-      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / (std::string("prelude.") + kSourceExt), e2) || fs::exists(f / "std" / (std::string("prelude.") + kLegacySourceExt), e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
+      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / (std::string("prelude.") + kSourceExt), e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
       for (const auto& f : found) candidates.push_back(f);
     }
   }
@@ -132,9 +128,7 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
   std::error_code exists;
   const fs::path stdRoot = fs::path(options_.stdlibRoot);
   for (const auto& candidate : {stdRoot / "std" / (std::string("prelude.") + kSourceExt),
-                                stdRoot / (std::string("prelude.") + kSourceExt),
-                                stdRoot / "std" / (std::string("prelude.") + kLegacySourceExt),
-                                stdRoot / (std::string("prelude.") + kLegacySourceExt)}) {
+                                stdRoot / (std::string("prelude.") + kSourceExt)}) {
     if (fs::exists(candidate, exists)) {
       graph_.preludeId = loadModule(candidate.string(), candidate.string(), nullptr);
       break;

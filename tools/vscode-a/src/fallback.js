@@ -239,7 +239,7 @@ function createFallbackController(env) {
         if (fallback || env.isDisposed()) return;
         output.appendLine('> a-lsp is not in use (missing, disabled by a.useLanguageServer, or workspace untrusted).');
         output.appendLine('> Using compiler check-on-save plus lexical/curated stdlib completion and hover fallback.');
-        const watcher = vscode.workspace.createFileSystemWatcher('**/*.{a,astra}');
+        const watcher = vscode.workspace.createFileSystemWatcher('**/*.astra');
         const declCache = new Map();
         async function fileInfo(uri) {
             const key = uri.toString();
@@ -306,7 +306,7 @@ function createFallbackController(env) {
                     }
                     const local = declarations(document.getText()).filter(decl => decl.name === name);
                     if (local.length) return local.map(decl => nameLocation(document, decl));
-                    const files = await vscode.workspace.findFiles('**/*.{a,astra}', '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}');
+                    const files = await vscode.workspace.findFiles('**/*.astra', '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}');
                     const locations = [];
                     for (const uri of files) {
                         if (token.isCancellationRequested || locations.length >= 50) return locations.length ? locations : null;

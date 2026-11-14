@@ -2,8 +2,7 @@
 # without an override it falls back to content heuristics and reports them
 # as C. Linguist only resolves linguist-language to languages in its
 # languages.yml (custom names are not supported), so "A" is not a valid
-# value. Until A is added to Linguist upstream, mark .astra/.a files with an
+# value. Until A is added to Linguist upstream, mark .astra files with an
 # unknown language name: they are then excluded from the language stats
 # instead of being misreported. Remove this line once Linguist ships "A".
 *.astra linguist-language=A
-*.a linguist-language=A

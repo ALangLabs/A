@@ -71,8 +71,7 @@
           "light": "./fileicons/a-dark.png"
         },
         "extensions": [
-          ".astra",
-          ".a"
+          ".astra"
         ],
         "configuration": "./language-configuration.json"
       }

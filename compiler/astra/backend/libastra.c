@@ -1202,20 +1202,10 @@ static int guess_filetype(const char *filename)
                 filetype = AFF_TYPE_ASMPP;
             else if (!strcmp(ext, "s"))
                 filetype = AFF_TYPE_ASM;
-            else if (!strcmp(ext, "astra") || !strcmp(ext, "a")) {
-                /* ".astra"/".a" is also the Unix archive extension: sniff for the
-                   archive magic before treating it as A source. */
-                FILE *f = astra_fopen(filename, "rb");
-                char magic[8] = {0};
-                int is_archive = 0;
-                if (f) {
-                    if (fread(magic, 1, 8, f) == 8 && !memcmp(magic, "!<arch>\n", 8))
-                        is_archive = 1;
-                    fclose(f);
-                }
-                /* .astra/.a files are A source; they are compiled via the C++
+            else if (!strcmp(ext, "astra")) {
+                /* .astra files are A source; they are compiled via the C++
                    frontend (compiler/astra/frontend/codegen), which emits C
-                   for astra. A bare .astra/.a here is not a C input. */
+                   for astra. A bare .astra here is not a C input. */
                 filetype = AFF_TYPE_BIN;
             }
             else if (!PATHCMP(ext, "c")

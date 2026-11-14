@@ -38,12 +38,9 @@ namespace a {
 namespace {
 constexpr int kOk=0,kCErr=1,kNoIn=66;
 
-// Append candidate source paths trying the canonical `.astra` extension first,
-// then the legacy `.a` extension, so old and new module files both resolve.
+// Append the candidate source path for a module base.
 void appendSourceExtCandidates(std::vector<std::string>& out, const std::filesystem::path& base) {
-  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
-    out.push_back((base.parent_path() / (base.filename().string() + "." + ext)).string());
-  }
+  out.push_back((base.parent_path() / (base.filename().string() + "." + kSourceExt)).string());
 }
 bool flushErrors(DiagnosticSink& s,const PipelineConfig& c,std::ostream& o,std::ostream& e){
   if(!s.hasErrors()) return true;
@@ -860,8 +857,7 @@ inline std::string precheckKey(const std::string& path,
     const std::filesystem::path root(ps.stdRoot);
     bool found = false;
     for (const std::filesystem::path& cand :
-         {root / "std" / (std::string("prelude.") + kSourceExt), root / (std::string("prelude.") + kSourceExt),
-          root / "std" / (std::string("prelude.") + kLegacySourceExt), root / (std::string("prelude.") + kLegacySourceExt)}) {
+         {root / "std" / (std::string("prelude.") + kSourceExt), root / (std::string("prelude.") + kSourceExt)}) {
       std::error_code ec;
       if (std::filesystem::is_regular_file(cand, ec) && !ec) {
         preVisitor(ps, cand.string());
@@ -1940,7 +1936,7 @@ std::vector<std::filesystem::path> discoverTestFiles(const std::filesystem::path
     if(ec){ ec.clear(); continue; }
     if(!entry.is_regular_file(ec)){ ec.clear(); continue; }
     const auto& p=entry.path();
-    if((p.extension()=="."+std::string(kSourceExt) || p.extension()=="."+std::string(kLegacySourceExt)) && fileHasTestDecl(p)) out.push_back(p);
+    if(p.extension()=="."+std::string(kSourceExt) && fileHasTestDecl(p)) out.push_back(p);
   }
   std::sort(out.begin(), out.end());
   return out;

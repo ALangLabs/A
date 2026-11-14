@@ -94,9 +94,7 @@ std::string findReplMain(const DriverConfig& c){
   roots.push_back(".");
   for(const auto& r:roots){
     const std::string ext = std::string(kSourceExt);
-    const std::string legacy = std::string(kLegacySourceExt);
-    const std::vector<std::string> replRels = {"/std/repl/main."+ext,"/repl/main."+ext,
-                                              "/std/repl/main."+legacy,"/repl/main."+legacy};
+    const std::vector<std::string> replRels = {"/std/repl/main."+ext,"/repl/main."+ext};
     for(const auto& rel: replRels){
       std::string p=r+rel; std::error_code ec;
       if(std::filesystem::exists(p,ec)) return p;
