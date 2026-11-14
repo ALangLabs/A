@@ -371,21 +371,31 @@ function registerProviders(getClient) {
         vscode.languages.registerInlayHintsProvider(selector, {
             async provideInlayHints(document, range, token) {
                 const a = client(); if (!a) return null;
+                const config = vscode.workspace.getConfiguration('a', document.uri);
+                if (!config.get('inlayHints.enabled', false)) return [];
+                const wantTypes = config.get('inlayHints.types', false);
+                const wantParams = config.get('inlayHints.parameters', false);
+                if (!wantTypes && !wantParams) return [];
                 const r = await a.request('textDocument/inlayHint', {
                     textDocument: { uri: document.uri.toString() },
                     range: lspRange(range),
                 }, token);
                 if (!Array.isArray(r)) return null;
-                return r.map(e => {
+                const hints = [];
+                for (const e of r) {
+                    // LSP InlayHintKind: 1 = Type, 2 = Parameter.
+                    if (e.kind === 1 && !wantTypes) continue;
+                    if (e.kind === 2 && !wantParams) continue;
                     const h = new vscode.InlayHint(
                         new vscode.Position(e.position.line, e.position.character),
                         e.label,
                         e.kind === 1 ? vscode.InlayHintKind.Type : e.kind === 2 ? vscode.InlayHintKind.Parameter : undefined);
-                    h.paddingLeft = Boolean(e.paddingLeft);
+                    h.paddingLeft = true;
                     h.paddingRight = Boolean(e.paddingRight);
                     if (e.tooltip) h.tooltip = typeof e.tooltip === 'string' ? e.tooltip : e.tooltip.value;
-                    return h;
-                });
+                    hints.push(h);
+                }
+                return hints;
             }
         }),
         ...registerSemanticTokens(vscode.languages, selector, getClient),

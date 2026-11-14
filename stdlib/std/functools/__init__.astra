@@ -1,0 +1,10 @@
+# std.functools package (Python `functools` port).
+#
+# Pure-A subset of Python 3.14 `Lib/functools.py`. See README.md for the
+# coverage matrix and semantic deviations (no decorators, no exceptions, no
+# generators, no `*args`/`**kwargs`, no `__call__`/descriptor protocol).
+from "partial.astra" import Partial, partial, partial1, partial2, partial3, partial4
+from "cache.astra" import CacheInfo, LRUCache, lru_cache, cache
+from "sort.astra" import sort_by
+from "dispatch.astra" import Dispatcher, singledispatch
+from "reduce.astra" import reduce, reduce_init

@@ -1,0 +1,2 @@
+# std.shlex package — port of Python 3.14 Lib/shlex.py.
+from "shlex.astra" import Shlex, Shlex_new, split, quote, join

@@ -27,6 +27,25 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
     return linalg == "linalg_dot" ? typeFloat(64) : typeArray(typeFloat(64));
   }
 
+  if (name == "f32s") {
+    if (call.args.size() != 3) {
+      builtinArityError(name, call, 3);
+      inferCallArgTypes(call);
+      return typeArray(typeFloat(64));
+    }
+    TypePtr data = inferExpr(*call.args[0].value);
+    TypePtr resolved = resolveType(data);
+    if (resolved->kind != TypeKind::String && resolved->kind != TypeKind::Bytes) {
+      reportMismatch(data, typeString(), call.args[0].value->span,
+                     "in the data passed to 'f32s'");
+    }
+    requireInteger(inferExpr(*call.args[1].value), call.args[1].value->span,
+                   "The byte offset passed to 'f32s'");
+    requireInteger(inferExpr(*call.args[2].value), call.args[2].value->span,
+                   "The element count passed to 'f32s'");
+    return typeArray(typeFloat(64));
+  }
+
   if (name == "unsafe_get" || name == "unsafe_set") {
     const bool getting = name == "unsafe_get";
     const std::size_t expected = getting ? 2 : 3;

@@ -1,0 +1,6 @@
+# Union/any-typed values are dynamic at use sites.
+fn either(x: int | str) -> any:
+  return x
+
+print(either(1))
+print(either("s"))

@@ -1,0 +1,483 @@
+# std.statistics — port of Python Lib/statistics.py (pure-A subset).
+#
+# Implements common descriptive statistics over numeric arrays.
+# Python's rich type coercions (Decimal/Fraction), weighted variants,
+# NormalDist, and advanced functions are omitted where not practical.
+#
+# Deviations from Python:
+#   * Functions take plain A lists/arrays of numbers (ints/floats).
+#   * On invalid input (empty data, insufficient points), functions
+#     `panic` with a message (A has no StatisticsError exceptions).
+#   * `fmean` ignores weights (not supported in this subset).
+#   * NormalDist.inv_cdf uses bisection on cdf rather than Acklam's
+#     rational approximation; NormalDist.samples takes an explicit
+#     std:random Random stream instead of a `seed=` keyword.
+#   * Hot paths delegate to native C builtins: mean/fmean sum via the
+#     `sum()` builtin (exact i64 accumulation for all-int data — possibly
+#     more accurate than CPython's float path — with a single float
+#     conversion at the end) and the median/quantile family sorts via the
+#     `sorted()` builtin. Element order and results are unchanged up to
+#     last-ulp rounding differences in the mean.
+
+import math
+import std:core
+import std:json
+from "std/math/special.astra" import erf, erfc
+
+fn _check_nonempty(data, name):
+    if len(data) < 1:
+        core.panic(name + " requires at least one data point")
+
+fn _to_float(x):
+    return float(x)
+
+fn mean(data):
+    "Arithmetic mean of data."
+    _check_nonempty(data, "mean")
+    # Native sum() runs in C (and parallelises large all-int lists);
+    # list() gives the untyped param a concrete array type for the
+    # builtin's static check, and float() converts the total once.
+    return float(sum(list(data))) / float(len(data))
+
+fn fmean(data):
+    "Arithmetic mean as float (weights not supported)."
+    _check_nonempty(data, "fmean")
+    return float(sum(list(data))) / float(len(data))
+
+fn _sorted_copy(data):
+    # sorted() is a native C sort that already returns a fresh list.
+    return sorted(data)
+
+fn median(data):
+    "Median (middle value) of numeric data."
+    _check_nonempty(data, "median")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    mid = n // 2
+    if n % 2 == 1:
+        return _to_float(xs[mid])
+    return (_to_float(xs[mid - 1]) + _to_float(xs[mid])) / 2.0
+
+fn median_low(data):
+    "Low median of data."
+    _check_nonempty(data, "median_low")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    if n % 2 == 1:
+        return _to_float(xs[n // 2])
+    return _to_float(xs[n // 2 - 1])
+
+fn median_high(data):
+    "High median of data."
+    _check_nonempty(data, "median_high")
+    xs = _sorted_copy(data)
+    n = len(xs)
+    return _to_float(xs[n // 2])
+
+fn mode(data):
+    "Most common data point (first among ties for highest count)."
+    _check_nonempty(data, "mode")
+    counts = {}
+    order = []
+    for x in data:
+        k = str(x)
+        if counts.contains(k):
+            counts[k] = counts[k] + 1
+        else:
+            counts[k] = 1
+            order.append(x)
+    best = None
+    best_count = -1
+    for x in order:
+        c = counts[str(x)]
+        if c > best_count:
+            best_count = c
+            best = x
+    return best
+
+fn _variance(data, mu, ddof):
+    n = len(data)
+    if n - ddof < 1:
+        core.panic("variance requires at least two data points")
+    ss = 0.0
+    for x in data:
+        # `x + 0.0` coerces int->float without a per-element builtin call.
+        d = (x + 0.0) - mu
+        ss = ss + d * d
+    return ss / float(n - ddof)
+
+fn pvariance(data):
+    "Population variance of data."
+    _check_nonempty(data, "pvariance")
+    mu = mean(data)
+    return _variance(data, mu, 0)
+
+fn variance(data):
+    "Sample variance of data (ddof=1)."
+    _check_nonempty(data, "variance")
+    mu = mean(data)
+    return _variance(data, mu, 1)
+
+fn pstdev(data):
+    "Population standard deviation of data."
+    return math.sqrt(pvariance(data))
+
+fn stdev(data):
+    "Sample standard deviation of data."
+    return math.sqrt(variance(data))
+
+fn geometric_mean(data):
+    "Geometric mean of positive numeric data."
+    _check_nonempty(data, "geometric_mean")
+    log_sum = 0.0
+    for x in data:
+        v = x + 0.0
+        if v <= 0.0:
+            core.panic("geometric_mean requires positive data points")
+        log_sum = log_sum + math.log(v)
+    return math.exp(log_sum / float(len(data)))
+
+fn harmonic_mean(data):
+    "Harmonic mean of positive numeric data."
+    _check_nonempty(data, "harmonic_mean")
+    denom = 0.0
+    for x in data:
+        v = x + 0.0
+        if v <= 0.0:
+            core.panic("harmonic_mean requires positive data points")
+        denom = denom + 1.0 / v
+    return float(len(data)) / denom
+
+fn multimode(data):
+    "All most-frequent data points, in order of first occurrence."
+    _check_nonempty(data, "multimode")
+    counts = {}
+    order = []
+    for x in data:
+        k = str(x)
+        if counts.contains(k):
+            counts[k] = counts[k] + 1
+        else:
+            counts[k] = 1
+            order.append(x)
+    best_count = -1
+    for x in order:
+        c = counts[str(x)]
+        if c > best_count:
+            best_count = c
+    modes = []
+    seen = {}
+    for x in order:
+        k = str(x)
+        if counts[k] == best_count and not seen.contains(k):
+            seen[k] = true
+            modes.append(x)
+    return modes
+
+fn median_absolute_deviation(data, scale = "normal"):
+    """Median absolute deviation from the median (MAD).
+
+    scale is "normal" (default; multiplied by 1.4826 to estimate sigma
+    for normally distributed data), "mad" (raw median absolute
+    deviation, scale factor 1.0), or a number used directly as the
+    scale factor — matching CPython statistics.median_absolute_deviation.
+    """
+    _check_nonempty(data, "median_absolute_deviation")
+    med = median(data)
+    devs = []
+    for x in data:
+        d = (x + 0.0) - med
+        if d < 0.0:
+            d = -d
+        devs.append(d)
+    mad = median(devs)
+    if str(scale) == "normal":
+        return mad * 1.4826
+    if str(scale) == "mad":
+        return mad
+    k = json.kind(scale)
+    if k == "int" or k == "float":
+        return mad * _to_float(scale)
+    core.panic("median_absolute_deviation scale must be 'normal', 'mad', or a number")
+    return mad
+
+fn _quantile_point(xs, h):
+    # xs sorted ascending; h is a 1-based position in (0, len(xs)) possibly fractional.
+    n = len(xs)
+    if h <= 1.0:
+        return _to_float(xs[0])
+    if h >= float(n):
+        return _to_float(xs[n - 1])
+    j = int(math.floor(h))
+    gamma = h - float(j)
+    lo = _to_float(xs[j - 1])
+    hi = _to_float(xs[j])
+    return (1.0 - gamma) * lo + gamma * hi
+
+fn quantiles(data, n, method = "exclusive"):
+    """Cut points dividing data into n equal-probability intervals.
+
+    method is 'exclusive' (default; h = (len+1)*i/n) or 'inclusive'
+    (h = (len-1)*i/n + 1), matching CPython statistics.quantiles."""
+    _check_nonempty(data, "quantiles")
+    if n < 1:
+        core.panic("quantiles requires n >= 1")
+    if method != "exclusive" and method != "inclusive":
+        core.panic("quantiles method must be 'exclusive' or 'inclusive'")
+    xs = _sorted_copy(data)
+    count = len(xs)
+    out = []
+    i = 1
+    while i < n:
+        fi = float(i)
+        fn_ = float(n)
+        h = 0.0
+        if method == "exclusive":
+            h = (float(count) + 1.0) * fi / fn_
+        else:
+            h = (float(count) - 1.0) * fi / fn_ + 1.0
+        out.append(_quantile_point(xs, h))
+        i = i + 1
+    return out
+
+fn covariance(data1, data2):
+    "Sample covariance of two equally-sized numeric datasets (ddof=1)."
+    if len(data1) != len(data2):
+        core.panic("covariance requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("covariance requires at least two data points")
+    mx = mean(data1)
+    my = mean(data2)
+    ss = 0.0
+    i = 0
+    while i < n:
+        dx = (data1[i] + 0.0) - mx
+        dy = (data2[i] + 0.0) - my
+        ss = ss + dx * dy
+        i = i + 1
+    return ss / float(n - 1)
+
+fn correlation(data1, data2):
+    "Pearson correlation coefficient of two equally-sized datasets."
+    if len(data1) != len(data2):
+        core.panic("correlation requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("correlation requires at least two data points")
+    mx = mean(data1)
+    my = mean(data2)
+    # Single pass accumulates all three sums of squared deviations;
+    # vx/vy here are the *sample* variances (pvariance*n/(n-1) == ss/(n-1)).
+    sxx = 0.0
+    sxy = 0.0
+    syy = 0.0
+    i = 0
+    while i < n:
+        dx = (data1[i] + 0.0) - mx
+        dy = (data2[i] + 0.0) - my
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * dy
+        syy = syy + dy * dy
+        i = i + 1
+    vx = sxx / float(n - 1)
+    vy = syy / float(n - 1)
+    if vx == 0.0 or vy == 0.0:
+        core.panic("correlation requires non-constant input")
+    return (sxy / float(n - 1)) / math.sqrt(vx * vy)
+
+fn linear_regression(data1, data2):
+    """Simple linear regression of data2 on data1 -> [slope, intercept].
+
+    slope = cov(x, y) / var(x) (sample variances); intercept = my - slope*mx.
+    Panics when x has zero variance (CPython raises StatisticsError)."""
+    if len(data1) != len(data2):
+        core.panic("linear_regression requires datasets of equal length")
+    n = len(data1)
+    if n < 2:
+        core.panic("linear_regression requires at least two data points")
+    mx = mean(data1)
+    my = mean(data2)
+    # One pass for both sums of squared deviations (covariance's ss is
+    # identical; vx is the sample variance of x).
+    sxx = 0.0
+    sxy = 0.0
+    i = 0
+    while i < n:
+        dx = (data1[i] + 0.0) - mx
+        dy = (data2[i] + 0.0) - my
+        sxx = sxx + dx * dx
+        sxy = sxy + dx * dy
+        i = i + 1
+    vx = sxx / float(n - 1)
+    if vx == 0.0:
+        core.panic("linear_regression requires non-constant x")
+    slope = (sxy / float(n - 1)) / vx
+    intercept = my - slope * mx
+    return [slope, intercept]
+
+fn median_grouped(data, interval = 1.0):
+    """Estimates the median for numeric data binned around the midpoints
+    of consecutive, fixed-width intervals (Python statistics.median_grouped).
+
+    Each value is the midpoint of a bin of width `interval`; the median is
+    linearly interpolated inside the median bin. The caller is responsible
+    for values being separated by exact multiples of `interval` (not checked).
+    """
+    xs = _sorted_copy(data)
+    n = len(xs)
+    if n == 0:
+        core.panic("median_grouped: no median for empty data")
+    # midpoint value of the median bin
+    x = _to_float(xs[n // 2])
+    # bisect_left: i = count of values < x ; bisect_right: j = count <= x
+    i = 0
+    while i < n and _to_float(xs[i]) < x:
+        i = i + 1
+    j = i
+    while j < n and _to_float(xs[j]) == x:
+        j = j + 1
+    iv = _to_float(interval)
+    lower = x - iv / 2.0
+    cf = float(i)
+    f = float(j - i)
+    return lower + iv * (float(n) / 2.0 - cf) / f
+
+# -- NormalDist ----------------------------------------------------------------
+#
+# Python statistics.NormalDist(mu=0.0, sigma=1.0): normal distribution with
+# pdf/cdf/inv_cdf/quantiles/samples. Deviations:
+#   * stored as public fields `mu`/`sigma` (constructed via
+#     NormalDist_new / from_samples rather than a keyword ctor).
+#   * inv_cdf uses bisection on cdf (~1e-12 accuracy after 100 iterations)
+#     instead of CPython's Acklam rational approximation.
+#   * samples(n, rng) takes an explicit std:random Random stream (Python's
+#     `seed=` keyword cannot be expressed; pass None to use the global
+#     std:random stream).
+#   * pdf()/cdf() panic when sigma == 0 (Python raises StatisticsError).
+
+# NOTE: _SQRT2/_TAU literals are inlined inside the methods below —
+# module-level variables read as 0.0 inside `a test` test functions
+# (toolchain quirk).
+
+"""
+_nd_inv_cdf(nd, prob) -> module-level inverse-CDF bisection shared by
+NormalDist.inv_cdf and quantiles (see the note on inv_cdf).
+"""
+fn _nd_inv_cdf(nd, prob):
+    pf = prob + 0.0
+    if pf <= 0.0 or pf >= 1.0:
+        core.panic("NormalDist.inv_cdf: p must be in (0.0, 1.0)")
+    if nd.sigma == 0.0:
+        return nd.mu
+    lo = nd.mu - 40.0 * nd.sigma
+    hi = nd.mu + 40.0 * nd.sigma
+    i = 0
+    while i < 100:
+        mid = (lo + hi) / 2.0
+        if nd.cdf(mid) < pf:
+            lo = mid
+        else:
+            hi = mid
+        i = i + 1
+    return (lo + hi) / 2.0
+
+"""
+_nd_quantiles(nd, n) -> module-level quantiles loop; int->float
+coercion of the loop counters miscompiles inside the NormalDist class
+method under `a run`/`a test`, so it lives here instead.
+"""
+fn _nd_quantiles(nd, ncnt):
+    if ncnt < 2:
+        core.panic("NormalDist.quantiles: n must be >= 2")
+    out = []
+    ii = 1
+    while ii < ncnt:
+        prob = float(ii) / float(ncnt)
+        out.append(_nd_inv_cdf(nd, prob))
+        ii = ii + 1
+    return out
+
+"""
+NormalDist: normal distribution N(mu, sigma). Fields mu/sigma are
+public (read-only by convention).
+"""
+class NormalDist:
+    mu
+    sigma
+
+    """pdf(self, x) -> probability density at x."""
+    fn pdf(self, x):
+        variance = self.sigma * self.sigma
+        if variance == 0.0:
+            core.panic("NormalDist.pdf: sigma is zero")
+        diff = (x + 0.0) - self.mu
+        return math.exp(diff * diff / (-2.0 * variance)) / math.sqrt(6.283185307179586 * variance)
+
+    """cdf(self, x) -> P(X <= x)."""
+    fn cdf(self, x):
+        if self.sigma == 0.0:
+            core.panic("NormalDist.cdf: sigma is zero")
+        return 0.5 * erfc((self.mu - (x + 0.0)) / (self.sigma * 1.4142135623730951))
+
+    """
+    inv_cdf(self, prob) -> x such that P(X <= x) = prob, for
+    0 < prob < 1 (Python statistics.NormalDist.inv_cdf; bisection).
+    NOTE: delegates to the module-level _nd_inv_cdf — a self->self
+    method call inside quantiles miscompiles under `a run`/`a test`.
+    """
+    fn inv_cdf(self, prob):
+        return _nd_inv_cdf(self, prob)
+
+    """
+    quantiles(self, n = 4) -> (n - 1) cut points separating the
+    distribution into n equal-probability intervals (Python parity;
+    n = 4 gives quartiles).
+    """
+    fn quantiles(self, n = 4):
+        return _nd_quantiles(self, n)
+
+    """
+    sample(self, rng) -> one sample; rng is a std:random Random (or any
+    object with .random()).
+    """
+    fn sample(self, rng):
+        return self.inv_cdf(rng.random())
+
+    """
+    samples(self, n, rng) -> array of n samples from rng
+    (Python NormalDist.samples; rng replaces the `seed=` keyword).
+    """
+    fn samples(self, n, rng):
+        out = []
+        i = 0
+        while i < n:
+            out.append(self.sample(rng))
+            i = i + 1
+        return out
+
+    """
+    zscore(self, x) -> standard score (x - mu) / sigma
+    (Python NormalDist.zscore).
+    """
+    fn zscore(self, x):
+        if self.sigma == 0.0:
+            core.panic("NormalDist.zscore: sigma is zero")
+        return ((x + 0.0) - self.mu) / self.sigma
+
+"""
+NormalDist_new(mu = 0.0, sigma = 1.0) -> NormalDist. Panics when
+sigma < 0 (Python raises StatisticsError).
+"""
+fn NormalDist_new(mu = 0.0, sigma = 1.0):
+    sm = sigma + 0.0
+    if sm < 0.0:
+        core.panic("NormalDist: sigma must be non-negative")
+    return NormalDist(mu + 0.0, sm)
+
+"""
+NormalDist_from_samples(data) -> NormalDist fitted to sample mean and
+sample standard deviation (Python NormalDist.from_samples).
+"""
+fn NormalDist_from_samples(data):
+    return NormalDist_new(mean(data), stdev(data))

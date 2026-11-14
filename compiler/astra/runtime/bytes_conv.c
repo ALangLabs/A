@@ -48,55 +48,36 @@ int a_utf8_valid(const char *p, uint64_t len) {
     return 1;
 }
 
-static char *conv_bytes_in(aval v, uint64_t *out_len, int *bad) {
-    AArr *a = (AArr *)obj_of(v);
-    *bad = 0;
-    *out_len = 0;
-    if (!a) return NULL;
-    uint64_t n = a->h.len;
-    char *buf = (char *)xmalloc(n ? n : 1);
-    if (arr_packed(a)) {
-        /* Socket reads hand back packed int64 storage; unpacking it into
-           1M tagged values first would double the cost of every decode. */
-        for (uint64_t i = 0; i < n; ++i) {
-            int64_t b = a->iitems[i];
-            if (b < 0 || b > 255) {
-                free(buf);
-                *bad = 1;
-                return NULL;
-            }
-            buf[i] = (char)b;
-        }
-        *out_len = n;
-        return buf;
-    }
-    arr_ensure_aval(a);
-    for (uint64_t i = 0; i < n; ++i) {
-        int64_t b = expect_int64(a->items[i], "a byte value");
-        if (b < 0 || b > 255) {
-            free(buf);
-            *bad = 1;
-            return NULL;
-        }
-        buf[i] = (char)b;
-    }
-    *out_len = n;
-    return buf;
-}
-
 aval bi_bytes_decode_utf8(uint64_t n, aval *argv) {
     want_args("bytes_decode_utf8", n, 1, 1);
     if (a_bytes_is(argv[0])) return a_bytes_to_str(argv[0]);
-    uint64_t len = 0;
-    int bad = 0;
-    char *raw = conv_bytes_in(argv[0], &len, &bad);
-    if (bad) return A_NONE;
-    if (!raw) return a_str_new("", 0);
-
-    int ok = a_utf8_valid(raw, len);
-    aval out = ok ? a_str_new(raw, len) : A_NONE;
-    free(raw);
-    return out;
+    AArr *a = (AArr *)obj_of(argv[0]);
+    if (!a) return a_str_new("", 0);
+    uint64_t len = a->h.len;
+    /* Unpack straight into the result string: the old path malloc'd a raw
+       buffer, filled it from the [i64] array, validated it, then memcpy'd
+       into the AStr and freed — three passes and two allocations. Values
+       outside 0..255 are not bytes; report that through A_NONE exactly
+       like the pure-A version does instead of silently masking bits. */
+    aval outv = a_str_new_uninit(len);
+    uint64_t olen = 0;
+    char *dst = str_mut_data(outv, &olen);
+    if (arr_packed(a)) {
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t b = a->iitems[i];
+            if (b < 0 || b > 255) return A_NONE;
+            dst[i] = (char)b;
+        }
+    } else {
+        arr_ensure_aval(a);
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t b = expect_int64(a->items[i], "a byte value");
+            if (b < 0 || b > 255) return A_NONE;
+            dst[i] = (char)b;
+        }
+    }
+    if (!a_utf8_valid(dst, len)) return A_NONE;
+    return outv;
 }
 
 aval bi_str_encode_utf8(uint64_t n, aval *argv) {
@@ -105,11 +86,12 @@ aval bi_str_encode_utf8(uint64_t n, aval *argv) {
     const char *p = str_data(argv[0], &len);
     if (!p) p = "";
     /* the string is already UTF-8, so its bytes are the answer; copying keeps
-       the A value independent of the string object's lifetime */
-    aval *items = (aval *)xmalloc((len ? len : 1) * sizeof(aval));
+       the A value independent of the string object's lifetime. Build the
+       packed int64 list directly: the old path tagged every byte into an
+       aval array and then memcpy'd it into the list — two passes and 8
+       bytes of scratch per byte on top of the result. */
+    int64_t *items = (int64_t *)xmalloc((len ? len : 1) * sizeof(int64_t));
     for (uint64_t i = 0; i < len; ++i)
-        items[i] = mkint_full((unsigned char)p[i]);
-    aval out = list_from_vec(items, len, 0);
-    free(items);
-    return out;
+        items[i] = (unsigned char)p[i];
+    return a_list_take_i64(items, len);
 }

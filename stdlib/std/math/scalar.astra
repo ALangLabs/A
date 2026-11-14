@@ -1,0 +1,546 @@
+#
+# std.math.scalar — scalar (Python math-module) API restored on top of the
+# NumPy-compatible array library, so `import std:math` keeps working for
+# both scalar callers (old std.math API) and NDArray callers (numpy API).
+#
+# Dual dispatch: names that collide with numpy ufuncs accept EITHER a
+# scalar number OR an NDArray. NDArray inputs are delegated to the ufunc
+# implementations in ufuncs.astra / reductions.astra / randomgen.astra; scalar inputs
+# go through the native `math` module (bare `import math` inside package
+# files resolves to the NATIVE scalar module — see module_loader.cpp).
+#
+# Names with no numpy counterpart (abs_val, pow_val, factorial, gcd, ...)
+# wrap native math.* or ported A implementations unconditionally.
+#
+# Deviations vs the old std.math API:
+#  * PI / E are module-level f64 constants (native math.PI semantics), not
+#    PI()/E() functions — every in-repo consumer uses them as values.
+#  * random() is provided by randomgen.astra (seeded _rng stream, [0,1)) —
+#    signature-compatible with the old math.random().
+#  * gamma(x) with ONE argument is the Gamma function (old API); with
+#    (shape, scale[, size]) it is the randomgen distribution sampler.
+#  * min/max/prod accept (scalar...), (NDArray), or (NDArray, axis).
+#  * erf/erfc are re-exported from special.astra (A&S 7.1.26 approximation).
+#
+from math import PI, E, sqrt as _nsqrt, sin as _nsin, cos as _ncos, tan as _ntan, asin as _nasin, acos as _nacos, atan as _natan, atan2 as _natan2, exp as _nexp, log as _nlog, log2 as _nlog2, log10 as _nlog10, floor as _nfloor, ceil as _nceil, round as _nround, trunc as _ntrunc, abs as _nabs, min as _nmin, max as _nmax, pow as _npow, random_int as _nrandom_int
+from "ndarray.astra" import NDArray
+from "special.astra" import erf, erfc
+from "ufuncs.astra" import sqrt as _usqrt, sin as _usin, cos as _ucos, tan as _utan, exp as _uexp, expm1 as _uexpm1, log as _ulog, log2 as _ulog2, log10 as _ulog10, log1p as _ulog1p, arcsin as _uarcsin, arccos as _uarccos, arctan as _uarctan, floor as _ufloor, ceil as _uceil, trunc as _utrunc, round as _uround, absolute as _uabsolute, deg2rad as _udeg2rad, rad2deg as _urad2deg, hypot as _uhypot, hypot_scalar as _uhypot_scalar, rhypot_scalar as _rhypot_scalar, fmod as _ufmod, fmod_scalar as _ufmod_scalar, rfmod_scalar as _rfmod_scalar, arctan2 as _uarctan2, arctan2_scalar as _uarctan2_scalar, rarctan2_scalar as _urarctan2_scalar, power as _upower, power_scalar as _upower_scalar, rpower_scalar as _rpower_scalar, minimum as _uminimum, minimum_scalar as _uminimum_scalar, rminimum_scalar as _rminimum_scalar, maximum as _umaximum, maximum_scalar as _umaximum_scalar, rmaximum_scalar as _rmaximum_scalar
+from "reductions.astra" import prod as _rprod, prod_all as _rprod_all, min as _rmin, min_all as _rmin_all, max as _rmax, max_all as _rmax_all
+from "randomgen.astra" import gamma as _rgamma
+
+# --- constants ---------------------------------------------------------------------
+# PI / E are re-exported native constants (math.PI / math.E values) — A
+# reserves them as builtin constants, so they cannot be assigned here; the
+# from-import binds the native values and re-exports them through numpy.astra.
+
+# --- dispatch helpers ------------------------------------------------------------
+
+fn _is_arr(v: any) -> bool:
+    return isinstance(v, NDArray)
+
+# --- unary dual dispatch ---------------------------------------------------------
+
+fn sqrt(x: any) -> any:
+    if _is_arr(x):
+        return _usqrt(x)
+    return _nsqrt(x + 0.0)
+
+fn sin(x: any) -> any:
+    if _is_arr(x):
+        return _usin(x)
+    return _nsin(x + 0.0)
+
+fn cos(x: any) -> any:
+    if _is_arr(x):
+        return _ucos(x)
+    return _ncos(x + 0.0)
+
+fn tan(x: any) -> any:
+    if _is_arr(x):
+        return _utan(x)
+    return _ntan(x + 0.0)
+
+fn asin(x: any) -> any:
+    if _is_arr(x):
+        return _uarcsin(x)
+    return _nasin(x + 0.0)
+
+fn acos(x: any) -> any:
+    if _is_arr(x):
+        return _uarccos(x)
+    return _nacos(x + 0.0)
+
+fn atan(x: any) -> any:
+    if _is_arr(x):
+        return _uarctan(x)
+    return _natan(x + 0.0)
+
+fn exp(x: any) -> any:
+    if _is_arr(x):
+        return _uexp(x)
+    return _nexp(x + 0.0)
+
+fn log(x: any) -> any:
+    if _is_arr(x):
+        return _ulog(x)
+    return _nlog(x + 0.0)
+
+fn log2(x: any) -> any:
+    if _is_arr(x):
+        return _ulog2(x)
+    return _nlog2(x + 0.0)
+
+fn log10(x: any) -> any:
+    if _is_arr(x):
+        return _ulog10(x)
+    return _nlog10(x + 0.0)
+
+fn floor(x: any) -> any:
+    if _is_arr(x):
+        return _ufloor(x)
+    return _nfloor(x + 0.0)
+
+fn ceil(x: any) -> any:
+    if _is_arr(x):
+        return _uceil(x)
+    return _nceil(x + 0.0)
+
+fn trunc(x: any) -> any:
+    if _is_arr(x):
+        return _utrunc(x)
+    return _ntrunc(x + 0.0)
+
+fn round(x: any) -> any:
+    # canonical `round`: ufunc for NDArrays, native _nround for scalars
+    # (_nround is half-away-from-zero; np.round is banker's — deviation).
+    if _is_arr(x):
+        return _uround(x)
+    return _nround(x + 0.0)
+
+fn round_val(x: any) -> any:
+    return round(x)
+
+fn abs_val(a: any) -> any:
+    if _is_arr(a):
+        return _uabsolute(a)
+    return _nabs(a)
+
+fn abs(a: any) -> any:
+    # native-module parity alias for abs_val.
+    return abs_val(a)
+
+fn expm1(x: any) -> any:
+    if _is_arr(x):
+        return _uexpm1(x)
+    xf = x + 0.0
+    ax = _nabs(xf)
+    if ax < 0.001:
+        # series: x + x^2/2! + x^3/3! (error < 4e-14 for |x| < 1e-3)
+        x2 = xf * xf
+        return xf + x2 / 2.0 + x2 * xf / 6.0
+    return _nexp(xf) - 1.0
+
+fn log1p(x: any) -> any:
+    if _is_arr(x):
+        return _ulog1p(x)
+    xf = x + 0.0
+    if xf <= -1.0:
+        panic("log1p: argument must be > -1")
+    ax = _nabs(xf)
+    if ax < 0.001:
+        # series: x - x^2/2 + x^3/3 - x^4/4 (error < 3e-13 for |x| < 1e-3)
+        x2 = xf * xf
+        return xf - x2 / 2.0 + x2 * xf / 3.0 - x2 * x2 / 4.0
+    return _nlog(1.0 + xf)
+
+fn degrees(x: any) -> any:
+    if _is_arr(x):
+        return _udeg2rad(x)
+    return (x + 0.0) * 57.29577951308232
+
+fn radians(x: any) -> any:
+    if _is_arr(x):
+        return _urad2deg(x)
+    return (x + 0.0) * 0.017453292519943295
+
+# --- binary dual dispatch ----------------------------------------------------------
+# Covers (NDArray, NDArray), (NDArray, scalar), (scalar, NDArray),
+# (scalar, scalar) via the ufuncs' three entry points per op.
+
+fn atan2(y: any, x: any) -> any:
+    ya = _is_arr(y)
+    xa = _is_arr(x)
+    if ya and xa:
+        return _uarctan2(y, x)
+    if ya:
+        return _uarctan2_scalar(y, x + 0.0)
+    if xa:
+        return _urarctan2_scalar(y + 0.0, x)
+    return _natan2(y + 0.0, x + 0.0)
+
+fn hypot(x: any, y: any) -> any:
+    xa = _is_arr(x)
+    ya = _is_arr(y)
+    if xa and ya:
+        return _uhypot(x, y)
+    if xa:
+        return _uhypot_scalar(x, y + 0.0)
+    if ya:
+        return _rhypot_scalar(x + 0.0, y)
+    # scalar path ported from the old implementation (overflow-safe)
+    ax = _nabs(x + 0.0)
+    ay = _nabs(y + 0.0)
+    m = _nmax(ax, ay)
+    if m == 0.0:
+        return 0.0
+    rx = ax / m
+    ry = ay / m
+    return m * _nsqrt(rx * rx + ry * ry)
+
+fn fmod(x: any, y: any) -> any:
+    xa = _is_arr(x)
+    ya = _is_arr(y)
+    if xa and ya:
+        return _ufmod(x, y)
+    if xa:
+        return _ufmod_scalar(x, y + 0.0)
+    if ya:
+        return _rfmod_scalar(x + 0.0, y)
+    # scalar path ported from the old implementation (C fmod semantics)
+    xf = x + 0.0
+    yf = y + 0.0
+    if yf == 0.0:
+        panic("fmod: zero divisor")
+    return xf - _ntrunc(xf / yf) * yf
+
+fn pow_val(base: any, e: any) -> any:
+    ba = _is_arr(base)
+    ea = _is_arr(e)
+    if ba and ea:
+        return _upower(base, e)
+    if ba:
+        return _upower_scalar(base, e + 0.0)
+    if ea:
+        return _rpower_scalar(base + 0.0, e)
+    return _npow(base + 0.0, e + 0.0)
+
+fn pow(base: any, e: any) -> any:
+    # native-module parity alias for pow_val.
+    return pow_val(base, e)
+
+fn min_val(a: any, b: any) -> any:
+    aa = _is_arr(a)
+    ba = _is_arr(b)
+    if aa and ba:
+        return _uminimum(a, b)
+    if aa:
+        return _uminimum_scalar(a, b + 0.0)
+    if ba:
+        return _rminimum_scalar(a + 0.0, b)
+    return _nmin(a, b)
+
+fn max_val(a: any, b: any) -> any:
+    aa = _is_arr(a)
+    ba = _is_arr(b)
+    if aa and ba:
+        return _umaximum(a, b)
+    if aa:
+        return _umaximum_scalar(a, b + 0.0)
+    if ba:
+        return _rmaximum_scalar(a + 0.0, b)
+    return _nmax(a, b)
+
+# --- reductions with scalar fallback ----------------------------------------------
+# Unified min/max/prod: (NDArray) -> scalar reduction (np.min(a) parity),
+# (NDArray, axis) -> axis reduction, scalars/lists -> old scalar behaviour.
+
+fn _prod_list(xs) -> any:
+    # scalar path: product of an iterable (list/tuple). Kept in a helper so
+    # the parameter is not narrowed by _is_arr in the caller.
+    r = 1
+    for x in xs:
+        r = r * x
+    return r
+
+fn prod(xs, axis = None) -> any:
+    if _is_arr(xs):
+        if axis == None:
+            return _rprod_all(xs)
+        return _rprod(xs, axis)
+    return _prod_list(xs)
+
+fn _min2(a, b) -> any:
+    # two-arg scalar min preserving int-ness when both operands are ints.
+    if isinstance(a, "int") and isinstance(b, "int"):
+        return _nmin(a, b)
+    return _nmin(a + 0.0, b + 0.0)
+
+fn _max2(a, b) -> any:
+    if isinstance(a, "int") and isinstance(b, "int"):
+        return _nmax(a, b)
+    return _nmax(a + 0.0, b + 0.0)
+
+fn min(a, b = None, axis = None) -> any:
+    if _is_arr(a):
+        ax = axis
+        if ax == None:
+            ax = b
+        if ax == None:
+            return _rmin_all(a)
+        return _rmin(a, ax)
+    if b == None:
+        return a
+    return _min2(a, b)
+
+fn max(a, b = None, axis = None) -> any:
+    if _is_arr(a):
+        ax = axis
+        if ax == None:
+            ax = b
+        if ax == None:
+            return _rmax_all(a)
+        return _rmax(a, ax)
+    if b == None:
+        return a
+    return _max2(a, b)
+
+# --- gamma: 1 arg = Gamma function (old API), >=2 args = distribution ------------
+
+fn _lgamma_pos(x: f64) -> f64:
+    # log|Gamma(x)| for x > 0 via the Lanczos approximation
+    # (g = 5, n = 6 coefficients; Numerical Recipes gammln).
+    cof0 = 76.18009172947146
+    cof1 = -86.50532032941677
+    cof2 = 24.01409824083091
+    cof3 = -1.231739572450155
+    cof4 = 0.1208650973866179e-2
+    cof5 = -0.5395239384953e-5
+    y = x
+    tmp = x + 5.5
+    tmp = tmp - (x + 0.5) * _nlog(tmp)
+    ser = 1.000000000190015
+    y = y + 1.0
+    ser = ser + cof0 / y
+    y = y + 1.0
+    ser = ser + cof1 / y
+    y = y + 1.0
+    ser = ser + cof2 / y
+    y = y + 1.0
+    ser = ser + cof3 / y
+    y = y + 1.0
+    ser = ser + cof4 / y
+    y = y + 1.0
+    ser = ser + cof5 / y
+    return -tmp + _nlog(2.5066282746310005 * ser / x)
+
+fn lgamma(x: any) -> any:
+    # log|Gamma(x)| (Python math.lgamma). Panics at non-positive integers.
+    xf = x + 0.0
+    xi = int(xf)
+    if xf == float(xi) and xf <= 0.0:
+        panic("lgamma: pole at non-positive integer")
+    if xf < 0.5:
+        s = _nsin(3.141592653589793 * xf)
+        if s == 0.0:
+            panic("lgamma: pole")
+        return _nlog(3.141592653589793 / _nabs(s)) - _lgamma_pos(1.0 - xf)
+    return _lgamma_pos(xf)
+
+fn gamma(x, scale = None, size = None) -> any:
+    if scale != None or size != None:
+        # distribution sampler (randomgen.gamma semantics)
+        s = 1.0
+        if scale != None:
+            s = scale + 0.0
+        return _rgamma(x + 0.0, s, size)
+    # Gamma function (old std.math.gamma; Python math.gamma). Panics at
+    # non-positive integers.
+    xf = x + 0.0
+    xi = int(xf)
+    if xf == float(xi) and xf <= 0.0:
+        panic("gamma: pole at non-positive integer")
+    if xf < 0.5:
+        s = _nsin(3.141592653589793 * xf)
+        if s == 0.0:
+            panic("gamma: pole")
+        return 3.141592653589793 / (s * _nexp(_lgamma_pos(1.0 - xf)))
+    return _nexp(_lgamma_pos(xf))
+
+# --- scalar-only old API ------------------------------------------------------------
+
+fn random_int(lo, hi):
+    return _nrandom_int(lo, hi)
+
+fn clamp(x, lo, hi):
+    if x < lo:
+        return lo
+    if x > hi:
+        return hi
+    return x
+
+# -- integer functions (Python math parity; i64 arithmetic) -------------------
+# NOTE: factorial overflows silently past 20! (i64 limit ~9.2e18); comb/perm
+# have the same bound. Python math.factorial is unbounded — documented
+# deviation.
+
+"""
+factorial(n) -> n! as i64. Panics on n < 0 (Python raises ValueError).
+"""
+fn factorial(n: i64) -> i64:
+    if n < 0:
+        panic("factorial: n must be >= 0")
+    r = 1
+    i = 2
+    while i <= n:
+        r = r * i
+        i = i + 1
+    return r
+
+"""
+comb(n, k) -> binomial coefficient C(n, k) as i64 (Python math.comb).
+Panics when k < 0, n < 0, or k > n (Python raises ValueError).
+"""
+fn comb(n: i64, k: i64) -> i64:
+    if n < 0 or k < 0:
+        panic("comb: n and k must be >= 0")
+    if k > n:
+        panic("comb: k must be <= n")
+    if k > n - k:
+        k = n - k
+    r = 1
+    i = 1
+    while i <= k:
+        # exact at every step: r * (n - k + i) is divisible by i
+        r = r * (n - k + i) / i
+        i = i + 1
+    return r
+
+"""
+perm(n, k) -> number of k-permutations of n items as i64
+(Python math.perm). Panics when k < 0, n < 0, or k > n.
+"""
+fn perm(n: i64, k: i64) -> i64:
+    if n < 0 or k < 0:
+        panic("perm: n and k must be >= 0")
+    if k > n:
+        panic("perm: k must be <= n")
+    r = 1
+    i = 0
+    while i < k:
+        r = r * (n - i)
+        i = i + 1
+    return r
+
+"""
+_iabs64(a) -> |a| for i64 (MIN_VALUE edge wraps; irrelevant in practice).
+"""
+fn _iabs64(a: i64) -> i64:
+    if a < 0:
+        return -a
+    return a
+
+"""
+gcd(a, b) -> greatest common divisor of integers a, b as i64
+(Python math.gcd; accepts any number of ints — here two args).
+"""
+fn gcd(a: i64, b: i64) -> i64:
+    x = _iabs64(a)
+    y = _iabs64(b)
+    while y != 0:
+        t = x % y
+        x = y
+        y = t
+    return x
+
+"""
+lcm(a, b) -> least common multiple of integers a, b as i64
+(Python math.lcm). Returns 0 when either operand is 0.
+"""
+fn lcm(a: i64, b: i64) -> i64:
+    if a == 0 or b == 0:
+        return 0
+    g = gcd(a, b)
+    return (_iabs64(a) / g) * _iabs64(b)
+
+"""
+isqrt(n) -> integer square root: largest i64 r with r*r <= n
+(Python math.isqrt). Panics on n < 0.
+"""
+fn isqrt(n: i64) -> i64:
+    if n < 0:
+        panic("isqrt: n must be >= 0")
+    if n == 0:
+        return 0
+    r = _nfloor(_nsqrt(float(n))) + 1.0
+    ri = int(r)
+    while ri * ri > n:
+        ri = ri - 1
+    while (ri + 1) * (ri + 1) <= n:
+        ri = ri + 1
+    return ri
+
+# prod(xs) -> product of all elements of a numeric array
+# (Python math.prod). Empty array returns 1 (Python parity).
+# Implemented above as the unified `prod` (also handles (NDArray, axis)).
+
+# -- float functions -----------------------------------------------------------
+
+# hypot(x, y) -> sqrt(x*x + y*y), overflow-safe
+# (Python math.hypot with two args). NDArray-capable via ufuncs;
+# implemented above with dual dispatch.
+
+"""
+dist(p, q) -> Euclidean distance between two equal-length numeric
+arrays (Python math.dist). Panics on length mismatch.
+"""
+fn dist(p, q):
+    np = len(p)
+    if np != len(q):
+        panic("dist: points must have the same dimension")
+    ss = 0.0
+    i = 0
+    while i < np:
+        d = (p[i] + 0.0) - (q[i] + 0.0)
+        ss = ss + d * d
+        i = i + 1
+    return _nsqrt(ss)
+
+"""
+log_base(x, base) -> logarithm of x to the given base (Python
+_nlog(x, base)). Panics on x <= 0 or base <= 0.
+"""
+fn log_base(x, base):
+    xf = x + 0.0
+    bf = base + 0.0
+    if xf <= 0.0 or bf <= 0.0:
+        panic("log: domain error")
+    return _nlog(xf) / _nlog(bf)
+
+"""
+cbrt(x) -> real cube root of x (Python math.cbrt; preserves sign).
+"""
+fn cbrt(x):
+    xf = x + 0.0
+    ax = _nabs(xf)
+    r = _npow(ax, 0.3333333333333333)
+    if xf < 0.0:
+        return -r
+    return r
+
+"""
+fsum(xs) -> accurately rounded sum via Neumaier (compensated) summation
+(Python math.fsum; the compensated algorithm bounds the error).
+"""
+fn fsum(xs):
+    s = 0.0
+    c = 0.0
+    for x in xs:
+        xf = x + 0.0
+        t = s + xf
+        if _nabs(s) >= _nabs(xf):
+            c = c + (s - t) + xf
+        else:
+            c = c + (xf - t) + s
+        s = t
+    return s + c

@@ -46,6 +46,11 @@ typedef aval (*a_builtin_fn)(uint64_t n, aval *argv);
 #define A_NONE   (A_TAG | 0x2ULL)
 #define A_FALSE  (A_TAG | 0x4ULL)
 #define A_TRUE   (A_TAG | 0x6ULL)
+/* stream constants for the `stdout`/`stderr` builtins (print file= kwarg).
+ * Same small-constant encoding as above: even payload, nonzero low nibble,
+ * so they are never pointers or inline ints. */
+#define A_STDOUT (A_TAG | 0x8ULL)
+#define A_STDERR (A_TAG | 0xAULL)
 
 /* inline int: 47-bit signed payload (payload>>1, sign-extended from bit 46) */
 static inline aval a_mkint(int64_t i) {
@@ -203,6 +208,8 @@ enum {
     A_BI_OS_DISK_USAGE, A_BI_OS_POPEN, A_BI_OS_KILL, A_BI_OS_EXIT,
     /* Python-parity builtin (appended so existing ids stay stable) */
     A_BI_DIVMOD,
+    /* bulk little-endian f32 -> [f64] decode (appended; ids stay stable) */
+    A_BI_F32S,
     A_BI_COUNT
 };
 
@@ -531,10 +538,43 @@ const char *a_builtin_name(uint64_t id);
 aval a_panic_msg(const char *msg);              /* prints + exit(1), noreturn-ish */
 aval a_printv(uint64_t n, aval *argv);          /* print: space-sep + \n, stdout */
 aval a_eprintv(uint64_t n, aval *argv);         /* eprint -> stderr */
+/* print/eprint with keyword options: sep/end are string avals or A_NONE
+ * (defaults " " / "\n"), file is A_NONE/A_STDOUT/A_STDERR (or a future IO
+ * stream aval), is_stderr selects the default stream like eprint. */
+aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
+                  int is_stderr);
 void a_runtime_init(void);                      /* idempotent */
 
 /* object predicates used by codegen-free helpers */
 int a_obj_is_instance(aval v, const char *type_name); /* isinstance-ish */
+
+/* ---- exported fast paths (implemented in fastpath.c) ----
+ * Same semantics as the static inline fast paths above, but callable from
+ * non-C codegen (the LLVM backend emits calls to these instead of the
+ * *_slow entry points). Each handles the inline-int / double cases inline
+ * and tail-calls the corresponding *_slow variant otherwise. */
+aval a_add_fast(aval l, aval r);
+aval a_sub_fast(aval l, aval r);
+aval a_mul_fast(aval l, aval r);
+aval a_div_fast(aval l, aval r);
+aval a_floordiv_fast(aval l, aval r);
+aval a_mod_fast(aval l, aval r);
+aval a_pow_fast(aval l, aval r);
+aval a_eq_fast(aval l, aval r);
+aval a_ne_fast(aval l, aval r);
+aval a_lt_fast(aval l, aval r);
+aval a_le_fast(aval l, aval r);
+aval a_gt_fast(aval l, aval r);
+aval a_ge_fast(aval l, aval r);
+aval a_neg_fast(aval v);
+aval a_bnot_fast(aval v);
+aval a_not_fast(aval v);
+aval a_truthy_raw_fast(aval v);
+aval a_band_fast(aval l, aval r);
+aval a_bor_fast(aval l, aval r);
+aval a_bxor_fast(aval l, aval r);
+aval a_shl_fast(aval l, aval r);
+aval a_shr_fast(aval l, aval r);
 
 #endif /* ASTRA_A_RUNTIME_H */
 

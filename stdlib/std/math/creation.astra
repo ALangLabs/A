@@ -1,0 +1,186 @@
+#
+# numpy creation/copy routines: deep copies, asarray variants, from_flat,
+# indices, ogrid, copyto. Creation ops already in ndarray.astra (zeros, ones,
+# empty, full, arange, linspace, eye, identity, array_from_list) are NOT
+# re-defined here.
+#
+# dtype is f64 only; arrays are always C-contiguous (row-major flat buffer),
+# so copy/ascontiguousarray are plain deep copies.
+
+from "ndarray.astra" import NDArray
+from "ndarray.astra" import _shape_size
+
+# --- copy ---------------------------------------------------------------------
+
+fn copy(a: NDArray) -> NDArray:
+    # deep copy: new data buffer and new shape list
+    data = []
+    for v in a.data:
+        data.append(v)
+    shape = []
+    for d in a.shape:
+        shape.append(d)
+    return NDArray(data, shape)
+
+fn ascontiguousarray(a: NDArray) -> NDArray:
+    # we are always C-contiguous; equivalent to copy
+    return copy(a)
+
+fn require(a: NDArray) -> NDArray:
+    # dtype/contiguity requirements are always satisfied for f64 NDArray
+    return a
+
+fn copyto(dst: NDArray, src: NDArray) -> NDArray:
+    # copy min(size) elements in C order (like np.copyto with broadcasting
+    # unsupported here; src is flattened)
+    n = dst.size()
+    m = src.size()
+    if m < n:
+        n = m
+    i = 0
+    while i < n:
+        dst.data[i] = src.data[i]
+        i = i + 1
+    return dst
+
+# --- asarray variants -----------------------------------------------------------
+# A has no dynamic/heterogeneous param typing, so instead of one `asarray`
+# accepting any input we provide typed entry points:
+#   asarray_flat(xs)        flat [f64]            -> shape [n]
+#   asarray_list(rows)      [[f64]]               -> shape [rows, cols] (2-D)
+#   asarray_nested3(cubes)  [[[f64]]]             -> shape [d0, d1, d2] (3-D)
+#   asarray_ndarray(a)      NDArray               -> returned as-is
+
+fn asarray_ndarray(a: NDArray) -> NDArray:
+    return a
+
+fn asarray_flat(xs: [f64]) -> NDArray:
+    data = []
+    for v in xs:
+        data.append(v)
+    return NDArray(data, [len(xs)])
+
+fn asarray_list(rows: [[f64]]) -> NDArray:
+    if len(rows) == 0:
+        return NDArray([], [0, 0])
+    cols = len(rows[0])
+    shape = [len(rows), cols]
+    data = []
+    for row in rows:
+        for v in row:
+            data.append(v)
+    return NDArray(data, shape)
+
+fn asarray_nested3(cubes: [[[f64]]]) -> NDArray:
+    # [[[f64]]] -> shape [d0, d1, d2]; rectangular input assumed
+    if len(cubes) == 0:
+        return NDArray([], [0, 0, 0])
+    d1 = len(cubes[0])
+    if d1 == 0:
+        return NDArray([], [len(cubes), 0, 0])
+    d2 = len(cubes[0][0])
+    shape = [len(cubes), d1, d2]
+    data = []
+    for plane in cubes:
+        for row in plane:
+            for v in row:
+                data.append(v)
+    return NDArray(data, shape)
+
+# --- from_flat ------------------------------------------------------------------
+
+fn from_flat(data: [f64], shape: [i64]) -> NDArray:
+    # like ndarray() but validates size; returns empty array on mismatch
+    if _shape_size(shape) != len(data):
+        # size mismatch: return a 0-size array rather than an
+        # inconsistent (empty data, nonzero shape) array
+        return NDArray([], [0])
+    out = []
+    for v in data:
+        out.append(v)
+    return NDArray(out, shape)
+
+# --- indices --------------------------------------------------------------------
+
+fn indices(dimensions: [i64]) -> NDArray:
+    # np.indices equivalent: for shape (d0,...,dk) returns array of shape
+    # (k, d0, ..., dk); element [i, x0, ..., xk-1] = xi.
+    # Implemented via flat offset math: out multi-index has k+ndim dims.
+    k = len(dimensions)
+    if k == 0:
+        return NDArray([], [])
+    outshape = [k]
+    for d in dimensions:
+        outshape.append(d)
+    nout = _shape_size(outshape)
+    data = []
+    for i in 0..nout:
+        data.append(0.0)
+    for i in 0..nout:
+        # decompose flat index i over outshape into multi-index (k+ndim coords)
+        rem = i
+        coords = []
+        ax = len(outshape) - 1
+        while ax >= 0:
+            coords.insert(0, rem % outshape[ax])
+            rem = rem // outshape[ax]
+            ax = ax - 1
+        # element [which, x0, ..., xk-1] = coordinate along axis `which`
+        which = coords[0]
+        data[i] = coords[1 + which]
+    return NDArray(data, outshape)
+
+# --- ogrid ----------------------------------------------------------------------
+
+fn _ogrid_axis(dim: i64, axis: i64, nd: i64) -> NDArray:
+    # 1-D coordinate vector 0..dim-1 reshaped so only `axis` has extent dim
+    data = []
+    for i in 0..dim:
+        data.append(i)
+    shape = []
+    for i in 0..nd:
+        if i == axis:
+            shape.append(dim)
+        else:
+            shape.append(1)
+    return NDArray(data, shape)
+
+fn ogrid(shape: [i64]) -> [NDArray]:
+    # np.ogrid equivalent: list of nd broadcastable coordinate arrays
+    nd = len(shape)
+    out = []
+    for axis in 0..nd:
+        out.append(_ogrid_axis(shape[axis], axis, nd))
+    return out
+
+fn mgrid(shape: [i64]) -> NDArray:
+    # dense meshgrid flattened into one NDArray of shape (nd, d0, ..., dk-1)
+    # built by broadcasting each ogrid entry (implemented manually since we
+    # have no general broadcast-to-shape helper for arbitrary ranks).
+    nd = len(shape)
+    if nd == 0:
+        return NDArray([], [])
+    outshape = [nd]
+    for d in shape:
+        outshape.append(d)
+    nout = _shape_size(outshape)
+    total = _shape_size(shape)
+    data = []
+    for i in 0..nout:
+        data.append(0.0)
+    for axis in 0..nd:
+        # for trailing flat index ax, coordinate along `axis` is tc[axis]
+        ax = 0
+        while ax < total:
+            # decompose ax over shape -> trailing coords
+            rem = ax
+            tc = []
+            k = nd - 1
+            while k >= 0:
+                tc.insert(0, rem % shape[k])
+                rem = rem // shape[k]
+                k = k - 1
+            # C-order offset for [axis, x0, ..., xk-1] in (nd, d0, ..., dk)
+            data[axis * total + ax] = tc[axis]
+            ax = ax + 1
+    return NDArray(data, outshape)

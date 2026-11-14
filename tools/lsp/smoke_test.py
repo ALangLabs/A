@@ -172,7 +172,7 @@ def main() -> int:
         return 2
 
     with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory) / "main.a"
+        path = Path(directory) / "main.astra"
         path.write_text(SOURCE, encoding="utf-8")
         uri = path.as_uri()
 
@@ -797,7 +797,7 @@ def main() -> int:
 
         # Code actions on a second document with real diagnostics: W0001
         # (unused let) and W0002 (statement after return).
-        bad_path = Path(directory) / "bad.a"
+        bad_path = Path(directory) / "bad.astra"
         bad_uri = bad_path.as_uri()
         bad_source = (
             "fn broken() -> i32:\n"
@@ -818,7 +818,7 @@ def main() -> int:
             },
         )
         # The worker publishes one notification per open document; drain
-        # them and confirm bad.a's warnings arrived.
+        # them and confirm bad.astra's warnings arrived.
         bad_diags = None
         for _ in range(2):
             note = client.wait_notification("textDocument/publishDiagnostics")
@@ -826,7 +826,7 @@ def main() -> int:
                 bad_diags = note["params"]["diagnostics"]
         codes = {d.get("code") for d in (bad_diags or [])}
         if not {"W0001", "W0002"}.issubset(codes):
-            fail(f"bad.a diagnostics missing W0001/W0002: {bad_diags}")
+            fail(f"bad.astra diagnostics missing W0001/W0002: {bad_diags}")
 
         dead_line = 3  # 0-based line of `let dead_local = 3`
         actions = client.request(
@@ -878,7 +878,7 @@ def main() -> int:
 
         # Trait/impl: documentSymbol shows the impl block, and hover on the
         # conforming method reports the trait it implements.
-        trait_path = Path(directory) / "trait.a"
+        trait_path = Path(directory) / "trait.astra"
         trait_uri = trait_path.as_uri()
         trait_source = (
             "trait Named:\n"
@@ -930,16 +930,16 @@ def main() -> int:
 
         # Organize imports: sorts a contiguous run (quoted, std:, from),
         # dedupes exact repeats, and collapses the removed line.
-        (Path(directory) / "a.a").write_text("fn ax() -> i32:\n    return 1\n", encoding="utf-8")
-        (Path(directory) / "b.a").write_text("fn bx() -> i32:\n    return 2\n", encoding="utf-8")
-        imp_path = Path(directory) / "imp.a"
+        (Path(directory) / "a.astra").write_text("fn ax() -> i32:\n    return 1\n", encoding="utf-8")
+        (Path(directory) / "b.astra").write_text("fn bx() -> i32:\n    return 2\n", encoding="utf-8")
+        imp_path = Path(directory) / "imp.astra"
         imp_uri = imp_path.as_uri()
         imp_source = (
             "import std:json\n"
-            "import \"b.a\"\n"
+            "import \"b.astra\"\n"
             "import std:core\n"
-            "from \"a.a\" import ax\n"
-            "import \"a.a\"\n"
+            "from \"a.astra\" import ax\n"
+            "import \"a.astra\"\n"
             "import std:json\n"
         )
         imp_path.write_text(imp_source, encoding="utf-8")
@@ -973,9 +973,9 @@ def main() -> int:
         if not organize:
             fail(f"codeAction missing organizeImports: {actions}")
         expected_imports = (
-            "from \"a.a\" import ax\n"
-            "import \"a.a\"\n"
-            "import \"b.a\"\n"
+            "from \"a.astra\" import ax\n"
+            "import \"a.astra\"\n"
+            "import \"b.astra\"\n"
             "import std:core\n"
             "import std:json\n"
         )
@@ -1004,7 +1004,7 @@ def main() -> int:
         client.request(
             "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
         )
-        # Filter to the main document: pending diagnostics for imp.a
+        # Filter to the main document: pending diagnostics for imp.astra
         # (intentional duplicate `std:json` import) may be delivered first.
         async_diag = None
         for _ in range(8):

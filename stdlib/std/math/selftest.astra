@@ -1,0 +1,119 @@
+# std.math.numpy selftest — smoke coverage across all submodules.
+# Run: ./build/a test stdlib/std/math/selftest.astra
+import std:math
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_close(a, b):
+    d = a - b
+    if d < 0:
+        d = -d
+    assert(d < 0.0001)
+
+fn test_core():
+    a = math.zeros([2, 3])
+    assert_eq(a.shape[0], 2)
+    assert_eq(a.size(), 6)
+    b = math.arange(0.0, 4.0, 1.0)
+    assert_eq(b.data[3], 3.0)
+    m = math.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    t = math.transpose(m)
+    assert_eq(t.data[1], 3.0)
+    assert_eq(math.reshape(b, [2, 2]).shape[1], 2)
+
+fn test_ufuncs():
+    x = math.arange(1.0, 5.0, 1.0)
+    y = math.add(x, math.multiply_scalar(x, 2.0))
+    assert_eq(y.data[0], 3.0)
+    assert_eq(y.data[3], 12.0)
+    s = math.sqrt(x)
+    assert_close(s.data[3], 2.0)
+    w = math.where_(math.greater(x, 2.5), x, math.multiply_scalar(x, 0.0))
+    assert_eq(w.data[0], 0.0)
+    assert_eq(w.data[3], 4.0)
+
+fn test_reductions():
+    m = math.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_close(math.sum_all(m), 10.0)
+    assert_close(math.mean_all(m), 2.5)
+    assert_close(math.std_all(m), 1.1180339)
+    assert_eq(math.trace(m), 5.0)
+    assert_eq(math.argmax_all(m), 3)
+    assert_eq(math.argmin_all(m), 0)
+
+fn test_linalg():
+    m = math.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_close(math.det(m), -2.0)
+    i = math.inv(m)
+    assert_close(i.data[0], -2.0)
+    assert_close(i.data[3], -0.5)
+    p = math.matmul(m, m)
+    assert_eq(p.data[0], 7.0)
+    assert_eq(p.data[3], 22.0)
+    n = math.norm(m)
+    assert(n > 5.0)
+
+fn test_shape_ops():
+    a = math.arange(0.0, 6.0, 1.0)
+    r = math.reshape(a, [2, 3])
+    assert_eq(r.shape[0], 2)
+    e = math.expand_dims(a, 0)
+    assert_eq(e.shape[0], 1)
+    s = math.stack2(a, a, 0)
+    assert_eq(s.shape[0], 2)
+    c = math.concatenate2(r, r, 0)
+    assert_eq(c.shape[0], 4)
+    f = math.flipud(r)
+    assert_eq(f.data[0], 3.0)
+
+fn test_random():
+    math.seed(42)
+    x = math.random_sample([100])
+    for v in x.data:
+        assert(v >= 0.0 and v < 1.0)
+    math.seed(42)
+    y = math.random_sample([100])
+    assert_eq(x.data[50], y.data[50])
+
+fn test_stats():
+    (h, _e) = math.histogram(math.arange(0.0, 5.0, 1.0), 5)
+    for v in h.data:
+        assert_eq(v, 1.0)
+    assert_close(math.median(math.asarray_flat([1.0, 3.0, 2.0])), 2.0)
+    (hh, _xe, _ye) = math.histogram2d(math.arange(0.0, 4.0, 1.0), math.arange(0.0, 4.0, 1.0), 2)
+    assert(hh.size() > 0)
+
+fn test_poly():
+    assert_close(math.polyval([1.0, 0.0, -1.0], 2.0), 3.0)
+    roots = math.polyroots([1.0, 0.0, -1.0])
+    assert_eq(len(roots), 2)
+    assert_close(roots[0], -1.0)
+    assert_close(roots[1], 1.0)
+
+fn test_io():
+    a = math.arange(0.0, 4.0, 1.0)
+    math.savetxt("/tmp/a_numpy_selftest.txt", a)
+    b = math.loadtxt("/tmp/a_numpy_selftest.txt")
+    assert_eq(b.data[2], 2.0)
+
+fn test_indexing():
+    m = math.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    d = math.diagonal(m, 0)
+    assert_eq(d.data[0], 1.0)
+    assert_eq(d.data[1], 4.0)
+    idx = math.nonzero(math.greater(m, 2.5))
+    assert(len(idx) == 2)
+
+entry main():
+    test_core()
+    test_ufuncs()
+    test_reductions()
+    test_linalg()
+    test_shape_ops()
+    test_random()
+    test_stats()
+    test_poly()
+    test_io()
+    test_indexing()
+    print("numpy selftest: all passed")

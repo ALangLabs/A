@@ -2,7 +2,7 @@
 # Golden tests for the A language compiler.
 #
 # Layout:
-#   tests/integration/cases/**/*.a      one case per feature; may live in
+#   tests/integration/cases/**/*.astra    one case per feature; may live in
 #                                       subdirectories (e.g. errors/, stdlib/)
 #   tests/integration/cases/**/lib/     imported fixtures; never run directly
 #   <path>/<name>.out                   expected stdout for a `run` case
@@ -45,7 +45,7 @@ run_case() {
   local expected expected_err exit_file expected_exit actual_exit rc
 
   case_dir="$(dirname "$source")"
-  base="$(basename "$source" .a)"
+  base="$(basename "$source" .astra)"
   name="${case_dir#$CASES_DIR/}/$base"
   name="${name#./}"
   stdout_file="$TMP_DIR/${name//\//__}.stdout"
@@ -114,7 +114,7 @@ run_case() {
 # Discover every case, excluding library fixtures in `lib/` directories.
 while IFS= read -r source; do
   run_case "$source"
-done < <(find "$CASES_DIR" -name '*.a' -not -path '*/lib/*' | sort)
+done < <(find "$CASES_DIR" -name '*.astra' -not -path '*/lib/*' | sort)
 
 echo
 echo "passed: $passed, failed: $failed"

@@ -40,13 +40,16 @@ class Parser {
   void synchronize();
 
   StmtPtr parseStatement();
-  StmtPtr parseFnDecl(bool entryKw = false);
+  StmtPtr parseFnDecl(bool entryKw = false, bool externFn = false);
+  StmtPtr parseExternDecl();
   StmtPtr parseStructDecl();
   StmtPtr parseEnumDecl();
   StmtPtr parseTraitDecl();
   StmtPtr parseImplDecl();
   StmtPtr parseTypeAliasDecl();
   StmtPtr parseIf();
+  StmtPtr parseComptimeIf();
+  StmtPtr parseComptimeFor();
   StmtPtr parseWhile();
   StmtPtr parseDoWhile();
   StmtPtr parseFor();
@@ -70,7 +73,10 @@ class Parser {
   void expectNewline();
 
   ParamDecl parseParam(bool allowDefault = false);
+  // `T | U | ...` union types sit at the top level; everything else (arrays,
+  // tuples, maps, sets, fn types, named types, `?` suffixes) is an atom.
   TypeExprPtr parseTypeExpr();
+  TypeExprPtr parseTypeExprAtom();
   // Parses a `<...>` generic parameter list (current token is '<'). Each
   // parameter is `Name` or `Name: Bound` / `Name: BoundA + BoundB`; bound
   // trait names are appended to `bounds` (parallel spans in `boundSpans`) so
@@ -89,6 +95,19 @@ class Parser {
   Pattern parsePrimaryPattern();
   ExprPtr parseCallOrIndexPostfix(ExprPtr base);
   std::vector<CallArg> parseCallArgs();
+  // Builds the CallExpr for `callee(args)` (or the `?.` desugaring of
+  // `obj?.m(args)`), attaching any explicit `<T, ...>` type arguments.
+  ExprPtr buildCallExpr(ExprPtr callee, std::vector<CallArg> args,
+                        std::vector<TypeExprPtr> typeArgs, Span endSpan);
+  // Lookahead for `expr<T, ...>(`: returns the token index just past the
+  // closing '>' when the tokens at `pos` form a well-formed type argument
+  // list followed by '(', or ~std::size_t(0) otherwise (the '<' is then a
+  // comparison operator).
+  std::size_t scanCallTypeArgsEnd(std::size_t pos) const;
+  // Consumes a '>' in type-argument position; '>>' lexes as a single token,
+  // so it is split into two '>' tokens on demand (see splitShrGt).
+  bool matchTypeArgGt();
+  void splitShrGt();
   std::vector<StringPart> parseStringParts(const Token& token);
   std::string decodeEscapes(const std::string& raw, Span span);
 

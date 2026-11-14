@@ -1,0 +1,514 @@
+import std:core
+
+fn repeat<T>(n: i64, x: T) -> [T]:
+    out = []
+    i = 0
+    while i < n:
+        out.append(x)
+        i = i + 1
+    return out
+
+fn zip_apply<T>(f: fn(T, T) -> T, a: [T], b: [T]) -> [T]:
+    if len(a) != len(b):
+        core.panic("zip_apply: lengths differ")
+    out = []
+    i = 0
+    while i < len(a):
+        out.append(f(a[i], b[i]))
+        i = i + 1
+    return out
+
+fn take<T>(n: i64, xs: [T]) -> [T]:
+    m = n
+    if m < 0:
+        m = 0
+    if m > len(xs):
+        m = len(xs)
+    return xs[0..m]
+
+fn enumerate_pairs(xs: [i64]) -> [[i64]]:
+    out = []
+    i = 0
+    while i < len(xs):
+        out.append([i, xs[i]])
+        i = i + 1
+    return out
+
+# -- itertools-style helpers (eager array versions; Python returns lazy
+# iterators — documented deviation) -----------------------------------------
+
+"""
+chain(lists) -> flattened array of all elements of the arrays in `lists`.
+"""
+fn chain(lists):
+    out = []
+    for sub in lists:
+        for x in sub:
+            out.append(x)
+    return out
+
+"""
+product(lists) -> array of arrays: the cartesian product of the input
+arrays (each output element is an array of one item per input array).
+product([]) -> [[]]; any empty input array -> [].
+"""
+fn _prod_rec(i, acc, lists, out):
+    if i == len(lists):
+        out.append(acc.copy())
+    else:
+        for v in lists[i]:
+            acc.append(v)
+            _prod_rec(i + 1, acc, lists, out)
+            acc.pop()
+
+fn product(lists):
+    out = []
+    if len(lists) == 0:
+        out.append([])
+        return out
+    _prod_rec(0, [], lists, out)
+    return out
+
+"""
+_perm_rec / combinations helpers: `pre` is the in-progress selection,
+`used` marks consumed positions in `xs`, `r` the target size, `out` the
+result. The used-flag formulation avoids allocating a fresh "remaining"
+array at every recursion node (the old rest-array version was O(n) extra
+allocation per node).
+"""
+fn _perm_rec(depth, xs, used, pre, r, out):
+    if depth == r:
+        out.append(pre.copy())
+    else:
+        i = 0
+        while i < len(xs):
+            if not used[i]:
+                used[i] = true
+                pre.append(xs[i])
+                _perm_rec(depth + 1, xs, used, pre, r, out)
+                pre.pop()
+                used[i] = false
+            i = i + 1
+
+"""
+permutations(xs, r = -1) -> array of arrays: r-length orderings of xs.
+r defaults to len(xs); r > len(xs) -> []; r < 0 (other than -1) panics.
+Same lexicographic order as the previous rest-array implementation.
+"""
+fn permutations(xs, r = -1):
+    n = len(xs)
+    if r == -1:
+        r = n
+    if r < 0:
+        core.panic("permutations: negative r")
+    out = []
+    if r > n:
+        return out
+    used = []
+    i = 0
+    while i < n:
+        used.append(false)
+        i = i + 1
+    _perm_rec(0, xs, used, [], r, out)
+    return out
+
+fn _comb_rec(start, pre, xs, r, out, with_replacement):
+    if len(pre) == r:
+        out.append(pre.copy())
+    else:
+        need = r - len(pre)
+        last = len(xs) - need
+        if with_replacement:
+            # picks may repeat, so any remaining index is a valid start
+            last = len(xs) - 1
+        i = start
+        while i <= last:
+            pre.append(xs[i])
+            if with_replacement:
+                _comb_rec(i, pre, xs, r, out, with_replacement)
+            else:
+                _comb_rec(i + 1, pre, xs, r, out, with_replacement)
+            pre.pop()
+            i = i + 1
+
+"""
+combinations(xs, r = -1) -> array of arrays: r-length subsets of xs in
+lexicographic order of positions. r defaults to len(xs); r > len(xs) -> [].
+"""
+fn combinations(xs, r = -1):
+    n = len(xs)
+    if r == -1:
+        r = n
+    if r < 0:
+        core.panic("combinations: negative r")
+    out = []
+    if r > n:
+        return out
+    _comb_rec(0, [], xs, r, out, false)
+    return out
+
+"""
+combinations_with_replacement(xs, r = -1) -> r-length selections where
+elements may repeat (non-decreasing index order). r > len(xs) is allowed.
+"""
+fn combinations_with_replacement(xs, r = -1):
+    n = len(xs)
+    if r == -1:
+        r = n
+    if r < 0:
+        core.panic("combinations_with_replacement: negative r")
+    out = []
+    if n == 0:
+        if r == 0:
+            out.append([])
+        return out
+    _comb_rec(0, [], xs, r, out, true)
+    return out
+
+"""
+groupby(xs) -> array of [key, items] pairs grouping CONSECUTIVE equal
+adjacent elements (== comparison). Python's key function is not ported —
+use groupby_key for that. Each pair is [key, [elements...]].
+"""
+fn groupby(xs):
+    out = []
+    i = 0
+    n = len(xs)
+    while i < n:
+        k = xs[i]
+        items = []
+        j = i
+        while j < n and xs[j] == k:
+            items.append(xs[j])
+            j = j + 1
+        pair = []
+        pair.append(k)
+        pair.append(items)
+        out.append(pair)
+        i = j
+    return out
+
+"""
+groupby_key(xs, key) -> like groupby but groups by key(x) (a function);
+each pair is [key_value, [original elements...]].
+"""
+fn groupby_key(xs, key):
+    out = []
+    i = 0
+    n = len(xs)
+    while i < n:
+        k = key(xs[i])
+        items = []
+        j = i
+        while j < n and key(xs[j]) == k:
+            items.append(xs[j])
+            j = j + 1
+        pair = []
+        pair.append(k)
+        pair.append(items)
+        out.append(pair)
+        i = j
+    return out
+
+"""
+accumulate(xs, f) -> running totals [x0, f(x0,x1), f(f(x0,x1),x2), ...].
+Empty xs -> []. `f` is a required function argument.
+"""
+fn accumulate(xs, f):
+    out = []
+    if len(xs) == 0:
+        return out
+    acc = xs[0]
+    out.append(acc)
+    i = 1
+    while i < len(xs):
+        acc = f(acc, xs[i])
+        out.append(acc)
+        i = i + 1
+    return out
+
+"""
+takewhile(pred, xs) -> longest prefix where pred(x) is true.
+"""
+fn takewhile(pred, xs):
+    out = []
+    i = 0
+    while i < len(xs) and pred(xs[i]):
+        out.append(xs[i])
+        i = i + 1
+    return out
+
+"""
+dropwhile(pred, xs) -> xs with the longest pred-true prefix removed.
+"""
+fn dropwhile(pred, xs):
+    i = 0
+    while i < len(xs) and pred(xs[i]):
+        i = i + 1
+    return xs[i..]
+
+"""
+pairwise(xs) -> [[x0,x1],[x1,x2],...] consecutive pairs (Python 3.10+).
+"""
+fn pairwise(xs):
+    out = []
+    i = 0
+    while i + 1 < len(xs):
+        p = []
+        p.append(xs[i])
+        p.append(xs[i + 1])
+        out.append(p)
+        i = i + 1
+    return out
+
+"""
+batched(xs, n) -> array of chunks of size n (last chunk may be short).
+Python itertools.batched semantics; n must be >= 1.
+"""
+fn batched(xs, n):
+    if n < 1:
+        core.panic("batched: n must be >= 1")
+    out = []
+    i = 0
+    while i < len(xs):
+        chunk = []
+        j = 0
+        while j < n and i + j < len(xs):
+            chunk.append(xs[i + j])
+            j = j + 1
+        out.append(chunk)
+        i = i + n
+    return out
+
+"""
+islice(xs, start, stop = -1, step = 1) -> elements xs[start:stop:step].
+stop = -1 means "to the end". Negative start/stop are not supported
+(Python counts from the end); they panic.
+"""
+fn islice(xs, start, stop = -1, step = 1):
+    if start < 0:
+        core.panic("islice: negative start")
+    if stop < -1:
+        core.panic("islice: negative stop")
+    if step < 1:
+        core.panic("islice: step must be >= 1")
+    n = len(xs)
+    if stop < 0 or stop > n:
+        stop = n
+    out = []
+    i = start
+    while i < stop:
+        out.append(xs[i])
+        i = i + step
+    return out
+
+"""
+zip_longest(a, b, fill = None) -> pairs [ai, bi] up to the longer input;
+missing elements are `fill` (Python itertools.zip_longest with two
+iterables; A has no *args so only the 2-way variant is provided).
+"""
+fn zip_longest(a, b, fill = None):
+    na = len(a)
+    nb = len(b)
+    n = na
+    if nb > n:
+        n = nb
+    out = []
+    i = 0
+    while i < n:
+        p = []
+        if i < na:
+            p.append(a[i])
+        else:
+            p.append(fill)
+        if i < nb:
+            p.append(b[i])
+        else:
+            p.append(fill)
+        out.append(p)
+        i = i + 1
+    return out
+
+"""
+compress(data, selectors) -> elements of `data` whose corresponding
+selector is truthy (Python itertools.compress).
+"""
+fn compress(data, selectors):
+    out = []
+    n = len(selectors)
+    if len(data) < n:
+        n = len(data)
+    i = 0
+    while i < n:
+        if selectors[i]:
+            out.append(data[i])
+        i = i + 1
+    return out
+
+"""
+filterfalse(pred, xs) -> elements where pred(x) is false
+(Python itertools.filterfalse; `filter` keeps truthy).
+"""
+fn filterfalse(pred, xs):
+    out = []
+    for x in xs:
+        if not pred(x):
+            out.append(x)
+    return out
+
+"""
+tee(xs) -> [xs.copy(), xs.copy()] — two independent materialized
+iterators (Python itertools.tee is lazy; here both are eager copies).
+"""
+fn tee(xs):
+    return [xs.copy(), xs.copy()]
+
+"""
+indexed(xs, start = 0) -> [[i, x], ...] pairs (Python enumerate).
+The builtin `enumerate` name is taken, so this is the itertools-style
+helper; `start` offsets the first index.
+"""
+fn indexed(xs, start = 0):
+    out = []
+    i = 0
+    while i < len(xs):
+        p = []
+        p.append(start + i)
+        p.append(xs[i])
+        out.append(p)
+        i = i + 1
+    return out
+
+"""
+starmap(f, pairs) -> [f(p[0], p[1]) for p in pairs] (Python
+itertools.starmap). Each pair must be an indexable 2-element array —
+A tuples cannot be indexed, so tuple pairs are a documented deviation.
+"""
+fn starmap(f, pairs):
+    out = []
+    for p in pairs:
+        out.append(f(p[0], p[1]))
+    return out
+
+"""
+cycle(xs, n) -> xs repeated n times, flattened (Python itertools.cycle
+is infinite; here it is bounded — pass n for the number of repetitions,
+n <= 0 yields []). Elements are NOT copied: composite elements are
+shared across repetitions, like Python's cycle.
+"""
+fn cycle(xs, n):
+    out = []
+    i = 0
+    while i < n:
+        for x in xs:
+            out.append(x)
+        i = i + 1
+    return out
+
+"""
+count_range(start = 0, step = 1, n = 10) -> [start, start+step, ...]
+of length n (bounded analogue of the infinite itertools.count).
+step must not be 0.
+"""
+fn count_range(start = 0, step = 1, n = 10):
+    if step == 0:
+        core.panic("count_range: step must not be 0")
+    out = []
+    i = 0
+    v = start
+    while i < n:
+        out.append(v)
+        v = v + step
+        i = i + 1
+    return out
+
+"""
+zip_all(lists) -> array of arrays: the n-way zip of the input arrays,
+each output element holding one item per input array, stopping at the
+SHORTEST input (Python itertools.zip / builtin zip over *iterables).
+zip_all([]) -> [].
+"""
+fn zip_all(lists):
+    k = len(lists)
+    if k == 0:
+        return []
+    n = len(lists[0])
+    i = 1
+    while i < k:
+        if len(lists[i]) < n:
+            n = len(lists[i])
+        i = i + 1
+    out = []
+    r = 0
+    while r < n:
+        p = []
+        j = 0
+        while j < k:
+            p.append(lists[j][r])
+            j = j + 1
+        out.append(p)
+        r = r + 1
+    return out
+
+"""
+zip_longest_all(lists, fill = None) -> n-way zip stopping at the LONGEST
+input; missing elements are `fill` (Python itertools.zip_longest over
+*iterables — here an array of arrays instead of varargs).
+"""
+fn zip_longest_all(lists, fill = None):
+    k = len(lists)
+    if k == 0:
+        return []
+    n = 0
+    i = 0
+    while i < k:
+        if len(lists[i]) > n:
+            n = len(lists[i])
+        i = i + 1
+    # hoist per-input lengths: len() inside the r*j loop was O(n*k) calls
+    lens = []
+    i = 0
+    while i < k:
+        lens.append(len(lists[i]))
+        i = i + 1
+    out = []
+    r = 0
+    while r < n:
+        p = []
+        j = 0
+        while j < k:
+            if r < lens[j]:
+                p.append(lists[j][r])
+            else:
+                p.append(fill)
+            j = j + 1
+        out.append(p)
+        r = r + 1
+    return out
+
+"""
+chain_from_iterable(lists) -> flattened array: concat of every element
+of every sub-array (Python itertools.chain.from_iterable). Elements are
+shared, not copied.
+"""
+fn chain_from_iterable(lists):
+    out = []
+    for sub in lists:
+        for x in sub:
+            out.append(x)
+    return out
+
+"""
+accumulate_init(xs, f, init) -> running totals seeded by `init`:
+[init, f(init,x0), f(f(init,x0),x1), ...] — the Python
+itertools.accumulate(iterable, function, initial=init) analogue. Empty
+xs -> [init].
+"""
+fn accumulate_init(xs, f, init):
+    out = []
+    acc = init
+    out.append(acc)
+    for x in xs:
+        acc = f(acc, x)
+        out.append(acc)
+    return out

@@ -1,0 +1,174 @@
+# Self-check for numpy/io.astra — run: ./build/a run stdlib/std/math/numpy/_check_io.astra
+# Exercises savetxt/loadtxt round-trip, fromstring, fromfile, genfromtxt,
+# repr/str, tobytes/save/load. Uses temp files under /tmp and panics on
+# any failure (non-zero exit).
+
+from "ndarray.astra" import NDArray, array_from_list, array2string, zeros
+from "io.astra" import savetxt, loadtxt, loadtxt_delim, loadtxt_cols, fromstring, frombuffer, tofile, fromfile, genfromtxt, array_str, array_repr, tobytes, ndarray_to_bytes, save, load, save_text, load_text
+
+TMP = "/tmp/a_numpy_io_check"
+
+fn _near(x: f64, y: f64) -> bool:
+    d = x - y
+    if d < 0:
+        d = -d
+    return d < 1e-9
+
+fn _assert_arr_eq(name: str, got: NDArray, want_data: [f64], want_shape: [i64]) -> bool:
+    ok = len(got.shape) == len(want_shape)
+    if ok:
+        for i in 0..len(want_shape):
+            if got.shape[i] != want_shape[i]:
+                ok = false
+    if ok:
+        if len(got.data) != len(want_data):
+            ok = false
+    if ok:
+        for i in 0..len(want_data):
+            if not _near(got.data[i], want_data[i]):
+                ok = false
+    if ok:
+        print("ok " + name)
+    else:
+        print("FAIL " + name + " got=" + array2string(got) + " shape=" + str(got.shape))
+    return ok
+
+entry main():
+    all_ok = true
+
+    # --- savetxt / loadtxt round-trip (2-D) ---
+    a = array_from_list([[1.5, 2.25, -3.0], [4.0, 0.5, 6.125]])
+    savetxt(TMP + "_2d.txt", a, "%.6f", ",")
+    b = loadtxt_delim(TMP + "_2d.txt", ",")
+    all_ok = _assert_arr_eq("loadtxt_delim 2d", b, [1.5, 2.25, -3.0, 4.0, 0.5, 6.125], [2, 3]) and all_ok
+
+    # whitespace delimiter + comments + blank lines
+    write_file(TMP + "_ws.txt", "# comment\n\n1 2 3\n4 5 6 # tail\n")
+    c = loadtxt(TMP + "_ws.txt")
+    all_ok = _assert_arr_eq("loadtxt ws+comments", c, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3]) and all_ok
+
+    # 1-D savetxt -> one value per line -> 1-D loadtxt
+    v = NDArray([1.0, 2.5, -4.0], [3])
+    savetxt(TMP + "_1d.txt", v)
+    d = loadtxt(TMP + "_1d.txt")
+    all_ok = _assert_arr_eq("1d roundtrip", d, [1.0, 2.5, -4.0], [3]) and all_ok
+
+    # skiprows
+    write_file(TMP + "_skip2.txt", "header\n1 2\n3 4\n")
+    e = loadtxt(TMP + "_skip2.txt", " ", 1, "#")
+    all_ok = _assert_arr_eq("skiprows", e, [1.0, 2.0, 3.0, 4.0], [2, 2]) and all_ok
+
+    # single column -> 1-D, single value -> 0-d
+    write_file(TMP + "_col.txt", "1\n2\n3\n")
+    f = loadtxt(TMP + "_col.txt")
+    all_ok = _assert_arr_eq("single col", f, [1.0, 2.0, 3.0], [3]) and all_ok
+    write_file(TMP + "_one.txt", "42\n")
+    g = loadtxt(TMP + "_one.txt")
+    ok = len(g.shape) == 0 and len(g.data) == 1 and _near(g.data[0], 42.0)
+    if ok:
+        print("ok scalar")
+    else:
+        print("FAIL scalar shape=" + str(g.shape))
+    all_ok = ok and all_ok
+
+    # loadtxt_cols
+    write_file(TMP + "_cols.txt", "1 2 3\n4 5 6\n")
+    h = loadtxt_cols(TMP + "_cols.txt", " ", 0, [0, 2])
+    all_ok = _assert_arr_eq("usecols", h, [1.0, 3.0, 4.0, 6.0], [2, 2]) and all_ok
+
+    # --- fromstring ---
+    s = fromstring("1.5 2.5 -3e2", " ")
+    all_ok = _assert_arr_eq("fromstring", s, [1.5, 2.5, -300.0], [3]) and all_ok
+    s2 = fromstring("1,2,3", ",")
+    all_ok = _assert_arr_eq("fromstring sep", s2, [1.0, 2.0, 3.0], [3]) and all_ok
+    fb = frombuffer("7 8 9")
+    all_ok = _assert_arr_eq("frombuffer", fb, [7.0, 8.0, 9.0], [3]) and all_ok
+
+    # --- tofile / fromfile ---
+    tofile(v, TMP + "_flat.txt")
+    ff = fromfile(TMP + "_flat.txt")
+    all_ok = _assert_arr_eq("tofile/fromfile", ff, [1.0, 2.5, -4.0], [3]) and all_ok
+
+    # --- genfromtxt: missing/bad -> nan, ragged padded ---
+    write_file(TMP + "_gen.txt", "1 2 x\n3\n4 5 6\n")
+    gf = genfromtxt(TMP + "_gen.txt")
+    gd = gf.data
+    ok = len(gd) == 9 and _near(gd[0], 1.0) and _near(gd[1], 2.0)
+    ok = ok and gd[2] != gd[2] and _near(gd[3], 3.0) and gd[4] != gd[4] and gd[5] != gd[5]
+    ok = ok and _near(gd[6], 4.0) and _near(gd[7], 5.0) and _near(gd[8], 6.0)
+    if ok:
+        print("ok genfromtxt nan/pad")
+    else:
+        print("FAIL genfromtxt data=" + str(gd))
+    all_ok = ok and all_ok
+
+    # --- repr / str ---
+    r = array_repr(a)
+    print("repr: " + r)
+    ok = r.startswith("array([[") and r.endswith("]])")
+    if ok:
+        print("ok array_repr wrapper")
+    else:
+        print("FAIL array_repr")
+    all_ok = ok and all_ok
+    st = array_str(v)
+    ok = st == "[1.0, 2.5, -4.0]"
+    if ok:
+        print("ok array_str 1d")
+    else:
+        print("FAIL array_str got=" + st)
+    all_ok = ok and all_ok
+
+    # --- tobytes / ndarray_to_bytes / save / load ---
+    tb = tobytes(v)
+    fb2 = frombuffer(tb)
+    ok = fb2.data[0] == 1.0 and fb2.data[2] == -4.0 and len(fb2.data) == 3
+    if ok:
+        print("ok tobytes roundtrip")
+    else:
+        print("FAIL tobytes got=" + tb)
+    all_ok = ok and all_ok
+    bb = ndarray_to_bytes(v)
+    ok = len(bb) == len(tb)
+    if ok:
+        print("ok ndarray_to_bytes len")
+    else:
+        print("FAIL ndarray_to_bytes")
+    all_ok = ok and all_ok
+
+    # save/load preserves ndim (3-D)
+    m = zeros([2, 2, 2])
+    m.data[0] = 1.5
+    m.data[7] = -2.25
+    save(TMP + "_arr.txt", m)
+    ml = load(TMP + "_arr.txt")
+    ok = len(ml.shape) == 3 and ml.shape[0] == 2 and ml.shape[1] == 2 and ml.shape[2] == 2
+    ok = ok and _near(ml.data[0], 1.5) and _near(ml.data[7], -2.25) and _near(ml.data[3], 0.0)
+    if ok:
+        print("ok save/load 3d")
+    else:
+        print("FAIL save/load shape=" + str(ml.shape) + " data=" + str(ml.data))
+    all_ok = ok and all_ok
+
+    # save_text/load_text aliases
+    save_text(TMP + "_st.txt", a)
+    stl = load_text(TMP + "_st.txt")
+    all_ok = _assert_arr_eq("save_text/load_text", stl, [1.5, 2.25, -3.0, 4.0, 0.5, 6.125], [2, 3]) and all_ok
+
+    # cleanup temp files
+    remove_file(TMP + "_2d.txt")
+    remove_file(TMP + "_ws.txt")
+    remove_file(TMP + "_1d.txt")
+    remove_file(TMP + "_skip2.txt")
+    remove_file(TMP + "_col.txt")
+    remove_file(TMP + "_one.txt")
+    remove_file(TMP + "_cols.txt")
+    remove_file(TMP + "_flat.txt")
+    remove_file(TMP + "_gen.txt")
+    remove_file(TMP + "_arr.txt")
+    remove_file(TMP + "_st.txt")
+
+    if all_ok:
+        print("ALL IO CHECKS PASSED")
+    else:
+        panic("IO CHECKS FAILED")

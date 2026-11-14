@@ -1,0 +1,7 @@
+# std.http — HTTP/1.1 client package (Python http.client / requests-lite).
+#
+#   from std:http import get, post, request, http_connection, https_connection
+#   resp = get("https://example.com/")
+#   resp.status, resp.headers, resp.body, resp.text(), resp.json()
+from "client.astra" import Response, HTTPConnection, Session, http_connection, https_connection, request, get, post, delete, put, patch, head, options, session, codes, status_codes, _pool_close_all
+from "urls.astra" import UrlParts, urlsplit, urlunsplit, quote, urlencode

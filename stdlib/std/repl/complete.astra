@@ -1,0 +1,253 @@
+# Tab-completion candidates for the REPL (the IPythonPTCompleter analog).
+# Sources: A keywords, interpreter builtins, native module members, and
+# names the REPL has seen defined in the session.
+
+user_names = []
+# Session-lifetime completion cache: cap it so a long REPL session cannot
+# grow it without bound (oldest names are evicted first).
+MAX_USER_NAMES = 4096
+
+fn c_add(name):
+    if name != "" and not user_names.contains(name):
+        user_names.append(name)
+        if len(user_names) > MAX_USER_NAMES:
+            user_names.remove_at(0)
+
+fn is_ident_start(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or c == "_"
+
+fn is_ident_char(c):
+    return is_ident_start(c) or (c >= "0" and c <= "9")
+
+fn word_at(text, pos):
+    # Identifier characters immediately before `pos`.
+    start = pos
+    while start > 0 and is_ident_char(text[start - 1..start]):
+        start = start - 1
+    return (start, pos - start)
+
+fn note_name(name):
+    c_add(name)
+
+# Records names a submitted source snippet defines, so later completions can
+# offer them (approximates IPython's namespace-aware completion).
+fn note_source(src):
+    for raw in src.splitlines():
+        line = raw.strip()
+        if line == "" or line[0..1] == "#":
+            continue
+        # fn/class/enum/trait NAME
+        for kw in ["fn ", "class ", "enum ", "trait "]:
+            if len(line) >= len(kw) and line[0..len(kw)] == kw:
+                rest = line[len(kw)..]
+                end = 0
+                while end < len(rest) and is_ident_char(rest[end..end + 1]):
+                    end = end + 1
+                c_add(rest[0..end])
+                break
+        # import NAME / import NAME as ALIAS / from MOD import a, b as c
+        if len(line) >= 7 and line[0..7] == "import ":
+            rest = line[7..].strip()
+            parts = rest.split(" as ")
+            name = parts[0].strip()
+            if len(parts) > 1:
+                c_add(parts[1].strip())
+            else:
+                c_add(name)
+        if len(line) >= 5 and line[0..5] == "from ":
+            rest = line[5..]
+            idx = rest.find(" import ")
+            if idx >= 0:
+                names = rest[idx + 8..].strip()
+                for piece in names.split(","):
+                    seg = piece.strip().split(" as ")
+                    if len(seg) > 1:
+                        c_add(seg[1].strip())
+                    else:
+                        c_add(seg[0].strip())
+        # NAME = ... at top level (skip ==, !=, <=, >=, +=, -=, *=, /=, %=)
+        eq = line.find("=")
+        if eq > 0 and line[eq - 1..eq] != "=" and line[eq - 1..eq] != "!" and line[eq - 1..eq] != "<" and line[eq - 1..eq] != ">" and line[eq - 1..eq] != "+" and line[eq - 1..eq] != "-" and line[eq - 1..eq] != "*" and line[eq - 1..eq] != "/" and line[eq - 1..eq] != "%":
+            ts = line[eq + 1..].strip()
+            if ts == "" or ts[0..1] != "=":
+                (ws, wl) = word_at(line, eq)
+                word = line[ws..ws + wl]
+                if word != "" and is_ident_start(word[0..1]):
+                    c_add(word)
+
+keywords = ["fn", "if", "elif", "else", "while", "for", "in", "loop",
+            "break", "continue", "return", "defer", "class",
+            "metaclass", "pass", "self", "true",
+            "false", "and", "or", "not", "import", "from", "as", "match",
+            "None", "Some", "Ok", "Err", "enum", "do", "type", "trait",
+            "where", "comptime", "impl", "try", "except", "finally", "raise",
+            "is", "lambda", "with", "yield", "async", "await", "del",
+            "assert", "global", "nonlocal", "exit", "quit"]
+
+builtins = ["print", "eprint", "input", "flush", "len", "str", "int",
+            "float", "bool", "abs", "min", "max", "sum", "any", "all",
+            "sorted", "reversed", "enumerate", "zip", "map", "filter",
+            "range", "open", "repr", "id", "hash", "iter", "next", "dir",
+            "help", "format", "chr", "ord", "hex", "oct", "bin", "round",
+            "pow", "divmod", "hasattr", "getattr", "setattr", "callable",
+            "isinstance", "super", "object", "vars", "locals", "globals",
+            "list", "dict", "set", "tuple", "bytes", "bytearray",
+            "frozenset", "memoryview", "slice", "property", "staticmethod",
+            "classmethod", "breakpoint", "Exception", "ValueError",
+            "TypeError", "KeyError", "IndexError", "NameError", "RuntimeError",
+            "StopIteration", "ArithmeticError", "AssertionError",
+            "AttributeError", "EOFError", "ImportError", "LookupError",
+            "NotImplementedError", "OSError", "OverflowError", "RecursionError",
+            "SyntaxError", "SystemExit", "ZeroDivisionError", "True",
+            "False", "None", "Ellipsis", "NotImplemented"]
+
+module_members = {
+    "math": ["sqrt", "abs", "min", "max", "pow", "sin", "cos", "tan",
+             "asin", "acos", "atan", "atan2", "exp", "log", "log2",
+             "log10", "floor", "ceil", "round", "trunc", "random",
+             "random_int", "PI", "E"],
+    "io": ["print", "eprint", "input", "flush"],
+    "fs": ["read_file", "write_file", "append_file", "file_exists",
+           "list_dir", "remove_file", "create_dir", "remove_dir", "rename",
+           "current_dir"],
+    "strings": ["len", "str", "join"],
+    "collections": ["len", "map", "filter", "reduce", "any", "all", "sum",
+                    "join", "set"],
+    "core": ["panic", "assert", "assert_eq"],
+    "time": ["now", "sleep"],
+    "json": ["parse", "stringify", "pretty", "is_valid", "get", "at",
+             "len", "has", "keys", "kind", "as_str", "as_int", "as_float",
+             "as_bool", "as_array", "as_map"],
+    "binary": ["encode", "decode"],
+    "testing": ["seed", "for_all_int", "for_all_float", "for_all_bool",
+                "for_all_string", "for_all_elem"],
+    "log": ["set_level", "set_json", "debug", "info", "warn", "error"],
+    "metrics": ["counter", "gauge", "histogram", "render", "reset"],
+    "trace": ["start", "end", "current", "set_attribute", "add_event",
+              "inject", "extract", "spans", "reset"],
+    "net": ["resolve", "tcp_listen", "tcp_connect", "accept", "send",
+            "recv", "close", "local_port", "set_timeout", "set_nonblocking",
+            "poll", "udp_socket", "udp_bind", "udp_send", "udp_recv",
+            "tls_connect", "tls_wrap", "send_bytes", "recv_bytes",
+            "inflate_bytes", "tls_available"],
+    "terminal": ["isatty", "raw_mode", "read_char", "read_char_ms", "write",
+                 "flush", "size", "home"],
+    "env": ["get"],
+    "repl": ["eval"],
+    "arena": ["new", "pool", "region", "alloc", "release", "reset", "used",
+              "total"],
+    "unsafe": ["get", "set", "address_of", "load", "store", "offset"],
+}
+
+module_names = ["math", "io", "fs", "strings", "collections", "core",
+                "time", "json", "binary", "testing", "log", "metrics",
+                "trace", "net", "terminal", "env", "repl", "arena",
+                "unsafe", "prelude", "simd", "iter", "format", "comptime"]
+
+method_names = ["append", "extend", "insert", "remove_at", "pop", "remove",
+                "clear", "copy", "count", "index", "contains", "sort",
+                "reverse", "first", "last", "join", "get", "update", "keys",
+                "values", "items", "add", "discard", "union", "intersection",
+                "difference", "issubset", "issuperset", "lower", "upper",
+                "split", "rsplit", "strip", "lstrip", "rstrip", "find",
+                "rfind", "index", "rindex", "startswith", "endswith",
+                "replace", "splitlines", "expandtabs", "partition",
+                "rpartition", "removeprefix", "removesuffix", "join",
+                "isalnum", "isalpha", "isascii", "isdigit", "isidentifier",
+                "islower", "isnumeric", "isprintable", "isspace", "istitle",
+                "isupper", "repeat", "chars", "capitalize", "casefold",
+                "title", "swapcase", "center", "ljust", "rjust", "zfill",
+                "count", "items", "keys", "values", "get", "has", "at",
+                "kind", "as_str", "as_int", "as_float", "as_bool",
+                "as_array", "as_map", "encode", "decode", "now", "sleep",
+                "read", "write", "seek", "tell", "close", "flush", "isatty",
+                "fileno", "readline", "readlines", "writelines", "truncate",
+                "name", "mode", "closed", "buffer", "raw", "encoding",
+                "errors", "newlines", "detach", "readable", "writable",
+                "seekable", "read1", "peek", "readinto", "write_through"]
+
+fn starts_with(text, prefix):
+    return len(text) >= len(prefix) and text[0..len(prefix)] == prefix
+
+# All candidates for `prefix`. When the prefix contains a dot (module.member
+# or object.attr), completes the member side.
+fn candidates(prefix):
+    dot = prefix.rfind(".")
+    if dot >= 0:
+        base = prefix[0..dot]
+        tail = prefix[dot + 1..]
+        pool = module_members.get(base, method_names)
+        out = []
+        for name in pool:
+            if starts_with(name, tail) and not out.contains(base + "." + name):
+                out.append(base + "." + name)
+        return out
+    out = []
+    for name in keywords:
+        if starts_with(name, prefix):
+            out.append(name)
+    for name in builtins:
+        if starts_with(name, prefix) and not out.contains(name):
+            out.append(name)
+    for name in module_names:
+        if starts_with(name, prefix) and not out.contains(name):
+            out.append(name)
+    for name in user_names:
+        if starts_with(name, prefix) and not out.contains(name):
+            out.append(name)
+    out.sort()
+    return out
+
+# Copy of the session-defined names (for %who/%whos).
+fn session_names():
+    out = []
+    for name in user_names:
+        out.append(name)
+    return out
+
+# Drops every session-recorded name (the `clean` command / %reset).
+fn reset_session_names():
+    user_names.clear()
+
+# Short classification of a (possibly dotted) name for `name?` inspection.
+# Returns "" when the name is unknown.
+fn describe(name):
+    dot = name.rfind(".")
+    if dot >= 0:
+        base = name[0..dot]
+        member = name[dot + 1..]
+        pool = module_members.get(base, [])
+        if pool.contains(member):
+            return "member of module " + base
+        return ""
+    if keywords.contains(name):
+        return "keyword"
+    if builtins.contains(name):
+        return "builtin function"
+    if module_names.contains(name):
+        return "module"
+    members = module_members.get(name, [])
+    if len(members) > 0:
+        return "module"
+    if user_names.contains(name):
+        return "session-defined name"
+    return ""
+
+# Common prefix length shared by all candidates (for Tab completion).
+fn common_prefix(items):
+    if len(items) == 0:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    first = items[0]
+    n = len(first)
+    for item in items:
+        if len(item) < n:
+            n = len(item)
+        i = 0
+        while i < n and item[i] == first[i]:
+            i = i + 1
+        n = i
+        if n == 0:
+            break
+    return first[0..n]

@@ -1,0 +1,146 @@
+# std.re selftest — regex engine coverage (search/match/classes/quantifiers/
+# groups/alternation/anchors/sub/split/escape).
+# Run: ./build/a test stdlib/std/re/selftest.astra
+import std:re
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn test_search_and_groups():
+    m = re.search("a(b*)c", "xxabbc")
+    assert(m != None)
+    assert_eq(m!.group(0) ?? "", "abbc")
+    assert_eq(m!.group(1) ?? "", "bb")
+    assert_eq(m!.start(0), 2)
+    assert_eq(m!.end(0), 6)
+    assert_eq(m!.span(0)[0], 2)
+    assert_eq(m!.span(0)[1], 6)
+    gs = m!.groups()
+    assert_eq(gs[0], "bb")
+    # no match -> None
+    assert(re.search("zzz", "hello") == None)
+    # anchored match_at (Python re.match)
+    assert(re.match_at("b", "abc") == None)
+    m2 = re.match_at("a", "abc")
+    assert(m2 != None)
+    assert_eq(m2!.group(0) ?? "", "a")
+    # fullmatch
+    assert(re.fullmatch("a+", "aaa") != None)
+    assert(re.fullmatch("a+", "aab") == None)
+    assert(re.fullmatch("a*", "") != None)
+
+fn test_findall():
+    f = re.findall("\\d+", "a1b22c333")
+    assert_eq(len(f), 3)
+    assert_eq(f[0], "1")
+    assert_eq(f[1], "22")
+    assert_eq(f[2], "333")
+    # one group -> group strings
+    f1 = re.findall("(\\w+)@(\\w+)", "a@b c@d")
+    assert_eq(len(f1), 2)
+    assert_eq(f1[0][0], "a")
+    assert_eq(f1[0][1], "b")
+    assert_eq(f1[1][0], "c")
+    assert_eq(f1[1][1], "d")
+    # empty-match semantics match CPython
+    fx = re.findall("x*", "abxd")
+    assert_eq(len(fx), 5)
+    assert_eq(fx[0], "")
+    assert_eq(fx[2], "x")
+    assert_eq(re.findall("", "abc"), ["", "", "", ""])
+    assert_eq(re.findall("^", "abc"), [""])
+    assert_eq(re.findall("$", "abc"), [""])
+
+fn test_classes_and_escapes():
+    assert_eq(re.findall("[a-c]+", "abcxyzcab"), ["abc", "cab"])
+    assert_eq(re.findall("[^0-9]+", "ab12cd"), ["ab", "cd"])
+    assert_eq(re.findall("[a-cx-z]+", "abcxyz"), ["abcxyz"])
+    assert_eq(re.findall("\\w+", "hi_9 x-y"), ["hi_9", "x", "y"])
+    assert_eq(re.findall("\\d+", "a1b22"), ["1", "22"])
+    assert_eq(re.findall("\\s", "a b\tc"), [" ", "\t"])
+    assert_eq(re.findall("[\\d.]+", "a1.2b"), ["1.2"])
+    assert_eq(re.findall("\\b\\w+\\b", "hi there!"), ["hi", "there"])
+    assert(re.search("\\bcat\\b", "a cat sat") != None)
+    assert(re.search("\\bcat\\b", "concatenate") == None)
+    assert(re.search("\\Aabc", "abc") != None)
+    assert(re.search("c\\z", "abc") != None)
+    assert(re.search("c\\Z", "abc") != None)
+
+fn test_quantifiers():
+    # NOTE: '{' must be written '\{' in A string literals (interpolation).
+    assert_eq(re.findall("a\{2,3\}", "aaaa"), ["aaa"])
+    assert_eq(re.findall("a\{2,\}", "aaaaa"), ["aaaaa"])
+    assert_eq(re.findall("a\{3\}", "aaaa"), ["aaa"])
+    assert_eq(re.findall("colou?r", "color colour"), ["color", "colour"])
+    assert_eq(re.findall("(ab)+", "ababab"), ["ab"])
+    assert_eq(re.findall("a|ab", "ab"), ["a"])
+    assert_eq(re.findall("(a*)(b*)", "aab"), [["aa", "b"], ["", ""]])
+
+fn test_groups_and_alternation():
+    m = re.search("(a|ab)(c|bcd)", "abcd")
+    assert(m != None)
+    assert_eq(m!.group(0) ?? "", "abcd")
+    assert_eq(m!.group(1) ?? "", "a")
+    assert_eq(m!.group(2) ?? "", "bcd")
+    # non-participating group -> None (checked via Match.group -> String?)
+    it = re.finditer("(a)|(b)", "ab")
+    assert_eq(it[0].group(1) ?? "", "a")
+    assert(it[0].group(2) == None)
+    assert(it[1].group(1) == None)
+    assert_eq(it[1].group(2) ?? "", "b")
+    # non-capturing group
+    assert_eq(re.findall("(?:ab)+", "abab"), ["abab"])
+    # nested groups
+    m2 = re.search("((a)b)+", "zabab")
+    assert(m2 != None)
+    assert_eq(m2!.group(0) ?? "", "abab")
+    assert_eq(m2!.group(1) ?? "", "ab")
+    assert_eq(m2!.group(2) ?? "", "a")
+
+fn test_sub():
+    assert_eq(re.sub("(\\w+)@(\\w+)", "\\2@\\1", "mail a@b now"), "mail b@a now")
+    assert_eq(re.sub("x", "-", "axbxc"), "a-b-c")
+    assert_eq(re.sub("x*", "-", "abxd"), "-a-b--d-")
+    assert_eq(re.sub("(a)(b)?", "[\\1|\\2]", "ab a"), "[a|b] [a|]")
+    assert_eq(re.sub("a", "\\n", "a"), "\n")
+    # count limit
+    assert_eq(re.sub("a", "X", "aaa", 2), "XXa")
+
+fn test_split():
+    sp = re.split(",", "a,b,,c")
+    assert_eq(len(sp), 4)
+    assert_eq(sp[0], "a")
+    assert_eq(sp[1], "b")
+    assert_eq(sp[2], "")
+    assert_eq(sp[3], "c")
+    # captured groups interleave
+    sp2 = re.split("(,)", "a,b")
+    assert_eq(len(sp2), 3)
+    assert_eq(sp2[1], ",")
+    sp3 = re.split("", "abc")
+    assert_eq(sp3, ["", "a", "b", "c", ""])
+    # maxsplit
+    sp4 = re.split(",", "a,b,c,d", 1)
+    assert_eq(len(sp4), 2)
+    assert_eq(sp4[1], "b,c,d")
+
+fn test_escape_and_dot():
+    assert_eq(re.escape("a.b*c"), "a\\.b\\*c")
+    assert_eq(re.findall("a.c", "abc\naxc"), ["abc", "axc"])
+    assert_eq(re.findall(".", "héllo"), ["h", "é", "l", "l", "o"])
+
+fn test_compiled_pattern():
+    p = re.compile("colou?r")
+    m = p.search("my colour")
+    assert(m != None)
+    assert_eq(m!.group(0) ?? "", "colour")
+    assert_eq(p.findall("color colour"), ["color", "colour"])
+    assert_eq(p.sub("X", "color colour"), "X X")
+    it = p.finditer("color colour")
+    assert_eq(len(it), 2)
+    assert_eq(it[0].group(0) ?? "", "color")
+    assert_eq(it[1].group(0) ?? "", "colour")
+    assert_eq(p.count("color colour"), 2)

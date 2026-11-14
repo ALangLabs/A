@@ -1,0 +1,624 @@
+# std.pprint.pretty — Python `pprint` port (part 1: PrettyPrinter engine).
+#
+# Python `pprint` pretty-prints Python objects to a stream with width/
+# depth/indent controls. This port reproduces the core algorithm:
+#
+#   * `_safe_repr(object, context, maxlevels, level)` -> (text, readable,
+#     recursive) triple, powering `saferepr`/`isreadable`/`isrecursive`.
+#   * `_format`/`_format_items`/`_format_dict_items` — the width-aware
+#     line-breaking writer, ported from Python 3.14 `pprint.py`.
+#
+# Port notes (see README.md):
+#   * Output goes to stdout (`pprint`) or a returned string (`pformat`);
+#     there is no `stream=` parameter.
+#   * Recursion detection uses a `{object: true}` context map. A hashes
+#     arrays/maps/sets/structs/Json by identity, matching Python's
+#     `id(object)` keys. `_recursion` markers omit the id (A has none).
+#   * Dispatch is by `json.kind` + `json.as_array`/`as_map` probes +
+#     `str` prefix for sets/tuples, instead of `type(object).__repr__`.
+#     Container optionals cannot be None-compared in A, so probes use a
+#     string sentinel + `json.kind` check.
+#   * Sets and tuples are decomposed via the `binary` codec
+#     (encode -> decode -> Json array) because A tuples cannot be iterated;
+#     elements surface as `Json` and nested tuples/sets degrade to lists.
+#   * Dict keys are emitted in insertion order; `sort_dicts` sorts only when
+#     every key is a string (A cannot safely sort heterogeneous keys —
+#     Python falls back to unsorted via `_safe_key` anyway).
+#   * Strings that exceed the width are wrapped in parentheses with chunks
+#     on continuation lines — an approximation of Python's word-based
+#     `_pprint_str` (no regex engine in A).
+#   * `underscore_numbers` is honored for ints; `compact` is honored.
+import std:json
+import std:binary
+import std:core
+
+"""_slice(s, start, end) -> substring s[start:end] (chars, end exclusive;
+native slice with clamping — the old per-char loop built rope views)."""
+fn _slice(s, start, end):
+    src = str(s)
+    n = len(src)
+    if start < 0:
+        start = 0
+    if end > n:
+        end = n
+    if end < start:
+        end = start
+    return src[start..end]
+
+"""_floordiv(a, b) -> floor(a / b) for b > 0."""
+fn _floordiv(a, b):
+    q = a / b
+    if a < 0 and a % b != 0:
+        q = q - 1
+    return q
+
+"""_max(a, b) -> larger of two ints."""
+fn _max(a: i64, b: i64) -> i64:
+    if a > b:
+        return a
+    return b
+
+"""
+_is_container_opt(v) -> true when a `json.as_array`/`as_map` probe
+result (or-ed with the "NONE" sentinel) is Some. Container optionals
+(`[Json]?`, `map<String,Json>?`) cannot be compared to None in A, so we
+probe with a string sentinel and check the runtime kind instead.
+"""
+fn _is_container_opt(v):
+    return json.kind(v) != "string"
+
+"""
+_py_str_repr(s) -> Python-style repr of a string (single quotes,
+escapes for backslash, the quote char, \n, \t, \r). `s` must be a plain
+String (extract via json.as_str first). Non-ASCII and other control
+characters pass through literally (documented deviation).
+"""
+fn _py_str_repr(s):
+    quote = "'"
+    if s.contains("'") and not s.contains("\""):
+        quote = "\""
+    parts = [quote]
+    for c in s:
+        sc = str(c)
+        if sc == "\\":
+            parts.append("\\\\")
+        elif sc == quote:
+            parts.append("\\" + quote)
+        elif sc == "\n":
+            parts.append("\\n")
+        elif sc == "\t":
+            parts.append("\\t")
+        elif sc == "\r":
+            parts.append("\\r")
+        else:
+            parts.append(sc)
+    parts.append(quote)
+    return "".join(parts)
+
+"""_seq_kind(x) -> "set" | "tuple" | "other" for kind=="array" non-lists."""
+fn _seq_kind(x):
+    s = str(x)
+    if s.startswith("\{"):
+        return "set"
+    if s.startswith("("):
+        return "tuple"
+    return "other"
+
+"""_items(x) -> [Json] elements for native sets/tuples via binary codec."""
+fn _items(x):
+    d = binary.decode(binary.encode(x))
+    probe = d ?? "NONE"
+    if json.kind(probe) == "string":
+        return []
+    return (json.as_array(d!) ?? [])
+
+"""_keys(mm) -> [key] collected from a (possibly non-string-keyed) map."""
+fn _keys(mm):
+    ks = []
+    for k in mm:
+        ks.append(k)
+    return ks
+
+"""_all_strings(ks) -> true when every key's json.kind is "string"."""
+fn _all_strings(ks):
+    for k in ks:
+        if json.kind(k) != "string":
+            return false
+    return true
+
+"""_sorted_keys(ks, sort_dicts) -> ks, sorted when safe (all-string keys)."""
+fn _sorted_keys(ks, sort_dicts):
+    if sort_dicts and _all_strings(ks):
+        out = []
+        for k in ks:
+            out.append(k)
+        out.sort()
+        return out
+    return ks
+
+"""
+_underscore_int(i) -> str(i) with '_' thousands separators
+(Python `f"{i:_d}"` / underscore_numbers=True).
+"""
+fn _underscore_int(i: i64):
+    s = str(i)
+    neg = s.startswith("-")
+    digits = s
+    if neg:
+        digits = _slice(s, 1, len(s))
+    n = len(digits)
+    first = n % 3
+    out = ""
+    idx = 0
+    if first > 0:
+        out = _slice(digits, 0, first)
+        idx = first
+    while idx < n:
+        if out != "":
+            out = out + "_"
+        out = out + _slice(digits, idx, idx + 3)
+        idx = idx + 3
+    if neg:
+        out = "-" + out
+    return out
+
+"""_recursion_name(x) -> type word for '<Recursion on ...>' markers."""
+fn _recursion_name(x):
+    kind = json.kind(x)
+    if kind == "array":
+        if _is_container_opt(json.as_array(x) ?? "NONE"):
+            return "list"
+        t = _seq_kind(x)
+        if t == "set":
+            return "set"
+        if t == "tuple":
+            return "tuple"
+        return "list"
+    if kind == "object":
+        return "dict"
+    return "object"
+
+"""
+_recursion(x) -> '<Recursion on TYPE>' (Python includes id=...; A has no
+stable object id, so the id is omitted — documented deviation).
+"""
+fn _recursion(x):
+    return "<Recursion on " + _recursion_name(x) + ">"
+
+"""
+SafeRepr — (text, readable, recursive) triple from _safe_repr
+(Python returns a plain tuple; A tuples cannot be indexed).
+"""
+class SafeRepr:
+    text: str
+    readable: bool
+    recursive: bool
+
+"""Buf — mutable string sink for _format (Python writes to a stream)."""
+class Buf:
+    parts: [String]
+
+    fn put(self, s):
+        self.parts.append(s)
+
+    fn text(self):
+        return "".join(self.parts)
+
+"""
+PrettyPrinter — configurable pretty-printer (Python
+`pprint.PrettyPrinter`).
+
+Constructor field order (positional, no defaults in A):
+indent, width, depth, compact, sort_dicts, underscore_numbers
+`_readable`/`_recursive` are internal flags (Python uses instance
+attributes set during formatting; they must be initialized by the
+constructor).
+`depth <= 0` means unlimited (Python `depth=None`; note Python also
+treats depth=0 as unlimited since 0 is falsy).
+There is no `stream` field: `pprint` writes to stdout, `pformat`
+returns the string.
+"""
+class PrettyPrinter:
+    indent: i64
+    width: i64
+    depth: i64
+    compact: bool
+    sort_dicts: bool
+    underscore_numbers: bool
+    _readable: bool
+    _recursive: bool
+
+    """pprint(self, object) -> pretty-print to stdout + newline."""
+    fn pprint(self, object):
+        buf = Buf([])
+        self._format(object, buf, 0, 0, {}, 0)
+        print(buf.text())
+
+    """pformat(self, object) -> pretty-printed string (no trailing newline)."""
+    fn pformat(self, object):
+        buf = Buf([])
+        self._format(object, buf, 0, 0, {}, 0)
+        return buf.text()
+
+    """isrecursive(self, object) -> bool (Python PrettyPrinter.isrecursive)."""
+    fn isrecursive(self, object):
+        r = self._safe_repr(object, {}, 0, 0)
+        return r.recursive
+
+    """isreadable(self, object) -> bool (Python PrettyPrinter.isreadable)."""
+    fn isreadable(self, object):
+        r = self._safe_repr(object, {}, 0, 0)
+        return r.readable and not r.recursive
+
+    """
+    _format(self, object, buf, indent, allowance, context, level)
+    -> width-aware writer (port of Python PrettyPrinter._format).
+    """
+    fn _format(self, object, buf, indent, allowance, context, level):
+        if object in context:
+            buf.put(_recursion(object))
+            self._recursive = true
+            self._readable = false
+            return None
+        rep = self._repr(object, context, level)
+        if not rep.readable:
+            self._readable = false
+        if rep.recursive:
+            self._recursive = true
+        max_width = self.width - indent - allowance
+        if len(rep.text) > max_width:
+            kind = json.kind(object)
+            dispatched = false
+            if kind == "object" and _is_container_opt(json.as_map(object) ?? "NONE"):
+                context[object] = true
+                self._pprint_dict(object, buf, indent, allowance, context, level + 1)
+                context.pop(object)
+                dispatched = true
+            elif kind == "array":
+                if _is_container_opt(json.as_array(object) ?? "NONE"):
+                    context[object] = true
+                    self._pprint_list(object, buf, indent, allowance, context, level + 1)
+                    context.pop(object)
+                    dispatched = true
+                else:
+                    t = _seq_kind(object)
+                    if t == "set":
+                        context[object] = true
+                        self._pprint_set(object, buf, indent, allowance, context, level + 1)
+                        context.pop(object)
+                        dispatched = true
+            elif kind == "string":
+                context[object] = true
+                self._pprint_str(object, buf, indent, allowance, context, level + 1)
+                context.pop(object)
+                dispatched = true
+            if dispatched:
+                return None
+        buf.put(rep.text)
+        return None
+
+    """_pprint_dict(self, object, buf, indent, allowance, context, level)"""
+    fn _pprint_dict(self, object, buf, indent, allowance, context, level):
+        buf.put("\{")
+        if self.indent > 1:
+            buf.put(" ".repeat(self.indent - 1))
+        mm = (json.as_map(object))!
+        ks = _sorted_keys(_keys(mm), self.sort_dicts)
+        if len(ks) > 0:
+            self._format_dict_items(mm, ks, buf, indent, allowance + 1, context, level)
+        buf.put("\}")
+
+    """_format_dict_items(self, mm, ks, buf, indent, allowance, context, level)"""
+    fn _format_dict_items(self, mm, ks, buf, indent, allowance, context, level):
+        indent = indent + self.indent
+        delimnl = ",\n" + " ".repeat(indent)
+        last_index = len(ks) - 1
+        i = 0
+        while i < len(ks):
+            last = i == last_index
+            k = ks[i]
+            rep = self._repr(k, context, level)
+            buf.put(rep.text)
+            buf.put(": ")
+            if last:
+                self._format(mm[k], buf, indent + len(rep.text) + 2, allowance, context, level)
+            else:
+                self._format(mm[k], buf, indent + len(rep.text) + 2, 1, context, level)
+            if not last:
+                buf.put(delimnl)
+            i = i + 1
+
+    """_pprint_list(self, object, buf, indent, allowance, context, level)"""
+    fn _pprint_list(self, object, buf, indent, allowance, context, level):
+        buf.put("[")
+        elems = (json.as_array(object))!
+        self._format_items(elems, buf, indent, allowance + 1, context, level)
+        buf.put("]")
+
+    """_pprint_set(self, object, buf, indent, allowance, context, level)"""
+    fn _pprint_set(self, object, buf, indent, allowance, context, level):
+        elems = _items(object)
+        if len(elems) == 0:
+            buf.put("set()")
+            return None
+        buf.put("\{")
+        self._format_items(elems, buf, indent, allowance + 1, context, level)
+        buf.put("\}")
+        return None
+
+    #_pprint_tuple is not provided: A tuples cannot be iterated or
+    #indexed (binary.decode round-trips them to an opaque TupleValue),
+    #so tuples render via their one-line str() repr — documented
+    #deviation from Python's element-wise tuple formatting.
+
+    """
+    _pprint_str(self, object, buf, indent, allowance, context, level)
+    -> over-width string wrapping (approximation of Python's
+    word-based chunking; chunks are split on character boundaries).
+    """
+    fn _pprint_str(self, object, buf, indent, allowance, context, level):
+        st = (json.as_str(object))!
+        rep = _py_str_repr(st)
+        avail = self.width - indent - allowance
+        if avail < 8:
+            avail = 8
+        if len(rep) <= avail:
+            buf.put(rep)
+            return None
+        buf.put("(")
+        chunk = avail - 2
+        if chunk < 4:
+            chunk = 4
+        n = len(st)
+        inner_indent = indent + 1
+        sep = "\n" + " ".repeat(inner_indent)
+        i = 0
+        first = true
+        while i < n:
+            take = chunk
+            if n - i < take:
+                take = n - i
+            piece = _slice(st, i, i + take)
+            if not first:
+                buf.put(sep)
+            buf.put(_py_str_repr(piece))
+            i = i + take
+            first = false
+        buf.put(")")
+        return None
+
+    """
+    _format_items(self, elems, buf, indent, allowance, context, level)
+    -> port of Python PrettyPrinter._format_items (compact/width logic).
+    """
+    fn _format_items(self, elems, buf, indent, allowance, context, level):
+        indent = indent + self.indent
+        if self.indent > 1:
+            buf.put(" ".repeat(self.indent - 1))
+        delimnl = ",\n" + " ".repeat(indent)
+        delim = ""
+        max_width = self.width - indent + 1
+        width = max_width
+        n = len(elems)
+        i = 0
+        while i < n:
+            ent = elems[i]
+            last = i == n - 1
+            if last:
+                max_width = max_width - allowance
+                width = width - allowance
+            if self.compact:
+                rep = self._repr(ent, context, level)
+                w = len(rep.text) + 2
+                if width < w:
+                    width = max_width
+                    if delim != "":
+                        delim = delimnl
+                if width >= w:
+                    width = width - w
+                    buf.put(delim)
+                    delim = ", "
+                    buf.put(rep.text)
+                    i = i + 1
+                    continue
+            buf.put(delim)
+            delim = delimnl
+            if last:
+                self._format(ent, buf, indent, allowance, context, level)
+            else:
+                self._format(ent, buf, indent, 1, context, level)
+            i = i + 1
+
+    """
+    _repr(self, object, context, level) -> SafeRepr on a context copy
+    (Python: self.format(object, context.copy(), self._depth, level)).
+    """
+    fn _repr(self, object, context, level):
+        r = self._safe_repr(object, context.copy(), self.depth, level)
+        if not r.readable:
+            self._readable = false
+        if r.recursive:
+            self._recursive = true
+        return r
+
+    """
+    _safe_repr(self, object, context, maxlevels, level) -> SafeRepr
+    (port of Python PrettyPrinter._safe_repr).
+    """
+    fn _safe_repr(self, object, context, maxlevels, level):
+        kind = json.kind(object)
+
+        # -- scalar atoms -------------------------------------------------
+        if kind == "null":
+            return SafeRepr("None", true, false)
+        if kind == "bool":
+            b = (json.as_bool(object))!
+            if b:
+                return SafeRepr("True", true, false)
+            return SafeRepr("False", true, false)
+        if kind == "int" or kind == "float" or kind == "number":
+            if json.as_int(object) != None:
+                n = (json.as_int(object))!
+                if self.underscore_numbers:
+                    return SafeRepr(_underscore_int(n), true, false)
+                return SafeRepr(str(n), true, false)
+            return SafeRepr(str(object), true, false)
+        if kind == "string":
+            st = (json.as_str(object))!
+            return SafeRepr(_py_str_repr(st), true, false)
+
+        # -- array-kind: list | set | tuple --------------------------------
+        if kind == "array":
+            if _is_container_opt(json.as_array(object) ?? "NONE"):
+                arr = (json.as_array(object))!
+                n = len(arr)
+                if n == 0:
+                    return SafeRepr("[]", true, false)
+                if maxlevels > 0 and level >= maxlevels:
+                    return SafeRepr("[...]", false, object in context)
+                if object in context:
+                    return SafeRepr(_recursion(object), false, true)
+                context[object] = true
+                readable = true
+                recursive = false
+                parts = []
+                level = level + 1
+                for e in arr:
+                    r = self._safe_repr(e, context, maxlevels, level)
+                    parts.append(r.text)
+                    if not r.readable:
+                        readable = false
+                    if r.recursive:
+                        recursive = true
+                context.pop(object)
+                return SafeRepr("[" + ", ".join(parts) + "]", readable, recursive)
+            t = _seq_kind(object)
+            if t == "set":
+                elems = _items(object)
+                n = len(elems)
+                if n == 0:
+                    return SafeRepr("set()", true, false)
+                if maxlevels > 0 and level >= maxlevels:
+                    return SafeRepr("\{...\}", false, object in context)
+                if object in context:
+                    return SafeRepr(_recursion(object), false, true)
+                context[object] = true
+                readable = true
+                recursive = false
+                parts = []
+                level = level + 1
+                for e in elems:
+                    r = self._safe_repr(e, context, maxlevels, level)
+                    parts.append(r.text)
+                    if not r.readable:
+                        readable = false
+                    if r.recursive:
+                        recursive = true
+                context.pop(object)
+                return SafeRepr("\{" + ", ".join(parts) + "\}", readable, recursive)
+            if t == "tuple":
+                # Tuples cannot be decomposed in A (un-iterable; the binary
+                # codec round-trips them to an opaque TupleValue), so they
+                # render via str() — documented deviation.
+                rep = str(object)
+                return SafeRepr(rep, len(rep) > 0 and not rep.startswith("<"), false)
+            # Other array-kind values (should not occur): leaf repr.
+            rep = str(object)
+            return SafeRepr(rep, len(rep) > 0 and not rep.startswith("<"), false)
+
+        # -- object-kind: dict | struct | Json object ----------------------
+        if kind == "object":
+            if _is_container_opt(json.as_map(object) ?? "NONE"):
+                mm = (json.as_map(object))!
+                ks = _sorted_keys(_keys(mm), self.sort_dicts)
+                n = len(ks)
+                if n == 0:
+                    return SafeRepr("\{\}", true, false)
+                if maxlevels > 0 and level >= maxlevels:
+                    return SafeRepr("\{...\}", false, object in context)
+                if object in context:
+                    return SafeRepr(_recursion(object), false, true)
+                context[object] = true
+                readable = true
+                recursive = false
+                parts = []
+                level = level + 1
+                for k in ks:
+                    kr = self._safe_repr(k, context, maxlevels, level)
+                    vr = self._safe_repr(mm[k], context, maxlevels, level)
+                    parts.append(kr.text + ": " + vr.text)
+                    if not kr.readable or not vr.readable:
+                        readable = false
+                    if kr.recursive or vr.recursive:
+                        recursive = true
+                context.pop(object)
+                return SafeRepr("\{" + ", ".join(parts) + "\}", readable, recursive)
+            rep = str(object)
+            return SafeRepr(rep, len(rep) > 0 and not rep.startswith("<"), false)
+
+        # -- everything else (ranges, closures, results, None handled above)
+        rep = str(object)
+        return SafeRepr(rep, len(rep) > 0 and not rep.startswith("<"), false)
+
+# ---------------------------------------------------------------------------
+# Module-level convenience API (Python pprint.pprint/pformat/saferepr/...).
+# A has no default arguments, so the full parameter set is only reachable
+# through PrettyPrinter; these wrappers use Python's defaults:
+# indent=1, width=80, depth=None(0), compact=false, sort_dicts=true,
+# underscore_numbers=false. `pp` uses sort_dicts=false like Python.
+# ---------------------------------------------------------------------------
+
+"""_default_printer(sort_dicts) -> PrettyPrinter with Python defaults."""
+fn _default_printer(sort_dicts):
+    return PrettyPrinter(1, 80, 0, false, sort_dicts, false, true, true)
+
+"""
+PrettyPrinter_new(indent = 1, width = 80, depth = 0, compact = false,
+sort_dicts = true, underscore_numbers = false) -> PrettyPrinter.
+
+Friendlier front-end for the positional `PrettyPrinter(...)`
+constructor: `depth` 0 means unlimited (Python `depth=None`);
+`_readable`/`_recursive` start true like a fresh Python printer.
+"""
+fn PrettyPrinter_new(indent = 1, width = 80, depth = 0, compact = false, sort_dicts = true, underscore_numbers = false):
+    return PrettyPrinter(indent, width, depth, compact, sort_dicts, underscore_numbers, true, true)
+
+"""pprint(object) -> pretty-print to stdout (Python pprint.pprint)."""
+fn pprint(object):
+    _default_printer(true).pprint(object)
+
+"""pformat(object) -> pretty-printed string (Python pprint.pformat)."""
+fn pformat(object):
+    return _default_printer(true).pformat(object)
+
+"""
+saferepr(object) -> repr string that handles recursive structures
+(Python pprint.saferepr; unlimited depth, one line).
+"""
+fn saferepr(object):
+    p = _default_printer(true)
+    return p._safe_repr(object, {}, 0, 0).text
+
+"""isreadable(object) -> bool (Python pprint.isreadable)."""
+fn isreadable(object):
+    p = _default_printer(true)
+    return p.isreadable(object)
+
+"""isrecursive(object) -> bool (Python pprint.isrecursive)."""
+fn isrecursive(object):
+    p = _default_printer(true)
+    return p.isrecursive(object)
+
+"""pp(object) -> pprint with sort_dicts=false (Python pprint.pp)."""
+fn pp(object):
+    _default_printer(false).pprint(object)
+
+"""
+pformat_full(object, indent, width, depth, compact, sort_dicts,
+underscore_numbers) -> pretty-printed string with the full Python
+pformat parameter set exposed positionally (A has no keyword args).
+depth <= 0 means unlimited (Python depth=None).
+"""
+fn pformat_full(object, indent, width, depth, compact, sort_dicts, underscore_numbers):
+    p = PrettyPrinter_new(indent, width, depth, compact, sort_dicts, underscore_numbers)
+    return p.pformat(object)

@@ -134,18 +134,11 @@ aval a_len(aval v) {
     if (lo && lo->type == T_PYBUF) return mkint_full(((APyBuf *)lo)->count);
     switch (kind_of(v)) {
         case K_STR:
-        case K_CHAR: {
-            /* len() is a code-point count, which needs a UTF-8 scan; cache it
-               on the string (Python caches this too) so repeated len() calls
-               in a loop do not rescan. */
-            AStr *s = (AStr *)obj_of(v);
-            uint32_t cp = astr_cp_cached(s);
-            if (!cp) {
-                cp = (uint32_t)u8_count(s->data, s->h.len) + 1u;
-                astr_cp_cache(s, cp - 1u);
-            }
-            return mkint_full(cp - 1u);
-        }
+        case K_CHAR:
+            /* len() is a code-point count, which needs a UTF-8 scan; the
+               count is cached per string object (ropes cache per node, so
+               append loops stay amortized O(1) per len() call). */
+            return mkint_full(a_str_cpcount(v));
         case K_VIEW: return mkint_full(((AView *)obj_of(v))->len);
         case K_BYTES: return mkint_full(((ABytes *)obj_of(v))->h.len);
         case K_LIST:

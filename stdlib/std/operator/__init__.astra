@@ -1,0 +1,292 @@
+# std.operator — port of Python Lib/operator.py (pure-Python implementation).
+#
+# A has no special-method protocol, no `is` identity operator, no `getattr`,
+# no `callable`, no exceptions, and no default/variadic parameters. See
+# README.md for the coverage matrix and deviations.
+#
+# Implementation notes (type-checker/backend limitations shaped the code):
+#   * Dispatch probes are inlined: calling a helper with an untyped parameter
+#     and then using that parameter in typed operations can hang semantic
+#     analysis, so each function below is self-contained.
+#   * `str(x)` accepts every value without constraining its type, so kind
+#     dispatch goes through string probes like `(x + "") == x` (true only for
+#     strings) instead of `json.kind` (which would pin the parameter to Json).
+#   * `== None` inside a function body miscompiles under the native backend,
+#     so None is detected via `str(x) == "None"` (the string "None" itself is
+#     indistinguishable — documented deviation).
+import std:math
+import std:core
+
+# -- comparisons ---------------------------------------------------------------
+
+fn lt(a, b):
+    return a < b
+
+fn le(a, b):
+    return a <= b
+
+fn eq(a, b):
+    return a == b
+
+fn ne(a, b):
+    return a != b
+
+fn ge(a, b):
+    return a >= b
+
+fn gt(a, b):
+    return a > b
+
+# -- logical --------------------------------------------------------------------
+
+fn truth(x):
+    # Python-style truthiness for bool/None/number/string/array/map/set,
+    # approximated from the value's string representation (str() is total).
+    # Strings that literally equal a falsy repr ("0", "None", "false", "[]",
+    # "{}", "") report the falsy side — see README deviations. Structs and
+    # function values have no meaningful repr check and may misreport.
+    s = str(x)
+    if s == "" or s == "None" or s == "false" or s == "0" or s == "0.0" or s == "-0.0" or s == "[]" or s == "\{\}":
+        return false
+    return true
+
+fn not_(a):
+    return not truth(a)
+
+# A has no `is` identity operator; approximated by equality (see README).
+fn is_(a, b):
+    return a == b
+
+fn is_not(a, b):
+    return a != b
+
+fn is_none(a):
+    # str(None) == "None"; also true for the string "None" (documented).
+    return str(a) == "None"
+
+fn is_not_none(a):
+    return not is_none(a)
+
+# -- math / bitwise ---------------------------------------------------------------
+
+fn abs(a):
+    return math.abs(a)
+
+fn add(a, b):
+    return a + b
+
+fn and_(a, b):
+    return a & b
+
+fn floordiv(a, b):
+    # Python `a // b` floors toward -inf; A's `/` truncates toward zero.
+    # Integral floats print with a '.' ("3.0"), ints never do.
+    if not str(a).contains(".") and not str(b).contains("."):
+        q = a / b
+        r = a % b
+        if r != 0 and ((r < 0) != (b < 0)):
+            q = q - 1
+        return q
+    return math.floor(a / b)
+
+fn index(a):
+    # Approximation of a.__index__(): integral numbers only.
+    if not ((a + 0) == a):
+        core.panic("operator.index: argument is not an integer")
+    i = int(a)
+    if float(i) != float(a):
+        core.panic("operator.index: argument is not an integer")
+    return i
+
+fn inv(a):
+    return ~a
+
+fn invert(a):
+    return inv(a)
+
+fn lshift(a, b):
+    return a << b
+
+fn mod(a, b):
+    # Python `a % b` takes the sign of the divisor; A's `%` keeps the
+    # dividend's sign, so adjust when the remainder and divisor differ.
+    r = a % b
+    if r != 0 and ((r < 0) != (b < 0)):
+        r = r + b
+    return r
+
+fn mul(a, b):
+    return a * b
+
+fn neg(a):
+    return -a
+
+fn or_(a, b):
+    return a | b
+
+fn pos(a):
+    # A has no unary plus operator; +a is the identity for numbers.
+    return a
+
+fn pow(a, b):
+    # Two-argument form only (Python's mod= third argument is unsupported).
+    return a ** b
+
+fn rshift(a, b):
+    return a >> b
+
+fn sub(a, b):
+    return a - b
+
+fn truediv(a, b):
+    # Python `/` is always true division; A's `/` truncates for int/int.
+    return float(a) / float(b)
+
+fn xor(a, b):
+    return a ^ b
+
+# -- sequence operations ---------------------------------------------------------
+
+fn concat(a, b):
+    # Python `a + b` for sequences. Strings use `+`; other iterables are
+    # copied element-wise into a fresh array. `(x + "") == x` is true only
+    # for strings (every other type formats differently under `+ ""`).
+    if (a + "") == a:
+        if (b + "") == b:
+            return a + b
+        core.panic("operator.concat: mismatched operand types")
+    if (b + "") == b:
+        core.panic("operator.concat: mismatched operand types")
+    out = []
+    for v in a:
+        out.append(v)
+    for v in b:
+        out.append(v)
+    return out
+
+fn contains(a, b):
+    # Same as `b in a` (note reversed operands, like Python).
+    return b in a
+
+fn countOf(a, b):
+    # Elements equal to `b`. `v == b` covers ordinary values; the str()
+    # fallback lets string iteration (which yields chars) match string
+    # elements — closer to Python's per-character count than .count's
+    # substring semantics (see README deviations).
+    n = 0
+    for v in a:
+        if v == b or str(v) == str(b):
+            n = n + 1
+    return n
+
+fn delitem(a, b):
+    # `del a[b]`: pop by index for arrays, by key for maps.
+    a.pop(b)
+
+fn getitem(a, b):
+    return a[b]
+
+fn indexOf(a, b):
+    # First index of `b` in `a`; panics like Python's ValueError. The str()
+    # fallback handles string iteration (chars) like countOf.
+    i = 0
+    for v in a:
+        if v == b or str(v) == str(b):
+            return i
+        i = i + 1
+    core.panic("operator.indexOf: value not in sequence")
+    return i
+
+fn setitem(a, b, c):
+    a[b] = c
+
+fn length_hint(obj):
+    # Python's length_hint(obj, default=0); A has no default arguments, so
+    # this takes only `obj` and returns len(obj). Non-sized objects raise a
+    # runtime error instead of returning the default (documented deviation).
+    return len(obj)
+
+# -- generalized lookup objects ----------------------------------------------------
+
+fn itemgetter(item):
+    # Returns a callable fetching `item` from its operand (Python parity).
+    return fn(obj) => obj[item]
+
+fn _itemgetter_all(obj, items):
+    out = []
+    for i in items:
+        out.append(obj[i])
+    return out
+
+fn itemgetter_all(items):
+    # Multi-index variant of itemgetter; Python returns a tuple, A an array.
+    return fn(obj) => _itemgetter_all(obj, items)
+
+fn repeat_seq(a, n):
+    # Sequence repetition `a * n` (Python has no operator.repeat; `*` is
+    # spelled mul there). Strings repeat via concatenation, other iterables
+    # are copied element-wise `n` times into a fresh array.
+    if (a + "") == a:
+        # native str.repeat is C-fast (rope-friendly); repeat(n<=0) -> ""
+        return a.repeat(n)
+    out = []
+    i = 0
+    while i < n:
+        for v in a:
+            out.append(v)
+        i = i + 1
+    return out
+
+fn repeat(a, n):
+    return repeat_seq(a, n)
+
+# -- call ------------------------------------------------------------------------
+
+# `call(f, args)` applies function value `f` to the elements of `args`.
+# Backed by std.functools._apply (arity-dispatched, max 8 args).
+from "std/functools/_apply.astra" import _apply
+
+fn call(f, args):
+    return _apply(f, args)
+
+# -- in-place operation aliases -----------------------------------------------------
+#
+# Python's iadd/isub/... prefer __i*__ dunders and fall back to the plain
+# binary op. A has no dunder protocol and arrays/maps are reference types,
+# so these are simple aliases of the corresponding binary functions.
+
+fn iadd(a, b):
+    return add(a, b)
+
+fn isub(a, b):
+    return sub(a, b)
+
+fn imul(a, b):
+    return mul(a, b)
+
+fn itruediv(a, b):
+    return truediv(a, b)
+
+fn ifloordiv(a, b):
+    return floordiv(a, b)
+
+fn imod(a, b):
+    return mod(a, b)
+
+fn ipow(a, b):
+    return pow(a, b)
+
+fn ilshift(a, b):
+    return lshift(a, b)
+
+fn irshift(a, b):
+    return rshift(a, b)
+
+fn iand(a, b):
+    return and_(a, b)
+
+fn ior(a, b):
+    return or_(a, b)
+
+fn ixor(a, b):
+    return xor(a, b)

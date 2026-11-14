@@ -1,0 +1,302 @@
+#
+# complex numbers: scalar Complex type + NDArray pack/unpack bridges.
+#
+# Complex is a pair of f64 (re, im). A has no operator overloading or
+# first-class functions, so every operation is a named c_* function, mirroring
+# NumPy's np.complex128 scalar semantics (complexfunctions.py).
+#
+# DEVIATIONS FROM NUMPY:
+#  * Scalar only: elementwise complex-array ops live in the pack/unpack layer
+#    (cpack/cunpack interleave re/im into a flat f64 NDArray) — see below.
+#  * Complex arrays are represented two ways:
+#      - cpack(re, im) -> NDArray with interleaved flat data
+#        [re0, im0, re1, im1, ...] and shape [2*n] (n = len(re.data)).
+#      - c_array(re, im) -> [Complex] list of class instances.
+#    cunpack(arr) splits an interleaved NDArray back into a [NDArray, NDArray]
+#    list [re_arr, im_arr]; cunpack_list(arr) -> [Complex].
+#  * Division by a zero complex (or zero scalar) yields IEEE-style inf/nan
+#    components instead of raising (A's `/` panics on a zero divisor, so all
+#    divisions go through guarded helpers).
+#  * c_eq is exact (re == re && im == im); use an isclose-style check for
+#    approximate equality.
+#
+import math
+from "ndarray.astra" import NDArray
+from "ufuncs.astra" import _nan, _pinf, _div, _hypot
+
+class Complex:
+    re: f64
+    im: f64
+
+# --- construction / accessors -------------------------------------------------
+
+fn c_new(re: f64, im: f64) -> Complex:
+    return Complex(re, im)
+
+fn c_real(c: Complex) -> f64:
+    return c.re
+
+fn c_imag(c: Complex) -> f64:
+    return c.im
+
+fn c_zero() -> Complex:
+    return Complex(0.0, 0.0)
+
+fn c_one() -> Complex:
+    return Complex(1.0, 0.0)
+
+fn c_i() -> Complex:
+    return Complex(0.0, 1.0)
+
+fn C0() -> Complex:
+    return Complex(0.0, 0.0)
+
+fn c_from_polar(r: f64, theta: f64) -> Complex:
+    # r * (cos theta + i sin theta)
+    return Complex(r * math.cos(theta), r * math.sin(theta))
+
+fn c_from_real(x: f64) -> Complex:
+    return Complex(x, 0.0)
+
+# --- unary ops -----------------------------------------------------------------
+
+fn c_neg(c: Complex) -> Complex:
+    return Complex(-c.re, -c.im)
+
+fn c_conj(c: Complex) -> Complex:
+    return Complex(c.re, -c.im)
+
+fn c_abs(c: Complex) -> f64:
+    # hypot(re, im), overflow-safe
+    return _hypot(c.re, c.im)
+
+fn c_arg(c: Complex) -> f64:
+    return math.atan2(c.im, c.re)
+
+fn c_recip(c: Complex) -> Complex:
+    d = c.re * c.re + c.im * c.im
+    if d == 0.0:
+        # 1/(0+0j): NumPy gives (inf+nanj); approximate with nan+nanj
+        return Complex(_pinf(), _nan())
+    return Complex(_div(c.re, d), _div(-c.im, d))
+
+fn c_eq(a: Complex, b: Complex) -> bool:
+    return a.re == b.re and a.im == b.im
+
+# --- arithmetic ---------------------------------------------------------------
+
+fn c_add(a: Complex, b: Complex) -> Complex:
+    return Complex(a.re + b.re, a.im + b.im)
+
+fn c_sub(a: Complex, b: Complex) -> Complex:
+    return Complex(a.re - b.re, a.im - b.im)
+
+fn c_mul(a: Complex, b: Complex) -> Complex:
+    return Complex(a.re * b.re - a.im * b.im,
+                   a.re * b.im + a.im * b.re)
+
+fn c_div(a: Complex, b: Complex) -> Complex:
+    # (a * conj(b)) / |b|^2, guarded against |b| == 0
+    d = b.re * b.re + b.im * b.im
+    if d == 0.0:
+        if a.re == 0.0 and a.im == 0.0:
+            return Complex(_nan(), _nan())   # 0/0
+        return Complex(_pinf(), _nan())     # x/0 -> inf+nanj (numpy-ish)
+    return Complex(_div(a.re * b.re + a.im * b.im, d),
+                   _div(a.im * b.re - a.re * b.im, d))
+
+# Complex OP f64 scalar (scalar treated as real)
+fn c_add_scalar(a: Complex, s: f64) -> Complex:
+    return Complex(a.re + s, a.im)
+
+fn c_sub_scalar(a: Complex, s: f64) -> Complex:
+    return Complex(a.re - s, a.im)
+
+fn c_mul_scalar(a: Complex, s: f64) -> Complex:
+    return Complex(a.re * s, a.im * s)
+
+fn c_div_scalar(a: Complex, s: f64) -> Complex:
+    if s == 0.0:
+        return Complex(_pinf(), _nan())
+    return Complex(_div(a.re, s), _div(a.im, s))
+
+# f64 scalar OP Complex ("r" = reflected, numpy naming)
+fn c_radd_scalar(s: f64, a: Complex) -> Complex:
+    return Complex(s + a.re, a.im)
+
+fn c_rsub_scalar(s: f64, a: Complex) -> Complex:
+    return Complex(s - a.re, -a.im)
+
+fn c_rmul_scalar(s: f64, a: Complex) -> Complex:
+    return Complex(s * a.re, s * a.im)
+
+fn c_rdiv_scalar(s: f64, a: Complex) -> Complex:
+    # s / a = s * conj(a) / |a|^2
+    d = a.re * a.re + a.im * a.im
+    if d == 0.0:
+        return Complex(_pinf(), _nan())
+    return Complex(_div(s * a.re, d), _div(-s * a.im, d))
+
+# --- transcendental -------------------------------------------------------------
+
+fn c_exp(c: Complex) -> Complex:
+    # e^re * (cos im + i sin im)
+    e = math.exp(c.re)
+    return Complex(e * math.cos(c.im), e * math.sin(c.im))
+
+fn c_log(c: Complex) -> Complex:
+    # ln|z| + i arg(z); arg in (-pi, pi]
+    r = _hypot(c.re, c.im)
+    if r == 0.0:
+        return Complex(-_pinf(), _nan())   # numpy: (-inf+nanj)
+    re = math.log(r)
+    if re != re:
+        return Complex(_nan(), _nan())
+    return Complex(re, math.atan2(c.im, c.re))
+
+fn c_sqrt(c: Complex) -> Complex:
+    # stable formula (NumPy _sqrt): w = sqrt((r+x)/2), v = sign(y)*sqrt((r-x)/2)
+    r = _hypot(c.re, c.im)
+    if r == 0.0:
+        return Complex(0.0, 0.0)
+    w2 = (r + c.re) * 0.5
+    v2 = (r - c.re) * 0.5
+    if v2 < 0.0:
+        v2 = 0.0   # rounding guard
+    w = math.sqrt(w2)
+    v = math.sqrt(v2)
+    if c.im < 0.0 or (c.im == 0.0 and math.atan2(c.im, -1.0) < 0.0):
+        v = -v
+    return Complex(w, v)
+
+# math module has no sinh/cosh; compute via exp like ufuncs.astra does.
+fn _csinh(x: f64) -> f64:
+    return (math.exp(x) - math.exp(-x)) / 2.0
+
+fn _ccosh(x: f64) -> f64:
+    return (math.exp(x) + math.exp(-x)) / 2.0
+
+fn c_sin(c: Complex) -> Complex:
+    # sin x cosh y + i cos x sinh y
+    return Complex(math.sin(c.re) * _ccosh(c.im),
+                   math.cos(c.re) * _csinh(c.im))
+
+fn c_cos(c: Complex) -> Complex:
+    # cos x cosh y - i sin x sinh y
+    return Complex(math.cos(c.re) * _ccosh(c.im),
+                   -math.sin(c.re) * _csinh(c.im))
+
+fn c_tan(c: Complex) -> Complex:
+    return c_div(c_sin(c), c_cos(c))
+
+fn c_sinh(c: Complex) -> Complex:
+    # sinh x cos y + i cosh x sin y
+    return Complex(_csinh(c.re) * math.cos(c.im),
+                   _ccosh(c.re) * math.sin(c.im))
+
+fn c_cosh(c: Complex) -> Complex:
+    # cosh x cos y + i sinh x sin y
+    return Complex(_ccosh(c.re) * math.cos(c.im),
+                   _csinh(c.re) * math.sin(c.im))
+
+fn c_tanh(c: Complex) -> Complex:
+    return c_div(c_sinh(c), c_cosh(c))
+
+fn c_asin(c: Complex) -> Complex:
+    # asin(z) = -i * log(i z + sqrt(1 - z^2))
+    z2 = c_mul(c, c)
+    w = c_sqrt(c_sub(c_one(), z2))
+    iz = c_mul(c_i(), c)
+    t = c_log(c_add(iz, w))
+    return c_mul(c_new(0.0, -1.0), t)
+
+fn c_acos(c: Complex) -> Complex:
+    # acos(z) = pi/2 - asin(z)
+    return c_sub(c_new(1.5707963267948966, 0.0), c_asin(c))
+
+fn c_atan(c: Complex) -> Complex:
+    # atan(z) = (i/2) * (log(1 - i z) - log(1 + i z))
+    iz = c_mul(c_i(), c)
+    num = c_log(c_sub(c_one(), iz))
+    den = c_log(c_add(c_one(), iz))
+    d = c_sub(num, den)
+    return c_mul(c_new(0.0, 0.5), d)
+
+fn c_pow(c: Complex, n: f64) -> Complex:
+    # polar form: |z|^n * (cos(n arg z) + i sin(n arg z))
+    if n == 0.0:
+        return c_one()
+    r = _hypot(c.re, c.im)
+    th = math.atan2(c.im, c.re)
+    rn = math.pow(r, n)
+    a = n * th
+    return Complex(rn * math.cos(a), rn * math.sin(a))
+
+# --- printing -------------------------------------------------------------------
+
+fn _fmt_f(v: f64) -> str:
+    return str(v)
+
+fn c_str(c: Complex) -> str:
+    # numpy style: "(re+imj)" / "(re-imj)"
+    im = c.im
+    sign = "+"
+    av = im
+    if im < 0.0 or (im == 0.0 and math.atan2(im, -1.0) < 0.0):
+        sign = "-"
+        av = -im
+    return "(" + _fmt_f(c.re) + sign + _fmt_f(av) + "j)"
+
+fn c_repr(c: Complex) -> str:
+    return c_str(c)
+
+# --- NDArray bridges ------------------------------------------------------------
+
+fn cpack(re: NDArray, im: NDArray) -> NDArray:
+    # interleaved flat: [re0, im0, re1, im1, ...], shape [2*n]
+    n = re.size()
+    m = im.size()
+    if m < n:
+        n = m
+    data = []
+    for i in 0..n:
+        data.append(re.data[i])
+        data.append(im.data[i])
+    return NDArray(data, [2 * n])
+
+fn cunpack(arr: NDArray) -> [NDArray]:
+    # split an interleaved [re0,im0,...] array -> [re_arr, im_arr]
+    n = arr.size() // 2
+    re_data = []
+    im_data = []
+    for i in 0..n:
+        re_data.append(arr.data[2 * i])
+        im_data.append(arr.data[2 * i + 1])
+    return [NDArray(re_data, [n]), NDArray(im_data, [n])]
+
+fn c_array(re: NDArray, im: NDArray) -> [Complex]:
+    # parallel re/im arrays -> list of Complex scalars
+    n = re.size()
+    m = im.size()
+    if m < n:
+        n = m
+    out = []
+    for i in 0..n:
+        out.append(Complex(re.data[i], im.data[i]))
+    return out
+
+fn cpack_list(cs: [Complex]) -> NDArray:
+    # [Complex] -> interleaved flat NDArray (same layout as cpack)
+    data = []
+    for c in cs:
+        data.append(c.re)
+        data.append(c.im)
+    return NDArray(data, [2 * len(cs)])
+
+fn cunpack_list(arr: NDArray) -> [Complex]:
+    # interleaved NDArray -> [Complex]
+    n = arr.size() // 2
+    out = []
+    for i in 0..n:
+        out.append(Complex(arr.data[2 * i], arr.data[2 * i + 1]))
+    return out

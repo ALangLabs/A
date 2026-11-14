@@ -1,6 +1,0 @@
-# std.bytes.bytes — backward-compatible exports (implementation split into multi-file modules).
-#
-# Prefer the package API:
-#   from std:bytes import encode, decode, utf8_encode, utf8_decode, chr, ord, b2s, s2b
-from "utf8.a" import chr, ord, utf8_encode, utf8_decode
-from "latin1.a" import b2s, s2b, s2b_fast

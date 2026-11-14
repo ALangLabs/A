@@ -831,7 +831,10 @@ static int astra_compile(ASTRAState *s1, int filetype, const char *str, int fd)
                 if (filetype & (AFF_TYPE_ASM | AFF_TYPE_ASMPP)) {
                     astra_assemble(s1, !!(filetype & AFF_TYPE_ASMPP));
                 } else {
-                    astragen_compile(s1);
+                    astra_error_noabort("C compilation is not supported: astra assembles "
+                                ".s/.S sources and links objects (the A frontend "
+                                "emits assembly; runtime objects are built by a "
+                                "system/cross C compiler)");
                 }
                 astraelf_end_file(s1);
             }
@@ -1199,8 +1202,8 @@ static int guess_filetype(const char *filename)
                 filetype = AFF_TYPE_ASMPP;
             else if (!strcmp(ext, "s"))
                 filetype = AFF_TYPE_ASM;
-            else if (!strcmp(ext, "a")) {
-                /* ".a" is also the Unix archive extension: sniff for the
+            else if (!strcmp(ext, "astra") || !strcmp(ext, "a")) {
+                /* ".astra"/".a" is also the Unix archive extension: sniff for the
                    archive magic before treating it as A source. */
                 FILE *f = astra_fopen(filename, "rb");
                 char magic[8] = {0};
@@ -1210,9 +1213,9 @@ static int guess_filetype(const char *filename)
                         is_archive = 1;
                     fclose(f);
                 }
-                /* .a files are A source; they are compiled via the C++
+                /* .astra/.a files are A source; they are compiled via the C++
                    frontend (compiler/astra/frontend/codegen), which emits C
-                   for astra. A bare .a here is not a C input. */
+                   for astra. A bare .astra/.a here is not a C input. */
                 filetype = AFF_TYPE_BIN;
             }
             else if (!PATHCMP(ext, "c")

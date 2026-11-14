@@ -39,7 +39,7 @@ fn main():
 """
 
 def a_bench(path, n, tmp):
-    src = os.path.join(tmp, "bench_lit.a")
+    src = os.path.join(tmp, "bench_lit.astra")
     with open(src, "w") as f:
         f.write(A_SRC % (n, path, PORT))
     out = subprocess.run([A, "run", src], capture_output=True, text=True, check=True).stdout

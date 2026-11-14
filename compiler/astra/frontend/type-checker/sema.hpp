@@ -62,6 +62,9 @@ struct VarTypeInfo {
   std::string name;
   Span span;
   TypePtr type;
+  // True only for plain `name = ...` variable declarations (not parameters,
+  // loop variables, or pattern bindings) — used to limit inlay type hints.
+  bool variableDecl = false;
 };
 
 struct SemaResult {
@@ -149,6 +152,7 @@ class Sema {
     std::string name;
     Span span;
     TypePtr type;
+    bool variableDecl = false;
   };
 
   struct ModuleAlias {
@@ -198,7 +202,7 @@ class Sema {
   ModuleExports& exportsFor(int moduleId);
   TypePtr moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
                            bool report);
-  // Follow `from "x.a" import name` value re-exports to the declaring
+  // Follow `from "x.astra" import name` value re-exports to the declaring
   // module so exported package values keep their concrete type.
   TypePtr resolveReexportedValue(int moduleId, const std::string& name, int depth);
   TypePtr moduleMemberCall(const ModuleAlias& alias, const std::string& member, CallExpr& call);
@@ -229,6 +233,9 @@ class Sema {
   void registerEnum(EnumDecl& decl);
   void resolveEnumPayloads(EnumDecl& decl);
   void registerFunctionSignature(FnDecl& decl);
+  // Validate an `extern fn` declaration's signature against the C-FFI type
+  // mapping and record its param/return types for the LLVM backend.
+  void checkExternDecl(FnDecl& decl, const FnSig& sig);
   void registerMethodSignatures(StructDecl& decl);
   void checkFunctionBody(FnDecl& decl, const FnSig& sig);
   void checkStructMethodBodies(StructDecl& decl);
@@ -284,6 +291,11 @@ class Sema {
   void checkLambdaAgainst(LambdaExpr& expr, TypePtr expected);
   void checkArgAgainst(Expr& expr, TypePtr expected, const std::string& context);
   void checkFixedArrayLength(Expr& value, TypePtr expected);
+  // When `expected` is vector[T, N] and the already-inferred `expr` is an
+  // array literal of N elements or a numeric scalar, accept it as a vector
+  // (broadcast for scalars) and rewrite expr.inferredType so the backend
+  // emits unboxed <N x ty> IR. Returns false when no coercion applied.
+  bool coerceVectorInit(Expr& expr, TypePtr expected);
 
   TypePtr checkFunctionValueCall(const std::string& name, TypePtr fnType, CallExpr& call);
 
@@ -298,6 +310,7 @@ class Sema {
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkPrintCall(const std::string& name, CallExpr& call);
   TypePtr checkIcCall(CallExpr& call);
+  TypePtr checkCastCall(CallExpr& call);
   std::string icContextString(Span span) const;
   // Builtin domains: each returns nullptr when `name` is not handled so the
   // dispatcher can try the next domain.

@@ -1,2 +1,0 @@
-import "order_base.a" as base
-val_seen = base.val + 10

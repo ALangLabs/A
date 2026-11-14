@@ -439,6 +439,8 @@ void Sema::requireBool(TypePtr type, Span span, const std::string& what) {
       TypePtr resolved = resolveType(type);
       if (resolved->kind == TypeKind::Bool) return;
       if (resolved->kind == TypeKind::Var) { unify(type, typeBool()); return; }
+      // Union/any operands are decided at runtime.
+      if (resolved->kind == TypeKind::Union || resolved->kind == TypeKind::Any) return;
       if (resolved->kind == TypeKind::Error) return;
       sink_.error(span, what + " must be bool, found " + typePhrase(type) + ".");
     }
@@ -467,6 +469,8 @@ void Sema::requireBool(TypePtr type, Span span, const std::string& what) {
     if (constrainVar(type, Constraint::Integer)) return;
     return;
   }
+  // Union/any operands are decided at runtime.
+  if (resolved->kind == TypeKind::Union || resolved->kind == TypeKind::Any) return;
   if (resolved->kind == TypeKind::Error) return;
   sink_.error(span, what + " must be an integer, found " + typePhrase(type) + ".");
 }
@@ -478,6 +482,8 @@ TypePtr Sema::requireNumeric(TypePtr type, Span span, const std::string& what) {
   // same as any other dynamic operand).
   if (dynamicOptionalElem(type)) return type;
   if (resolved->kind == TypeKind::Var && constrainVar(type, Constraint::Numeric)) return type;
+  // Union/any operands are decided at runtime.
+  if (resolved->kind == TypeKind::Union || resolved->kind == TypeKind::Any) return type;
   sink_.error(span, what + " must be numeric, found " + typePhrase(type) + ".");
   return typeError();
 }
@@ -521,6 +527,7 @@ bool Sema::checkCompoundOp(const std::string& op, TypePtr targetType, Span span)
       case Constraint::None: return "a value of unknown type";
     }
   }
+  if (resolved->kind == TypeKind::Any) return "any value";
   std::string name = typeName(resolved);
   // typeName() already includes an article for unresolved-variable shapes
   // (e.g. Optional<int-var> renders "an integer type?"); don't double it.

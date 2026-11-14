@@ -83,7 +83,7 @@ aval a_getitem(aval obj, aval idx) {
     }
     switch (kind_of(obj)) {
         case K_STR: {
-            AStr *s = (AStr *)obj_of(obj);
+            AStr *s = astr_flat(obj);
             int64_t total = (int64_t)u8_count(s->data, s->h.len);
             int64_t i = normalize_index(expect_int64(idx, "string index"), (uint64_t)total);
             uint64_t boff = cp_to_byte(s->data, s->h.len, i);
@@ -161,7 +161,7 @@ aval a_setitem(aval obj, aval idx, aval val) {
                 a->flags |= ARR_F_NOMIX;
                 arr_ensure_aval(a);
             }
-            if ((a->flags & ARR_F_F64) && !a_is_double(val)) a->flags &= ~ARR_F_F64;
+            if ((a->flags & ARR_F_F64) && !a_is_double(val)) arr_f64_unmark(a);
             a_region_store(a, val);   /* region write barrier */
             a->items[i] = val;
             return val;
@@ -242,7 +242,7 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
             int64_t i = normalize_index(k, len);
             if (pok) root->iitems[(size_t)(base + i)] = pv;
             else {
-                if ((root->flags & ARR_F_F64) && !a_is_double(val)) root->flags &= ~ARR_F_F64;
+                if ((root->flags & ARR_F_F64) && !a_is_double(val)) arr_f64_unmark(root);
                 root->items[(size_t)(base + i)] = val;
             }
             k = (int64_t)((uint64_t)k + (uint64_t)step);
@@ -252,7 +252,7 @@ aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
             int64_t i = normalize_index(k, len);
             if (pok) root->iitems[(size_t)(base + i)] = pv;
             else {
-                if ((root->flags & ARR_F_F64) && !a_is_double(val)) root->flags &= ~ARR_F_F64;
+                if ((root->flags & ARR_F_F64) && !a_is_double(val)) arr_f64_unmark(root);
                 root->items[(size_t)(base + i)] = val;
             }
             k = (int64_t)((uint64_t)k + (uint64_t)step);
@@ -322,8 +322,8 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
     AObj *o = obj_of(obj);
     uint64_t len;
     if (o->type == T_BYTES) len = ((ABytes *)o)->h.len;
-    else if (o->type == T_STR)
-        len = u8_count(((AStr *)o)->data, ((AStr *)o)->h.len);
+    else if (o->type == T_STR || o->type == T_ROPE)
+        len = a_str_cpcount(obj);
     else if (o->type == T_VIEW)
         len = (uint64_t)((AView *)o)->len;
     else
@@ -358,8 +358,8 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
         dst->data[w] = 0;
         return out;
     }
-    if (o->type == T_STR) {
-        AStr *s = (AStr *)o;
+    if (o->type == T_STR || o->type == T_ROPE) {
+        AStr *s = astr_flat(obj);
         Buf b;
         buf_init(&b);
         for (int64_t i = start; st > 0 ? i < stop : i > stop;) {
@@ -413,6 +413,21 @@ aval a_slice(aval obj, aval lo, aval hi, aval step) {
     return r;
 }
 
+/* Iterator kind tags stored in AIter.has_lookahead for non-Python
+   iterators (the field is only a lookahead flag when py_mode is set,
+   and py_mode iterators return before the tag is ever consulted).
+   Tagging at creation lets a_iter_next dispatch on one switch instead
+   of re-deriving the source kind from scratch on every element. */
+enum {
+    ITAG_ARR = 1,   /* T_LIST / T_TUPLE / T_SET (AArr storage) */
+    ITAG_DICT,      /* T_DICT / T_STRUCT (ADict pairs -> keys) */
+    ITAG_VIEW,      /* T_VIEW */
+    ITAG_STR,       /* T_STR / T_CHAR */
+    ITAG_BYTES,     /* T_BYTES */
+    ITAG_PYBUF,     /* T_PYBUF */
+    ITAG_RANGE      /* K_RANGE */
+};
+
 aval a_iter_new(aval v) {
     AIter *it = (AIter *)xmalloc(sizeof(AIter));
     it->h.type = T_ITER;
@@ -426,18 +441,28 @@ aval a_iter_new(aval v) {
     it->lookahead = A_NONE;
     switch (kind_of(v)) {
         case K_VIEW:
+            it->has_lookahead = ITAG_VIEW;
+            return mkobj(&it->h);
         case K_LIST:
         case K_TUPLE:
         case K_SET:
+            it->has_lookahead = ITAG_ARR;
+            return mkobj(&it->h);
         case K_STR:
+            it->has_lookahead = ITAG_STR;
+            return mkobj(&it->h);
         case K_DICT:
+            it->has_lookahead = ITAG_DICT;
+            return mkobj(&it->h);
         case K_BYTES:
+            it->has_lookahead = ITAG_BYTES;
             return mkobj(&it->h);
         case K_RANGE: {
             ARange *r = (ARange *)obj_of(v);
             it->cur = r->lo;
             it->end = r->hi;
             it->step = r->step;
+            it->has_lookahead = ITAG_RANGE;
             return mkobj(&it->h);
         }
         default: {
@@ -445,6 +470,7 @@ aval a_iter_new(aval v) {
             if (vo && vo->type == T_PYBUF) {
                 /* Index-based iteration over the raw buffer elements;
                    handled by the generic path in a_iter_next. */
+                it->has_lookahead = ITAG_PYBUF;
                 return mkobj(&it->h);
             }
             if (vo && vo->type == T_PYOBJ) {
@@ -486,6 +512,105 @@ aval a_iter_next(aval it, aval *out) {
         return (aval)1;
     }
     aval src = iter->src;
+    AObj *so = obj_of(src);
+    switch (iter->has_lookahead) {
+        case ITAG_RANGE: {
+            int64_t c = iter->cur, e = iter->end, s = iter->step;
+            int more = s > 0 ? c < e : c > e;
+            if (!more) { iter->src = A_NONE; return (aval)0; }
+            *out = mkint_full(c);
+            if (s > 0) {
+                if (c > INT64_MAX - s) iter->cur = e;
+                else iter->cur = c + s;
+            } else {
+                if (c < INT64_MIN - s) iter->cur = e;
+                else iter->cur = c + s;
+            }
+            return (aval)1;
+        }
+        case ITAG_DICT: {
+            ADict *d = (ADict *)so;
+            if (iter->idx >= d->h.len) { iter->src = A_NONE; return (aval)0; }
+            *out = d->pairs[iter->idx++].k;
+            return (aval)1;
+        }
+        case ITAG_ARR: {
+            AArr *a = (AArr *)so;
+            if (iter->idx >= a->h.len) { iter->src = A_NONE; return (aval)0; }
+            uint64_t i = iter->idx++;
+            *out = arr_packed(a) ? mkint_full(a->iitems[i]) : a->items[i];
+            return (aval)1;
+        }
+        case ITAG_VIEW: {
+            AView *vw = (AView *)so;
+            if (iter->idx >= (uint64_t)vw->len) { iter->src = A_NONE; return (aval)0; }
+            /* The view's parent chain is fixed at creation, so resolve
+               root+offset once and cache them: `cur` holds the absolute
+               base offset, `end` the root AArr* (as intptr), and `step`
+               is the resolved flag (unused for view iterators). arr_elem
+               is used per element because the root can re-pack to
+               int64 storage between next() calls. */
+            AArr *root;
+            int64_t base;
+            if (iter->step) {
+                root = (AArr *)(intptr_t)iter->end;
+                base = iter->cur;
+            } else {
+                root = view_root(src, &base);
+                iter->cur = base;
+                iter->end = (int64_t)(intptr_t)root;
+                iter->step = 1;
+            }
+            uint64_t i = iter->idx++;
+            *out = root ? arr_elem(root, (uint64_t)(base + (int64_t)i)) : A_NONE;
+            return (aval)1;
+        }
+        case ITAG_STR: {
+            AStr *s = astr_flat(src);
+            /* Code-point count is cached on the string (same scheme as
+               a_len): without it every next() ran a full O(n) u8_count
+               scan, making string iteration O(n^2). */
+            uint32_t cp = astr_cp_cached(s);
+            uint64_t len;
+            if (cp) len = (uint64_t)cp - 1u;
+            else {
+                len = u8_count(s->data, s->h.len);
+                astr_cp_cache(s, (uint32_t)len);
+            }
+            if (iter->idx >= len) { iter->src = A_NONE; return (aval)0; }
+            /* `cur` is the byte offset of code point `idx`: it advances by
+               exactly the yielded character's byte length each call, so
+               string iteration is O(n) total instead of a cp_to_byte
+               rescan per element. The clamping rule matches cp_to_byte's
+               (u8_len truncated to 1 past the end). A consistency guard
+               falls back to cp_to_byte if the cursor ever disagrees. */
+            int64_t boff = iter->cur;
+            if ((uint64_t)boff >= s->h.len)
+                boff = (int64_t)cp_to_byte(s->data, s->h.len, (int64_t)iter->idx);
+            int l = u8_len((unsigned char)s->data[boff]);
+            if (boff + (uint64_t)l > s->h.len) l = 1;
+            *out = a_char_new(s->data + boff, (uint64_t)l);
+            iter->cur = boff + l;
+            iter->idx++;
+            return (aval)1;
+        }
+        case ITAG_BYTES: {
+            ABytes *b = (ABytes *)so;
+            if (iter->idx >= b->h.len) { iter->src = A_NONE; return (aval)0; }
+            *out = mkint_full((unsigned char)b->data[iter->idx++]);
+            return (aval)1;
+        }
+        case ITAG_PYBUF: {
+            APyBuf *b = (APyBuf *)so;
+            if (iter->idx >= (uint64_t)b->count) { iter->src = A_NONE; return (aval)0; }
+            *out = pybuf_read(b, (int64_t)iter->idx++);
+            return (aval)1;
+        }
+        default:
+            break;
+    }
+    /* Untagged iterator (cannot be produced by a_iter_new today; kept as
+       a defensive fallback that re-derives the source kind per call). */
     if (kind_of(src) == K_RANGE) {
         int64_t c = iter->cur, e = iter->end, s = iter->step;
         int more = s > 0 ? c < e : c > e;
@@ -500,7 +625,6 @@ aval a_iter_next(aval it, aval *out) {
         }
         return (aval)1;
     }
-    AObj *so = obj_of(src);
     uint64_t len;
     aval *items = NULL;
     int64_t *iitems = NULL;
@@ -517,8 +641,9 @@ aval a_iter_next(aval it, aval *out) {
     } else if (so->type == T_VIEW) {
         vw_src = (AView *)so;
         len = (uint64_t)vw_src->len;
-    } else if (so->type == T_STR || so->type == T_CHAR) {
-        len = u8_count(((AStr *)so)->data, ((AStr *)so)->h.len);
+    } else if (so->type == T_STR || so->type == T_CHAR || so->type == T_ROPE) {
+        AStr *s = astr_flat(src);
+        len = u8_count(s->data, s->h.len);
     } else if (so->type == T_BYTES) {
         len = ((ABytes *)so)->h.len;
     } else {
@@ -538,8 +663,8 @@ aval a_iter_next(aval it, aval *out) {
     else if (so->type == T_BYTES) {
         *out = mkint_full((unsigned char)((ABytes *)so)->data[i]);
     }
-    else if (so->type == T_STR || so->type == T_CHAR) {
-        AStr *s = (AStr *)so;
+    else if (so->type == T_STR || so->type == T_CHAR || so->type == T_ROPE) {
+        AStr *s = astr_flat(src);
         uint64_t boff = cp_to_byte(s->data, s->h.len, (int64_t)i);
         int l = u8_len((unsigned char)s->data[boff]);
         if (boff + (uint64_t)l > s->h.len) l = 1;

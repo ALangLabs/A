@@ -1,0 +1,130 @@
+# std.collections.userlist — Python `collections.UserList` port.
+#
+# UserList is a thin wrapper around a plain list exposing the MutableSequence
+# API. `data` is a public `[T]` field; this class adds the Python method
+# surface (`at`/`set`/`pop`/`remove`/`index`/`count`/...). Indexing `l[i]`
+# cannot be overloaded in A, so `at(i)`/`set(i, v)` are the equivalents.
+import std:core
+
+class UserList<T>:
+    data: [T]
+
+    """
+    at(i) -> element at index i (negative indexes from the end);
+    runtime error when out of range (Python raises IndexError).
+    """
+    fn at(self, i):
+        n = len(self.data)
+        idx = i
+        if idx < 0:
+            idx = idx + n
+        if idx < 0 or idx >= n:
+            core.panic("UserList index out of range")
+        return self.data[idx]
+
+    """
+    set(i, v) -> assign element at index i; runtime error when out of
+    range (Python `ul[i] = v` raises IndexError).
+    """
+    fn set(self, i, v):
+        n = len(self.data)
+        idx = i
+        if idx < 0:
+            idx = idx + n
+        if idx < 0 or idx >= n:
+            core.panic("UserList index out of range")
+        self.data[idx] = v
+
+    fn append(self, v):
+        self.data.append(v)
+
+    fn extend(self, xs: [T]):
+        self.data.extend(xs)
+
+    """iadd(xs) -> extend in place and return self (Python `ul += xs`)."""
+    fn iadd(self, xs: [T]):
+        self.extend(xs)
+        return self
+
+    fn insert(self, i, v):
+        self.data.insert(i, v)
+
+    """
+    pop() -> remove and return the LAST element; runtime error when
+    empty (Python `ul.pop()`).
+    """
+    fn pop(self):
+        return self.data.pop()
+
+    """
+    pop_at(i) -> remove and return the element at index i
+    (Python `ul.pop(i)`).
+    """
+    fn pop_at(self, i):
+        n = len(self.data)
+        idx = i
+        if idx < 0:
+            idx = idx + n
+        if idx < 0 or idx >= n:
+            core.panic("UserList index out of range")
+        return self.data.pop(idx)
+
+    """
+    remove(v) -> remove the first occurrence of v; runtime error when
+    absent (Python `ul.remove(v)` raises ValueError).
+    """
+    fn remove(self, v):
+        self.data.remove(v)
+
+    fn clear(self):
+        self.data.clear()
+
+    fn copy(self):
+        return UserList(self.data.copy())
+
+    """count(v) -> number of occurrences of v."""
+    fn count(self, v):
+        return self.data.count(v)
+
+    """
+    index(v) -> first index of v; runtime error when absent
+    (Python raises ValueError).
+    """
+    fn index(self, v):
+        return self.data.index(v)
+
+    """index_from(v, start) -> first index of v at or after `start`."""
+    fn index_from(self, v, start):
+        return self.data.index(v, start)
+
+    fn reverse(self):
+        self.data.reverse()
+
+    fn sort(self):
+        self.data.sort()
+
+    fn contains(self, v):
+        return self.data.contains(v)
+
+    fn size(self):
+        return len(self.data)
+
+    """to_list() -> the underlying list copy (Python iteration analogue)."""
+    fn to_list(self):
+        return self.data.copy()
+
+    """first() -> first element as an optional (None when empty)."""
+    fn first(self):
+        return self.data.first()
+
+    """last() -> last element as an optional (None when empty)."""
+    fn last(self):
+        return self.data.last()
+
+"""user_list() -> empty UserList."""
+fn user_list<T>() -> UserList<T>:
+    return UserList([])
+
+"""user_list_of(xs) -> UserList wrapping an existing list."""
+fn user_list_of(xs):
+    return UserList(xs)

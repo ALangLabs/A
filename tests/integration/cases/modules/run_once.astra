@@ -1,0 +1,9 @@
+import "lib/counter.astra"
+import "lib/counter.astra" as again
+from "lib/counter.astra" import value
+
+print(again.value)
+print(value)
+counter.value = 99
+print(counter.value)
+print(again.value)

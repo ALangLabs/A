@@ -62,7 +62,7 @@ struct DeferStmt : Stmt {
   StmtPtr body;
 };
 
-// `import "lib/util.a"`, `import "lib/util.a" as u`, `import math`, or
+// `import "lib/util.astra"`, `import "lib/util.astra" as u`, `import math`, or
 struct ImportStmt : Stmt {
   ImportStmt() : Stmt(StmtKind::Import) {}
   std::string path;        // quoted path, empty for native/bare/python imports
@@ -78,7 +78,7 @@ struct ImportStmt : Stmt {
   Span targetSpan;
 };
 
-// `from "lib/util.a" import add, Vec as Point` or `from python:<pkg> import x`.
+// `from "lib/util.astra" import add, Vec as Point` or `from python:<pkg> import x`.
 struct FromImportStmt : Stmt {
   FromImportStmt() : Stmt(StmtKind::FromImport) {}
   struct Item {
@@ -107,6 +107,11 @@ struct IfStmt : Stmt {
   };
   std::vector<Branch> branches;
   std::vector<StmtPtr> elseBody;
+  // `comptime if COND:` — the condition is evaluated at compile time and only
+  // the taken branch is kept (see pipeline/comptime.cpp). Always cleared by
+  // the time sema/backends see the node: an unevaluable condition degrades
+  // to a regular runtime `if`.
+  bool comptime = false;
 };
 
 struct WhileStmt : Stmt {
@@ -127,6 +132,10 @@ struct ForStmt : Stmt {
   Span varSpan;
   ExprPtr iterable;
   std::vector<StmtPtr> body;
+  // `comptime for i in <compile-time iterable>:` — unrolled at compile time
+  // by pipeline/comptime.cpp; cleared (degraded to a runtime `for`) when the
+  // iterable is not a compile-time constant.
+  bool comptime = false;
 };
 
 struct LoopStmt : Stmt {
@@ -138,6 +147,10 @@ struct ComptimeParam {
   std::string name;
   Span span;
   TypeExprPtr type;
+  // Index into the combined positional parameter list (comptime and regular
+  // params interleaved in source order). The parser records it so call-site
+  // specialization knows which argument binds this parameter.
+  std::size_t position = 0;
 };
 
 struct FnDecl : Stmt {
@@ -157,6 +170,10 @@ struct FnDecl : Stmt {
   std::vector<StmtPtr> body;
   int moduleId = -1;  // module owning the function, filled in by Sema
   bool isEntry = false;  // `entry name():` — program entry point
+  // `extern ["C"] fn name(...) -> T` — C FFI declaration. No body; calls
+  // lower to a direct LLVM `call` on `externName` (defaults to `name`).
+  bool isExtern = false;
+  std::string externName;  // C symbol name; empty means use `name`
   // Docstring attached from a string-literal statement inside an enclosing
   // type/impl body (methods only). Top-level and body docstrings are recovered
   // from the statement stream instead.

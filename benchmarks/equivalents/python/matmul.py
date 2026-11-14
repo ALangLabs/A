@@ -1,5 +1,5 @@
 # Plain-Python blocked matmul (64x64x64) — same workload as
-# benchmarks/numerical/matmul.a (A native blocked matmul) and the C/C++
+# benchmarks/numerical/matmul.astra (A native blocked matmul) and the C/C++
 # equivalents. Flat row-major, ikj order, tile 32.
 import sys
 

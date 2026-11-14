@@ -3,9 +3,32 @@
 static char *read_all_file(const char *path, size_t *out_len) {
     FILE *f = fopen(path, "rb");
     if (!f) panicf("cannot read file '%s'", path);
+    /* Regular files: take the size from fseek/ftell and do one allocation
+       plus (usually) one read. The old doubling-realloc loop re-copied the
+       whole buffer on every growth step — ~6x slower on hundred-MB files. */
     size_t cap = 4096, len = 0;
-    char *buf = (char *)xmalloc(cap + 1);
-    for (;;) {
+    char *buf = NULL;
+    int done = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            cap = (size_t)sz;
+            buf = (char *)xmalloc(cap + 1);
+            len = fread(buf, 1, cap, f);
+            if (len < cap) {
+                done = 1;   /* fread only stops short at EOF or error */
+            } else {
+                /* Exact fit is ambiguous: probe once so a file that ends
+                   exactly at `cap` does not trigger a pointless 2x realloc
+                   plus a final EOF fread. */
+                int c = fgetc(f);
+                if (c == EOF) done = 1;
+                else ungetc(c, f);
+            }
+        }
+    }
+    if (!buf) buf = (char *)xmalloc(cap + 1);   /* non-seekable stream */
+    while (!done) {
         if (len == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap + 1); }
         size_t r = fread(buf + len, 1, cap - len, f);
         len += r;
@@ -25,6 +48,49 @@ const char *path_arg(aval v, const char *what) {
 aval bi_read_file(uint64_t n, aval *argv) {
     want_args("read_file", n, 1, 1);
     const char *path = path_arg(argv[0], "path");
+    /* Fast path: a seekable file of known size is read straight into the
+       string's own storage — no intermediate buffer and no second copy.
+       This is what makes multi-hundred-MB reads (model weights, etc.)
+       practical. Anything unusual falls back to read_all_file. */
+    FILE *f = fopen(path, "rb");
+    if (!f) panicf("cannot read file '%s'", path);
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && (uint64_t)sz <= UINT32_MAX &&
+            fseek(f, 0, SEEK_SET) == 0) {
+            aval s = a_str_new_uninit((uint64_t)sz);
+            AStr *as = (AStr *)obj_of(s);
+            size_t got = fread(as->data, 1, (size_t)sz, f);
+            if (!ferror(f) && got == (size_t)sz) {
+                int c = fgetc(f);
+                if (c == EOF) { fclose(f); return s; }
+                ungetc(c, f);
+                /* File grew past ftell: keep the string and concat the
+                   tail (rope concat is lazy — no copy unless read). */
+                size_t tcap = 4096, tlen = 0;
+                char *tbuf = (char *)xmalloc(tcap + 1);
+                for (;;) {
+                    if (tlen == tcap) { tcap *= 2; tbuf = (char *)xrealloc(tbuf, tcap + 1); }
+                    size_t r = fread(tbuf + tlen, 1, tcap - tlen, f);
+                    tlen += r;
+                    if (r == 0) break;
+                }
+                int ferr = ferror(f);
+                fclose(f);
+                if (ferr) { free(tbuf); panicf("cannot read file '%s'", path); }
+                tbuf[tlen] = '\0';
+                aval tail = a_str_new(tbuf, (uint64_t)tlen);
+                free(tbuf);
+                return a_str_cat(s, tail);
+            }
+            /* Short read or error: discard and use the generic path. */
+            fclose(f);
+        } else {
+            fclose(f);
+        }
+    } else {
+        fclose(f);
+    }
     size_t len;
     char *data = read_all_file(path, &len);
     aval r = a_str_new(data, (uint64_t)len);
@@ -34,9 +100,17 @@ aval bi_read_file(uint64_t n, aval *argv) {
 
 static aval write_file_impl(aval pathv, aval textv, const char *mode, const char *name) {
     const char *path = path_arg(pathv, "path");
-    if (kind_of(textv) != K_STR) panicf("%s() text must be str", name);
+    const char *p;
     uint64_t len;
-    const char *p = str_data(textv, &len);
+    AObj *o = obj_of(textv);
+    if (o && o->type == T_BYTES) {
+        ABytes *b = (ABytes *)o;
+        p = b->data;
+        len = b->h.len;
+    } else {
+        if (kind_of(textv) != K_STR) panicf("%s() text must be str or Bytes", name);
+        p = str_data(textv, &len);
+    }
     FILE *f = fopen(path, mode);
     if (!f) panicf("cannot open file '%s'", path);
     if (len && fwrite(p, 1, (size_t)len, f) != len) {
@@ -55,11 +129,12 @@ aval bi_read_bytes(uint64_t n, aval *argv) {
     const char *path = path_arg(argv[0], "path");
     size_t len;
     char *data = read_all_file(path, &len);
-    AVec out = { NULL, 0, 0 };
-    for (size_t i = 0; i < len; ++i)
-        avec_push(&out, a_mkint((unsigned char)data[i]));
-    aval r = list_from_vec(out.p, (uint64_t)out.len, 0);
-    free(out.p);
+    /* Straight into packed int64 storage: no AVec regrowth, no aval
+       round-trip — one pass over the bytes, 8x less memory than the
+       tagged-value path. */
+    int64_t *v = (int64_t *)xmalloc((len ? len : 1) * sizeof(int64_t));
+    for (size_t i = 0; i < len; ++i) v[i] = (unsigned char)data[i];
+    aval r = a_list_take_i64(v, (uint64_t)len);
     free(data);
     return r;
 }
@@ -70,14 +145,27 @@ aval bi_write_bytes(uint64_t n, aval *argv) {
     AArr *a = arr_of(argv[1], "write_bytes bytes");
     uint64_t len = a->h.len;
     char *buf = (char *)xmalloc(len ? len : 1);
-    for (uint64_t i = 0; i < len; ++i) {
-        int64_t v = expect_int64(arr_elem(a, i), "write_bytes byte");
-        if (v < 0 || v > 255) {
-            free(buf);
-            panicf("write_bytes: byte value %lld out of range 0-255",
-                   (long long)v);
+    if (arr_packed(a)) {
+        /* Packed int64 storage: values are already raw, no aval decode. */
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t v = a->iitems[i];
+            if (v < 0 || v > 255) {
+                free(buf);
+                panicf("write_bytes: byte value %lld out of range 0-255",
+                       (long long)v);
+            }
+            buf[i] = (char)v;
         }
-        buf[i] = (char)v;
+    } else {
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t v = expect_int64(arr_elem(a, i), "write_bytes byte");
+            if (v < 0 || v > 255) {
+                free(buf);
+                panicf("write_bytes: byte value %lld out of range 0-255",
+                       (long long)v);
+            }
+            buf[i] = (char)v;
+        }
     }
     FILE *f = fopen(path, "wb");
     if (!f) { free(buf); panicf("cannot open file '%s'", path); }

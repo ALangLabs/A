@@ -1,0 +1,461 @@
+# std.enum — named constant sets and bit flags (functional API).
+#
+# A native `enum` declaration is built into the language; this package
+# provides runtime-constructed constant sets via a functional API:
+#
+#   class Color(Enum):
+#       RED = 1
+#       GREEN = auto()
+#
+# A cannot express that — class bodies only hold field declarations and
+# `fn` methods (`RED = 1` is a parse error), there is no metaclass
+# machinery, and `match` variant patterns require real `enum` variants.
+# What A *can* express is enum.py's functional API:
+#
+#   Color = Enum("Color", ["RED", "GREEN", "BLUE"])        # values 1, 2, 3
+#   Color = Enum("Color", {"RED": 1, "GREEN": 5})          # explicit values
+#   Shade = Flag("Shade", {"R": 1, "W": 2, "X": 4})        # bit flags
+#
+# `Color` is an EnumSpec (the "class" analogue, same role as
+# NamedTupleSpec): `Color.at("RED")` is the `Color.RED` analogue,
+# `Color.members()` iterates members, `Color.value_of(1)` is `Color(1)`.
+# See README.md for the full deviation list.
+import std:core
+import std:json
+
+# NOTE: the auto() sentinel is inlined as a literal in auto()/_is_auto
+# rather than stored in a module constant — it is an improbable plain
+# string, only compared after json.as_str extraction.
+
+# Monotonic id distinguishing specs: two Enum("Color", ...) calls produce
+# distinct member types even when names/values coincide (matching enum-class semantics).
+_spec_id_counter = 0
+
+# Upper bound on FlagSpec composite-member cache entries; beyond it,
+# composites are still built but not retained (prevents unbounded growth
+# when callers synthesize many distinct bitmasks).
+_COMPOSITES_MAX = 4096
+
+fn _next_spec_id():
+    _spec_id_counter = _spec_id_counter + 1
+    return _spec_id_counter
+
+"""
+auto() -> marker for automatic numbering inside an Enum/Flag spec.
+In a name list values number 1, 2, 3, ...; in a \{name: value\} map an
+auto() value continues from the previous integer value + 1. In Flag
+specs auto values are powers of two (1, 2, 4, 8, ...).
+"""
+fn auto():
+    return "@@enum.auto@@"
+
+"""
+_concrete(v) -> unwrap a Json value to its concrete A type
+(int/float/bool/String/None); arrays and objects stay Json.
+"""
+fn _concrete(v):
+    k = json.kind(v)
+    if k == "null":
+        return None
+    if k == "bool":
+        return json.as_bool(v)!
+    if k == "number":
+        i = json.as_int(v)
+        if i == None:
+            return json.as_float(v)!
+        return i!
+    if k == "string":
+        return json.as_str(v)!
+    return v
+
+"""_is_auto(v) -> true when v is the auto() sentinel."""
+fn _is_auto(v):
+    s = json.as_str(v)
+    if s == None:
+        return false
+    return s! == "@@enum.auto@@"
+
+"""
+EnumMember: a single named enum member (canonical or flag composite).
+`name`/`value` are public fields, matching the `member.name` /
+`member.value` attributes.
+"""
+class EnumMember:
+    name
+    value
+    _owner_name
+    _label
+    _spec_id
+    _style
+
+    """label() -> "Owner.NAME" form ("Perm.R|W" for flag composites)."""
+    fn label(self):
+        return self._label
+
+    """typename() -> name of the owning enum type ("Color")."""
+    fn typename(self):
+        return self._owner_name
+
+    """
+    text() -> "Owner.NAME" for Enum and Flag, the bare value for
+    IntEnum/StrEnum/IntFlag.
+    """
+    fn text(self):
+        if self._style == "intenum" or self._style == "strenum" or self._style == "intflag":
+            return str(self.value)
+        return self._label
+
+    """repr() -> "<Color.RED: 1>" analogue."""
+    fn repr(self):
+        return "<" + self._label + ": " + str(self.value) + ">"
+
+    """
+    eq(other) -> true for the same member of the same spec.
+    (A `==` on instances is already structural; this is the explicit,
+    explicit member comparison.)
+    """
+    fn eq(self, other):
+        return self._spec_id == other._spec_id and self.name == other.name
+
+"""EnumSpec: what Enum()/IntEnum()/StrEnum() return — the "class" analogue."""
+class EnumSpec:
+    _typename
+    _id
+    _style
+    _names
+    _members
+    _by_name
+    _by_value
+
+    fn typename(self):
+        return self._typename
+
+    """size() -> number of canonical (non-alias) members."""
+    fn size(self):
+        return len(self._members)
+
+    """
+    members() -> canonical members in definition order
+    (aliases excluded).
+    """
+    fn members(self):
+        return self._members.copy()
+
+    """names() -> canonical member names in definition order."""
+    fn names(self):
+        return self._names.copy()
+
+    """values() -> member values in definition order."""
+    fn values(self):
+        out = []
+        for m in self._members:
+            out.append(m.value)
+        return out
+
+    """
+    members_map() -> \{name: member\} including aliases
+    (the members mapping).
+    """
+    fn members_map(self):
+        return self._by_name.copy()
+
+    """
+    at(name) -> member; runtime error when absent
+    (raises a runtime error when absent).
+    """
+    fn at(self, name):
+        if name not in self._by_name:
+            core.panic("Enum '" + self._typename + "' has no member '" + name + "'")
+        return self._by_name[name]
+
+    """get(name) -> member or None when absent."""
+    fn get(self, name) -> EnumMember?:
+        if name in self._by_name:
+            return self._by_name[name]
+        return None
+
+    """has(name) -> true when the (canonical or alias) name exists."""
+    fn has(self, name):
+        return name in self._by_name
+
+    """
+    value_of(v) -> member with value v; runtime error when absent
+    (raises a runtime error when absent).
+    """
+    fn value_of(self, v):
+        if v not in self._by_value:
+            core.panic("Enum '" + self._typename + "' has no member with value " + str(v))
+        return self._by_value[v]
+
+    """find_value(v) -> member with value v or None when absent."""
+    fn find_value(self, v) -> EnumMember?:
+        if v in self._by_value:
+            return self._by_value[v]
+        return None
+
+    """
+    unique(self) -> self; panics when two canonical members share a
+    value (Python enum.unique decorator analogue — call it on the spec
+    after construction: `Color = Color.unique()` or `Color.unique()`).
+    """
+    fn unique(self):
+        seen = {}
+        for m in self._members:
+            k = str(m.value)
+            if k in seen:
+                core.panic("duplicate value " + str(m.value) +
+                           " in enum '" + self._typename + "'")
+            seen[k] = true
+        return self
+
+"""
+FlagSpec: what Flag()/IntFlag() return. Wraps an EnumSpec of canonical
+single-bit members plus a cache of composite pseudo-members.
+"""
+class FlagSpec:
+    _spec: EnumSpec
+    _all
+    _composites
+
+    fn typename(self):
+        return self._spec._typename
+
+    fn size(self):
+        return self._spec.size()
+
+    fn members(self):
+        return self._spec.members()
+
+    fn names(self):
+        return self._spec.names()
+
+    fn values(self):
+        return self._spec.values()
+
+    fn members_map(self):
+        return self._spec.members_map()
+
+    fn at(self, name):
+        return self._spec.at(name)
+
+    fn get(self, name):
+        return self._spec.get(name)
+
+    fn has(self, name):
+        return self._spec.has(name)
+
+    """_flag_int(x) -> x as int; runtime error for non-integers."""
+    fn _flag_int(self, x):
+        n = json.as_int(x)
+        if n == None:
+            core.panic("flag values must be integers, got " + str(x))
+        return n!
+
+    """
+    _mk(iv) -> canonical or composite member for bitmask iv.
+    Unknown bits are kept and folded into the member name as a decimal
+    suffix (unknown bits are kept for both Flag kinds).
+    """
+    fn _mk(self, iv):
+        if iv < 0:
+            core.panic("negative flag value " + str(iv))
+        if iv in self._spec._by_value:
+            return self._spec._by_value[iv]
+        if iv in self._composites:
+            return self._composites[iv]
+        covered = 0
+        parts = []
+        for m in self._spec._members:
+            mv = m.value
+            if mv != 0 and (iv & mv) == mv:
+                covered = covered | mv
+                parts.append(m.name)
+        leftover = iv ^ covered
+        if leftover != 0:
+            parts.append(str(leftover))
+        if len(parts) == 0:
+            parts.append("0")
+        pname = "|".join(parts)
+        member = EnumMember(pname, iv, self._spec._typename,
+                            self._spec._typename + "." + pname,
+                            self._spec._id, self._spec._style)
+        if len(self._composites) < _COMPOSITES_MAX:
+            self._composites[iv] = member
+        return member
+
+    """value_of(v) -> member for bitmask v (canonical or composite)."""
+    fn value_of(self, v):
+        return self._mk(self._flag_int(v))
+
+    """
+    find_value(v) -> same as value_of; kept for API symmetry with
+    EnumSpec (flag lookups never fail for integer input).
+    """
+    fn find_value(self, v):
+        return self._mk(self._flag_int(v))
+
+    """union(a, b) -> a | b  (the `|` operator analogue)."""
+    fn union(self, a, b):
+        return self._mk(self._flag_int(a.value) | self._flag_int(b.value))
+
+    """intersection(a, b) -> a & b."""
+    fn intersection(self, a, b):
+        return self._mk(self._flag_int(a.value) & self._flag_int(b.value))
+
+    """symmetric_difference(a, b) -> a ^ b."""
+    fn symmetric_difference(self, a, b):
+        return self._mk(self._flag_int(a.value) ^ self._flag_int(b.value))
+
+    """difference(a, b) -> a & ~b."""
+    fn difference(self, a, b):
+        return self._mk(self._flag_int(a.value) & ~self._flag_int(b.value))
+
+    """invert(a) -> all defined bits not in a (~a within the flag's mask)."""
+    fn invert(self, a):
+        return self._mk(self._all & ~self._flag_int(a.value))
+
+    """
+    contains_flag(container, flag) -> true when every bit of `flag`
+    is set in `container` (the `in` operator analogue).
+    """
+    fn contains_flag(self, container, flag):
+        cv = self._flag_int(container.value)
+        fv = self._flag_int(flag.value)
+        return (cv & fv) == fv
+
+    """unique(self) -> self; delegates to the wrapped EnumSpec.unique()."""
+    fn unique(self):
+        return self._spec.unique()
+
+fn _names_from_string(s):
+    # native split() collapses whitespace runs (Python splits the names
+    # string on whitespace too, after ',' -> ' ')
+    return str(s).replace(",", " ").split()
+
+fn _names_from_json_list(arr):
+    out = []
+    for x in arr:
+        s = json.as_str(x)
+        if s == None:
+            core.panic("enum member names must be strings, got " + str(x))
+        out.append(s!)
+    return out
+
+"""
+_as_int_or(v, fallback) -> v as int, or fallback when v is not an
+integer. Uses json.as_int + `!` unwrap (T? optionals must be unwrapped
+explicitly; `!= None` narrowing does not unwrap at runtime).
+"""
+fn _as_int_or(v, fallback):
+    i = json.as_int(v)
+    if i == None:
+        return fallback
+    return i!
+
+fn _flag_int_value(typename, name, v):
+    n = json.as_int(v)
+    if n == None:
+        core.panic("Flag '" + typename + "' member '" + name + "' value must be an integer")
+    if n! < 0 or (n! != 0 and (n! & (n! - 1)) != 0):
+        core.panic("Flag '" + typename + "' member '" + name + "' value " + str(n!) +
+                   " is not zero or a power of two")
+    return n!
+
+fn _build_enum(typename, spec, style) -> EnumSpec:
+    k = json.kind(spec)
+    names = []
+    vmap = {}
+    has_values = false
+    if k == "string":
+        names = _names_from_string(json.as_str(spec)!)
+    elif k == "array":
+        names = _names_from_json_list(json.as_array(spec)!)
+    elif k == "object":
+        vmap = json.as_map(spec)!
+        has_values = true
+        for key in vmap:
+            names.append(key)
+    else:
+        core.panic("Enum spec must be a string of names, a list of names, " +
+                   "or a \{name: value\} map; got " + k)
+    is_flag = style == "flag" or style == "intflag"
+    id = _next_spec_id()
+    es = EnumSpec(typename, id, style, [], [], {}, {})
+
+    next_auto = 1
+    next_pow = 1
+    for name in names:
+        if name == "":
+            core.panic("enum member name must not be empty")
+        if name in es._by_name:
+            core.panic("duplicate member name '" + name + "' in '" + typename + "'")
+
+        explicit = false
+        raw = None
+        if has_values:
+            raw = vmap[name]
+            explicit = not _is_auto(raw)
+
+        value = 0
+        if explicit:
+            value = _concrete(raw)
+            if is_flag:
+                value = _flag_int_value(typename, name, value)
+            # auto() continues from the previous integer value + 1
+            next_auto = _as_int_or(value, next_auto - 1) + 1
+        elif is_flag:
+            value = next_pow
+            next_pow = next_pow * 2
+        else:
+            value = next_auto
+            next_auto = next_auto + 1
+
+        if value in es._by_value:
+            # alias: second name for an existing value shares the member
+            es._by_name[name] = es._by_value[value]
+            continue
+        member = EnumMember(name, value, typename, typename + "." + name, id, style)
+        es._names.append(name)
+        es._members.append(member)
+        es._by_name[name] = member
+        es._by_value[value] = member
+    return es
+
+fn _build_flag(typename, spec, style) -> FlagSpec:
+    es = _build_enum(typename, spec, style)
+    allv = 0
+    for m in es._members:
+        allv = allv | m.value
+    return FlagSpec(es, allv, {})
+
+"""
+Enum(typename, spec) -> EnumSpec. `spec` is a string of names
+("RED GREEN"), a list of names, or a \{name: value\} map. List/string
+forms auto-number values from 1; map values may use auto().
+Duplicate values create aliases (both names resolve to one member).
+"""
+fn Enum(typename, spec) -> EnumSpec:
+    return _build_enum(typename, spec, "enum")
+
+"""IntEnum(typename, spec) -> EnumSpec with int-style text()."""
+fn IntEnum(typename, spec) -> EnumSpec:
+    return _build_enum(typename, spec, "intenum")
+
+"""StrEnum(typename, spec) -> EnumSpec with string-style text()."""
+fn StrEnum(typename, spec) -> EnumSpec:
+    return _build_enum(typename, spec, "strenum")
+
+"""
+Flag(typename, spec) -> FlagSpec of single-bit members with composite
+("R|W") pseudo-members. Values must be integers; auto() yields powers
+of two. Unknown bits are kept (boundary=KEEP) rather than rejected.
+"""
+fn Flag(typename, spec) -> FlagSpec:
+    return _build_flag(typename, spec, "flag")
+
+"""
+IntFlag(typename, spec) -> FlagSpec whose text() renders the numeric
+value.
+"""
+fn IntFlag(typename, spec) -> FlagSpec:
+    return _build_flag(typename, spec, "intflag")

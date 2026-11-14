@@ -1,0 +1,141 @@
+# Runtime benchmarks: dict/set/string/view/json/GC-churn hot paths.
+# Each prints "name ms" (best of 3). Run: ./build/a run benchmarks/runtime/dict.astra
+import std:time
+import json
+
+fn bench(name, f):
+    best = 1000000000000
+    r = 0
+    while r < 3:
+        t0 = time.now()
+        f()
+        t1 = time.now()
+        if t1 - t0 < best:
+            best = t1 - t0
+        r = r + 1
+    print(name + " " + str(best))
+
+fn dict_churn():
+    m = {}
+    xk = 999
+    i = 0
+    while i < 5000:
+        xk = (xk * 1103515245 + 12345) % 2147483648
+        m["key" + str(xk % 50000)] = i
+        i = i + 1
+    acc = 0
+    i = 0
+    while i < 5000:
+        xk = (xk * 1103515245 + 12345) % 2147483648
+        hit = m.get("key" + str(xk % 50000))
+        if hit != None:
+            acc = acc + hit
+        i = i + 1
+    return acc
+
+fn dict_pop():
+    m = {}
+    i = 0
+    while i < 1000:
+        m["k" + str(i)] = i
+        i = i + 1
+    i = 0
+    while i < 750:
+        m.pop("k" + str(i))
+        i = i + 1
+    return len(m)
+
+fn set_ops():
+    a = set()
+    b = set()
+    i = 0
+    while i < 1000:
+        a.add(i)
+        b.add(i * 2)
+        i = i + 1
+    acc = 0
+    r = 0
+    while r < 10:
+        u = a.union(b)
+        n = a.intersection(b)
+        d = a.difference(b)
+        acc = acc + len(u) + len(n) + len(d)
+        r = r + 1
+    return acc
+
+fn list_scan():
+    xs = []
+    i = 0
+    while i < 20000:
+        xs.append(i)
+        i = i + 1
+    acc = 0
+    r = 0
+    while r < 5:
+        acc = acc + xs.index(15000) + xs.count(777)
+        if xs.contains(42):
+            acc = acc + 1
+        r = r + 1
+    return acc
+
+fn view_iter():
+    big = []
+    i = 0
+    while i < 10000:
+        big.append(i)
+        i = i + 1
+    acc = 0
+    r = 0
+    while r < 50:
+        v = big[100..1000]
+        s = 0
+        for x in v:
+            s = s + x
+        acc = acc + s
+        r = r + 1
+    return acc
+
+fn str_methods():
+    s = ""
+    i = 0
+    while i < 500:
+        s = s + "Item-{i}-"
+        i = i + 1
+    parts = s.split("-")
+    acc = 0
+    for w in parts:
+        acc = acc + len(w.strip().upper())
+    joined = "|".join(parts[0..500])
+    rep = joined.replace("|", ";")
+    return acc + len(rep)
+
+fn json_churn():
+    acc = 0
+    i = 0
+    while i < 5000:
+        doc = {"id": i, "name": 0, "ok": 1}
+        txt = json.stringify(doc)
+        back = json.parse(txt)
+        acc = acc + json.as_int(json.get(back, "id"))!
+        i = i + 1
+    return acc
+
+fn fn_churn():
+    acc = 0
+    i = 0
+    while i < 20000:
+        xs = [i, i + 1, i + 2]
+        d = {"a": i}
+        acc = acc + xs[0] + d["a"]
+        i = i + 1
+    return acc
+
+entry main():
+    bench("dict_churn", dict_churn)
+    bench("dict_pop", dict_pop)
+    bench("set_ops", set_ops)
+    bench("list_scan", list_scan)
+    bench("view_iter", view_iter)
+    bench("str_methods", str_methods)
+    bench("json_churn", json_churn)
+    bench("fn_churn", fn_churn)

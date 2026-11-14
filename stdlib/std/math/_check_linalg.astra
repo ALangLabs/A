@@ -1,0 +1,153 @@
+# Check for linalg.astra — run: ./build/a run _check_linalg.astra  (from this dir)
+import std:core
+
+from "ndarray.astra" import NDArray, ndarray, zeros, eye, array2string
+from "linalg.astra" import dot, inner, vdot, outer, kron, matmul, matvec
+from "linalg.astra" import cross, norm, vector_norm, matrix_norm
+from "linalg.astra" import det, inv, solve, lstsq, matrix_power, multi_dot
+from "linalg.astra" import tensordot, eigvalsh_2x2, lu
+
+fn close(a: f64, b: f64, tol: f64) -> bool:
+    d = a - b
+    if d < 0:
+        d = -d
+    return d < tol
+
+fn arr_close(x: NDArray, want: [f64], tol: f64) -> bool:
+    if x.size() != len(want):
+        return false
+    for i in 0..len(want):
+        if close(x.data[i], want[i], tol) == false:
+            return false
+    return true
+
+entry main():
+    tol = 0.0000001
+
+    # --- dot ---
+    v = ndarray([1.0, 2.0, 3.0], [3])
+    w = ndarray([4.0, 5.0, 6.0], [3])
+    d = dot(v, w)
+    core.assert(d.size() == 1 and close(d.data[0], 32.0, tol))
+    core.assert(close(vdot(v, w), 32.0, tol))
+    core.assert(close(inner(v, w).data[0], 32.0, tol))
+
+    # 2-D . 1-D and 1-D . 2-D (matching inner dim 2)
+    A = ndarray([1.0, 2.0, 3.0, 4.0], [2, 2])   # [[1,2],[3,4]]
+    x2 = ndarray([1.0, 1.0], [2])
+    r = dot(A, x2)
+    core.assert(r.shape[0] == 2 and close(r.data[0], 3.0, tol) and close(r.data[1], 7.0, tol))
+    # x (2,) . A (2,2) -> (2,)
+    r2 = dot(x2, A)
+    core.assert(r2.shape[0] == 2 and close(r2.data[0], 4.0, tol) and close(r2.data[1], 6.0, tol))
+    # 2-D . 2-D
+    B = ndarray([5.0, 6.0, 7.0, 8.0], [2, 2])
+    C = dot(A, B)
+    core.assert(C.shape[0] == 2 and C.shape[1] == 2)
+    core.assert(arr_close(C, [19.0, 22.0, 43.0, 50.0], tol))
+
+    # N-D dot: (2,2,2) . (2,3) contract last(2) with second-to-last(2)
+    T = ndarray([1.0, 0.0, 0.0, 1.0, 2.0, 0.0, 0.0, 2.0], [2, 2, 2])
+    M = ndarray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+    td = dot(T, M)
+    # result shape = T.shape[:-1] + M.shape[:-2] + M.shape[-1:] = (2,2,3)
+    core.assert(td.shape[0] == 2 and td.shape[1] == 2 and td.shape[2] == 3)
+
+    # --- matmul ---
+    mm = matmul(A, B)
+    core.assert(arr_close(mm, [19.0, 22.0, 43.0, 50.0], tol))
+    # vector matmul
+    vm = matmul(x2, A)   # (2,) @ (2,2) -> (2,)
+    core.assert(vm.shape[0] == 2 and close(vm.data[0], 4.0, tol) and close(vm.data[1], 6.0, tol))
+    mv2 = matmul(A, x2)  # (2,2) @ (2,) -> (2,)
+    core.assert(mv2.shape[0] == 2 and close(mv2.data[0], 3.0, tol) and close(mv2.data[1], 7.0, tol))
+    # batched: (2,2,2) @ (2,2) -> (2,2,2)
+    batch = matmul(T, eye(2))
+    core.assert(batch.shape[0] == 2 and batch.shape[1] == 2 and batch.shape[2] == 2)
+
+    # --- matvec ---
+    W = ndarray([1.0, 0.0, 0.0, 1.0], [2, 2])
+    mo = matvec(x2, W)
+    core.assert(arr_close(mo, [1.0, 1.0], tol))
+    mb = matvec(x2, W, ndarray([10.0, 20.0], [2]))
+    core.assert(arr_close(mb, [11.0, 21.0], tol))
+
+    # --- cross ---
+    c1 = ndarray([1.0, 0.0, 0.0], [3])
+    c2 = ndarray([0.0, 1.0, 0.0], [3])
+    cr = cross(c1, c2)
+    core.assert(arr_close(cr, [0.0, 0.0, 1.0], tol))
+    # stacked (2,3)x(2,3)
+    s1 = ndarray([1.0, 0.0, 0.0, 0.0, 1.0, 0.0], [2, 3])
+    s2 = ndarray([0.0, 1.0, 0.0, 0.0, 0.0, 1.0], [2, 3])
+    csr = cross(s1, s2)
+    core.assert(csr.shape[0] == 2 and arr_close(csr, [0.0, 0.0, 1.0, 1.0, 0.0, 0.0], tol))
+
+    # --- norms ---
+    vv = ndarray([3.0, 4.0], [2])
+    core.assert(close(norm(vv), 5.0, tol))
+    core.assert(close(vector_norm(vv, 1.0), 7.0, tol))
+    core.assert(close(vector_norm(vv, "inf"), 4.0, tol))
+    core.assert(close(norm(A), 5.477225575051661, 0.0001))  # frobenius
+    core.assert(close(matrix_norm(A, "fro"), 5.477225575051661, 0.0001))
+    core.assert(close(matrix_norm(A, "1"), 6.0, tol))    # max col sum = |2|+|4|
+    core.assert(close(matrix_norm(A, "inf"), 7.0, tol))  # max row sum = |3|+|4|
+
+    # --- det / inv / solve ---
+    core.assert(close(det(A), -2.0, tol))
+    Ai = inv(A)
+    # A^-1 = [[-2,1],[1.5,-0.5]]
+    core.assert(arr_close(Ai, [-2.0, 1.0, 1.5, -0.5], tol))
+    # A . A^-1 = I
+    I2 = matmul(A, Ai)
+    core.assert(arr_close(I2, [1.0, 0.0, 0.0, 1.0], tol))
+    # solve A x = [1,1] -> x = [-1,1]? A^-1 [1,1] = [-1, 1]
+    sx = solve(A, ndarray([1.0, 1.0], [2]))
+    core.assert(arr_close(sx, [-1.0, 1.0], tol))
+    # solve with 2 rhs
+    B2 = ndarray([1.0, 2.0, 3.0, 4.0], [2, 2])
+    SX = solve(A, B2)
+    core.assert(SX.shape[0] == 2 and SX.shape[1] == 2)
+
+    # --- lstsq ---
+    # overdetermined: A(3x2), b(3) -> x ~ [?, ?]; use exact consistent system
+    A3 = ndarray([1.0, 1.0, 1.0, 2.0, 2.0, 1.0, 3.0, 1.0, 2.0], [3, 2])
+    b3 = ndarray([3.0, 5.0, 4.0], [3])  # x=[1,2]: rows give 3,5,4
+    xl = lstsq(A3, b3)
+    core.assert(xl.shape[0] == 2)
+    core.assert(close(xl.data[0], 1.0, 0.001) and close(xl.data[1], 2.0, 0.001))
+
+    # --- matrix_power ---
+    P2 = matrix_power(A, 2)
+    core.assert(arr_close(P2, [7.0, 10.0, 15.0, 22.0], tol))   # A^2
+    P0 = matrix_power(A, 0)
+    core.assert(arr_close(P0, [1.0, 0.0, 0.0, 1.0], tol))
+    Pinv = matrix_power(A, -1)
+    core.assert(arr_close(Pinv, [-2.0, 1.0, 1.5, -0.5], tol))
+
+    # --- multi_dot ---
+    md = multi_dot([A, B, eye(2)])
+    core.assert(arr_close(md, [19.0, 22.0, 43.0, 50.0], tol))
+
+    # --- tensordot ---
+    td2 = tensordot(T, M, 1)   # contract last 1 of T (size2) with first 1 of M (size2)
+    core.assert(td2.size() == 2 * 2 * 3)
+
+    # --- outer / kron ---
+    o = outer(x2, x2)
+    core.assert(arr_close(o, [1.0, 1.0, 1.0, 1.0], tol))
+    K = kron(ndarray([1.0, 2.0], [1, 2]), ndarray([3.0, 4.0], [2, 1]))
+    # np.kron([[1,2]], [[3],[4]]) -> (2,2): [[3,6],[4,8]]
+    core.assert(K.shape[0] == 2 and K.shape[1] == 2)
+    core.assert(arr_close(K, [3.0, 6.0, 4.0, 8.0], tol))
+
+    # --- eigvalsh_2x2 ---
+    S = ndarray([2.0, 1.0, 1.0, 2.0], [2, 2])
+    ev = eigvalsh_2x2(S)
+    core.assert(close(ev.data[0], 1.0, tol) and close(ev.data[1], 3.0, tol))
+
+    # --- lu ---
+    lr = lu(A)
+    core.assert(lr[0].shape[0] == 2)
+
+    print("linalg checks passed")

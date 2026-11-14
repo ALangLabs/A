@@ -40,6 +40,18 @@ enum class TypeKind {
   // First-class byte buffer (Bytes(...)): a growable char buffer. Indexing
   // yields i64 0..255, iteration yields bytes, and len() is O(1).
   Bytes,
+  // Fixed-width numeric SIMD vector `vector[T, N]` (also spelled `simd[T, N]`):
+  // N lanes of numeric element type T, lowered to a native LLVM `<N x ty>`
+  // vector inside expressions and boxed as a list of N avals at boundaries.
+  Vector,
+  // Python-typing `any`/`Any`: the dynamic top type. Unifies with (and is
+  // unified by) every type without binding anything; use sites treat values
+  // of this type like untyped (Var) values.
+  Any,
+  // Python-typing union `T | U | ...` (also `Union[T, U]`). Members live in
+  // `params`. `None` members are folded into Optional at resolution time, so
+  // a Union never directly contains a None member.
+  Union,
   Var,
 };
 
@@ -117,6 +129,13 @@ inline TypePtr typeArray(TypePtr elem, std::int64_t length = -1) {
   return type;
 }
 
+inline TypePtr typeVector(TypePtr elem, std::int64_t lanes) {
+  auto type = makeType(TypeKind::Vector);
+  type->elem = std::move(elem);
+  type->length = lanes;
+  return type;
+}
+
 inline TypePtr typeRange(TypePtr elem) {
   auto type = makeType(TypeKind::Range);
   type->elem = std::move(elem);
@@ -165,6 +184,24 @@ inline TypePtr typeTuple(std::vector<TypePtr> elements) {
   type->params = std::move(elements);
   return type;
 }
+
+// `tuple[T, ...]` — homogeneous variable-length tuple (Python typing). Stored
+// as Tuple with length == -2 and params == {T}; unify() treats it as "any
+// arity of T".
+inline TypePtr typeTupleVariadic(TypePtr elem) {
+  auto type = makeType(TypeKind::Tuple);
+  type->params = {std::move(elem)};
+  type->length = -2;
+  return type;
+}
+
+inline TypePtr typeUnion(std::vector<TypePtr> members) {
+  auto type = makeType(TypeKind::Union);
+  type->params = std::move(members);
+  return type;
+}
+
+inline TypePtr typeAny() { return makeType(TypeKind::Any); }
 
 inline TypePtr typeStruct(const std::string& name) {
   auto type = makeType(TypeKind::Struct);
@@ -215,6 +252,11 @@ inline bool isFloatType(const TypePtr& type) {
 inline bool isNumericType(const TypePtr& type) {
   TypePtr t = resolveType(type);
   return t && (t->kind == TypeKind::Int || t->kind == TypeKind::Float);
+}
+
+inline bool isVectorType(const TypePtr& type) {
+  TypePtr t = resolveType(type);
+  return t && t->kind == TypeKind::Vector;
 }
 
 inline TypePtr builtinTypeByName(const std::string& name) {
@@ -269,6 +311,9 @@ inline std::string typeName(const TypePtr& type) {
       }
       return typeName(current) + dims;
     }
+    case TypeKind::Vector:
+      return "vector[" + typeName(t->elem) + ", " +
+             std::to_string(t->length) + "]";
     case TypeKind::Range: return "range<" + typeName(t->elem) + ">";
     case TypeKind::Optional: return typeName(t->elem) + "?";
     case TypeKind::Result: return "Result<" + typeName(t->elem) + ", " + typeName(t->errorType) + ">";
@@ -280,6 +325,10 @@ inline std::string typeName(const TypePtr& type) {
     case TypeKind::IO: return "IO";
     case TypeKind::Bytes: return "Bytes";
     case TypeKind::Tuple: {
+      if (t->length == -2) {
+        // `tuple[T, ...]`: homogeneous variable-length tuple.
+        return "tuple[" + typeName(t->params[0]) + ", ...]";
+      }
       std::string s = "(";
       for (std::size_t i = 0; i < t->params.size(); ++i) {
         if (i) s += ", ";
@@ -301,6 +350,15 @@ inline std::string typeName(const TypePtr& type) {
       s += ") -> " + typeName(t->ret);
       return s;
     }
+    case TypeKind::Union: {
+      std::string s;
+      for (std::size_t i = 0; i < t->params.size(); ++i) {
+        if (i) s += " | ";
+        s += typeName(t->params[i]);
+      }
+      return s.empty() ? "any" : s;
+    }
+    case TypeKind::Any: return "any";
     case TypeKind::Var:
       switch (t->constraint) {
         case Constraint::Integer: return "an integer type";

@@ -2,7 +2,7 @@
   "name": "string-utils",
   "version": "0.3.0",
   "description": "String helpers (slugify, truncate, reverse). Depends on math-utils.",
-  "main": "string_utils.a",
+  "main": "string_utils.astra",
   "dependencies": {
     "math-utils": "^2.0.0"
   }

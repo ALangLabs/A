@@ -1,0 +1,363 @@
+#
+# std.math.fft — NumPy-compatible FFT subset on NDArray (f64 dtype only).
+#
+# A has no complex dtype (see complex.astra work in progress), so every function
+# that NumPy would return a complex array for instead returns TWO NDArrays:
+# the real and imaginary parts as separate 1-D (or 2-D) arrays. Functions are
+# named after np.fft but return tuples `(re, im)` — index [0]/[1] or
+# destructure `(re, im) = fft(x_re, x_im)`.
+#
+#   fft(re, im)      -> (NDArray, NDArray)   1-D forward FFT (X[k] = sum x[n] e^{-2pi i kn/N})
+#   ifft(re, im)     -> (NDArray, NDArray)   1-D inverse FFT (1/N scaling, e^{+2pi i kn/N})
+#   fft2(re, im)     -> (NDArray, NDArray)   2-D FFT (rows then columns)
+#   ifft2(re, im)    -> (NDArray, NDArray)   2-D inverse FFT
+#   rfft(re)         -> (NDArray, NDArray)   real-input FFT, non-negative freqs only (n//2+1 bins)
+#   irfft(re, im)    -> NDArray              inverse of rfft -> real NDArray [n]
+#   fftfreq(n, d)    -> NDArray              cycles per unit, length n
+#   rfftfreq(n, d)   -> NDArray              non-negative freqs, length n//2+1
+#   fftshift(a)      -> NDArray              shift zero-freq to center (last axis)
+#   ifftshift(a)     -> NDArray              inverse of fftshift (last axis)
+#   next_pow2(n)     -> i64                  smallest power of two >= n
+#   fft_auto(re, im) -> (NDArray, NDArray)   zero-pad to next pow2, then fft
+#
+# DEVIATIONS FROM NUMPY:
+#   * Complex values are carried as (re, im) NDArray pairs — no complex dtype.
+#   * fft/ifft REQUIRE the transform length to be a power of two (iterative
+#     radix-2 Cooley-Tukey with bit-reversal permutation). NumPy's pocketfft
+#     handles arbitrary composite lengths via mixed radices; here non-pow2
+#     input panics. Use fft_auto to zero-pad, or next_pow2 to size buffers.
+#   * rfft/irfft do NOT use a dedicated real-input algorithm: rfft runs the
+#     full complex FFT with a zero imaginary part and returns only bins
+#     0..n//2 (the other bins are redundant by conjugate symmetry). Same
+#     output as np.fft.rfft, ~2x the work. irfft reconstructs the full
+#     spectrum via X[n-k] = conj(X[k]) and returns the real part.
+#   * fftshift/ifftshift operate on the LAST axis only (NumPy shifts all
+#     axes); call them on the re and im arrays separately for complex data.
+#   * fftfreq/rfftfreq return f64 NDArrays (NumPy returns float too — same).
+#   * No fftn/fftn-shift helpers beyond 1-D/2-D, no hfft, no next_fast_len.
+
+import math
+import std:core
+
+from "ndarray.astra" import NDArray, ndarray, zeros, reshape, ravel, _shape_size
+
+fn _pi() -> f64:
+    return 3.14159265358979323846
+
+fn _check(cond: bool, msg: str):
+    if cond == false:
+        core.panic(msg)
+
+fn _is_pow2(n: i64) -> bool:
+    if n <= 0:
+        return false
+    return (n & (n - 1)) == 0
+
+fn next_pow2(n: i64) -> i64:
+    # smallest power of two >= n (n <= 0 -> 1)
+    p = 1
+    while p < n:
+        p = p * 2
+    return p
+
+fn _bitrev(i: i64, n: i64) -> i64:
+    # bit-reversed index of i within n (n must be a power of two)
+    bits = 0
+    t = n
+    while t > 1:
+        bits = bits + 1
+        t = t // 2
+    r = 0
+    x = i
+    for b in 0..bits:
+        r = r * 2 + (x % 2)
+        x = x // 2
+    return r
+
+# --- 1-D core on flat lists ----------------------------------------------------
+# In-place iterative radix-2 Cooley-Tukey with bit-reversal permutation.
+# inverse=false -> forward (exp(-2pi i kn/N)); inverse=true -> conjugate
+# twiddles plus 1/N scaling. Input lists are copied; callers' data is safe.
+
+fn _fft1_lists(re: [f64], im: [f64], inverse: bool) -> ([f64], [f64]):
+    n = len(re)
+    br = []
+    bi = []
+    for i in 0..n:
+        r = _bitrev(i, n)
+        while len(br) <= r:
+            br.append(0.0)
+            bi.append(0.0)
+        br[r] = re[i]
+        bi[r] = im[i]
+    len_ = 2
+    while len_ <= n:
+        half = len_ // 2
+        # sign = -1 forward, +1 inverse (conjugate twiddle)
+        sgn = -1.0
+        if inverse:
+            sgn = 1.0
+        i = 0
+        while i < n:
+            for j in 0..half:
+                ang = 2.0 * _pi() * j / len_
+                wr = math.cos(ang)
+                wi = sgn * math.sin(ang)
+                k = i + j + half
+                # butterfly: a = lower elem, b = upper elem, t = w*b
+                # out_lower = a + t ; out_upper = a - t
+                lr = br[i + j]
+                li = bi[i + j]
+                ar = br[k]
+                ai = bi[k]
+                tr = wr * ar - wi * ai
+                ti = wr * ai + wi * ar
+                br[i + j] = lr + tr
+                bi[i + j] = li + ti
+                br[k] = lr - tr
+                bi[k] = li - ti
+            i = i + len_
+        len_ = len_ * 2
+    if inverse:
+        inv_n = 1.0 / n
+        for i in 0..n:
+            br[i] = br[i] * inv_n
+            bi[i] = bi[i] * inv_n
+    return (br, bi)
+
+fn _check_fft_input(re: NDArray, im: NDArray, fname: str):
+    _check(len(re.shape) == 1, fname + ": real input must be 1-D")
+    _check(len(im.shape) == 1, fname + ": imag input must be 1-D")
+    _check(re.shape[0] == im.shape[0], fname + ": re/im shape mismatch")
+    n = re.shape[0]
+    _check(n >= 1, fname + ": empty input")
+    _check(_is_pow2(n), fname + ": length must be a power of two (use fft_auto to pad)")
+
+fn fft(re: NDArray, im: NDArray) -> (NDArray, NDArray):
+    _check_fft_input(re, im, "fft")
+    n = re.shape[0]
+    (or_, oi) = _fft1_lists(re.data, im.data, false)
+    return (NDArray(or_, [n]), NDArray(oi, [n]))
+
+fn ifft(re: NDArray, im: NDArray) -> (NDArray, NDArray):
+    _check_fft_input(re, im, "ifft")
+    n = re.shape[0]
+    (or_, oi) = _fft1_lists(re.data, im.data, true)
+    return (NDArray(or_, [n]), NDArray(oi, [n]))
+
+# --- 2-D ------------------------------------------------------------------------
+
+fn _check_fft2_input(re: NDArray, im: NDArray, fname: str):
+    _check(len(re.shape) == 2, fname + ": input must be 2-D")
+    _check(len(im.shape) == 2, fname + ": imag input must be 2-D")
+    _check(re.shape[0] == im.shape[0] and re.shape[1] == im.shape[1],
+           fname + ": re/im shape mismatch")
+    _check(_is_pow2(re.shape[0]) and _is_pow2(re.shape[1]),
+           fname + ": both axes must have power-of-two length")
+
+fn fft2(re: NDArray, im: NDArray) -> (NDArray, NDArray):
+    _check_fft2_input(re, im, "fft2")
+    rows = re.shape[0]
+    cols = re.shape[1]
+    dre = []
+    dim = []
+    for v in re.data:
+        dre.append(v)
+    for v in im.data:
+        dim.append(v)
+    # rows
+    for i in 0..rows:
+        base = i * cols
+        rre = []
+        rim = []
+        for j in 0..cols:
+            rre.append(dre[base + j])
+            rim.append(dim[base + j])
+        (rr, ri) = _fft1_lists(rre, rim, false)
+        for j in 0..cols:
+            dre[base + j] = rr[j]
+            dim[base + j] = ri[j]
+    # columns
+    for j in 0..cols:
+        cre = []
+        cim = []
+        for i in 0..rows:
+            cre.append(dre[i * cols + j])
+            cim.append(dim[i * cols + j])
+        (cr, ci) = _fft1_lists(cre, cim, false)
+        for i in 0..rows:
+            dre[i * cols + j] = cr[i]
+            dim[i * cols + j] = ci[i]
+    return (NDArray(dre, [rows, cols]), NDArray(dim, [rows, cols]))
+
+fn ifft2(re: NDArray, im: NDArray) -> (NDArray, NDArray):
+    _check_fft2_input(re, im, "ifft2")
+    rows = re.shape[0]
+    cols = re.shape[1]
+    dre = []
+    dim = []
+    for v in re.data:
+        dre.append(v)
+    for v in im.data:
+        dim.append(v)
+    for i in 0..rows:
+        base = i * cols
+        rre = []
+        rim = []
+        for j in 0..cols:
+            rre.append(dre[base + j])
+            rim.append(dim[base + j])
+        (rr, ri) = _fft1_lists(rre, rim, true)
+        for j in 0..cols:
+            dre[base + j] = rr[j]
+            dim[base + j] = ri[j]
+    for j in 0..cols:
+        cre = []
+        cim = []
+        for i in 0..rows:
+            cre.append(dre[i * cols + j])
+            cim.append(dim[i * cols + j])
+        (cr, ci) = _fft1_lists(cre, cim, true)
+        for i in 0..rows:
+            dre[i * cols + j] = cr[i]
+            dim[i * cols + j] = ci[i]
+    return (NDArray(dre, [rows, cols]), NDArray(dim, [rows, cols]))
+
+# --- real-input FFT -------------------------------------------------------------
+
+fn rfft(re: NDArray) -> (NDArray, NDArray):
+    # np.fft.rfft equivalent: returns bins 0..n//2 (n//2+1 values) of the
+    # complex FFT of the real signal. Im part is internally zero; only the
+    # non-negative frequencies are returned (deviation: full complex FFT is
+    # computed — output identical, ~2x work vs a true real FFT).
+    _check(len(re.shape) == 1, "rfft: input must be 1-D")
+    n = re.shape[0]
+    _check(n >= 2, "rfft: length must be >= 2")
+    _check(_is_pow2(n), "rfft: length must be a power of two")
+    zi = []
+    for i in 0..n:
+        zi.append(0.0)
+    (fr, fi) = _fft1_lists(re.data, zi, false)
+    m = n // 2 + 1
+    or_ = []
+    oi = []
+    for k in 0..m:
+        or_.append(fr[k])
+        oi.append(fi[k])
+    return (NDArray(or_, [m]), NDArray(oi, [m]))
+
+fn irfft(re: NDArray, im: NDArray) -> NDArray:
+    # np.fft.irfft equivalent: `re`/`im` hold the n//2+1 non-negative
+    # frequency bins; output length n = 2*(m-1) must be a power of two.
+    # Returns the REAL part as an NDArray (imaginary part discarded — it is
+    # ~0 for a conjugate-symmetric spectrum).
+    _check(len(re.shape) == 1, "irfft: real input must be 1-D")
+    _check(len(im.shape) == 1, "irfft: imag input must be 1-D")
+    m = re.shape[0]
+    _check(m == im.shape[0], "irfft: re/im shape mismatch")
+    _check(m >= 2, "irfft: need at least 2 bins")
+    n = 2 * (m - 1)
+    _check(_is_pow2(n), "irfft: reconstructed length must be a power of two")
+    fre = []
+    fim = []
+    for k in 0..n:
+        fre.append(0.0)
+        fim.append(0.0)
+    for k in 0..m:
+        fre[k] = re.data[k]
+        fim[k] = im.data[k]
+    # conjugate symmetry: X[n-k] = conj(X[k]) for k = 1..m-1 (bin m = n/2 is
+    # the self-conjugate Nyquist bin and is already filled)
+    for k in 1..m - 1:
+        fre[n - k] = fre[k]
+        fim[n - k] = -fim[k]
+    (xr, _xi) = _fft1_lists(fre, fim, true)
+    return NDArray(xr, [n])
+
+# --- frequencies ----------------------------------------------------------------
+
+fn fftfreq(n: i64, d: f64 = 1.0) -> NDArray:
+    # np.fft.fftfreq: cycles per unit d. For even n the negative freqs start
+    # at index n/2; for odd n at index (n+1)/2... implemented per NumPy:
+    #   i < n//2 (even) / i <= n//2 (odd) -> +i/(n d); else (i-n)/(n d)
+    _check(n >= 1, "fftfreq: n must be >= 1")
+    data = []
+    nd = n * d
+    for i in 0..n:
+        k = i
+        if n % 2 == 0:
+            if i >= n // 2:
+                k = i - n
+        else:
+            if i > n // 2:
+                k = i - n
+        data.append(k / nd)
+    return NDArray(data, [n])
+
+fn rfftfreq(n: i64, d: f64 = 1.0) -> NDArray:
+    # np.fft.rfftfreq: non-negative frequencies 0..n//2, length n//2+1.
+    _check(n >= 1, "rfftfreq: n must be >= 1")
+    m = n // 2 + 1
+    nd = n * d
+    data = []
+    for i in 0..m:
+        data.append(i / nd)
+    return NDArray(data, [m])
+
+# --- shifting -------------------------------------------------------------------
+
+fn _shift_last(a: NDArray, fwd: bool) -> NDArray:
+    # permutation on the LAST axis only. fwd=true -> fftshift,
+    # fwd=false -> ifftshift. out[i] = in[(i + s) % n] for fftshift where
+    # s = (n+1)//2; ifftshift uses the inverse offset.
+    nd = len(a.shape)
+    _check(nd >= 1, "fftshift: input must have at least 1 dimension")
+    n = a.shape[nd - 1]
+    if n <= 1:
+        data = []
+        for v in a.data:
+            data.append(v)
+        return NDArray(data, a.shape)
+    s = (n + 1) // 2
+    if fwd == false:
+        s = n - s
+    blocks = a.size() // n
+    data = []
+    for b in 0..blocks:
+        base = b * n
+        for i in 0..n:
+            src = base + (i + s) % n
+            data.append(a.data[src])
+    return NDArray(data, a.shape)
+
+fn fftshift(a: NDArray) -> NDArray:
+    # np.fft.fftshift on the last axis: moves zero frequency to center.
+    return _shift_last(a, true)
+
+fn ifftshift(a: NDArray) -> NDArray:
+    # np.fft.ifftshift on the last axis: inverse permutation.
+    return _shift_last(a, false)
+
+# --- convenience -----------------------------------------------------------------
+
+fn fft_auto(re: NDArray, im: NDArray) -> (NDArray, NDArray):
+    # Zero-pad both inputs to the next power of two (min length 1) and return
+    # their FFT. Output length is next_pow2(max(len(re), len(im))).
+    # Deviation: NumPy's fft pads to next_fast_len (smooth sizes like 12, 20)
+    # for speed; here only powers of two are supported by the radix-2 core.
+    _check(len(re.shape) == 1 and len(im.shape) == 1, "fft_auto: inputs must be 1-D")
+    _check(re.shape[0] == im.shape[0], "fft_auto: re/im shape mismatch")
+    n0 = re.shape[0]
+    n = next_pow2(n0)
+    if n == n0:
+        return fft(re, im)
+    dre = []
+    dim = []
+    for v in re.data:
+        dre.append(v)
+    for v in im.data:
+        dim.append(v)
+    while len(dre) < n:
+        dre.append(0.0)
+        dim.append(0.0)
+    return fft(NDArray(dre, [n]), NDArray(dim, [n]))

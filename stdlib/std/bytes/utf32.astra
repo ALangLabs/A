@@ -1,0 +1,109 @@
+# std.bytes.utf32 — UTF-32 codecs (LE/BE and BOM-aware).
+import std:core
+from "common.astra" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+
+"""_u32_enc_le(cp, out)"""
+fn _u32_enc_le(cp, out):
+    out.append(cp % 256)
+    out.append(cp / 256 % 256)
+    out.append(cp / 65536 % 256)
+    out.append(cp / 16777216 % 256)
+
+"""_u32_enc_be(cp, out)"""
+fn _u32_enc_be(cp, out):
+    out.append(cp / 16777216 % 256)
+    out.append(cp / 65536 % 256)
+    out.append(cp / 256 % 256)
+    out.append(cp % 256)
+
+"""utf32le_encode(s, errors) -> [i64]"""
+fn utf32le_encode(s: String, errors: String):
+    _check_errors(errors)
+    out = []
+    for c in s.chars():
+        _u32_enc_le(ord(c)!, out)
+    return out
+
+"""utf32be_encode(s, errors) -> [i64]"""
+fn utf32be_encode(s: String, errors: String):
+    _check_errors(errors)
+    out = []
+    for c in s.chars():
+        _u32_enc_be(ord(c)!, out)
+    return out
+
+"""utf32_encode(s, errors) -> [i64] (BOM + UTF-32LE)."""
+fn utf32_encode(s: String, errors: String):
+    _check_errors(errors)
+    out = [255, 254, 0, 0]
+    for c in s.chars():
+        _u32_enc_le(ord(c)!, out)
+    return out
+
+"""_u32_dec(bytes, le, errors) -> String"""
+fn _u32_dec(bytes, le, errors):
+    _check_errors(errors)
+    parts = []
+    i = 0
+    n = len(bytes)
+    while i + 3 < n:
+        b0 = bytes[i]
+        b1 = bytes[i + 1]
+        b2 = bytes[i + 2]
+        b3 = bytes[i + 3]
+        cp = 0
+        if le:
+            cp = b0 + b1 * 256 + b2 * 65536 + b3 * 16777216
+        else:
+            cp = b0 * 16777216 + b1 * 65536 + b2 * 256 + b3
+        i = i + 4
+        if cp < 0 or cp > 1114111 or (cp >= 55296 and cp <= 57343):
+            if _is_ignore(errors):
+                continue
+            if _is_replace(errors):
+                parts.append("�")
+                continue
+            core.panic("utf-32: invalid code point (strict)")
+        c = chr(cp)
+        parts.append(c ?? "�")
+    if i < n:
+        if _is_ignore(errors):
+            pass
+        elif _is_replace(errors):
+            parts.append("�")
+        else:
+            core.panic("utf-32: truncated data (strict)")
+    return join(parts, "")
+
+"""utf32le_decode(bytes, errors) -> String"""
+fn utf32le_decode(bytes, errors: String):
+    return _u32_dec(bytes, true, errors)
+
+"""utf32be_decode(bytes, errors) -> String"""
+fn utf32be_decode(bytes, errors: String):
+    return _u32_dec(bytes, false, errors)
+
+"""utf32_decode(bytes, errors) -> String (BOM-aware)."""
+fn utf32_decode(bytes, errors: String):
+    _check_errors(errors)
+    n = len(bytes)
+    if n >= 4:
+        b0 = bytes[0]
+        b1 = bytes[1]
+        b2 = bytes[2]
+        b3 = bytes[3]
+        if b0 == 255 and b1 == 254 and b2 == 0 and b3 == 0:
+            rest = []
+            i = 4
+            while i < n:
+                rest.append(bytes[i])
+                i = i + 1
+            return _u32_dec(rest, true, errors)
+        if b0 == 0 and b1 == 0 and b2 == 254 and b3 == 255:
+            rest = []
+            i = 4
+            while i < n:
+                rest.append(bytes[i])
+                i = i + 1
+            return _u32_dec(rest, false, errors)
+    return _u32_dec(bytes, true, errors)

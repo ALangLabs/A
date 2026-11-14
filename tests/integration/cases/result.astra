@@ -1,0 +1,11 @@
+fn divide(a, b):
+    if b == 0:
+        return Err("division by zero")
+    return Ok(a // b)
+
+fn compute(x, y):
+    q = divide(x, y)?
+    return Ok(q + 1)
+
+print(compute(10, 2))
+print(compute(10, 0))

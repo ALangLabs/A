@@ -1,0 +1,193 @@
+# apm.util — filesystem, path, and shell helpers shared by every command.
+#
+# The A runtime has no argv/startup-location API, so apm reads its CLI from
+# the APM_ARGS environment variable (set by the `apm` launcher script) and
+# locates the toolchain/registry through APM_* variables. See apm/README.md.
+
+import fs
+import env
+import std:bytes
+import std:core
+import std:shlex
+
+"""ob() -> open brace "{" without a string-literal brace (interpolation-safe)."""
+fn ob():
+    return bytes.chr(123)!
+
+"""cb() -> close brace "}" without a string-literal brace."""
+fn cb():
+    return bytes.chr(125)!
+
+"""getenv(name, default) -> environment variable or default when unset/empty."""
+fn getenv(name: String, default: String):
+    v = env.get(name)
+    if v == "":
+        return default
+    return v
+
+"""home_dir() -> user home directory ($HOME on POSIX)."""
+fn home_dir():
+    return getenv("HOME", ".")
+
+"""apm_home() -> directory containing the apm package ($APM_HOME or "apm")."""
+fn apm_home():
+    h = getenv("APM_HOME", "")
+    if h != "":
+        return h
+    # Fall back to "apm" so `a run apm/apm.astra` works from the repo root; the
+    # `apm` launcher always sets APM_HOME explicitly.
+    return "apm"
+
+"""default_registry() -> registry index path ($APM_REGISTRY or bundled one)."""
+fn default_registry():
+    r = getenv("APM_REGISTRY", "")
+    if r != "":
+        return r
+    return apm_home() + "/registry/registry.json"
+
+"""a_bin() -> the `a` toolchain binary ($APM_A_BIN, else "a" on PATH)."""
+fn a_bin():
+    return getenv("APM_A_BIN", "a")
+
+"""join(a, b) -> path join with a single slash."""
+fn join(a: String, b: String):
+    if a.endswith("/"):
+        return a + b
+    return a + "/" + b
+
+"""join3(a, b, c) -> three-part path join."""
+fn join3(a: String, b: String, c: String):
+    return join(join(a, b), c)
+
+"""basename(p) -> last path segment."""
+fn basename(p: String):
+    parts = p.split("/")
+    return parts[len(parts) - 1]
+
+"""dirname(p) -> parent directory ("" for a bare name)."""
+fn dirname(p: String):
+    i = p.rfind("/")
+    if i < 0:
+        return ""
+    if i == 0:
+        return "/"
+    return p[0..i]
+
+"""norm_import_name(pkg_name) -> A identifier: '-' -> '_', others kept."""
+fn norm_import_name(pkg_name: String):
+    out = ""
+    for c in pkg_name.chars():
+        s = str(c)
+        if s == "-":
+            out += "_"
+        else:
+            out += s
+    return out
+
+"""read_text(path) -> file contents ("" when missing)."""
+fn read_text(path: String):
+    if not is_file(path):
+        return ""
+    return read_file(path)
+
+"""write_text(path, text) -> write file, creating parent dirs."""
+fn write_text(path: String, text: String):
+    d = dirname(path)
+    if d != "" and not exists(d):
+        make_dirs(d)
+    write_file(path, text)
+
+"""make_dirs(path) -> create directory tree (mkdir -p)."""
+fn make_dirs(path: String):
+    if path != "" and path != "/" and not exists(path):
+        make_dirs(dirname(path))
+        create_dir(path)
+    return None
+
+"""exists(path) -> whether a file or directory exists."""
+fn exists(path: String):
+    return len(fs.stat(path)) > 0
+
+"""is_file(path) -> whether path is a regular file."""
+fn is_file(path: String):
+    r = fs.stat(path)
+    if len(r) == 0:
+        return false
+    return r[10]
+
+"""is_dir(path) -> whether path is a directory."""
+fn is_dir(path: String):
+    r = fs.stat(path)
+    if len(r) == 0:
+        return false
+    return r[11]
+
+"""list_paths(dir) -> entry names (not full paths); [] when not a dir."""
+fn list_paths(dir: String):
+    if not is_dir(dir):
+        return []
+    return list_dir(dir)
+
+"""copy_dir(src, dst) -> recursive copy (skips build/scratch dirs)."""
+fn copy_dir(src: String, dst: String):
+    make_dirs(dst)
+    for name in list_paths(src):
+        if name == ".apm" or name == ".git" or name == "cache" or name == ".cache" or name == "build":
+            continue
+        s = join(src, name)
+        d = join(dst, name)
+        if is_dir(s):
+            copy_dir(s, d)
+        else:
+            write_text(d, read_file(s))
+
+"""remove_all(path) -> recursive delete (file or directory)."""
+fn remove_all(path: String):
+    if exists(path):
+        if is_dir(path):
+            for name in list_paths(path):
+                remove_all(join(path, name))
+            remove_dir(path)
+        else:
+            remove_file(path)
+    return None
+
+"""dir_size(path) -> total bytes under path (approx)."""
+fn dir_size(path: String):
+    total = 0
+    if is_dir(path):
+        for name in list_paths(path):
+            total += dir_size(join(path, name))
+    elif is_file(path):
+        total += file_size(path)
+    return total
+
+"""shell(cmd) -> exit status of running cmd via the shell (0 == ok)."""
+fn shell(cmd: String):
+    return fs.system(cmd)
+
+"""q(s) -> shell-quoted string."""
+fn q(s: String):
+    return shlex.quote(s)
+
+"""fail(msg) -> print error and panic (A has no exit() API; panic -> 1)."""
+fn fail(msg: String):
+    eprint("apm: error: " + msg)
+    core.panic("apm: " + msg)
+
+"""ok(msg) -> print a success bullet."""
+fn ok(msg: String):
+    print("  ok " + msg)
+
+"""bullet(msg) -> print a plain bullet."""
+fn bullet(msg: String):
+    print("  " + msg)
+
+"""downloading(url, dest) -> download url to dest via curl (needs curl on PATH).
+curl follows redirects and speaks HTTPS; checked by `apm doctor`."""
+fn downloading(url: String, dest: String):
+    d = dirname(dest)
+    if d != "" and not exists(d):
+        make_dirs(d)
+    if shell("curl -fSL --fail --max-time 300 " + q(url) + " -o " + q(dest)) != 0:
+        fail("download failed: " + url)

@@ -1,0 +1,2 @@
+fn takes_list(x: list[int]) -> int: return x[0]
+print(takes_list(["a", "b"]))

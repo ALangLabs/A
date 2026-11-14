@@ -1,0 +1,68 @@
+# std.functools.singledispatch (simplified Python port).
+#
+# Python's `singledispatch(func)` inspects the type annotation of the first
+# parameter and registers per-type implementations, dispatching on the runtime
+# type of the first argument (with ABC/subclass/MRO resolution via
+# `functools._find_impl`).
+#
+# A has no annotation-driven dispatch, no `isinstance`, and no class
+# hierarchy introspection, so this port is a flat registry keyed by a runtime
+# tag string derived from `json.kind(x)` (mirroring `std.comptime.type_tag`,
+# which cannot be imported because `comptime` is a keyword):
+# "null", "bool", "int", "float", "string", "array", "object", ...
+#
+# Deviations vs Python:
+#   * `@singledispatch` decorator + `@d.register` decorators ->
+#     `d = singledispatch(default_fn)` then `d.register("int", fn)`.
+#   * register by type/ABC -> register by explicit tag string only.
+#   * `d.dispatch(cls)` takes a tag string, not a type object.
+#   * `d.register` returns the registered function (like Python) for manual
+#     chaining; decorator usage is impossible in A.
+#   * no subclass/MRO fallback: an unregistered tag uses the default registered.
+#   * calling the dispatcher -> `d.call(args)` (array form, `_apply` limit
+#     of 8 arguments); dispatch is on the tag of `args[0]`.
+#   * `singledispatchmethod`, annotation-based `register`, and `dispatch`
+#     caching are not provided.
+import std:json
+from "_apply.astra" import _apply
+
+fn _type_tag(x) -> str:
+    kind = json.kind(x)
+    if kind == "number":
+        if "." in str(x):
+            return "float"
+        return "int"
+    return kind
+
+"""
+Dispatcher is the A analogue of a `functools.singledispatch` object.
+`func` is the default implementation; `registry` maps tag strings to
+registered function values.
+"""
+class Dispatcher:
+    func
+    registry
+
+    """
+    register(self, tag, registered) -> stores `registered` for dispatch tag `tag`
+    (e.g. "int", "string", "array"); returns `registered`.
+    """
+    fn register(self, tag, registered):
+        self.registry[tag] = registered
+        return registered
+
+    """dispatch(self, tag) -> registered function for `tag`, or the default."""
+    fn dispatch(self, tag):
+        return self.registry.get(tag, self.func)
+
+    """dispatch_value(self, x) -> registered function for `x`'s runtime tag."""
+    fn dispatch_value(self, x):
+        return self.dispatch(_type_tag(x))
+
+    """call(self, args) -> dispatches on the tag of `args[0]` and invokes the"""
+    fn call(self, args):
+        return _apply(self.dispatch_value(args[0]), args)
+
+"""singledispatch(func) -> Dispatcher with `func` as the default registered."""
+fn singledispatch(func):
+    return Dispatcher(func, {})

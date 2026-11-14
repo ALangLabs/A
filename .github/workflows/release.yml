@@ -1,0 +1,93 @@
+name: release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+          - os: ubuntu-24.04-arm
+            platform: linux-arm64
+          - os: macos-latest
+            platform: macos-arm64
+          - os: macos-13
+            platform: macos-x86_64
+          - os: windows-latest
+            platform: windows-x86_64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DA_WARNINGS_AS_ERRORS=ON -DA_ENABLE_LTO=ON
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Package
+        shell: bash
+        run: tooling/release/package.sh build dist ${{ matrix.platform }}
+
+      - name: Stage release assets
+        shell: bash
+        run: |
+          mkdir -p assets
+          cp dist/a-${{ matrix.platform }}.* assets/ 2>/dev/null || true
+          # The vsix is platform-independent; attach it from one leg only so
+          # the three upload-artifact merges don't collide on the name.
+          if [ "${{ matrix.platform }}" = "linux-x86_64" ]; then
+            cp dist/a-language.vsix assets/ 2>/dev/null || true
+          fi
+
+      - name: Upload assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: a-dist-${{ matrix.platform }}
+          path: assets/*
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: a-dist-*
+          merge-multiple: true
+          path: assets
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          version="$(sed -n 's/^project(Alang VERSION \([^ ]*\).*/\1/p' CMakeLists.txt)"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="v${version}"
+          fi
+          ls -la assets
+          notes="A toolchain ${version} binaries.
+
+          Install (Linux/macOS):
+            curl -fsSL https://raw.githubusercontent.com/ALangLabs/A/main/install/install.sh | sh
+
+          Install (Windows, PowerShell):
+            irm https://raw.githubusercontent.com/ALangLabs/A/main/install/install.ps1 | iex"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" assets/* --clobber
+          else
+            gh release create "$tag" assets/* --title "A ${version}" --notes "$notes"
+          fi

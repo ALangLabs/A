@@ -1,0 +1,39 @@
+# std.fractions selftest — run: ./build/a test stdlib/std/fractions/selftest.astra
+import std:fractions
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_arith():
+    a = fractions.Fraction_new(1, 2)
+    b = fractions.Fraction_new(1, 3)
+    assert_eq(a.add(b).to_string(), "5/6")
+    assert_eq(a.mul(b).to_string(), "1/6")
+    assert_eq(a.truediv(b).to_string(), "3/2")
+    assert_eq(a.neg().to_string(), "-1/2")
+
+fn test_pow_ratio():
+    f = fractions.Fraction_new(2, 3)
+    assert_eq(f.pow(3).to_string(), "8/27")
+    assert_eq(f.pow(-2).to_string(), "9/4")
+    assert_eq(f.pow(0).to_string(), "1")
+    r = f.as_integer_ratio()
+    assert_eq(r[0], 2)
+    assert_eq(r[1], 3)
+    g = fractions.Fraction_new(4, 2)
+    gr = g.as_integer_ratio()
+    assert_eq(gr[0], 2)
+    assert_eq(gr[1], 1)
+
+fn test_from_str():
+    assert_eq(fractions.Fraction_from_str("3/4").to_string(), "3/4")
+    assert_eq(fractions.Fraction_from_str("-7/3").to_string(), "-7/3")
+    assert_eq(fractions.Fraction_from_str("5").to_string(), "5")
+    assert_eq(fractions.Fraction_from_str("  12 ").to_string(), "12")
+    assert_eq(fractions.Fraction_from_str("1.5").to_string(), "3/2")
+    assert_eq(fractions.Fraction_from_str("-0.25").to_string(), "-1/4")
+    assert_eq(fractions.Fraction_from_str("2e-1").to_string(), "1/5")
+    assert_eq(fractions.Fraction_from_str("1.25E2").to_string(), "125")
+    assert_eq(fractions.Fraction_from_str("0.1").to_string(), "1/10")
+    # round-trip through float constructor stays exact for dyadics
+    assert_eq(fractions.Fraction_from_float(0.5).to_string(), "1/2")

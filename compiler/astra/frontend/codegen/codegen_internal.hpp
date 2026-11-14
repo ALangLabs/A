@@ -6,10 +6,12 @@
 #include <cstdio>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "ast/ast.hpp"
 #include "ast/builtins.hpp"
+#include "name-resolution/module_loader.hpp"
 #include "strings/float_text.hpp"
 #include "strings/utf8.hpp"
 
@@ -109,7 +111,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"move", 232}, {"borrow", 233}, {"borrow_mut", 234}, {"copy", 235},
       {"os_chdir", 236}, {"os_getpid", 237}, {"os_getppid", 238},
       {"os_getuid", 239}, {"os_geteuid", 240}, {"os_getgid", 241},
-      {"divmod", 273},
+      {"divmod", 273}, {"f32s", 274},
       {"os_getegid", 242}, {"os_getlogin", 243}, {"os_cpu_count", 244},
       {"os_uname", 245}, {"os_stat", 246}, {"os_lstat", 247},
       {"os_access", 248}, {"os_chmod", 249}, {"os_symlink", 250},
@@ -241,6 +243,55 @@ inline std::string stableHex64(std::uint64_t h) {
 }
 inline std::string stableTag(const std::string& s) {
   return stableHex64(stableHash64(s));
+}
+
+// Follow `from "x.astra" import name` re-exports (package __init__ modules) to
+// the module that actually declares `name`. Returns {moduleId, name};
+// unchanged when there is no re-export. Moved here from codegen.cpp when
+// the assembly backend was removed; the LLVM emitter is the only consumer.
+inline std::pair<int, std::string> resolveModuleMember(
+    const ModuleGraph& graph, int moduleId, const std::string& name) {
+  std::string cur = name;
+  for (int depth = 0; moduleId >= 0 && depth < 16; ++depth) {
+    if (moduleId >= (int)graph.modules.size()) break;
+    const Module& mod = graph.at(moduleId);
+    if (!mod.program) break;
+    bool declared = false;
+    for (const StmtPtr& s : mod.program->statements) {
+      if ((s->kind == StmtKind::FnDecl &&
+           static_cast<const FnDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::StructDecl &&
+           static_cast<const StructDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::EnumDecl &&
+           static_cast<const EnumDecl*>(s.get())->name == cur) ||
+          (s->kind == StmtKind::Let &&
+           static_cast<const LetStmt*>(s.get())->name == cur)) {
+        declared = true;
+        break;
+      }
+    }
+    if (declared) break;
+    int nextId = -1;
+    std::string nextName;
+    for (const StmtPtr& s : mod.program->statements) {
+      if (s->kind != StmtKind::FromImport) continue;
+      const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
+      if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
+        continue;
+      for (const auto& item : im->items) {
+        if (item.name == cur || (!item.alias.empty() && item.alias == cur)) {
+          nextId = im->moduleId;
+          nextName = item.name;
+          break;
+        }
+      }
+      if (nextId >= 0) break;
+    }
+    if (nextId < 0) break;
+    moduleId = nextId;
+    cur = nextName;
+  }
+  return {moduleId, cur};
 }
 
 }  // namespace a

@@ -1,7 +1,0 @@
-import std:math
-
-fn PI():
-    return math.PI
-
-fn E():
-    return math.E

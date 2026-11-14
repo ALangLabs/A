@@ -1,4 +1,5 @@
 #include "name-resolution/module_loader.hpp"
+#include "exe_path.hpp"
 
 #include <algorithm>
 #include <cstdlib>
@@ -14,6 +15,15 @@
 namespace a {
 namespace fs = std::filesystem;
 namespace {
+
+// Build the candidate file paths for a module stem, trying the canonical
+// `.astra` extension first and the legacy `.a` extension second, so old
+// sources keep resolving while new code uses `.astra`.
+void addSourceExtCandidates(std::vector<fs::path>& out, const fs::path& base) {
+  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
+    out.push_back(base.parent_path() / (base.filename().string() + "." + ext));
+  }
+}
 
 std::string readFile(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
@@ -49,18 +59,15 @@ std::string defaultStdlibRoot() {
   if (const char* env = std::getenv("A_STDLIB"); env && *env) return env;
 
   std::vector<fs::path> candidates;
-  std::error_code error;
-#if defined(__linux__)
-  fs::path executable = fs::read_symlink("/proc/self/exe", error);
-#else
-  fs::path executable;
-#endif
-  if (!error && !executable.empty()) {
-    fs::path dir = executable.parent_path();
-    candidates.push_back(dir / "stdlib");
-    candidates.push_back(dir / ".." / "stdlib");
-    candidates.push_back(dir / ".." / ".." / "stdlib");
-    candidates.push_back(dir / ".." / "share" / "a" / "stdlib");
+  {
+    const std::string self = exePath();
+    if (!self.empty()) {
+      fs::path dir = fs::path(self).parent_path();
+      candidates.push_back(dir / "stdlib");
+      candidates.push_back(dir / ".." / "stdlib");
+      candidates.push_back(dir / ".." / ".." / "stdlib");
+      candidates.push_back(dir / ".." / "share" / "a" / "stdlib");
+    }
   }
   // Walk up from cwd to find a repo/source stdlib (test harnesses may run
   // from subdirectories). Prefer roots that contain prelude/std layout.
@@ -70,7 +77,7 @@ std::string defaultStdlibRoot() {
     if (!ec) {
       std::vector<fs::path> found;
       for (fs::path up = cwd; !up.empty(); up = up.parent_path()) { found.push_back(up / "stdlib"); if (up == up.parent_path()) break; }
-      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / "prelude.a", e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
+      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / (std::string("prelude.") + kSourceExt), e2) || fs::exists(f / "std" / (std::string("prelude.") + kLegacySourceExt), e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
       for (const auto& f : found) candidates.push_back(f);
     }
   }
@@ -124,8 +131,10 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
   // everywhere. Programs compiled without a stdlib on disk are unaffected.
   std::error_code exists;
   const fs::path stdRoot = fs::path(options_.stdlibRoot);
-  for (const auto& candidate : {stdRoot / "std" / "prelude.a",
-                                stdRoot / "prelude.a"}) {
+  for (const auto& candidate : {stdRoot / "std" / (std::string("prelude.") + kSourceExt),
+                                stdRoot / (std::string("prelude.") + kSourceExt),
+                                stdRoot / "std" / (std::string("prelude.") + kLegacySourceExt),
+                                stdRoot / (std::string("prelude.") + kLegacySourceExt)}) {
     if (fs::exists(candidate, exists)) {
       graph_.preludeId = loadModule(candidate.string(), candidate.string(), nullptr);
       break;
@@ -197,7 +206,11 @@ void ModuleLoader::loadImports(Module& module) {
   // otherwise to a package under <stdlib>/std/.
   auto resolveStd = [&](const std::string& name, Span span, bool& nativeOut) -> int {
     nativeOut = false;
-    if (isNativeModule(name)) {
+    // `std:math` prefers the A-file package under std/math/ (the array API)
+    // over the native scalar module; bare `import math` still resolves
+    // native, which package files use for scalar math without cycles.
+    const bool preferPackage = (name == "math");
+    if (!preferPackage && isNativeModule(name)) {
       nativeOut = true;
       return -1;
     }
@@ -212,8 +225,11 @@ void ModuleLoader::loadImports(Module& module) {
     const std::size_t slash = rel.find_last_of('/');
     const std::string leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
     const fs::path root = fs::path(options_.stdlibRoot) / "std";
-    for (const fs::path& candidate :
-         {root / (rel + ".a"), root / rel / "__init__.a", root / rel / (leaf + ".a")}) {
+    std::vector<fs::path> stdCandidates;
+    addSourceExtCandidates(stdCandidates, root / rel);
+    addSourceExtCandidates(stdCandidates, root / rel / "__init__");
+    addSourceExtCandidates(stdCandidates, root / rel / leaf);
+    for (const fs::path& candidate : stdCandidates) {
       std::error_code error;
       if (!fs::is_regular_file(candidate, error) || error) continue;
       const std::string path = candidate.string();
@@ -225,6 +241,10 @@ void ModuleLoader::loadImports(Module& module) {
         return -1;
       }
       return loadModule(path, path, nullptr);
+    }
+    if (preferPackage && isNativeModule(name)) {
+      nativeOut = true;
+      return -1;
     }
     sink_.error(span, "Cannot find stdlib package '" + name + "'.",
                 "Native packages are math, io, fs, strings, collections, core, and time. "
@@ -309,18 +329,18 @@ int ModuleLoader::resolveBare(const std::string& name, Span span, bool& nativeOu
 
   std::vector<fs::path> candidates;
   const auto addPkg = [&](const fs::path& root) {
-    candidates.push_back(root / (name + ".a"));
-    candidates.push_back(root / name / (name + ".a"));
-    candidates.push_back(root / name / "__init__.a");
-    candidates.push_back(root / "std" / (name + ".a"));
-    candidates.push_back(root / "std" / name / (name + ".a"));
-    candidates.push_back(root / "std" / name / "__init__.a");
+    addSourceExtCandidates(candidates, root / name);
+    addSourceExtCandidates(candidates, root / name / name);
+    addSourceExtCandidates(candidates, root / name / "__init__");
+    addSourceExtCandidates(candidates, root / "std" / name);
+    addSourceExtCandidates(candidates, root / "std" / name / name);
+    addSourceExtCandidates(candidates, root / "std" / name / "__init__");
   };
   if (!options_.stdlibRoot.empty()) addPkg(fs::path(options_.stdlibRoot));
   for (const auto& dir : options_.modulePaths) {
-    candidates.push_back(fs::path(dir) / (name + ".a"));
-    candidates.push_back(fs::path(dir) / name / (name + ".a"));
-    candidates.push_back(fs::path(dir) / name / "__init__.a");
+    addSourceExtCandidates(candidates, fs::path(dir) / name);
+    addSourceExtCandidates(candidates, fs::path(dir) / name / name);
+    addSourceExtCandidates(candidates, fs::path(dir) / name / "__init__");
   }
 
   for (const auto& candidate : candidates) {

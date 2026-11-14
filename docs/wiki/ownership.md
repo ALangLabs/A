@@ -1,7 +1,7 @@
 # Ownership, move, and borrow
 
 A has flow-sensitive ownership checks (verified in
-`tests/integration/cases/ownership_*.a`, `borrow_*.a`, and
+`tests/integration/cases/ownership_*.astra`, `borrow_*.astra`, and
 `examples/advanced/`).
 
 ## `move(x)`

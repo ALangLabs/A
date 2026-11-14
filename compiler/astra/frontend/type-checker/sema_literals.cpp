@@ -18,6 +18,11 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
   if (object->kind == TypeKind::String) return typeChar();
   // Bytes index yields the byte value (i64 0..255), like Python's bytearray.
   if (object->kind == TypeKind::Bytes) return typeInt(64, true);
+  // Vector lane access yields the element type; the index must be an integer.
+  if (object->kind == TypeKind::Vector) {
+    requireInteger(indexType, expr.index->span, "The vector index");
+    return object->elem;
+  }
   // Tuples are indexable when the element position is known at compile time;
   // a literal index selects that element's exact type, otherwise the result is
   // dynamically typed (still bounds-checked at run time).
@@ -36,7 +41,8 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
     }
     auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return t;
   }
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (object->kind == TypeKind::Set) {
@@ -79,7 +85,8 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
     }
     auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return typeArray(t);
   }
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   sink_.error(expr.object->span,
@@ -195,7 +202,8 @@ TypePtr Sema::inferField(FieldExpr& expr) {
     return typeError();
   }
 
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
 
@@ -372,11 +380,38 @@ void Sema::checkArgAgainst(Expr& expr, TypePtr expected, const std::string& cont
     return;
   }
   TypePtr actual = inferExpr(expr);
-  if (!unify(actual, expected)) {
+  if (!coerceVectorInit(expr, expected) && !unify(actual, expected)) {
     reportMismatch(actual, expected, expr.span, context);
     return;
   }
   checkFixedArrayLength(expr, expected);
+}
+
+// Vector coercion for call arguments / annotated bindings: a list literal
+// of exactly N elements or a numeric scalar (broadcast) is accepted where
+// vector[T, N] is expected. On success expr.inferredType becomes the vector
+// type so llvm_emit produces unboxed <N x ty> values.
+bool Sema::coerceVectorInit(Expr& expr, TypePtr expected) {
+  TypePtr exp = resolveType(expected);
+  if (!exp || exp->kind != TypeKind::Vector) return false;
+  TypePtr actual = resolveType(expr.inferredType);
+  if (!actual || actual->kind == TypeKind::Vector ||
+      actual->kind == TypeKind::Error) {
+    return false;
+  }
+  if (auto* lit = dynamic_cast<ArrayLitExpr*>(&expr)) {
+    if (actual->kind != TypeKind::Array ||
+        (std::int64_t)lit->elements.size() != exp->length) {
+      return false;
+    }
+    if (!unify(actual->elem, exp->elem)) return false;
+  } else {
+    if (actual->kind != TypeKind::Var && !isNumericType(actual)) return false;
+    if (!unify(actual, exp->elem)) return false;
+  }
+  expr.inferredType = exp;
+  exprTypes_[&expr] = exp;
+  return true;
 }
 
 // A fixed-size array type with a literal initializer must match exactly. The

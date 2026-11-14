@@ -1,0 +1,22 @@
+import "../../../stdlib/std/simd/simd.astra" as simd
+
+fn double(x):
+    return x * 2
+
+a = simd.Vec8(1, 2, 3, 4, 5, 6, 7, 8)
+b = simd.Vec8(10, 20, 30, 40, 50, 60, 70, 80)
+print(a.add(b).to_list())
+print(a.scale(2).to_list())
+print(a.dot(b))
+print(a.hadamard(b).to_list())
+print(simd.vec8_broadcast(7).to_list())
+print(simd.add_lists([1, 2, 3, 4], [10, 20, 30, 40]))
+print(simd.scale_list([1, 2, 3], 3))
+print(simd.dot_list([1, 2, 3], [4, 5, 6]))
+print(simd.hadamard_list([2, 3, 4], [5, 6, 7]))
+print(simd.broadcast_list(9, 4))
+print(simd.vectorize_list([1, 2, 3, 4], 2))
+print(simd.unroll_list([1, 2, 3, 4, 5], 2, 4))
+v = simd.vec8_from_list([8, 7, 6, 5, 4, 3, 2, 1])
+print(v.get(3))
+print(v.to_list())

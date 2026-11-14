@@ -1,0 +1,231 @@
+# std.string - port of CPython Lib/string.py (constants + selected helpers).
+#
+# Pure-A subset. Provides ASCII character classification constants and
+# `capwords`. `Template` is provided below; `Formatter` is not ported.
+#
+# Deviations from CPython:
+#   * `capwords(s, sep)` takes exactly 2 args (A has no default params).
+#     Pass `None` for `sep` to get whitespace splitting/collapsing behavior.
+#   * Only ASCII constants are provided.
+#
+# Implementation note: all splitting/casing/joining goes through native
+# string methods (`.split()`, `.capitalize()`, `.join()`, `.find()`,
+# slices) which are C-fast. Manual per-character indexing builds rope
+# views that make downstream concatenation pathologically slow, so the
+# hot paths avoid `s[i]` loops entirely.
+
+whitespace = " \t\n\r"
+ascii_lowercase = "abcdefghijklmnopqrstuvwxyz"
+ascii_uppercase = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+ascii_letters = ascii_lowercase + ascii_uppercase
+digits = "0123456789"
+hexdigits = "0123456789abcdefABCDEF"
+octdigits = "01234567"
+punctuation = "!\"#$%&'()*+,-./:;<=>?@[\\]^_~"
+printable = digits + ascii_letters + punctuation + whitespace
+
+fn capwords(s, sep):
+    "Capitalize words using split/capitalize/join. Pass None for whitespace behavior."
+    src = str(s)
+    if sep == None:
+        # Python: s.split(None) splits on whitespace runs and discards them.
+        caps = []
+        for w in src.split():
+            caps.append(str(w).capitalize())
+        return " ".join(caps)
+    sp = str(sep)
+    if sp == "":
+        # A's str.split("") raises "empty separator"; Python's capwords
+        # would raise ValueError on s.split("") too. The previous port
+        # capitalized the whole string — keep that behaviour.
+        return src.capitalize()
+    caps = []
+    for w in src.split(sp):
+        caps.append(str(w).capitalize())
+    return sp.join(caps)
+
+# --- string.Template port -------------------------------------------------------
+#
+# Python `string.Template`: `$identifier` and `${identifier}` placeholders
+# substituted from a mapping; `$$` is a literal delimiter. Deviations:
+#   * delimiter must be a single character (Python allows str but only
+#     single-char delimiters are meaningful in practice).
+#   * idpattern is fixed to Python's default `[_a-z][_a-z0-9]*`
+#     (case-insensitive); custom idpatterns are not supported.
+#   * substitute() panics on a missing key (Python raises KeyError).
+#     Invalid placeholders (a lone '$' or '$' before a non-identifier
+#     char) are left as literal text in both modes, matching CPython;
+#     only malformed '${...}' forms panic.
+#   * The mapping must be an A map/dict; attribute-style objects are not
+#     supported.
+#
+# Implementation: literal runs between placeholders are emitted as native
+# slices and the result is built with one `"".join(parts)` — no per-char
+# string indexing. `cs = s.chars()` materializes flat chars once so
+# identifier scanning indexes a plain array, not the (possibly rope)
+# source string.
+
+import std:core
+
+fn _tmpl_is_alpha(ch):
+    return (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z")
+
+fn _tmpl_is_digit(ch):
+    return ch >= "0" and ch <= "9"
+
+fn _tmpl_is_id_start(ch):
+    return _tmpl_is_alpha(ch) or ch == "_"
+
+fn _tmpl_is_id_char(ch):
+    return _tmpl_is_alpha(ch) or _tmpl_is_digit(ch) or ch == "_"
+
+fn _tmpl_braced(s, i, n, mapping, safe, parts):
+    # s[i] == '{'; find closing '}' from i+1. Returns new index or -1.
+    close = s.find("\}", i + 1)
+    if close < 0:
+        core.panic("Template: invalid placeholder (unterminated brace)")
+    key = s[i + 1..close]
+    if len(key) == 0:
+        core.panic("Template: invalid placeholder")
+    if key in mapping:
+        parts.append(str(mapping[key]))
+        return close + 1
+    if safe:
+        return -1
+    core.panic("Template: key '" + key + "' not found")
+    return -1
+
+fn _tmpl_named(s, cs, i, n, mapping, safe, parts):
+    # cs[i] is the delimiter; read an identifier starting at i+1.
+    # `cs` is the flat char array of `s`, so indexing is O(1).
+    j = i + 1
+    start = j
+    while j < n:
+        ch = str(cs[j])
+        if j == start:
+            if not _tmpl_is_id_start(ch):
+                break
+        else:
+            if not _tmpl_is_id_char(ch):
+                break
+        j = j + 1
+    if j == start:
+        return -1
+    key = s[start..j]
+    if key in mapping:
+        parts.append(str(mapping[key]))
+        return j
+    if safe:
+        return -1
+    core.panic("Template: key '" + key + "' not found")
+    return -1
+
+fn _template_substitute(src, delim, mapping, safe):
+    s = str(src)
+    d = str(delim)
+    if len(d) != 1:
+        return s
+    n = len(s)
+    cs = s.chars()
+    parts = []
+    i = 0
+    while i < n:
+        # jump to the next delimiter (native find is C-fast)
+        idx = s.find(d, i)
+        if idx < 0:
+            break
+        if idx > i:
+            parts.append(s[i..idx])
+        if idx + 1 < n and str(cs[idx + 1]) == d:
+            # "$$" -> literal delimiter
+            parts.append(d)
+            i = idx + 2
+            continue
+        nxt = -1
+        if idx + 1 < n and str(cs[idx + 1]) == "\{":
+            nxt = _tmpl_braced(s, idx + 1, n, mapping, safe, parts)
+        else:
+            nxt = _tmpl_named(s, cs, idx, n, mapping, safe, parts)
+        if nxt < 0:
+            # safe_substitute: emit the delimiter literally and continue
+            parts.append(d)
+            i = idx + 1
+            continue
+        i = nxt
+    if i < n:
+        parts.append(s[i..n])
+    return "".join(parts)
+
+"""
+Template: string.Template port — `$name`/`${name}` substitution.
+Construct via `Template_new(template)` or `Template_new(template, delim)`.
+"""
+class Template:
+    template
+    delimiter
+
+    """substitute(mapping) -> string with placeholders replaced; panics on missing keys."""
+    fn substitute(self, mapping):
+        return _template_substitute(self.template, self.delimiter, mapping, false)
+
+    """safe_substitute(mapping) -> like substitute but leaves unknown placeholders as-is."""
+    fn safe_substitute(self, mapping):
+        return _template_substitute(self.template, self.delimiter, mapping, true)
+
+"""Template_new(template, delimiter = "$") -> Template."""
+fn Template_new(template, delimiter = "$"):
+    return Template(str(template), str(delimiter))
+
+# --- str.translate / str.maketrans port ---------------------------------------
+#
+# Python `s.translate(table)` maps each character through `table`, a dict
+# produced by `str.maketrans` (or any mapping ord->ord/str/None). A map
+# keys are strings, so tables here key single-character strings:
+#
+#   t = string.maketrans("abc", "xyz")     # a->x, b->y, c->z
+#   s.translate(t)  ->  string.translate(s, t)
+#   string.translate(s, {"a": None})       # delete 'a'
+#
+# Deviations:
+#   * Keys/values are single-character strings (not ordinals); a value of
+#     None deletes the character, any other string replaces it.
+#   * maketrans(x, y) requires equal-length strings (Python allows the
+#     two-arg form only for equal lengths too).
+#   * Characters not present in the table pass through unchanged
+#     (Python: missing keys are kept).
+
+"""
+maketrans(frm, to) -> {char: char} translation table for equal-length
+strings (Python str.maketrans(x, y)).
+"""
+fn maketrans(frm, to):
+    a = str(frm)
+    b = str(to)
+    if len(a) != len(b):
+        core.panic("maketrans: 'from' and 'to' strings must have equal length")
+    ca = a.chars()
+    cb = b.chars()
+    table = {}
+    i = 0
+    while i < len(ca):
+        table[str(ca[i])] = str(cb[i])
+        i = i + 1
+    return table
+
+"""
+translate(s, table) -> s with each character replaced per `table`
+({single-char-string: replacement-or-None}); absent keys are kept and
+None values delete the character (Python str.translate).
+"""
+fn translate(s, table):
+    parts = []
+    for c in str(s):
+        ch = str(c)
+        if ch in table:
+            v = table[ch]
+            if v == None:
+                continue
+            parts.append(str(v))
+        else:
+            parts.append(ch)
+    return "".join(parts)

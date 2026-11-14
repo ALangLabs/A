@@ -1,0 +1,15 @@
+#
+# Pure-A helpers plus Python `collections` ports. NOTE: bare
+# `import collections` resolves to the *native* collections module
+# (len/map/filter/reduce/...); this package is reached via
+# `import "std/collections/__init__.astra"` (quoted path).
+from "list.astra" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
+from "dict.astra" import dict_get, dict_has
+from "namedtuple.astra" import namedtuple, NamedTuple, NamedTupleSpec
+from "counter.astra" import Counter, counter_of
+from "ordereddict.astra" import OrderedDict, ordered_dict_fromkeys
+from "defaultdict.astra" import defaultdict, DefaultDict
+from "chainmap.astra" import ChainMap, chain_map, chain_map_of
+from "userdict.astra" import UserDict, user_dict, user_dict_of
+from "userlist.astra" import UserList, user_list, user_list_of
+from "deque.astra" import deque, deque_of, deque_bounded, Deque

@@ -1,2 +1,0 @@
-from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round_val, trunc, random, random_int, clamp, factorial, comb, perm, gcd, lcm, isqrt, prod, hypot, dist, fmod, degrees, radians, expm1, log1p, log_base, cbrt, fsum, erf, erfc, lgamma, gamma
-from "constants.a" import PI, E

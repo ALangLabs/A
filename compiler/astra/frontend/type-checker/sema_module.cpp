@@ -172,7 +172,7 @@ SemaResult Sema::analyze() {
   result.fnParamTypes = fnParamTypes_;
   result.fnReturnTypes = fnReturnTypes_;
   for (const DeclaredVarInfo& info : declaredVariables_) {
-    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type, info.variableDecl});
   }
   // Mirror Expr::inferredType into the result map for LSP clients.
   result.exprTypes = exprTypes_;
@@ -249,7 +249,7 @@ SemaResult Sema::analyzeParallel(int jobs) {
   result.fnParamTypes = fnParamTypes_;
   result.fnReturnTypes = fnReturnTypes_;
   for (const DeclaredVarInfo& info : declaredVariables_) {
-    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type});
+    result.variables.push_back(VarTypeInfo{info.name, info.span, info.type, info.variableDecl});
   }
   result.exprTypes = exprTypes_;
   return result;
@@ -283,8 +283,8 @@ void Sema::registerModule(Module& module) {
   exports.name = module.name;
   auto& statements = module.program->statements;
 
-  // Re-export imported names, so package `__init__.a` files can aggregate
-  // their submodules (`from "collections.a" import map_list`). Locally
+  // Re-export imported names, so package `__init__.astra` files can aggregate
+  // their submodules (`from "collections.astra" import map_list`). Locally
   // declared names below take precedence on collision.
   for (const auto& entry : fromBindings_) {
     const FromBinding& binding = entry.second;
@@ -453,6 +453,22 @@ void Sema::checkModule(Module& module) {
     if (auto* decl = dynamic_cast<FnDecl*>(stmt.get())) {
       auto found = functionsByName_.find(qualified(decl->name));
       if (found == functionsByName_.end() || found->second != decl) continue;
+      // `extern fn` declarations have no body to check; validate the C-FFI
+      // signature and record the types the LLVM backend marshals with.
+      if (decl->isExtern) {
+        auto sig = signatures_.find(decl);
+        if (sig != signatures_.end()) {
+          checkExternDecl(*decl, sig->second);
+          fnParamTypes_[decl] = sig->second.paramTypes;
+          fnReturnTypes_[decl] = sig->second.retType;
+        }
+        continue;
+      }
+      // Functions with `comptime` parameters are never called directly: the
+      // comptime pass rewrites every call site to a specialized clone whose
+      // body is checked instead. Checking the unsubstituted original would
+      // report errors in `comptime if` branches that no specialization keeps.
+      if (!decl->comptimeParams.empty()) continue;
       auto sig = signatures_.find(decl);
       if (sig == signatures_.end()) continue;
       checkFunctionBody(*decl, sig->second);

@@ -2,6 +2,16 @@
 
 namespace a {
 TypePtr Sema::checkFunctionValueCall(const std::string& name, TypePtr fnType, CallExpr& call) {
+  if (!call.typeArgs.empty()) {
+    // Function values (variables, lambdas, parameters) carry no generic
+    // signature, so there is nothing to instantiate the arguments into.
+    sink_.error(call.span,
+                "'" + name + "' is a function value; explicit type arguments "
+                "are only supported on generic function declarations.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+    return typeError();
+  }
   TypePtr resolved = resolveType(fnType);
   if (resolved->kind == TypeKind::Error) {
     for (auto& arg : call.args) inferExpr(*arg.value);
@@ -42,14 +52,45 @@ TypePtr Sema::checkFunctionValueCall(const std::string& name, TypePtr fnType, Ca
 
 TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
   FnSig effective = sig;
+  // Explicit call-site type arguments (`f<i64>(x)`) pin the signature's type
+  // parameters directly instead of leaving them to be inferred from the
+  // arguments. Anything not pinned still gets a fresh variable per call.
+  std::vector<TypePtr> explicitTypes;
+  if (!call.typeArgs.empty()) {
+    if (sig.typeParams.empty()) {
+      sink_.error(call.span,
+                  "Function '" + sig.name + "' is not generic; it takes no "
+                  "type arguments.");
+      for (auto& arg : call.args) inferExpr(*arg.value);
+      for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+      return typeError();
+    }
+    if (call.typeArgs.size() != sig.typeParamVars.size()) {
+      sink_.error(call.span,
+                  "Function '" + sig.name + "' expects " +
+                      std::to_string(sig.typeParamVars.size()) +
+                      " type argument(s), found " +
+                      std::to_string(call.typeArgs.size()) + ".");
+      for (auto& arg : call.args) inferExpr(*arg.value);
+      for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+      return typeError();
+    }
+    explicitTypes.reserve(call.typeArgs.size());
+    for (auto& ta : call.typeArgs) explicitTypes.push_back(resolveTypeExpr(*ta));
+  }
   if (!sig.typeParams.empty()) {
     std::unordered_map<TypePtr, TypePtr> mapping;
     for (std::size_t i = 0; i < sig.typeParamVars.size(); ++i) {
-      TypePtr fresh = freshVar(Constraint::None,
-                              sig.typeParamVars[i]->varSpan,
-                              "type parameter '" + sig.typeParams[i] + "'");
-      fresh->allowUnresolved = true;
-      mapping[sig.typeParamVars[i]] = fresh;
+      TypePtr inst;
+      if (i < explicitTypes.size()) {
+        inst = explicitTypes[i];
+      } else {
+        inst = freshVar(Constraint::None,
+                        sig.typeParamVars[i]->varSpan,
+                        "type parameter '" + sig.typeParams[i] + "'");
+        inst->allowUnresolved = true;
+      }
+      mapping[sig.typeParamVars[i]] = inst;
     }
     std::vector<TypePtr> params;
     params.reserve(sig.paramTypes.size());
@@ -122,12 +163,30 @@ TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
 TypePtr Sema::checkStructConstruction(const StructSym& sym, CallExpr& call) {
   std::unordered_map<TypePtr, TypePtr> mapping;
   std::vector<TypePtr> typeArgs;
-  for (std::size_t i = 0; i < sym.typeParamVars.size(); ++i) {
-    TypePtr fresh = freshVar(Constraint::None, sym.typeParamVars[i]->varSpan,
-                            "type parameter '" + sym.typeParams[i] + "'");
-    fresh->allowUnresolved = true;
-    mapping[sym.typeParamVars[i]] = fresh;
-    typeArgs.push_back(fresh);
+  if (!call.typeArgs.empty()) {
+    // `Point<i64>(...)` pins the struct's type parameters explicitly.
+    if (call.typeArgs.size() != sym.typeParamVars.size()) {
+      sink_.error(call.span,
+                  "Struct '" + sym.name + "' expects " +
+                      std::to_string(sym.typeParamVars.size()) +
+                      " type argument(s), found " +
+                      std::to_string(call.typeArgs.size()) + ".");
+      for (auto& arg : call.args) inferExpr(*arg.value);
+      for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+      return typeStruct(sym.name);
+    }
+    for (auto& ta : call.typeArgs) typeArgs.push_back(resolveTypeExpr(*ta));
+    for (std::size_t i = 0; i < sym.typeParamVars.size(); ++i) {
+      mapping[sym.typeParamVars[i]] = typeArgs[i];
+    }
+  } else {
+    for (std::size_t i = 0; i < sym.typeParamVars.size(); ++i) {
+      TypePtr fresh = freshVar(Constraint::None, sym.typeParamVars[i]->varSpan,
+                              "type parameter '" + sym.typeParams[i] + "'");
+      fresh->allowUnresolved = true;
+      mapping[sym.typeParamVars[i]] = fresh;
+      typeArgs.push_back(fresh);
+    }
   }
   std::vector<std::pair<std::string, TypePtr>> fields;
   fields.reserve(sym.fields.size());
@@ -302,12 +361,36 @@ TypePtr Sema::checkVariantConstruction(EnumInfo& info, FieldExpr& field, CallExp
 
   std::unordered_map<TypePtr, TypePtr> mapping;
   std::vector<TypePtr> typeArgs;
-  for (std::size_t i = 0; i < info.typeParamVars.size(); ++i) {
-    TypePtr fresh = freshVar(Constraint::None, info.typeParamVars[i]->varSpan,
-                             "type parameter '" + info.typeParams[i] + "'");
-    fresh->allowUnresolved = true;
-    mapping[info.typeParamVars[i]] = fresh;
-    typeArgs.push_back(fresh);
+  if (!call.typeArgs.empty()) {
+    if (call.typeArgs.size() != info.typeParamVars.size()) {
+      sink_.error(call.span,
+                  "Enum '" + shortName(info.name) + "' expects " +
+                      std::to_string(info.typeParamVars.size()) +
+                      " type argument(s), found " +
+                      std::to_string(call.typeArgs.size()) + ".");
+      for (auto& arg : call.args) inferExpr(*arg.value);
+      for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+      TypePtr result = typeEnum(info.name);
+      for (std::size_t i = 0; i < info.typeParamVars.size(); ++i) {
+        TypePtr fresh = freshVar(Constraint::None, info.typeParamVars[i]->varSpan,
+                                 "type parameter '" + info.typeParams[i] + "'");
+        fresh->allowUnresolved = true;
+        result->params.push_back(fresh);
+      }
+      return result;
+    }
+    for (auto& ta : call.typeArgs) typeArgs.push_back(resolveTypeExpr(*ta));
+    for (std::size_t i = 0; i < info.typeParamVars.size(); ++i) {
+      mapping[info.typeParamVars[i]] = typeArgs[i];
+    }
+  } else {
+    for (std::size_t i = 0; i < info.typeParamVars.size(); ++i) {
+      TypePtr fresh = freshVar(Constraint::None, info.typeParamVars[i]->varSpan,
+                               "type parameter '" + info.typeParams[i] + "'");
+      fresh->allowUnresolved = true;
+      mapping[info.typeParamVars[i]] = fresh;
+      typeArgs.push_back(fresh);
+    }
   }
 
   std::vector<std::pair<std::string, TypePtr>> fields;

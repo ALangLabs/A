@@ -1,0 +1,88 @@
+# std.enum selftest — functional Enum/IntEnum/StrEnum/Flag/IntFlag specs.
+# Run: ./build/a test stdlib/std/enum/selftest.astra
+import std:enum
+from std:enum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn test_enum_basic():
+    Color = Enum("Color", ["RED", "GREEN", "BLUE"])
+    assert_eq(Color.size(), 3)
+    assert_eq(Color.at("RED").value, 1)
+    assert_eq(Color.at("BLUE").value, 3)
+    assert_eq(Color.value_of(2).name, "GREEN")
+    assert_eq(Color.at("RED").label(), "Color.RED")
+    assert_true(Color.has("GREEN"))
+    assert(not Color.has("PURPLE"))
+    assert(Color.get("PURPLE") == None)
+    assert(Color.find_value(9) == None)
+
+fn test_enum_string_and_map_specs():
+    A = Enum("A", "X Y Z")
+    assert_eq(A.at("Y").value, 2)
+    B = Enum("B", {"P": 10, "Q": 20})
+    assert_eq(B.at("Q").value, 20)
+    # auto() in a map continues from previous int + 1 (map literals
+    # require homogeneous values, so build procedurally)
+    cm = {}
+    cm["ONE"] = 5
+    cm["TWO"] = auto()
+    cm["THREE"] = auto()
+    C = Enum("C", cm)
+    assert_eq(C.at("TWO").value, 6)
+    assert_eq(C.at("THREE").value, 7)
+
+fn test_enum_aliases():
+    Al = Enum("Al", {"A": 1, "B": 1, "C": 2})
+    assert_eq(Al.size(), 2)               # aliases excluded from members
+    assert_eq(Al.names(), ["A", "C"])
+    assert_eq(Al.at("B").name, "A")       # alias resolves to canonical member
+    assert_true(Al.has("B"))
+    assert_eq(len(Al.members_map()), 3)
+
+fn test_intenum_strenum():
+    N = IntEnum("N", ["ONE", "TWO"])
+    assert_eq(N.at("ONE").text(), "1")
+    S = StrEnum("S", {"HI": "HI", "BYE": "BYE"})
+    assert_eq(S.at("HI").text(), "HI")
+    assert_eq(S.at("HI").label(), "S.HI")
+
+fn test_flag():
+    Perm = Flag("Perm", {"R": 1, "W": 2, "X": 4})
+    rw = Perm.union(Perm.at("R"), Perm.at("W"))
+    assert_eq(rw.value, 3)
+    assert_eq(rw.name, "R|W")
+    assert_eq(Perm.value_of(3).name, "R|W")
+    assert_true(Perm.contains_flag(Perm.value_of(3), Perm.at("W")))
+    assert(not Perm.contains_flag(Perm.at("R"), Perm.at("W")))
+    inv = Perm.invert(Perm.at("R"))
+    assert_eq(inv.value, 6)
+    inter = Perm.intersection(Perm.value_of(3), Perm.value_of(5))
+    assert_eq(inter.value, 1)
+    # unknown bits kept
+    unk = Perm.value_of(8)
+    assert_eq(unk.value, 8)
+
+fn test_intflag():
+    P = IntFlag("P", ["A", "B", "C"])
+    assert_eq(P.at("A").value, 1)
+    assert_eq(P.at("C").value, 4)
+    ab = P.union(P.at("A"), P.at("B"))
+    assert_eq(ab.value, 3)
+
+fn test_unique():
+    U = Enum("U", ["A", "B", "C"])
+    assert(U.unique() == U)
+    V = Enum("V", {"X": 1, "Y": 2})
+    assert(V.unique() == V)
+    F = Flag("F", ["P", "Q"])
+    # FlagSpec.unique() delegates to the wrapped EnumSpec (returns EnumSpec)
+    assert(F.unique().typename() == "F")
+
+fn test_flag_auto():
+    Sh = Flag("Sh", ["R", "W", "X", "Y"])
+    assert_eq(Sh.at("Y").value, 8)

@@ -20,12 +20,10 @@ compiles A straight to native machine code.
 ## ✨ Features
 
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
-  and links a real executable through the bundled **Astra** backend (a TinyCC
-  fork). `a run` does the same and executes it. x86-64 SysV (Linux, macOS)
-  uses a dedicated x86-64 assembly emitter; x86-64 Windows uses a Win64
-  MS-ABI native emitter; every other target tries its own native assembly
-  emitter first (a declined construct is a hard error — there is no C
-  fallback).
+  and links a real executable. x86-64 SysV (Linux, macOS) lowers to LLVM IR
+  (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang` (host targets;
+  cross-compile is not yet supported). A declined construct is a hard error
+  — there is no fallback.
 - **Multi-target builds** — `a build --target <arch>` cross-compiles for
   i386, ARM (ARMv7), AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS,
   given a matching target sysroot (see *Cross-compilation* below), plus the
@@ -43,17 +41,40 @@ compiles A straight to native machine code.
   a `dlopen`'d libpython bridge (NumPy, PyTorch, …), including zero-copy
   buffer-protocol views.
 - **Native ML kernels** — Mojo-inspired kernels (`matmul` block-tiled, fused
-  `attention`/`softmax`, FMA hot loops, and an IR `fuseFma` contraction pass).
-- **First-class tooling** — `a fmt`, `a doc`, `a ir`, a REPL, a full **LSP**
+  `attention`/`softmax`, FMA hot loops).
+- **First-class tooling** — `a fmt`, `a doc`, a REPL, a full **LSP**
   server (`a-lsp`), and a VS Code extension.
 - **Package manager** — `apm` (`apm/apm`), `pip` for A: install, update,
   publish, and run third-party packages written in A itself, with a
   registry index, `apm.json` manifests, and `apm.lock.json` pinning.
   See [`apm/`](apm/README.md).
-- **LLVM-style optimization pipeline** — constant folding, DCE, inlining, LICM,
-  CSE, instcombine, SCCP, and `-O0`…`-Ofast` levels over a typed SSA IR.
+- **LLVM-style optimization pipeline** — `-O0`…`-Ofast` levels forwarded to
+  the LLVM backend.
 
 ## 🚀 Quick start
+
+### Install
+
+Prebuilt binaries are published on
+[GitHub Releases](https://github.com/ALangLabs/A/releases). The installers
+drop `a`, `a-lsp`, the Astra backend, and the stdlib under `~/.local`
+(Linux/macOS) or `%LOCALAPPDATA%\Programs\A` (Windows), put them on `PATH`,
+and install the editor extension into every detected VS Code or fork
+(Cursor, Windsurf, VSCodium, …):
+
+```sh
+# Linux / macOS
+curl -fsSL https://raw.githubusercontent.com/ALangLabs/A/main/install/install.sh | sh
+
+# Windows (PowerShell)
+irm https://raw.githubusercontent.com/ALangLabs/A/main/install/install.ps1 | iex
+```
+
+Options: `--prefix DIR` / `A_PREFIX` to relocate, `--no-extension` /
+`A_NO_EXTENSION=1` to skip the editor step, `A_VERSION` to pin a release.
+To build from source instead, continue below.
+
+### Build from source
 
 ```sh
 # Build the toolchain (produces build/a and build/a-lsp)
@@ -61,13 +82,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
 
 # Compile and run a program
-./build/a run examples/basics/hello.a
+./build/a run examples/basics/hello.astra
 
 # Type-check without running
-./build/a check path/to/file.a
+./build/a check path/to/file.astra
 
 # Produce a native binary
-./build/a build path/to/file.a -o myapp
+./build/a build path/to/file.astra -o myapp
 ```
 
 `cmake --build build -j` builds everything in `all`, including `a-lsp`
@@ -81,13 +102,12 @@ Or use the helper script: `tooling/build/build.sh`.
 
 | Command | Description |
 | --- | --- |
-| `a run <file.a>` | Compile and execute (`-c 'code'` for inline source) |
-| `a build <file.a> -o <bin>` | Compile to a native executable |
-| `a check <file.a>` | Type-check only (`--json` for machine-readable diagnostics) |
-| `a test <file.a>` | Discover and run every `fn test_*()` |
-| `a fmt <file.a>` | Format source (`-w` in place, `--check` for CI) |
-| `a doc <file.a>` | Generate documentation (`--json` supported) |
-| `a ir <file.a>` | Print the typed SSA IR (`--opt` / `-O*` to optimize) |
+| `a run <file.astra>` | Compile and execute (`-c 'code'` for inline source) |
+| `a build <file.astra> -o <bin>` | Compile to a native executable |
+| `a check <file.astra>` | Type-check only (`--json` for machine-readable diagnostics) |
+| `a test [file|dir]` | Discover and run `fn test_*()` in a file, or recursively in a directory/codebase (default: `.`); `--filter <substr>` selects by name |
+| `a fmt <file.astra>` | Format source (`-w` in place, `--check` for CI) |
+| `a doc <file.astra>` | Generate documentation (`--json` supported) |
 | `a repl` | Interactive REPL (self-hosted shell on a TTY) |
 
 Common flags: `-I <dir>` module search path, `--stdlib <dir>`, `-j/--jobs`,
@@ -137,7 +157,7 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 
 ```mermaid
 flowchart LR
-    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · IR · codegen"]
+    src[".astra source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
     fe --> s["x86-64 / per-arch asm"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
@@ -147,8 +167,8 @@ flowchart LR
 
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
-  analysis, typed SSA IR + optimizer, and the native code emitters
-  (`emitAsm` for x86-64 SysV, `emitNative` per-arch incl. the Win64 MS ABI
+  analysis, and the native code emitters
+  (`emitLLVM` -> LLVM IR -> opt/llc/clang
   for `x86_64-windows`).
 - **`compiler/astra/backend/`** — **Astra**, a TinyCC fork: the `astra` driver,
   the `libastra` library API, per-target code generators (x86-64, ARM, AArch64,

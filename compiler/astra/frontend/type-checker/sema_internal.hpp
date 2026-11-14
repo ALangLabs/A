@@ -121,7 +121,8 @@ inline bool isKnownBuiltin(const std::string& name) {
       "append_file", "file_exists", "file_size", "dot", "matvec", "matvec_t",
       "linalg_dot", "linalg_matvec", "linalg_matvec_t",
       "matmul", "softmax", "attention",
-      "linalg_matmul", "linalg_softmax", "linalg_attention", "list_dir", "remove_file", "create_dir",
+      "linalg_matmul", "linalg_softmax", "linalg_attention", "f32s",
+      "list_dir", "remove_file", "create_dir",
       "remove_dir", "rename", "current_dir", "now", "sleep", "panic", "assert",
       "open", "close",
       "assert_eq", "map",  "filter",   "reduce",   "any",
@@ -134,7 +135,7 @@ inline bool isKnownBuiltin(const std::string& name) {
       "arena_reset", "arena_used", "arena_total", "move", "copy",
       "borrow", "borrow_mut", "unsafe_address_of", "unsafe_load", "unsafe_store",
       "unsafe_offset", "py_buffer",
-      "Some", "Ok", "Err", "ic", "repr", "Bytes", "bytes", "divmod",
+      "Some", "Ok", "Err", "ic", "repr", "Bytes", "bytes", "divmod", "cast",
       "bytes_new", "bytes_append", "bytes_to_str",
       "__repr__", "__debug_repr__", "__ic_format__",
       // LLVM-style intrinsics

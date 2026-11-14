@@ -1,0 +1,161 @@
+# Exercise stdlib/std/math/numpy/logic.astra
+# Run: ./build/a run stdlib/std/math/numpy/_check_logic.astra
+#
+# Boolean arrays are NDArrays of 0.0/1.0 (f64-only dtype — documented
+# deviation from NumPy's bool dtype).
+
+from "ndarray.astra" import NDArray, ndarray, array_from_list, zeros, ones, _shape_size
+from "logic.astra" import greater, greater_equal, less, less_equal, equal, not_equal, logical_and, logical_or, logical_xor, logical_not, all, any, count_nonzero, isclose, allclose, array_equal, array_equiv, sign, isreal, iscomplex, isrealobj, iscomplexobj, shares_memory, may_share_memory, can_cast, min_scalar_type, result_type, packbits, unpackbits
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_arr_eq(a: NDArray, expected: [f64]):
+    assert_eq(len(a.data), len(expected))
+    for i in 0..len(expected):
+        assert_eq(a.data[i], expected[i])
+
+fn test_comparisons():
+    a = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    b = array_from_list([[4.0, 3.0], [2.0, 1.0]])
+    # elementwise NDArray x NDArray
+    assert_arr_eq(greater(a, b), [0.0, 0.0, 1.0, 1.0])
+    assert_arr_eq(less(a, b), [1.0, 1.0, 0.0, 0.0])
+    assert_arr_eq(greater_equal(a, b), [0.0, 0.0, 1.0, 1.0])
+    assert_arr_eq(less_equal(a, b), [1.0, 1.0, 0.0, 0.0])
+    assert_arr_eq(equal(a, b), [0.0, 0.0, 0.0, 0.0])
+    assert_arr_eq(not_equal(a, b), [1.0, 1.0, 1.0, 1.0])
+    # NDArray x scalar
+    assert_arr_eq(greater(a, 2.5), [0.0, 0.0, 1.0, 1.0])
+    assert_arr_eq(less_equal(a, 2.0), [1.0, 1.0, 0.0, 0.0])
+    # scalar x NDArray (order matters: 2 < a elementwise)
+    assert_arr_eq(less(2.5, a), [0.0, 0.0, 1.0, 1.0])
+    assert_arr_eq(greater_equal(3.0, a), [1.0, 1.0, 1.0, 0.0])
+    # equal against itself
+    assert_arr_eq(equal(a, a), [1.0, 1.0, 1.0, 1.0])
+    # scalar x scalar -> 0-d NDArray
+    s = greater(3.0, 2.0)
+    assert_eq(len(s.shape), 0)
+    assert_arr_eq(s, [1.0])
+    # broadcasting: [2,2] x [2] (right-aligned)
+    c = ndarray([10.0, 20.0], [2])
+    d = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_arr_eq(less(c, d), [0.0, 0.0, 0.0, 0.0])
+    assert_arr_eq(greater(c, d), [1.0, 1.0, 1.0, 1.0])
+
+fn test_logical():
+    a = array_from_list([[1.0, 0.0], [0.0, 5.0]])
+    b = array_from_list([[1.0, 1.0], [0.0, 0.0]])
+    # truthiness: 5.0 counts as true
+    assert_arr_eq(logical_and(a, b), [1.0, 0.0, 0.0, 0.0])
+    assert_arr_eq(logical_or(a, b), [1.0, 1.0, 0.0, 1.0])
+    assert_arr_eq(logical_xor(a, b), [0.0, 1.0, 0.0, 1.0])
+    assert_arr_eq(logical_not(a), [0.0, 1.0, 1.0, 0.0])
+    # scalar operands
+    assert_arr_eq(logical_and(a, 1.0), [1.0, 0.0, 0.0, 1.0])
+    assert_arr_eq(logical_or(0.0, a), [1.0, 0.0, 0.0, 1.0])
+    assert_arr_eq(logical_not(0.0), [1.0])
+    assert_arr_eq(logical_not(7.0), [0.0])
+
+fn test_reductions():
+    a = array_from_list([[1.0, 0.0], [0.0, 0.0]])
+    b = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    z = zeros([2, 2])
+    assert_eq(all(a), 0.0)
+    assert_eq(any(a), 1.0)
+    assert_eq(all(b), 1.0)
+    assert_eq(any(z), 0.0)
+    assert_eq(all(z), 0.0)
+    assert_eq(count_nonzero(a), 1.0)
+    assert_eq(count_nonzero(b), 4.0)
+    assert_eq(count_nonzero(z), 0.0)
+    # scalar forms
+    assert_eq(all(3.0), 1.0)
+    assert_eq(any(0.0), 0.0)
+    assert_eq(count_nonzero(2.0), 1.0)
+
+fn test_isclose_allclose():
+    a = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    b = array_from_list([[1.0, 2.000001], [3.0, 4.1]])
+    # default rtol=1e-5, atol=1e-8: only [0,1] differs within tol
+    r = isclose(a, b)
+    assert_arr_eq(r, [1.0, 1.0, 1.0, 0.0])
+    assert_eq(allclose(a, b), 0.0)
+    c = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_eq(allclose(a, c), 1.0)
+    assert_arr_eq(isclose(a, c), [1.0, 1.0, 1.0, 1.0])
+    # explicit tolerances + scalar broadcast
+    assert_eq(allclose(a, b, 0.001, 0.0), 0.0)
+    assert_eq(allclose(a, b, 0.2, 0.0), 1.0)
+    assert_arr_eq(isclose(a, 4.0, 0.5, 0.0), [0.0, 1.0, 1.0, 1.0])
+    assert_arr_eq(isclose(1.0, 1.0), [1.0])
+
+fn test_array_equal():
+    a = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    b = array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    c = array_from_list([[1.0, 2.0], [3.0, 5.0]])
+    d = ndarray([1.0, 2.0, 3.0, 4.0], [4])
+    assert_eq(array_equal(a, b), 1.0)
+    assert_eq(array_equal(a, c), 0.0)
+    assert_eq(array_equal(a, d), 0.0)  # shape mismatch
+    assert_eq(array_equal(2.0, 2.0), 1.0)
+    assert_eq(array_equal(2.0, 3.0), 0.0)
+    assert_eq(array_equal(a, 1.0), 0.0)
+    assert_eq(array_equiv(a, b), 1.0)
+
+fn test_sign():
+    a = array_from_list([[-2.0, 0.0, 3.0]])
+    assert_arr_eq(sign(a), [-1.0, 0.0, 1.0])
+    assert_arr_eq(sign(-5.0), [-1.0])
+    assert_arr_eq(sign(0.0), [0.0])
+    assert_arr_eq(sign(2.5), [1.0])
+
+fn test_dtype_predicates():
+    a = array_from_list([[1.0, 2.0]])
+    assert_arr_eq(isreal(a), [1.0, 1.0])
+    assert_arr_eq(iscomplex(a), [0.0, 0.0])
+    assert_eq(isrealobj(a), 1.0)
+    assert_eq(iscomplexobj(a), 0.0)
+
+fn test_type_helpers():
+    assert_eq(shares_memory(ones([2]), ones([2])), 0.0)
+    assert_eq(may_share_memory(ones([2]), ones([2])), 0.0)
+    assert_eq(can_cast("int64", "f64"), 1.0)
+    assert_eq(can_cast("f64", "f64"), 1.0)
+    assert_eq(can_cast("f64", "int32", "no"), 0.0)
+    assert_eq(min_scalar_type(1.5), "float64")
+    assert_eq(min_scalar_type(3), "int64")
+    assert_eq(result_type(1, 2.0), "float64")
+    assert_eq(result_type(1, 2), "int64")
+    assert_eq(result_type(ones([1]), 2), "float64")
+
+fn test_packbits():
+    # [1,0,1,1,0,0,0,1] -> 0b10110001 = 177
+    a = ndarray([1.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0, 1.0], [8])
+    p = packbits(a)
+    assert_eq(len(p.data), 1)
+    assert_eq(p.data[0], 177.0)
+    # 9 bits -> 2 bytes, last padded with zeros: [1 x8, 1] -> [255, 128]
+    b = ndarray([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0], [9])
+    p2 = packbits(b)
+    assert_eq(len(p2.data), 2)
+    assert_arr_eq(p2, [255.0, 128.0])
+    # round-trip through unpackbits
+    u = unpackbits(p2)
+    assert_eq(len(u.data), 16)
+    assert_arr_eq(u, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+    # count truncates
+    u2 = unpackbits(p2, 4)
+    assert_arr_eq(u2, [1.0, 1.0, 1.0, 1.0])
+
+entry main():
+    test_comparisons()
+    test_logical()
+    test_reductions()
+    test_isclose_allclose()
+    test_array_equal()
+    test_sign()
+    test_dtype_predicates()
+    test_type_helpers()
+    test_packbits()
+    print("numpy logic self-check: all tests passed")

@@ -1,5 +1,6 @@
 #include "driver/driver.hpp"
 #include "driver/version.hpp"
+#include "exe_path.hpp"
 #include <fstream>
 #include <istream>
 #include <ostream>
@@ -28,7 +29,7 @@
 #endif
 namespace a {
 namespace {
-PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; return p; }
+PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; p.backend=c.backend; return p; }
 bool readAll(const std::string& path,std::string& t,std::ostream& e){
   std::error_code ec;
   if(std::filesystem::is_directory(path,ec)){ e<<"error: '"<<path<<"' is a directory, not a source file\n"; return false; }
@@ -38,6 +39,7 @@ bool readAll(const std::string& path,std::string& t,std::ostream& e){
 int runSource(const std::string& n,std::string s,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return executePipeline(n,std::move(s),toP(c),i,o,e); }
 int runFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ std::string s; if(!readAll(p,s,e)) return 66; return executePipeline(p,std::move(s),toP(c),i,o,e); }
 int testFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return testPipeline(p,toP(c),i,o,e); }
+int testPath(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return a::testPath(p,toP(c),i,o,e); }
 namespace {
 // Heuristic for Python-style continuation: unclosed brackets or a trailing
 // ':' block opener mean more input is expected. Strings and '#' comments are
@@ -76,17 +78,15 @@ bool replInputComplete(const std::string& text){
 }
 }
 #if defined(__unix__) || defined(__APPLE__)
-// Locates the self-hosted A REPL (stdlib/std/repl/main.a): $A_STDLIB, then
+// Locates the self-hosted A REPL (stdlib/std/repl/main.astra): $A_STDLIB, then
 // paths relative to this executable (build/a -> ../stdlib), then cwd.
 std::string findReplMain(const DriverConfig& c){
   std::vector<std::string> roots;
   if(!c.stdlibRoot.empty()) roots.push_back(c.stdlibRoot);
   if(const char* e=std::getenv("A_STDLIB"); e&&*e) roots.push_back(e);
-  char exe[4096];
-  ssize_t n=::readlink("/proc/self/exe",exe,sizeof(exe)-1);
-  if(n>0){
-    exe[n]='\0';
-    std::string dir=exe; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
+  const std::string self=exePath();
+  if(!self.empty()){
+    std::string dir=self; auto s=dir.find_last_of('/'); if(s!=std::string::npos) dir.resize(s);
     roots.push_back(dir+"/../stdlib");
     roots.push_back(dir+"/../../stdlib");
     roots.push_back(dir+"/../share/a/stdlib");
@@ -94,7 +94,11 @@ std::string findReplMain(const DriverConfig& c){
   roots.push_back("stdlib");
   roots.push_back(".");
   for(const auto& r:roots){
-    for(const char* rel: {"/std/repl/main.a","/repl/main.a"}){
+    const std::string ext = std::string(kSourceExt);
+    const std::string legacy = std::string(kLegacySourceExt);
+    const std::vector<std::string> replRels = {"/std/repl/main."+ext,"/repl/main."+ext,
+                                              "/std/repl/main."+legacy,"/repl/main."+legacy};
+    for(const auto& rel: replRels){
       std::string p=r+rel; std::error_code ec;
       if(std::filesystem::exists(p,ec)) return p;
     }
@@ -104,16 +108,16 @@ std::string findReplMain(const DriverConfig& c){
 #endif
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
 #if defined(__unix__) || defined(__APPLE__)
-  // On a TTY, `a repl` runs the self-hosted IPython-style shell written in A
-  // (stdlib/std/repl/main.a). Piped stdin keeps the simple line REPL below.
+  // On a TTY, `a repl` runs the self-hosted interactive shell written in A
+  // (stdlib/std/repl/main.astra). Piped stdin keeps the simple line REPL below.
   if(isatty(STDIN_FILENO)){
     std::string main=findReplMain(c);
     if(!main.empty()) return runFile(main,c,in,o,e);
-    e<<"warning: could not locate stdlib/std/repl/main.a; using line REPL\n";
+    e<<"warning: could not locate stdlib/std/repl/main.astra; using line REPL\n";
   }
 #endif
-  // Line-based REPL: each complete input is compiled and run by Astra as a
-  // fresh process (top-level bindings do not persist between inputs).
+  // Line-based REPL: each complete input is compiled and run by the LLVM
+  // toolchain as a fresh process (top-level bindings do not persist).
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";
   ReplSession session;
   PipelineConfig pc=toP(c); pc.checkOnly=false;
@@ -135,8 +139,7 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
   o<<"\n";
   return 0;
 }
-int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,const std::string& /*backend*/,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
-int emitIRFile(const std::string& p,const DriverConfig& c,bool opt,std::ostream& o,std::ostream& e){ return emitIRPipeline(p,toP(c),opt,o,e); }
+int buildFile(const std::string& p,const std::string& out,const DriverConfig& c,std::ostream& e){ return buildPipeline(p,out,toP(c),e); }
 int formatFile(const std::string& p,const FormatFileOptions& opt,std::ostream& o,std::ostream& e){
   std::string s; if(!readAll(p,s,e)) return 66; DiagnosticSink sink;
   // formatSource lexes/parses with fileId 0; register the file so parse

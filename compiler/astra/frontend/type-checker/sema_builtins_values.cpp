@@ -2,6 +2,38 @@
 
 namespace a {
 
+TypePtr Sema::checkCastCall(CallExpr& call) {
+  // `cast<T>(x)` / `x as T`: a compile-time-only annotation. The value is
+  // passed through unchanged at runtime; sema only checks that the operand
+  // is not void and records the target type as the expression's type.
+  if (call.typeArgs.size() != 1) {
+    sink_.error(call.span,
+                "'cast' expects exactly one type argument, e.g. cast<int>(x) "
+                "or x as int.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    return typeError();
+  }
+  if (call.args.size() != 1 || !call.args[0].name.empty()) {
+    sink_.error(call.span, "'cast' expects exactly one positional argument.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    resolveTypeExpr(*call.typeArgs[0]);
+    return typeError();
+  }
+  TypePtr target = resolveTypeExpr(*call.typeArgs[0]);
+  TypePtr value = inferExpr(*call.args[0].value);
+  if (resolveType(value)->kind == TypeKind::Void) {
+    sink_.error(call.args[0].value->span, "Cannot cast a void value.");
+    return typeError();
+  }
+  // Python's cast never fails; keep the operand's inferred type when it
+  // already satisfies the target, otherwise adopt the target type (the cast
+  // is the programmer's assertion).
+  if (!unify(value, target)) {
+    call.args[0].value->inferredType = target;
+  }
+  return target;
+}
+
 TypePtr Sema::checkBuiltinValues(const std::string& name, CallExpr& call) {
 
   if (name == "py_buffer") {

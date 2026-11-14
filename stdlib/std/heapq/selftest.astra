@@ -1,0 +1,81 @@
+# std.heapq selftest — port of Python heapq behaviours.
+# Run: ./build/a test stdlib/std/heapq/selftest.astra
+from "heapq.astra" import heappush, heappop, heapify, heapreplace, heappushpop
+from "heapq.astra" import heappush_max, heappop_max, heapify_max, heapreplace_max, heappushpop_max
+from "heapq.astra" import nlargest, nsmallest, merge
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_push_pop():
+    h = []
+    heappush(h, 5)
+    heappush(h, 1)
+    heappush(h, 3)
+    heappush(h, 2)
+    heappush(h, 4)
+    assert_eq(heappop(h), 1)
+    assert_eq(heappop(h), 2)
+    assert_eq(h[0], 3)
+
+fn test_heapify():
+    h = [9, 4, 7, 1, 8]
+    heapify(h)
+    assert_eq(h[0], 1)
+    out = []
+    while len(h) > 0:
+        out.append(heappop(h))
+    assert_eq(out, [1, 4, 7, 8, 9])
+
+fn test_heapreplace_and_pushpop():
+    h = [1, 3, 5]
+    heapify(h)
+    # heapreplace: pop smallest, push item, return popped
+    assert_eq(heapreplace(h, 4), 1)
+    assert_eq(h[0], 3)
+    # heappushpop: push then pop smallest of the two
+    assert_eq(heappushpop(h, 2), 2)
+    assert_eq(h[0], 3)
+
+fn test_max_heap():
+    h = []
+    heappush_max(h, 1)
+    heappush_max(h, 5)
+    heappush_max(h, 3)
+    assert_eq(heappop_max(h), 5)
+    h2 = [3, 1, 4, 1, 5]
+    heapify_max(h2)
+    assert_eq(h2[0], 5)
+    assert_eq(heapreplace_max(h2, 6), 5)
+    # pushpop pushes then pops the max: a large item comes straight back
+    assert_eq(heappushpop_max(h2, 7), 7)
+    assert_eq(h2[0], 6)
+    # a small item stays in the heap while the max is popped
+    assert_eq(heappushpop_max(h2, 2), 6)
+    assert_eq(h2[0], 4)
+
+fn test_nsmallest_nlargest():
+    xs = [5, 1, 9, 3, 7, 2]
+    assert_eq(nsmallest(3, xs), [1, 2, 3])
+    assert_eq(nlargest(3, xs), [9, 7, 5])
+    # n larger than input returns everything sorted
+    assert_eq(nsmallest(10, xs), [1, 2, 3, 5, 7, 9])
+    assert_eq(nlargest(10, xs), [9, 7, 5, 3, 2, 1])
+    # n <= 0 returns empty
+    assert_eq(nsmallest(0, xs), [])
+    assert_eq(nlargest(-1, xs), [])
+
+fn test_merge():
+    a = [1, 4, 7]
+    b = [2, 3, 8]
+    c = [0, 5]
+    assert_eq(merge([a, b, c]), [0, 1, 2, 3, 4, 5, 7, 8])
+
+fn main():
+    test_push_pop()
+    test_heapify()
+    test_heapreplace_and_pushpop()
+    test_max_heap()
+    test_nsmallest_nlargest()
+    test_merge()
+    print("std.heapq selftest: all tests passed")

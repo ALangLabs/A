@@ -25,6 +25,25 @@ StmtPtr Parser::parseIf() {
   return stmt;
 }
 
+StmtPtr Parser::parseComptimeIf() {
+  // `comptime` already peeked; consume it, then parse a normal `if` and tag it.
+  Span start = cur().span;
+  advance();  // 'comptime'
+  StmtPtr stmt = parseIf();
+  if (auto* node = dynamic_cast<IfStmt*>(stmt.get())) node->comptime = true;
+  stmt->span = Span::join(start, stmt->span);
+  return stmt;
+}
+
+StmtPtr Parser::parseComptimeFor() {
+  Span start = cur().span;
+  advance();  // 'comptime'
+  StmtPtr stmt = parseFor();
+  if (auto* node = dynamic_cast<ForStmt*>(stmt.get())) node->comptime = true;
+  stmt->span = Span::join(start, stmt->span);
+  return stmt;
+}
+
 StmtPtr Parser::parseWhile() {
   Span start = cur().span;
   expect(Tok::KwWhile, "'while'");
@@ -251,7 +270,7 @@ StmtPtr Parser::parseImport() {
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'import'.",
-         "Write import \"lib/util.a\", import math, import std:<package>, or import python:<package>.");
+         "Write import \"lib/util.astra\", import math, import std:<package>, or import python:<package>.");
   }
 
   if (match(Tok::KwAs)) {
@@ -308,7 +327,7 @@ StmtPtr Parser::parseFromImport() {
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'from'.",
-         "Write from \"lib/util.a\" import add, from math import sqrt, from std:<pkg> import name, or from python:<pkg> import name.");
+         "Write from \"lib/util.astra\" import add, from math import sqrt, from std:<pkg> import name, or from python:<pkg> import name.");
   }
 
   expect(Tok::KwImport, "'import' after the module path");

@@ -1,0 +1,137 @@
+# check for polynomial.astra + set ops — run: ./build/a run stdlib/std/math/numpy/_check_polynomial.astra
+from "ndarray.astra" import NDArray
+from "polynomial.astra" import polyval, polyval_arr, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, roots, piecewise_const, isin, in1d, intersect1d, union1d, setdiff1d, setxor1d, finfo_f64
+
+fn assert_close(a, b, tol = 1e-9):
+    assert(abs(a - b) < tol)
+
+entry main():
+    # polyval: c = [1, 0, -1] -> x^2 - 1; at x=3 -> 8
+    assert_close(polyval([1.0, 0.0, -1.0], 3.0), 8.0)
+    # polyval on NDArray x
+    xa = NDArray([0.0, 1.0, 2.0, 3.0], [4])
+    r = polyval_arr([1.0, 0.0, -1.0], xa)
+    assert_close(r.data[0], -1.0)
+    assert_close(r.data[1], 0.0)
+    assert_close(r.data[2], 3.0)
+    assert_close(r.data[3], 8.0)
+    # polyval with list x returns NDArray
+    rl = polyval([2.0, 1.0], [1.0, 2.0, 3.0])
+    assert_close(rl.data[0], 3.0)
+    assert_close(rl.data[2], 7.0)
+
+    # polyfit: y = 2x + 1 through noisy-free points -> [2, 1]
+    xf = [0.0, 1.0, 2.0, 3.0, 4.0]
+    yf = [1.0, 3.0, 5.0, 7.0, 9.0]
+    cf = polyfit(xf, yf, 1)
+    assert_close(cf[0], 2.0)
+    assert_close(cf[1], 1.0)
+    # quadratic fit: y = x^2 -> [1, 0, 0]
+    xq = [0.0, 1.0, 2.0, 3.0]
+    yq = [0.0, 1.0, 4.0, 9.0]
+    cq = polyfit(xq, yq, 2)
+    assert_close(cq[0], 1.0, 1e-7)
+    assert_close(cq[1], 0.0, 1e-7)
+    assert_close(cq[2], 0.0, 1e-7)
+
+    # polyder: d/dx (x^3 + 2x^2 + 3x + 4) = 3x^2 + 4x + 3 -> [3,4,3]
+    d1 = polyder([1.0, 2.0, 3.0, 4.0])
+    assert_close(d1[0], 3.0)
+    assert_close(d1[1], 4.0)
+    assert_close(d1[2], 3.0)
+    # second derivative -> [6, 4]
+    d2 = polyder([1.0, 2.0, 3.0, 4.0], 2)
+    assert_close(d2[0], 6.0)
+    assert_close(d2[1], 4.0)
+
+    # polyint: int(2x + 3) = x^2 + 3x -> [1, 3, 0]
+    i1 = polyint([2.0, 3.0])
+    assert_close(i1[0], 1.0)
+    assert_close(i1[1], 3.0)
+    assert_close(i1[2], 0.0)
+
+    # polymul: (x+1)(x-1) = x^2 - 1
+    pm = polymul([1.0, 1.0], [1.0, -1.0])
+    assert_close(pm[0], 1.0)
+    assert_close(pm[1], 0.0)
+    assert_close(pm[2], -1.0)
+    # polyadd / polysub
+    pa = polyadd([1.0, 2.0], [3.0, 4.0, 5.0])
+    assert_close(pa[0], 3.0)
+    assert_close(pa[1], 5.0)
+    assert_close(pa[2], 7.0)
+    ps = polysub([1.0, 2.0, 3.0], [1.0, 1.0])
+    assert_close(ps[0], 1.0)
+    assert_close(ps[1], 1.0)
+    assert_close(ps[2], 2.0)
+    # polydiv: (x^2 - 1) / (x - 1) = x + 1 rem 0
+    dv = polydiv([1.0, 0.0, -1.0], [1.0, -1.0])
+    assert_close(dv[0][0], 1.0)
+    assert_close(dv[0][1], 1.0)
+    assert_close(len(dv[1]), 0)
+
+    # polyroots: x^2 - 1 -> [-1, 1]
+    r2 = polyroots([1.0, 0.0, -1.0])
+    assert_close(r2[0], -1.0)
+    assert_close(r2[1], 1.0)
+    # roots alias
+    ra = roots([1.0, 0.0, -1.0])
+    assert_close(ra[0], -1.0)
+    assert_close(ra[1], 1.0)
+    # x^3 - 6x^2 + 11x - 6 = (x-1)(x-2)(x-3) -> [1,2,3]
+    r3 = polyroots([1.0, -6.0, 11.0, -6.0])
+    assert_close(r3[0], 1.0, 1e-6)
+    assert_close(r3[1], 2.0, 1e-6)
+    assert_close(r3[2], 3.0, 1e-6)
+    # linear: 2x - 4 -> [2]
+    r1 = polyroots([2.0, -4.0])
+    assert_close(r1[0], 2.0)
+
+    # piecewise_const: x<0 -> -1, x>=0 -> 1
+    pw = piecewise_const(2.5, [[0.0]], [1.0], -1.0)
+    assert_close(pw, -1.0)
+    pw2 = piecewise_const(-1.0, [[1.0]], [5.0], 0.0)
+    assert_close(pw2, 5.0)
+    # array version: mask selects per element
+    xa2 = NDArray([0.0, 10.0], [2])
+    pwa = piecewise_const(xa2, [[1.0, 0.0]], [7.0], 3.0)
+    assert_close(pwa.data[0], 7.0)
+    assert_close(pwa.data[1], 3.0)
+
+    # set ops
+    ea = NDArray([1.0, 2.0, 3.0, 2.0], [4])
+    i1d = isin(ea, [2.0, 4.0])
+    assert_close(i1d.data[0], 0.0)
+    assert_close(i1d.data[1], 1.0)
+    assert_close(i1d.data[2], 0.0)
+    assert_close(i1d.data[3], 1.0)
+    # in1d flattened
+    i2 = in1d([1.0, 5.0, 3.0], [3.0, 1.0])
+    assert_close(i2.data[0], 1.0)
+    assert_close(i2.data[1], 0.0)
+    assert_close(i2.data[2], 1.0)
+    # set algebra
+    inter = intersect1d([1.0, 2.0, 2.0, 3.0], [2.0, 3.0, 4.0])
+    assert_close(inter.data[0], 2.0)
+    assert_close(inter.data[1], 3.0)
+    assert(len(inter.data) == 2)
+    uni = union1d([1.0, 2.0], [2.0, 3.0])
+    assert(len(uni.data) == 3)
+    assert_close(uni.data[0], 1.0)
+    assert_close(uni.data[2], 3.0)
+    dif = setdiff1d([1.0, 2.0, 3.0], [2.0])
+    assert(len(dif.data) == 2)
+    assert_close(dif.data[0], 1.0)
+    assert_close(dif.data[1], 3.0)
+    xord = setxor1d([1.0, 2.0, 3.0], [2.0, 3.0, 4.0])
+    assert(len(xord.data) == 2)
+    assert_close(xord.data[0], 1.0)
+    assert_close(xord.data[1], 4.0)
+
+    # finfo_f64
+    fi = finfo_f64()
+    assert_close(fi[0], 2.220446049250313e-16)
+    assert_close(fi[1], 1.7976931348623157e308)
+    assert_close(fi[3], 52.0)
+
+    print("polynomial checks OK")

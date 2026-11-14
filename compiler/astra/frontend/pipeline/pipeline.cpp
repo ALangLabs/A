@@ -1,4 +1,6 @@
 #include "pipeline/pipeline.hpp"
+#include "pipeline/comptime.hpp"
+#include "exe_path.hpp"
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
@@ -27,16 +29,22 @@
 #include <unordered_map>
 #include <vector>
 #include "diagnostics/diagnostics.hpp"
-#include "codegen/codegen.hpp"
-#include "ir/ir.hpp"
 #include "driver/version.hpp"
 #include "name-resolution/module_loader.hpp"
-#include "optimization/optimizer.hpp"
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
+#include "llvm/llvm_emit.hpp"
 namespace a {
 namespace {
 constexpr int kOk=0,kCErr=1,kNoIn=66;
+
+// Append candidate source paths trying the canonical `.astra` extension first,
+// then the legacy `.a` extension, so old and new module files both resolve.
+void appendSourceExtCandidates(std::vector<std::string>& out, const std::filesystem::path& base) {
+  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
+    out.push_back((base.parent_path() / (base.filename().string() + "." + ext)).string());
+  }
+}
 bool flushErrors(DiagnosticSink& s,const PipelineConfig& c,std::ostream& o,std::ostream& e){
   if(!s.hasErrors()) return true;
   if(c.jsonDiagnostics&&c.checkOnly) s.writeJson(o); else s.flush(e,c.useColor);
@@ -54,22 +62,13 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
   std::ostringstream b; b<<f.rdbuf(); if(f.bad()){e<<"error: failed to read '"<<p<<"'\n"; return false;} t=b.str(); return true;
 }
 
-// ---------------------------------------------------------------- Astra exec
-// `a run`/`a build`/`a test` are thin wrappers over the Astra toolchain
-// driver (compiler/astra/): the frontend emits target assembly (x86-64
-// SysV via emitAsm, other arches via emitNative), `astra` assembles that
-// together with the C A runtime (a_runtime.c) to machine code and links
-// the executable. There is no C-source intermediate: every target goes
-// A -> asm -> machine code.
-//
-// Cross-compilation: astra ships one driver binary per target architecture
-// (astra-<arch>, built by cmake/libastra.cmake). The frontend picks the
-// emitter by target: x86-64 SysV targets use emitAsm; every other arch
-// goes through emitNative (native per-arch assembly). i8086 is
-// asm-only — astra rejects C input for it. Astra
-// binaries are bound to the host OS at build time, so the target OS must
-// match the host — only the architecture is selectable.
-
+// ---------------------------------------------------------------- LLVM exec
+// `a run`/`a build`/`a test` are thin wrappers over the LLVM toolchain:
+// the frontend lowers the checked AST straight to LLVM IR (emitLLVM),
+// then `opt` (when optimizing), `llc` and `clang` turn it into a machine-
+// code executable linked against the prebuilt libaruntime.a. LLVM is the
+// only native backend and is host-only — there is no assembly emitter
+// fallback and no cross-compile path.
 // Compile-time host description.
 std::string hostArch() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -99,10 +98,9 @@ std::string hostOs() {
 }
 
 struct TargetDesc {
-  std::string arch;    // canonical astra arch name
-  std::string os;      // always the host OS (astra cannot cross OSes)
+  std::string arch;    // canonical arch name
+  std::string os;      // always the host OS (no cross-OS builds)
   bool native = false; // arch == host arch
-  bool useAsm = false; // x86-64 SysV: the asm emitter is valid
 };
 
 std::string lowerStr(std::string s) {
@@ -117,11 +115,10 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
   t = TargetDesc{};
   t.os = hostOs();
   // A_CODEGEN=c selected the C emitter, which was removed. Reject it here so
-  // every path fails alike — the split-unit, cache-hit and i8086 paths return
-  // before the single-unit guards below would notice.
+  // every path fails alike.
   if (const char* forced = std::getenv("A_CODEGEN"); forced && lowerStr(forced) == "c") {
     err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
-           "removed — every target compiles A -> assembly -> machine code\n";
+           "removed — the LLVM backend is the only native backend\n";
     return false;
   }
   std::string s = spec;
@@ -164,20 +161,17 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
     err << "error: unknown target '" << spec << "' (expected x86_64, i386, aarch64/arm64, arm, riscv64, or i8086)\n";
     return false;
   }
-  // OS tokens that disagree with the host OS are rejected — astra drivers
-  // are built per-OS and cannot cross operating systems. Exception:
-  // 'windows' is allowed as an explicit cross target because the astra
-  // PE backend (ASTRA_TARGET_PE) can be built as a host-OS binary that
-  // emits PE (e.g. an ELF astra-x86_64-windows on Linux); the driver is
-  // located via A_ASTRA_<ARCH>_WINDOWS / astra-<arch>-windows and the
-  // produced .exe cannot run on this host (td.native stays false).
+  // OS tokens that disagree with the host OS are rejected — the LLVM
+  // backend cannot cross operating systems. Exception: 'windows' parses
+  // as an explicit cross target (td.native stays false) so `a build`
+  // can report the host-only error cleanly.
   std::string reqOs;
   if (!osTok.empty() && osTok != t.os) {
     if (osTok == "windows") {
       reqOs = "windows";
     } else {
       err << "error: target OS '" << osTok << "' does not match host OS '" << t.os
-          << "' — astra drivers are built per-OS and cannot cross operating systems\n";
+          << "' — the LLVM backend cannot cross operating systems\n";
       return false;
     }
   }
@@ -193,10 +187,9 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
            "riscv64 backend; the runtime value model is 64-bit\n";
     return false;
   }
-  // The asm emitter is x86-64 SysV only: valid for ELF (linux) and Mach-O
-  // (macos) x86-64 targets. i386, ARM, RISC-V, i8086 and Windows x86-64
-  // (MS ABI) go through emitNative. A declined emission is a hard error.
-  t.useAsm = (arch == "x86_64" && (t.os == "linux" || t.os == "macos"));
+  // The LLVM backend is host-only: only the host arch on the host OS can
+  // produce a runnable binary. resolveTarget still parses foreign arches
+  // so `a build --target ...` can report a clean error downstream.
   return true;
 }
 
@@ -261,11 +254,9 @@ std::string findAstra(const std::string& arch, const std::string& os = "") {
   }
   return names.front();  // let CreateProcess report the failure
 #else
-  char exe[4096];
-  ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
-  if (n > 0) {
-    exe[n] = '\0';
-    std::string dir = exe;
+  const std::string self = exePath();
+  if (!self.empty()) {
+    std::string dir = self;
     auto pos = dir.find_last_of('/');
     if (pos != std::string::npos) {
       dir = dir.substr(0, pos);
@@ -328,79 +319,6 @@ int runChild(const std::string& prog, const std::vector<std::string>& args){
 }
 #endif
 
-// fork/exec `astra` for `arch`/`os` with the given arguments; the child
-// inherits our stdin/stdout/stderr. Returns the exit code, 127 on exec
-// failure.
-int runAstra(const std::string& arch, const std::string& os,
-             const std::vector<std::string>& args){
-  return runChild(findAstra(arch, os),args);
-}
-
-std::vector<std::string> splitArgs(const std::string& s) {
-  std::vector<std::string> out;
-  std::istringstream in(s);
-  std::string tok;
-  while (in >> tok) out.push_back(tok);
-  return out;
-}
-
-bool runtimeCcDisabled(const char* v) {
-  if (!v || !*v) return false;
-  std::string s = lowerStr(v);
-  return s == "0" || s == "off" || s == "no" || s == "none" || s == "astra";
-}
-
-// Host-target builds can use the system C compiler for the runtime archive.
-// Astra's C frontend is a tiny-compiler fork and emits unoptimized frame code;
-// GCC/Clang produce substantially better code for the numeric runtime kernels.
-// Cross targets still use astra because they need the target libc/sysroot.
-bool buildRuntimeArchiveCC(const std::string& arch, const std::string& runtimeDir,
-                           const std::vector<std::string>& rtSrcs,
-                           const std::string& rtArchive) {
-  if (arch != hostArch() || hostOs() == "windows" || rtSrcs.empty()) return false;
-  if (runtimeCcDisabled(std::getenv("A_RUNTIME_CC"))) return false;
-  const char* ccEnv = std::getenv("A_RUNTIME_CC");
-  std::string cc = (ccEnv && *ccEnv) ? ccEnv : "cc";
-  if (runChild(cc, {"--version"}) != 0) return false;
-
-  std::vector<std::string> cflags;
-  const char* flagEnv = std::getenv("A_RUNTIME_CFLAGS");
-  if (flagEnv && *flagEnv) {
-    cflags = splitArgs(flagEnv);
-  } else {
-    cflags = {"-O3", "-std=gnu11", "-w", "-fno-semantic-interposition"};
-    if (arch == "x86_64" || arch == "i386") {
-      cflags.push_back("-march=native");
-      cflags.push_back("-mtune=native");
-    }
-  }
-
-  const std::string objDir = runtimeDir + "/rt_obj_cc";
-  std::error_code ec;
-  std::filesystem::create_directories(objDir, ec);
-  if (ec) return false;
-
-  std::vector<std::string> objs;
-  objs.reserve(rtSrcs.size());
-  for (const std::string& src : rtSrcs) {
-    std::string obj = objDir + "/" +
-        std::filesystem::path(src).stem().string() + ".o";
-    std::vector<std::string> args = cflags;
-    args.push_back("-I" + runtimeDir);
-    args.push_back("-c");
-    args.push_back(src);
-    args.push_back("-o");
-    args.push_back(obj);
-    if (runChild(cc, args) != 0) return false;
-    objs.push_back(obj);
-  }
-
-  std::vector<std::string> aa = {"rcs", rtArchive};
-  aa.insert(aa.end(), objs.begin(), objs.end());
-  if (runChild("ar", aa) == 0) return true;
-  return runChild("llvm-ar", aa) == 0;
-}
-
 #ifdef _WIN32
 // CreateProcess a built binary directly; inherits stdin/stdout/stderr.
 // Returns the exit code, 127 on failure.
@@ -417,30 +335,6 @@ int runBinary(const std::string& path){
   int status=0;
   while(waitpid(pid,&status,0)<0){ if(errno!=EINTR) return 127; }
   if(WIFEXITED(status)) return WEXITSTATUS(status);
-  return 128+WTERMSIG(status);
-}
-// i8086 produces a flat boot image, not a host executable. Run it under
-// qemu-system-i386 with COM1 on stdio and isa-debug-exit on port 0xf4.
-// The guest _entry writes 42, which QEMU reports as exit status 85; map
-// that to success and propagate real failures.
-int runI8086Image(const std::string& img){
-  pid_t pid=fork();
-  if(pid<0) return 127;
-  if(pid==0){
-    std::vector<std::string> args={"qemu-system-i386",
-      "-drive", "format=raw,file="+img,
-      "-serial", "stdio",
-      "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-      "-display", "none", "-no-reboot"};
-    std::vector<char*> av;
-    for(auto& s:args) av.push_back(const_cast<char*>(s.c_str()));
-    av.push_back(nullptr);
-    execvp(av[0], av.data());
-    _exit(127);
-  }
-  int status=0;
-  while(waitpid(pid,&status,0)<0){ if(errno!=EINTR) return 127; }
-  if(WIFEXITED(status)){ int rc=WEXITSTATUS(status); return rc==85?0:rc; }
   return 128+WTERMSIG(status);
 }
 #endif
@@ -472,11 +366,11 @@ std::string tempPath(const char* tag,const std::string& name=""){
 }
 
 // ------------------------------------------------------- run binary cache
-// `a run`/`a test`/REPL recompile the same source (via astra) on every
+// `a run`/`a test`/REPL recompile the same source (via LLVM) on every
 // invocation, costing ~20ms even for a noop program, while the cached two-
 // phase-free binary execs in ~2ms like a native binary. The cache is
-// content-addressed: every module source, the runtime files, the astra
-// binary, target, opt level, codegen-forcing env vars and the toolchain
+// content-addressed: every module source, the runtime files, the toolchain
+// binaries, target, opt level, codegen-forcing env vars and the toolchain
 // version feed one FNV-1a key, so any edit invalidates. Disable with
 // A_NO_CACHE=1; override the directory with A_CACHE_DIR.
 
@@ -485,6 +379,52 @@ std::string tempPath(const char* tag,const std::string& name=""){
 bool findRuntime(const std::string& arch, const std::string& os,
                  std::string& astraBin, std::string& runtimeC,
                  std::string& runtimeDir);
+
+// Central cache root shared by the run cache and the per-module object
+// cache. A_CACHE_DIR overrides it (tests/CI); otherwise caches live under
+// the platform user-cache directory so source trees stay clean:
+//   Linux:   $XDG_CACHE_HOME/a or $HOME/.cache/a
+//   macOS:   $HOME/Library/Caches/a
+//   Windows: %LOCALAPPDATA%\a\cache
+// Falls back to the temp dir when no home/location is available.
+inline std::string defaultCacheRoot() {
+  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return d;
+#ifdef _WIN32
+  if (const char* l = std::getenv("LOCALAPPDATA"); l && *l)
+    return std::string(l) + "\\a\\cache";
+  char tmp[MAX_PATH];
+  DWORD n = GetTempPathA(MAX_PATH, tmp);
+  return std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "a-cache";
+#elif defined(__APPLE__)
+  if (const char* home = std::getenv("HOME"); home && *home)
+    return std::string(home) + "/Library/Caches/a";
+  return "/tmp/a-cache";
+#else
+  if (const char* x = std::getenv("XDG_CACHE_HOME"); x && *x)
+    return std::string(x) + "/a";
+  if (const char* home = std::getenv("HOME"); home && *home)
+    return std::string(home) + "/.cache/a";
+  if (const char* tmp = std::getenv("TMPDIR"); tmp && *tmp)
+    return std::string(tmp) + "/a-cache";
+  return "/tmp/a-cache";
+#endif
+}
+
+// Absolute, lexically-normal form of a module path for cache keys.
+// Display paths may be relative ("src/main.astra"), and the shared central
+// cache must not confuse identical relative paths in different projects —
+// emitted symbols embed canonical paths, so keys must too.
+inline std::string absCachePath(const std::string& path) {
+  std::error_code ec;
+  std::string abs =
+      std::filesystem::absolute(path, ec).lexically_normal().string();
+  return ec ? path : abs;
+}
+
+// Defined below with the LLVM backend; the run cache folds the resolved
+// tool paths into its key so toolchain upgrades invalidate binaries.
+std::string findLLVMTool(const char* envName,
+                         std::initializer_list<const char*> names);
 
 namespace run_cache {
 
@@ -520,6 +460,22 @@ inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
   h = mixBytes(h, p);
   h = mixInt(h, sz);
   return mixInt(h, mt);
+}
+
+// Fold the resolved LLVM tool binaries (opt/llc/clang) into the cache key:
+// a toolchain upgrade must invalidate cached binaries even when sources,
+// runtime and the `a` binary itself are unchanged.
+inline void mixLLVMToolStats(std::uint64_t& h) {
+  const std::string opt = findLLVMTool(
+      "A_LLVM_OPT", {"opt", "opt-18", "opt-17", "opt-16", "opt-15"});
+  const std::string llc = findLLVMTool(
+      "A_LLVM_LLC", {"llc", "llc-18", "llc-17", "llc-16", "llc-15"});
+  const std::string cc = findLLVMTool(
+      "A_LLVM_CC",
+      {"clang", "clang-18", "clang-17", "clang-16", "clang-15"});
+  if (!opt.empty()) h = mixFileStat(h, opt);
+  if (!llc.empty()) h = mixFileStat(h, llc);
+  if (!cc.empty()) h = mixFileStat(h, cc);
 }
 
 // Runtime C/headers are compiled into every binary, so a change to any of
@@ -607,11 +563,7 @@ inline std::string selfExePath() {
   if (n == 0 || n >= MAX_PATH) return std::string();
   return std::string(buf, n);
 #else
-  char buf[4096];
-  ssize_t n = ::readlink("/proc/self/exe", buf, sizeof buf - 1);
-  if (n <= 0) return std::string();
-  buf[n] = '\0';
-  return std::string(buf);
+  return exePath();
 #endif
 }
 
@@ -620,36 +572,19 @@ struct Plan {
   std::string file;  // final cache file path
 };
 
-// A_CACHE_DIR overrides the run-cache root (used by tests/CI). By default,
-// cache artifacts live in `_acache_` next to the relevant source, like
-// Python's __pycache__.
+// A_CACHE_DIR overrides the run-cache root (used by tests/CI). By default
+// the root is the platform user-cache directory (see defaultCacheRoot);
+// caches no longer drop `_acache_/` folders next to source files.
 inline bool cacheDirOverridden() {
   if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return true;
   return false;
 }
-inline std::string cacheDir(const std::string& nearPath = "") {
-  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return d;
-  if (!nearPath.empty()) {
-    std::error_code ec;
-    std::filesystem::path p = std::filesystem::absolute(nearPath, ec);
-    std::filesystem::path dir = p.parent_path();
-    if (dir.empty()) dir = ".";
-    return (dir / "_acache_").string();
-  }
-#ifdef _WIN32
-  char tmp[MAX_PATH];
-  DWORD n = GetTempPathA(MAX_PATH, tmp);
-  return std::string(n > 0 && n < MAX_PATH ? tmp : ".\\") + "_acache_";
-#else
-  if (const char* home = std::getenv("HOME"); home && *home)
-    return std::string(home) + "/.cache/_acache_";
-  return "/tmp/_acache_";
-#endif
-}
+inline std::string cacheDir() { return defaultCacheRoot(); }
 
+// Run/build caching is content-addressed and on by default; A_NO_CACHE=1
+// disables it (useful when chasing heisenbugs or benchmarking cold compiles).
 inline bool disabled() {
-  const char* v = std::getenv("A_NO_CACHE");
-  return v && *v && lowerStr(v) != "0";
+  return std::getenv("A_NO_CACHE") != nullptr;
 }
 
 // Computes the content-addressed cache path, or leaves Plan inactive when
@@ -673,10 +608,6 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   if (testMode) h = mixBytes(h, testFilter ? *testFilter : "");
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
-  const char* rcc = std::getenv("A_RUNTIME_CC");
-  h = mixBytes(h, rcc ? rcc : "");
-  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
-  h = mixBytes(h, rcflags ? rcflags : "");
   h = mixFileStat(h, astraBin);
   {
     const std::string self = selfExePath();
@@ -690,11 +621,12 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   h = mixBytes(h, runtimeDir);
   mixRuntimeSources(h, runtimeC);
   h = mixFileStat(h, runtimeDir + "/libaruntime.a");
+  mixLLVMToolStats(h);
   // Module sources: entry first-class (inline "<repl>"/"-c" sources come
   // from entrySource), every other module must read from disk.
   const ModuleGraph& g = *m.graph;
   for (const Module& mod : g.modules) {
-    h = mixBytes(h, mod.path);
+    h = mixBytes(h, absCachePath(mod.path));
     std::string text;
     if (!readFileText(mod.path, text)) {
       if (mod.id == g.entry && entrySource) {
@@ -707,11 +639,8 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   }
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx", static_cast<unsigned long long>(h));
-  std::string near;
-  if (g.entry >= 0 && g.entry < (int)g.modules.size())
-    near = g.at(g.entry).path;
   p.active = true;
-  std::string dir = cacheDir(near);
+  std::string dir = cacheDir();
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
   p.file = dir + (cacheDirOverridden() ? "/" : "/run.") + hex;
@@ -777,7 +706,7 @@ inline void scanImports(const std::string& text, std::vector<PreImport>& out) {
 // each resolved module contributes its content to the key, and every
 // candidate checked before it contributes an "absent" marker, so creating a
 // file that would shadow a resolved module changes the key. Depth is the
-// real dependency graph, so a directory full of unrelated `.a` files (or a
+// real dependency graph, so a directory full of unrelated `.astra` files (or a
 // temp dir) costs nothing and can never disable the cache.
 struct PreScan {
   const PipelineConfig& config;
@@ -792,7 +721,7 @@ struct PreScan {
 constexpr std::size_t kPreMaxFiles = 512;
 
 inline void preAbsent(PreScan& s, const std::string& p) {
-  s.h = mixBytes(s.h, "<absent>:" + p);
+  s.h = mixBytes(s.h, "<absent>:" + absCachePath(p));
 }
 
 inline void preWalk(PreScan& s, const std::string& fromDir, const PreImport& imp);
@@ -805,7 +734,7 @@ inline bool preVisitor(PreScan& s, const std::string& path) {
   if (++s.files > kPreMaxFiles) { s.ok = false; return false; }
   std::string text;
   if (!readFileText(path, text)) { s.ok = false; return false; }
-  s.h = mixBytes(s.h, path);
+  s.h = mixBytes(s.h, key);
   s.h = mixBytes(s.h, text);
   std::vector<PreImport> imps;
   scanImports(text, imps);
@@ -842,25 +771,25 @@ inline void preWalk(PreScan& s, const std::string& fromDir, const PreImport& imp
         slash == std::string::npos ? rel : rel.substr(slash + 1);
     const std::filesystem::path root =
         std::filesystem::path(s.stdRoot) / "std";
-    cands.push_back((root / (rel + ".a")).string());
-    cands.push_back((root / rel / "__init__.a").string());
-    cands.push_back((root / rel / (leaf + ".a")).string());
+    appendSourceExtCandidates(cands, root / rel);
+    appendSourceExtCandidates(cands, root / rel / "__init__");
+    appendSourceExtCandidates(cands, root / rel / leaf);
   } else {
     // Bare name: stdlib package layout first, then each search dir, exactly
     // as ModuleLoader::resolveBare orders them.
     const std::string& name = imp.target;
     const auto addRoot = [&](const std::filesystem::path& root) {
-      cands.push_back((root / (name + ".a")).string());
-      cands.push_back((root / name / (name + ".a")).string());
-      cands.push_back((root / name / "__init__.a").string());
+      appendSourceExtCandidates(cands, root / name);
+      appendSourceExtCandidates(cands, root / name / name);
+      appendSourceExtCandidates(cands, root / name / "__init__");
     };
     if (!s.stdRoot.empty()) {
       const std::filesystem::path root(s.stdRoot);
       addRoot(root);
       addRoot(root / "std");
-      cands.push_back((root / "std" / (name + ".a")).string());
-      cands.push_back((root / "std" / name / (name + ".a")).string());
-      cands.push_back((root / "std" / name / "__init__.a").string());
+      appendSourceExtCandidates(cands, root / "std" / name);
+      appendSourceExtCandidates(cands, root / "std" / name / name);
+      appendSourceExtCandidates(cands, root / "std" / name / "__init__");
     }
     for (const std::string& d : s.config.modulePaths) addRoot(d);
   }
@@ -900,10 +829,6 @@ inline std::string precheckKey(const std::string& path,
   h = mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
-  const char* rcc = std::getenv("A_RUNTIME_CC");
-  h = mixBytes(h, rcc ? rcc : "");
-  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
-  h = mixBytes(h, rcflags ? rcflags : "");
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
   h = mixBytes(h, source);
@@ -935,7 +860,8 @@ inline std::string precheckKey(const std::string& path,
     const std::filesystem::path root(ps.stdRoot);
     bool found = false;
     for (const std::filesystem::path& cand :
-         {root / "std" / "prelude.a", root / "prelude.a"}) {
+         {root / "std" / (std::string("prelude.") + kSourceExt), root / (std::string("prelude.") + kSourceExt),
+          root / "std" / (std::string("prelude.") + kLegacySourceExt), root / (std::string("prelude.") + kLegacySourceExt)}) {
       std::error_code ec;
       if (std::filesystem::is_regular_file(cand, ec) && !ec) {
         preVisitor(ps, cand.string());
@@ -961,10 +887,11 @@ inline std::string precheckKey(const std::string& path,
   std::uint64_t h2 = ps.h;
   mixRuntimeSources(h2, runtimeC);
   h2 = mixFileStat(h2, runtimeDir + "/libaruntime.a");
+  mixLLVMToolStats(h2);
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
                 static_cast<unsigned long long>(h2));
-  std::string dir = cacheDir(path);
+  std::string dir = cacheDir();
   std::error_code ec;
   std::filesystem::create_directories(dir, ec);
   return dir + (cacheDirOverridden() ? "/pre-" : "/pre.") + hex;
@@ -981,8 +908,8 @@ inline bool envFlagOff(const char* name) {
   return s == "0" || s == "off" || s == "no" || s == "none" || s == "false";
 }
 inline bool splitUnitsEnabled() {
-  // Per-module units are the default after Phase 3; A_SPLIT_UNITS=0 opts back
-  // into the single-unit emitAsm/emitNative path.
+  // Kept for the object-cache key helpers; the per-module split build that
+  // consumed this was removed with the assembly backend.
   return !envFlagOff("A_SPLIT_UNITS");
 }
 inline bool objCacheEnabled() {
@@ -992,26 +919,11 @@ inline bool debugUnits() {
   const char* v = std::getenv("A_DEBUG_UNITS");
   return v && *v && lowerStr(v) != "0";
 }
-// A_CACHE_DIR overrides with a central obj dir (tests/CI). By default, cached
-// artifacts live in `_acache_` next to each source module, like Python's
-// __pycache__.
+// Cached objects live in <cache root>/obj (see defaultCacheRoot). Unit
+// keys are content+path hashed, so a single shared dir is collision-safe
+// and source trees stay free of `_acache_/` folders.
 inline std::string objCacheDir() {
-  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) {
-    std::error_code ec;
-    std::filesystem::path parent = std::filesystem::path(d).parent_path();
-    return (parent.empty() ? std::filesystem::path(d) : parent / "obj").string();
-  }
-  return "";  // per-module _acache_ dirs used by default
-}
-inline std::string acacheDirForModule(const std::string& modulePath) {
-  if (const char* d = std::getenv("A_CACHE_DIR"); d && *d) return objCacheDir();
-  std::error_code ec;
-  std::filesystem::path p = modulePath.empty()
-                                ? std::filesystem::current_path(ec)
-                                : std::filesystem::absolute(modulePath, ec);
-  std::filesystem::path dir = p.parent_path();
-  if (dir.empty()) dir = ".";
-  return (dir / "_acache_").string();
+  return (std::filesystem::path(defaultCacheRoot()) / "obj").string();
 }
 inline std::string hex64(std::uint64_t h) {
   char b[17];
@@ -1309,10 +1221,6 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
   h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = run_cache::mixBytes(h, codegen ? codegen : "");
-  const char* rcc = std::getenv("A_RUNTIME_CC");
-  h = run_cache::mixBytes(h, rcc ? rcc : "");
-  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
-  h = run_cache::mixBytes(h, rcflags ? rcflags : "");
   if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
     h = run_cache::mixFileStat(h, astraBin);
     h = run_cache::mixBytes(h, runtimeDir);
@@ -1329,7 +1237,7 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
   }
   const ModuleGraph& g = *m.graph;
   const Module& mod = g.at(moduleId);
-  h = run_cache::mixBytes(h, "M:" + mod.path);
+  h = run_cache::mixBytes(h, "M:" + absCachePath(mod.path));
   std::string text;
   if (!run_cache::readFileText(mod.path, text)) {
     if (mod.id == g.entry && entrySource) text = *entrySource;
@@ -1340,7 +1248,7 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
   // Dependencies in sorted order for determinism.
   std::vector<int> sorted(deps.begin(), deps.end());
   for (int d : sorted) {
-    h = run_cache::mixBytes(h, "D:" + g.at(d).path);
+    h = run_cache::mixBytes(h, "D:" + absCachePath(g.at(d).path));
     h = run_cache::mixInt(h, sighash(g.at(d)));
   }
   if (moduleId == g.entry) {
@@ -1376,10 +1284,6 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
   h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = run_cache::mixBytes(h, codegen ? codegen : "");
-  const char* rcc = std::getenv("A_RUNTIME_CC");
-  h = run_cache::mixBytes(h, rcc ? rcc : "");
-  const char* rcflags = std::getenv("A_RUNTIME_CFLAGS");
-  h = run_cache::mixBytes(h, rcflags ? rcflags : "");
   std::string astraBin, runtimeC, runtimeDir;
   if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
     h = run_cache::mixFileStat(h, astraBin);
@@ -1412,7 +1316,7 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
     gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.entry));
     gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.preludeId));
     for (const Module& mod : g.modules) {
-      gh = run_cache::mixBytes(gh, "G:" + mod.path);
+      gh = run_cache::mixBytes(gh, "G:" + absCachePath(mod.path));
       gh = run_cache::mixInt(gh, scopeNamesHash(mod));
     }
     ctx.graphKey = gh;
@@ -1427,14 +1331,14 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
   h = run_cache::mixInt(h, ctx.graphKey);
   const ModuleGraph& g = *m.graph;
   const Module& mod = g.at(moduleId);
-  h = run_cache::mixBytes(h, "M:" + mod.path);
+  h = run_cache::mixBytes(h, "M:" + absCachePath(mod.path));
   auto sit = ctx.sourceById.find(moduleId);
   h = run_cache::mixBytes(h, sit == ctx.sourceById.end() ? "<missing>" : sit->second);
   auto sighIt = ctx.sighById.find(moduleId);
   h = run_cache::mixInt(h, sighIt == ctx.sighById.end() ? 0 : sighIt->second);
   std::vector<int> sorted(deps.begin(), deps.end());
   for (int d : sorted) {
-    h = run_cache::mixBytes(h, "D:" + g.at(d).path);
+    h = run_cache::mixBytes(h, "D:" + absCachePath(g.at(d).path));
     auto dit = ctx.sighById.find(d);
     h = run_cache::mixInt(h, dit == ctx.sighById.end() ? 0 : dit->second);
   }
@@ -1446,10 +1350,6 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
     if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
   }
   return hex64(h);
-}
-inline std::string unitCachePathFor(const std::string& modulePath,
-                                     const std::string& key) {
-  return acacheDirForModule(modulePath) + "/" + key + ".o";
 }
 inline std::string unitCachePath(const std::string& key) {
   return objCacheDir() + "/" + key + ".o";
@@ -1507,103 +1407,6 @@ bool findRuntime(const std::string& arch, const std::string& os,
   return false;
 }
 
-// Debian-style target triplet for sysroot discovery. Empty for the host
-// arch (host headers/libs are already on the default search path).
-std::string targetTriplet(const std::string& arch) {
-  if (arch == "i386") return "i386-linux-gnu";
-  if (arch == "arm64") return "aarch64-linux-gnu";
-  if (arch == "riscv64") return "riscv64-linux-gnu";
-  if (arch == "arm") return "arm-linux-gnueabihf";
-  if (arch == "riscv32") return "riscv32-linux-gnu";
-  return "";
-}
-
-// Cross-target header/library search dirs for `arch`, mirroring what a
-// gcc cross toolchain would use. A_SYSROOT_<ARCH> (e.g. A_SYSROOT_AARCH64)
-// or A_SYSROOT points at an explicit sysroot root and replaces
-// auto-detection; otherwise the Debian multiarch layouts installed by
-// gcc-*-linux-gnu / *-linux-gnu libc dev packages are probed.
-void crossSearchDirs(const std::string& arch, std::vector<std::string>& includes,
-                     std::vector<std::string>& libs) {
-  std::string triplet = targetTriplet(arch);
-  if (triplet.empty()) return;
-  std::string envName = "A_SYSROOT_";
-  for (char c : arch) envName += (c == '-' ? '_' : (char)::toupper((unsigned char)c));
-  const char* env = std::getenv(envName.c_str());
-  if (!env || !*env) env = std::getenv("A_SYSROOT");
-  auto isDir = [](const std::string& d) {
-    std::error_code ec; return std::filesystem::is_directory(d, ec);
-  };
-  auto add = [&isDir](std::vector<std::string>& v, const std::string& d) {
-    if (isDir(d) && std::find(v.begin(), v.end(), d) == v.end()) v.push_back(d);
-  };
-  // i386 on an amd64 Debian/Ubuntu host is multilib, not foreign: glibc
-  // headers are shared (/usr/include) and the arch bits live in the
-  // multiarch include dir (which also carries gnu/stubs-32.h).
-  auto addHostIncludes = [&]() {
-    add(includes, "/usr/include");
-    std::error_code ec;
-    for (const auto& de : std::filesystem::directory_iterator("/usr/include", ec)) {
-      std::string n = de.path().filename().string();
-      if (n.size() >= 10 && n.compare(n.size() - 10, 10, "-linux-gnu") == 0)
-        add(includes, de.path().string());
-    }
-  };
-  if (env && *env) {
-    std::string root = env;
-    while (root.size() > 1 && root.back() == '/') root.pop_back();
-    add(includes, root + "/usr/include");
-    add(includes, root + "/usr/" + triplet + "/include");
-    add(includes, root + "/include");
-    // Multiarch include dirs inside the sysroot (e.g. x86_64-linux-gnu
-    // carrying gnu/stubs-32.h for i386).
-    std::error_code ec2;
-    for (const auto& de : std::filesystem::directory_iterator(root + "/usr/include", ec2)) {
-      std::string n = de.path().filename().string();
-      if (n.size() >= 10 && n.compare(n.size() - 10, 10, "-linux-gnu") == 0)
-        add(includes, de.path().string());
-    }
-    if (arch == "i386") addHostIncludes();
-    add(libs, root + "/usr/lib/" + triplet);
-    add(libs, root + "/lib/" + triplet);
-    add(libs, root + "/usr/" + triplet + "/lib");
-    add(libs, root + "/usr/lib");
-    add(libs, root + "/lib");
-    // Debian/Ubuntu i386 multilib lives in lib32 (usrmerge: usr/lib32).
-    if (arch == "i386") {
-      add(libs, root + "/usr/lib32");
-      add(libs, root + "/lib32");
-    }
-    // gcc-cross layout: /usr/lib/gcc-cross/<triplet>/<ver>/{include,lib}
-    for (const std::string& base : {root + "/usr/lib/gcc-cross/" + triplet,
-                                    root + "/usr/lib/gcc/" + triplet}) {
-      std::error_code ec;
-      for (const auto& de : std::filesystem::directory_iterator(base, ec)) {
-        if (!de.is_directory(ec)) continue;
-        add(includes, de.path().string() + "/include");
-        add(libs, de.path().string() + "/lib");
-      }
-    }
-    return;
-  }
-  // Auto-detect: Debian/Ubuntu cross packages.
-  const std::string t = triplet;
-  add(includes, "/usr/" + t + "/include");
-  add(includes, "/usr/include/" + t);
-  add(libs, "/usr/lib/" + t);
-  add(libs, "/lib/" + t);
-  add(libs, "/usr/" + t + "/lib");
-  if (arch == "i386") addHostIncludes();
-  for (const std::string& base : {"/usr/lib/gcc-cross/" + t, "/usr/lib/gcc/" + t}) {
-    std::error_code ec;
-    for (const auto& de : std::filesystem::directory_iterator(base, ec)) {
-      if (!de.is_directory(ec)) continue;
-      add(includes, de.path().string() + "/include");
-      add(libs, de.path().string() + "/lib");
-    }
-  }
-}
-
 // Stages emitted source to a temp file with the given extension.
 std::string stageSrc(const std::string& source, const char* ext, std::ostream& err) {
   std::string p = tempPath("gen", ext);
@@ -1617,727 +1420,199 @@ std::string stageSrc(const std::string& source, const char* ext, std::ostream& e
   }
   return p;
 }
-// Compiles emitted target assembly plus the runtime modules with the
-// astra driver for `arch` into outPath. The runtime is modular: every *.c
-// next to the located a_runtime.c (dispatch/printing plus the domain .c
-// modules) is compiled and linked in, unless the prebuilt libaruntime.a
-// archive exists for the default opt level. -B points astra at the staged
-// per-arch lib dir (libastra1.a + headers) so cross targets never pick up
-// the host-arch archive.
-int astraBuild(const std::string& arch, const std::string& os,
-               const std::string& srcPath, const std::string& outPath,
-               std::ostream& err, int optimizationLevel = 3) {
-  std::string astraBin, runtimeC, runtimeDir;
-  if (!findRuntime(arch, os, astraBin, runtimeC, runtimeDir)) {
-    err << "error: cannot locate A runtime (a_runtime.c) for target '" << arch
-        << "'; set A_RUNTIME_C or build with cmake\n";
-    return 1;
-  }
-  // i8086 is a bare-metal real-mode target: no libc/sysroot, the runtime
-  // is a hand-written assembly subset, and the output is a flat boot
-  // image (not an ELF executable).
-  if (arch == "i8086") {
-    std::string rtS = runtimeDir + "/i8086_runtime.s";
-    if (!std::filesystem::exists(rtS)) rtS = runtimeDir + "/../i8086_runtime.s";
-    std::vector<std::string> args = {srcPath, rtS,
-        "-nostdlib", "-static",
-        "-Wl,-e,_start", "-Wl,-Ttext=0x7C00", "-Wl,-oformat=binary",
-        "-o", outPath};
-    int rc = runAstra(arch, os, args);
-    if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
-    // Pad to a whole number of 512-byte sectors, stamp the boot signature,
-    // and record the sector count at offset 0x1F8 for the .boot loader
-    // (which loads sectors 1..n-1 via int 13h AH=42h).
-    std::error_code ec;
-    auto sz = std::filesystem::file_size(outPath, ec);
-    if (!ec) {
-      const std::uint64_t sectors = (sz + 511) / 512;
-      const std::uint64_t padded = sectors * 512;
-      std::fstream f(outPath, std::ios::in | std::ios::out | std::ios::binary);
-      if (f) {
-        if (sz < padded) {
-          std::string pad((std::size_t)(padded - sz), '\x90');
-          f.seekp(0, std::ios::end); f.write(pad.data(), (std::streamsize)pad.size());
-        }
-        const std::uint32_t ns = (std::uint32_t)sectors;
-        f.seekp(0x1F8);
-        char nb[4] = {(char)(ns & 0xFF), (char)((ns >> 8) & 0xFF),
-                      (char)((ns >> 16) & 0xFF), (char)((ns >> 24) & 0xFF)};
-        f.write(nb, 4);
-        f.seekp(510);
-        char sig[2] = {(char)0x55, (char)0xAA};
-        f.write(sig, 2);
-      }
-    }
-    return 0;
-  }
-  std::vector<std::string> rtSrcs;
-  if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) {
-    rtSrcs.push_back(runtimeC);
-  } else {
-    std::error_code ec;
-    for (const auto& de : std::filesystem::directory_iterator(runtimeDir, ec)) {
-      if (de.path().extension() == ".c") rtSrcs.push_back(de.path().string());
-    }
-    if (rtSrcs.empty()) rtSrcs.push_back(runtimeC);
-    else std::sort(rtSrcs.begin(), rtSrcs.end());
-  }
-  std::string optFlag = "-O" + std::to_string(optimizationLevel < 0 ? 0 : (optimizationLevel > 3 ? 3 : optimizationLevel));
-  // -B points astra at the staged per-arch lib dir (libastra1.a + headers).
-  // Only pass it when such a dir exists — a source-tree runtimeDir has no
-  // astra lib artifacts and astra's own exe-relative probe does the job.
-  std::vector<std::string> args = {optFlag, "-I" + runtimeDir};
-  auto hasFile = [](const std::string& p) {
-    std::error_code ec; return std::filesystem::exists(p, ec);
-  };
-  std::string libDir;
-  for (const std::string& cand : {runtimeDir + "/libastra1.a",
-                                  runtimeDir + "/lib/libastra1.a"}) {
-    if (hasFile(cand)) { libDir = runtimeDir; break; }
-  }
-  if (libDir.empty()) {
-    // Look for a staged astralib-<arch>/astralib next to the astra binary.
-    std::string astraBin = findAstra(arch, os);
-    std::vector<std::string> libnames = {"astralib-" + arch};
-    if (arch == hostArch()) libnames.push_back("astralib");
-    auto slash = astraBin.find_last_of('/');
-    std::vector<std::string> bases;
-    if (slash != std::string::npos) {
-      std::string d = astraBin.substr(0, slash);
-      bases = {d, d + "/..", d + "/../.."};
-    } else bases = {".", ".."};
-    for (const auto& b : bases) {
-      for (const auto& ln : libnames) {
-        std::string cand = b + "/" + ln;
-        if (hasFile(cand + "/libastra1.a") || hasFile(cand + "/lib/libastra1.a")) {
-          libDir = std::filesystem::absolute(cand).string();
-          break;
-        }
-      }
-      if (!libDir.empty()) break;
-    }
-  }
-  if (!libDir.empty()) args.push_back("-B" + libDir);
-  // Header/library search paths. Native targets keep the host POSIX paths
-  // (needed on every arch: astra's bundled include/ lacks fcntl.h/
-  // termios.h/etc.). Cross targets get their libc headers and crt/lib
-  // dirs from the detected sysroot instead — mixing host headers with a
-  // foreign arch produces broken binaries.
-  if (os == "windows") {
-    // PE target: the runtime .c files need the bundled mingw-style headers
-    // and winapi/windows.h staged next to libastra1.a (astralib/include).
-    for (const std::string& base : {libDir, runtimeDir}) {
-      if (base.empty()) continue;
-      for (const char* sub : {"/include", "/include/winapi"}) {
-        std::string d = base + sub;
-        std::error_code ec2;
-        if (std::filesystem::is_directory(d, ec2))
-          args.push_back("-I" + d);
-      }
-    }
-  } else if (arch == hostArch()) {
-    args.insert(args.end(), {"-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
-                     "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include"});
-  } else {
-    std::vector<std::string> xinc, xlibs;
-    crossSearchDirs(arch, xinc, xlibs);
-    for (const auto& d : xinc) args.push_back("-I" + d);
-    for (const auto& d : xlibs) args.push_back("-L" + d);
-    if (xinc.empty() && xlibs.empty()) {
-      err << "note: no sysroot found for target '" << arch
-          << "'; set A_SYSROOT or A_SYSROOT_" << arch << " to a cross toolchain root\n";
-    }
-  }
-  // Lazily build a per-arch libaruntime.a: the first cross build compiles
-  // each runtime .c once into runtimeDir/rt_obj/*.o and archives them, so
-  // subsequent builds link the archive instead of recompiling ~40 C files
-  // per program. The archive is keyed by arch via runtimeDir (astralib-<arch>).
-  const std::string rtArchive = runtimeDir + "/libaruntime.a";
-  if (optimizationLevel >= 2 && !hasFile(rtArchive) && os != "windows" &&
-      !buildRuntimeArchiveCC(arch, runtimeDir, rtSrcs, rtArchive)) {
-    std::error_code ec;
-    const std::string objDir = runtimeDir + "/rt_obj";
-    std::filesystem::create_directories(objDir, ec);
-    std::vector<std::string> cargs = args;  // optFlag -I -B -I/-L prefix
-    std::vector<std::string> robjs;
-    bool ok = true;
-    for (const std::string& src : rtSrcs) {
-      std::string obj = objDir + "/" +
-          std::filesystem::path(src).stem().string() + ".o";
-      if (!hasFile(obj)) {
-        std::vector<std::string> ca = cargs;
-        ca.push_back("-c"); ca.push_back(src); ca.push_back("-o"); ca.push_back(obj);
-        if (runAstra(arch, os, ca) != 0) { ok = false; break; }
-      }
-      robjs.push_back(obj);
-    }
-    if (ok && !robjs.empty()) {
-      std::vector<std::string> aa = {"-ar", "rcs", rtArchive};
-      aa.insert(aa.end(), robjs.begin(), robjs.end());
-      ok = runAstra(arch, os, aa) == 0 && hasFile(rtArchive);
-    }
-    if (!ok) err << "note: could not prebuild libaruntime.a for '" << arch
-                 << "'; falling back to per-program runtime compile\n";
-  }
-  args.push_back(srcPath);
-  // The staged libaruntime.a is built once (O2); linking it avoids
-  // recompiling every runtime module for each program. Non-default opt levels
-  // and targets without the archive keep the compile-sources path.
-  if (optimizationLevel >= 2 && std::filesystem::exists(rtArchive)) {
-    args.push_back(rtArchive);
-  } else {
-    args.insert(args.end(), rtSrcs.begin(), rtSrcs.end());
-  }
-  args.push_back("-o"); args.push_back(outPath);
-  int rc = runAstra(arch, os, args);
-  if (rc != 0) { err << "error: astra failed to compile '" << srcPath << "'\n"; return 1; }
-  return 0;
-}
+// ---- LLVM backend -----------------------------------------------------------
+// The LLVM path lowers the checked AST straight to LLVM IR (.ll), then runs
+// the system LLVM toolchain: `opt` (skipped at -O0), `llc` to produce an
+// object file, and `clang` to link the object with the staged
+// libaruntime.a. Host targets only — there is no cross-compile path.
 
-// ---- per-module split build (Phase 2 + 3) -------------------------------
-struct AstraPlan {
-  std::string astraBin;
-  std::string runtimeC;
-  std::string runtimeDir;
-  std::string libDir;
-  std::string rtArchive;
-  std::vector<std::string> rtSrcs;
-  std::vector<std::string> baseArgs;
-};
-// Replicates the compiler-flag discovery in astraBuild (lib dir, includes,
-// lazy libaruntime.a) so per-unit assembly uses identical flags.
-bool prepareAstraPlan(const std::string& arch, const std::string& os,
-                      int optimizationLevel, std::ostream& err,
-                      AstraPlan& plan) {
-  if (!findRuntime(arch, os, plan.astraBin, plan.runtimeC, plan.runtimeDir)) {
-    err << "error: cannot locate A runtime (a_runtime.c) for target '" << arch
-        << "'; set A_RUNTIME_C or build with cmake\n";
-    return false;
-  }
-  if (const char* e = std::getenv("A_RUNTIME_C"); e && *e) {
-    plan.rtSrcs.push_back(plan.runtimeC);
+// Locates an LLVM tool: A_LLVM_<NAME> env override first, then PATH
+// (unversioned and -18/-17/-16 suffixed variants). Returns "" when absent.
+std::string findLLVMTool(const char* envName,
+                         std::initializer_list<const char*> names) {
+  static std::unordered_map<std::string, std::string> cache;
+  std::string key = envName;
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  std::string found;
+  if (const char* e = std::getenv(envName); e && *e) {
+    found = e;
   } else {
-    std::error_code ec;
-    for (const auto& de : std::filesystem::directory_iterator(plan.runtimeDir, ec)) {
-      if (de.path().extension() == ".c") plan.rtSrcs.push_back(de.path().string());
-    }
-    if (plan.rtSrcs.empty()) plan.rtSrcs.push_back(plan.runtimeC);
-    else std::sort(plan.rtSrcs.begin(), plan.rtSrcs.end());
-  }
-  std::string optFlag = "-O" + std::to_string(optimizationLevel < 0 ? 0 : (optimizationLevel > 3 ? 3 : optimizationLevel));
-  plan.baseArgs = {optFlag, "-I" + plan.runtimeDir};
-  auto hasFile = [](const std::string& p) {
-    std::error_code ec; return std::filesystem::exists(p, ec);
-  };
-  plan.libDir = "";
-  for (const std::string& cand : {plan.runtimeDir + "/libastra1.a",
-                                  plan.runtimeDir + "/lib/libastra1.a"}) {
-    if (hasFile(cand)) { plan.libDir = plan.runtimeDir; break; }
-  }
-  if (plan.libDir.empty()) {
-    std::vector<std::string> libnames = {"astralib-" + arch};
-    if (arch == hostArch()) libnames.push_back("astralib");
-    auto slash = plan.astraBin.find_last_of('/');
-    std::vector<std::string> bases;
-    if (slash != std::string::npos) {
-      std::string d = plan.astraBin.substr(0, slash);
-      bases = {d, d + "/..", d + "/../.."};
-    } else bases = {".", ".."};
-    for (const auto& b : bases) {
-      for (const auto& ln : libnames) {
-        std::string cand = b + "/" + ln;
-        if (hasFile(cand + "/libastra1.a") || hasFile(cand + "/lib/libastra1.a")) {
-          plan.libDir = std::filesystem::absolute(cand).string();
-          break;
+    // Bundled toolchain first: tools shipped next to the `a` executable
+    // (release packages stage opt/llc/clang under llvm-tools/ or bin/)
+    // win over whatever happens to be on PATH.
+    const std::string self = run_cache::selfExePath();
+    if (!self.empty()) {
+      std::string dir = self;
+      auto pos = dir.find_last_of("/\\");
+      if (pos != std::string::npos) {
+        dir = dir.substr(0, pos);
+        for (const std::string& base :
+             {dir + "/llvm-tools", dir + "/bin", dir}) {
+          for (const char* n : names) {
+            std::string cand = base + "/" + n;
+            std::error_code ec;
+            if (!std::filesystem::exists(cand, ec)) continue;
+#ifndef _WIN32
+            if (access(cand.c_str(), X_OK) != 0) continue;
+#endif
+            found = cand;
+            break;
+          }
+          if (!found.empty()) break;
         }
       }
-      if (!plan.libDir.empty()) break;
     }
-  }
-  if (!plan.libDir.empty()) plan.baseArgs.push_back("-B" + plan.libDir);
-  if (os == "windows") {
-    for (const std::string& base : {plan.libDir, plan.runtimeDir}) {
-      if (base.empty()) continue;
-      for (const char* sub : {"/include", "/include/winapi"}) {
-        std::string d = base + sub;
-        std::error_code ec2;
-        if (std::filesystem::is_directory(d, ec2))
-          plan.baseArgs.push_back("-I" + d);
-      }
-    }
-  } else if (arch == hostArch()) {
-    plan.baseArgs.insert(plan.baseArgs.end(), {"-I/usr/include", "-I/usr/include/x86_64-linux-gnu",
-                     "-I/usr/lib/gcc/x86_64-linux-gnu/13/include", "-I/usr/local/include"});
-  } else {
-    std::vector<std::string> xinc, xlibs;
-    crossSearchDirs(arch, xinc, xlibs);
-    for (const auto& d : xinc) plan.baseArgs.push_back("-I" + d);
-    for (const auto& d : xlibs) plan.baseArgs.push_back("-L" + d);
-    if (xinc.empty() && xlibs.empty()) {
-      err << "note: no sysroot found for target '" << arch
-          << "'; set A_SYSROOT or A_SYSROOT_" << arch << " to a cross toolchain root\n";
-    }
-  }
-  plan.rtArchive = plan.runtimeDir + "/libaruntime.a";
-  if (optimizationLevel >= 2 && !hasFile(plan.rtArchive) && os != "windows" &&
-      !buildRuntimeArchiveCC(arch, plan.runtimeDir, plan.rtSrcs, plan.rtArchive)) {
-    std::error_code ec;
-    const std::string objDir = plan.runtimeDir + "/rt_obj";
-    std::filesystem::create_directories(objDir, ec);
-    std::vector<std::string> robjs;
-    bool ok = true;
-    for (const std::string& src : plan.rtSrcs) {
-      std::string obj = objDir + "/" +
-          std::filesystem::path(src).stem().string() + ".o";
-      if (!hasFile(obj)) {
-        std::vector<std::string> ca = plan.baseArgs;
-        ca.push_back("-c"); ca.push_back(src); ca.push_back("-o"); ca.push_back(obj);
-        if (runAstra(arch, os, ca) != 0) { ok = false; break; }
-      }
-      robjs.push_back(obj);
-    }
-    if (ok && !robjs.empty()) {
-      std::vector<std::string> aa = {"-ar", "rcs", plan.rtArchive};
-      aa.insert(aa.end(), robjs.begin(), robjs.end());
-      ok = runAstra(arch, os, aa) == 0 && hasFile(plan.rtArchive);
-    }
-    if (!ok) err << "note: could not prebuild libaruntime.a for '" << arch
-                 << "'; falling back to per-program runtime compile\n";
-  }
-  return true;
-}
-int assembleOne(const std::string& arch, const std::string& os,
-                const std::vector<std::string>& baseArgs,
-                const std::string& srcPath, const std::string& objPath) {
-  std::vector<std::string> args = baseArgs;
-  args.push_back("-c"); args.push_back(srcPath);
-  args.push_back("-o"); args.push_back(objPath);
-  return runAstra(arch, os, args);
-}
+    if (found.empty()) {
+    const char* pathEnv = std::getenv("PATH");
+#ifdef _WIN32
+    const char delim = ';';
+#else
+    const char delim = ':';
+#endif
+    std::istringstream ss(pathEnv ? pathEnv : "");
+    std::string dir;
+    while (found.empty() && std::getline(ss, dir, delim)) {
+      if (dir.empty()) continue;
+      for (const char* n : names) {
+        std::string cand = dir + "/" + n;
+        std::error_code ec;
+        if (!std::filesystem::exists(cand, ec)) continue;
 #ifndef _WIN32
-int assembleAll(const std::string& arch, const std::string& os,
-                const std::vector<std::string>& baseArgs,
-                const std::vector<std::pair<std::string, std::string>>& jobsList,
-                int parallel) {
-  if (parallel <= 1 || jobsList.size() <= 1) {
-    int rc = 0;
-    for (const auto& j : jobsList) {
-      rc |= assembleOne(arch, os, baseArgs, j.first, j.second);
-    }
-    return rc;
-  }
-  std::string astraBin = findAstra(arch, os);
-  struct Child { pid_t pid; std::size_t idx; };
-  std::vector<Child> running;
-  std::vector<int> failed(jobsList.size(), 0);
-  std::size_t next = 0;
-  auto tryLaunch = [&]() -> bool {
-    if (next >= jobsList.size()) return false;
-    if ((int)running.size() >= parallel) return false;
-    const std::string& src = jobsList[next].first;
-    const std::string& obj = jobsList[next].second;
-    std::vector<std::string> args = baseArgs;
-    args.push_back("-c"); args.push_back(src);
-    args.push_back("-o"); args.push_back(obj);
-    std::vector<char*> av;
-    av.push_back(const_cast<char*>(astraBin.c_str()));
-    for (auto& s : args) av.push_back(const_cast<char*>(s.c_str()));
-    av.push_back(nullptr);
-    pid_t pid = fork();
-    if (pid < 0) return false;
-    if (pid == 0) {
-      execvp(astraBin.c_str(), av.data());
-      _exit(127);
-    }
-    running.push_back({pid, next});
-    ++next;
-    return true;
-  };
-  while (!running.empty() || next < jobsList.size()) {
-    while (tryLaunch()) {}
-    if (running.empty()) {
-      // Fork failed: fall back to serial for the rest.
-      for (; next < jobsList.size(); ++next)
-        failed[next] = assembleOne(arch, os, baseArgs, jobsList[next].first, jobsList[next].second);
-      break;
-    }
-    int status = 0;
-    pid_t w = waitpid(-1, &status, 0);
-    if (w < 0) {
-      if (errno == EINTR) continue;
-      break;
-    }
-    for (auto it = running.begin(); it != running.end(); ++it) {
-      if (it->pid == w) {
-        if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) failed[it->idx] = 1;
-        running.erase(it);
+        if (access(cand.c_str(), X_OK) != 0) continue;
+#endif
+        found = cand;
         break;
       }
     }
+    }
   }
-  int rc = 0;
-  for (int f : failed) rc |= f;
-  return rc;
+  cache.emplace(key, found);
+  return found;
 }
-#else
-int assembleAll(const std::string& arch, const std::string& os,
-                const std::vector<std::string>& baseArgs,
-                const std::vector<std::pair<std::string, std::string>>& jobsList,
-                int) {
-  int rc = 0;
-  for (const auto& j : jobsList) rc |= assembleOne(arch, os, baseArgs, j.first, j.second);
-  return rc;
+// Maps PipelineConfig.optimizationLevel to an -O flag.
+std::string llvmOptFlag(int level) {
+  if (level <= 0) return "-O0";
+  if (level == 1) return "-O1";
+  if (level == 2) return "-O2";
+  return "-O3";
 }
-#endif
-int linkUnits(const std::string& arch, const std::string& os,
-              const AstraPlan& plan, int optimizationLevel,
-              const std::vector<std::string>& objs, const std::string& outPath,
+// opt -O<n> -S in.ll -o opt.ll  ->  llc -O<n> -filetype=obj opt.ll -o out.o
+//   ->  clang out.o libaruntime.a -o out -lm -lpthread [-ldl].
+// Returns 0 on success; the failing stage's diagnostics go to err (the
+// tools' own stderr is inherited).
+int llvmBuild(const std::string& arch, const std::string& llPath,
+              const std::string& outPath, int optimizationLevel,
               std::ostream& err) {
-  std::vector<std::string> args = plan.baseArgs;
-  for (const auto& o : objs) args.push_back(o);
-  if (optimizationLevel >= 2 && std::filesystem::exists(plan.rtArchive))
-    args.push_back(plan.rtArchive);
-  else
-    args.insert(args.end(), plan.rtSrcs.begin(), plan.rtSrcs.end());
-  args.push_back("-o"); args.push_back(outPath);
-  int rc = runAstra(arch, os, args);
-  if (rc != 0) err << "error: astra failed to link program\n";
-  return rc;
-}
-// Splits a large unit's assembly text into independent chunks for parallel
-// `astra -c` (intra-unit parallel assemble). Header (bss+rodata) is kept in
-// chunk 0 (bss must appear once); rodata is duplicated in later chunks so
-// object-local `.L` string references resolve in each chunk. Text is split
-// at function boundaries (`    .text` lines) and balanced by line count.
-inline std::vector<std::string> splitUnitText(const std::string& text, int parts) {
-  std::vector<std::string> out;
-  if (parts <= 1 || text.empty()) { out.push_back(text); return out; }
-  std::vector<std::string> lines;
-  {
-    std::istringstream ss(text);
-    std::string line;
-    while (std::getline(ss, line)) lines.push_back(line + "\n");
+#ifdef _WIN32
+  (void)arch; (void)llPath; (void)outPath; (void)optimizationLevel;
+  err << "error: llvm backend is not supported on Windows yet\n";
+  return 1;
+#else
+  if (arch != hostArch()) {
+    err << "error: llvm backend is host-only; cross compile unsupported"
+        << " (target '" << arch << "' != host '" << hostArch() << "')\n";
+    return 1;
   }
-  long firstText = -1;
-  for (std::size_t i = 0; i < lines.size(); ++i) {
-    if (lines[i] == "    .text\n") { firstText = (long)i; break; }
+  const int level = optimizationLevel < 0 ? 0
+                   : optimizationLevel > 3 ? 3 : optimizationLevel;
+  const std::string optFlag = llvmOptFlag(level);
+  std::string cc = findLLVMTool("A_LLVM_CC",
+      {"clang", "clang-18", "clang-17", "clang-16", "clang-15",
+       "clang++", "clang++-18", "clang++-17"});
+  if (cc.empty()) {
+    err << "error: llvm backend: no clang driver found (set A_LLVM_CC)\n";
+    return 1;
   }
-  if (firstText < 0) { out.push_back(text); return out; }
-  long rodataIdx = -1;
-  for (std::size_t i = 0; i < (std::size_t)firstText; ++i) {
-    if (lines[i].find(".section .rodata") != std::string::npos) { rodataIdx = (long)i; break; }
+  std::string llc = findLLVMTool("A_LLVM_LLC",
+      {"llc", "llc-18", "llc-17", "llc-16", "llc-15"});
+  if (llc.empty()) {
+    err << "error: llvm backend: no llc found (set A_LLVM_LLC)\n";
+    return 1;
   }
-  std::string bssText, rodataText;
-  if (rodataIdx >= 0) {
-    for (long i = 0; i < rodataIdx; ++i) bssText += lines[(std::size_t)i];
-    for (long i = rodataIdx; i < firstText; ++i) rodataText += lines[(std::size_t)i];
-  } else {
-    for (long i = 0; i < firstText; ++i) bssText += lines[(std::size_t)i];
-  }
-  // Local string labels (.L__a_dN) must be repeated in every chunk because they
-  // are file-local and cannot be resolved across objects by the `-r` merge.
-  // Global data such as the __a_test_names/__a_test_fns tables must NOT be
-  // repeated: only the entry chunk that references them should define them,
-  // otherwise the merge fails with "link symbol defined twice".
-  std::string rodataLocal = rodataText;
-  {
-    std::size_t p = rodataLocal.find("    .globl __a_test_names");
-    if (p != std::string::npos) {
-      std::size_t q = rodataLocal.find("__a_test_fns:", p);
-      if (q != std::string::npos) {
-        std::size_t nl = rodataLocal.find('\n', q);
-        q = (nl == std::string::npos) ? rodataLocal.size() : nl + 1;
-        // Consume the .quad entries that follow __a_test_fns:.
-        while (q < rodataLocal.size() &&
-               rodataLocal.compare(q, 11, "    .quad ") == 0) {
-          nl = rodataLocal.find('\n', q);
-          q = (nl == std::string::npos) ? rodataLocal.size() : nl + 1;
-        }
-        rodataLocal.erase(p, q - p);
-      }
-    }
-  }
-  std::vector<std::string> funcs;
-  std::vector<std::size_t> funcLines;
-  // first func starts at firstText; subsequent funcs at each `    .text`
-  std::vector<std::size_t> starts;
-  for (std::size_t i = (std::size_t)firstText; i < lines.size(); ++i) {
-    if (lines[i] == "    .text\n") starts.push_back(i);
-  }
-  if (starts.empty()) { out.push_back(text); return out; }
-  for (std::size_t k = 0; k < starts.size(); ++k) {
-    std::size_t s = starts[k];
-    std::size_t e = (k + 1 < starts.size()) ? starts[k + 1] : lines.size();
-    std::string f;
-    for (std::size_t i = s; i < e; ++i) f += lines[i];
-    funcs.push_back(std::move(f));
-    funcLines.push_back(e - s);
-  }
-  if ((int)funcs.size() < 2) { out.push_back(text); return out; }
-  int nparts = std::min(parts, (int)funcs.size());
-  // Greedy balance by line count.
-  std::vector<std::vector<int>> groups((std::size_t)nparts);
-  std::vector<std::size_t> gsum((std::size_t)nparts, 0);
-  std::vector<int> order(funcs.size());
-  std::iota(order.begin(), order.end(), 0);
-  std::sort(order.begin(), order.end(), [&](int a, int b){ return funcLines[(std::size_t)a] > funcLines[(std::size_t)b]; });
-  for (int idx : order) {
-    int best = 0;
-    for (int g = 1; g < nparts; ++g) if (gsum[(std::size_t)g] < gsum[(std::size_t)best]) best = g;
-    groups[(std::size_t)best].push_back(idx);
-    gsum[(std::size_t)best] += funcLines[(std::size_t)idx];
-  }
-  for (int g = 0; g < nparts; ++g) {
-    std::string chunk = (g == 0 ? bssText + rodataText : rodataLocal);
-    // Preserve source order within group for determinism.
-    std::sort(groups[(std::size_t)g].begin(), groups[(std::size_t)g].end());
-    for (int idx : groups[(std::size_t)g]) chunk += funcs[(std::size_t)idx];
-    out.push_back(std::move(chunk));
-  }
-  return out;
-}
-// Builds `outPath` from per-module units (entry unit holds `main`).
-// Returns 0 on success, 1 on failure. Emits/assembles only cache misses
-// when the object cache is active; A_NO_CACHE disables it, but the split
-// layout is kept so cached/uncached binaries are byte-comparable.
-int buildSplitUnits(CompiledModule& m, const TargetDesc& td,
-                    const std::string& outPath, std::ostream& err,
-                    int optimizationLevel, bool testMode,
-                    const std::string* testFilter,
-                    const std::string* entrySource, int parallel) {
-  // Assembly itself is embarrassingly parallel; default to 4 workers even
-  // when frontend jobs=1 (A_JOBS/-j still cap it at 1 when explicitly 1
-  // and A_JOBS is set? No: explicit -j1 keeps serial assembly for
-  // determinism tests; only the default (jobs==0, no A_JOBS) auto-scales).
-  // NOTE: compileAndRun passes config.jobs (default 1) here, so without -j
-  // we would stay serial; treat 1 as auto=4 for assembly to meet the
-  // incremental-build perf gate (frontend jobs remain serial).
-  if (parallel <= 0) {
-    const char* j = std::getenv("A_JOBS");
-    if (j && *j) { try { parallel = std::stoi(j); } catch (...) { parallel = 4; } }
-    else parallel = 4;
-  } else if (parallel == 1 && !std::getenv("A_JOBS")) {
-    // Default `a run`/`a build` (jobs=1, no A_JOBS): parallel assembly.
-    parallel = 4;
-  }
-  const ModuleGraph& g = *m.graph;
-  std::vector<int> order = g.order;
-  if (order.empty() && g.entry >= 0) order.push_back(g.entry);
-  {
-    std::set<int> inOrder(order.begin(), order.end());
-    for (const Module& mod : g.modules)
-      if (!inOrder.count(mod.id)) order.push_back(mod.id);
-  }
-  bool useObjCache = objcache::objCacheEnabled();  // per-target key; cross .o safe
+  std::string cur = llPath;
+  std::string optPath, objPath;
   std::error_code ec;
-  if (useObjCache) {
-    std::string central = objcache::objCacheDir();
-    if (!central.empty()) std::filesystem::create_directories(central, ec);
-  }
-  struct UnitPlan {
-    int moduleId = -1;
-    std::uint64_t sigh = 0;
-    std::string key;
-    std::string cacheObj;
-    std::string cacheDir;
-    bool hit = false;
+  auto cleanup = [&]() {
+    if (!optPath.empty()) std::filesystem::remove(optPath, ec);
+    if (!objPath.empty()) std::filesystem::remove(objPath, ec);
   };
-  objcache::KeyContext keyCtx = objcache::makeKeyContext(m, td, optimizationLevel, entrySource);
-  std::vector<UnitPlan> plans;
-  for (int mid : order) {
-    UnitPlan up;
-    up.moduleId = mid;
-    up.sigh = keyCtx.sighById[mid];
-    std::set<int> deps;
-    if (mid == g.entry) {
-      for (const Module& mod : g.modules)
-        if (mod.id != mid) deps.insert(mod.id);
-    } else {
-      deps = objcache::transitiveImports(g, mid);
-      deps.erase(mid);
-    }
-    up.key = objcache::unitKeyWithCtx(m, keyCtx, testMode, testFilter, mid, deps);
-    up.cacheDir = objcache::acacheDirForModule(g.at(mid).path);
-    up.cacheObj = up.cacheDir + "/" + up.key + ".o";
-    if (useObjCache && std::filesystem::is_regular_file(up.cacheObj, ec))
-      up.hit = true;
-    plans.push_back(up);
-  }
-  std::vector<int> misses;
-  for (const auto& up : plans) if (!up.hit) misses.push_back(up.moduleId);
-  bool dbg = objcache::debugUnits();
-  if (dbg) {
-    for (const auto& up : plans) {
-      err << "unit " << up.moduleId << " " << g.at(up.moduleId).path
-          << " key=" << up.key << " " << (up.hit ? "hit" : "miss") << "\n";
-    }
-    err << "units: " << plans.size() << " total, " << misses.size() << " emitted\n";
-  }
-  AstraPlan azt;
-  if (!prepareAstraPlan(td.arch, td.os, optimizationLevel, err, azt)) return 1;
-  struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0);
-  auto ms_since = [&](struct timespec a){ struct timespec b; clock_gettime(CLOCK_MONOTONIC, &b); return (b.tv_sec-a.tv_sec)*1000 + (b.tv_nsec-a.tv_nsec)/1000000; };
-  bool dotiming = std::getenv("A_DEBUG_TIMING") != nullptr;
-  std::unordered_map<int, std::string> unitText;
-  if (!misses.empty()) {
-    std::vector<AsmUnit> emitted;
-    std::string emitErr;
-    bool emitOk;
-    if (td.useAsm) {
-      emitOk = emitAsmPerUnit(*m.graph, *m.sema, emitted, emitErr, testMode, testFilter, &misses);
-    } else {
-      // Native per-unit split (functions-only; top-levels in entry main).
-      emitOk = emitNativePerUnit(*m.graph, *m.sema, td.arch, td.os, emitted, emitErr,
-                                 testMode, testFilter, &misses);
-    }
-    if (!emitOk) {
-      err << "error: code generation failed: " << emitErr << "\n";
+  // Stage 1: opt (skipped at -O0).
+  if (level > 0) {
+    std::string opt = findLLVMTool("A_LLVM_OPT",
+        {"opt", "opt-18", "opt-17", "opt-16", "opt-15"});
+    if (opt.empty()) {
+      err << "error: llvm backend: no opt found (set A_LLVM_OPT)\n";
       return 1;
     }
-    for (auto& u : emitted) unitText[u.moduleId] = std::move(u.text);
-  }
-  if (dotiming) err << "timing emit ms=" << ms_since(ts0) << "\n";
-  // Assemble misses (parallel where possible). Large units are split into
-  // balanced chunks for intra-unit parallel assemble (see splitUnitText).
-  struct MissJob {
-    int moduleId = -1;
-    std::vector<std::string> chunkSrcs;
-    std::vector<std::string> chunkObjs;
-    std::string mergedObj;  // single .o for this unit after partial link
-    bool split = false;
-  };
-  std::vector<MissJob> missJobs;
-  std::vector<std::pair<std::string, std::string>> jobsList;  // chunk src->obj
-  std::vector<std::string> stagedSrcs;
-  std::vector<std::string> tempObjs;
-  std::unordered_map<int, std::string> objPath;
-  for (const auto& up : plans) {
-    if (up.hit) {
-      objPath[up.moduleId] = up.cacheObj;
-    } else {
-      auto it = unitText.find(up.moduleId);
-      if (it == unitText.end()) {
-        err << "error: missing unit emission for module " << up.moduleId << "\n";
-        return 1;
-      }
-      MissJob mj;
-      mj.moduleId = up.moduleId;
-      std::vector<std::string> chunks;
-      std::size_t nlines = 0;
-      {
-        // Count lines to decide splitting (threshold keeps setup cost low).
-        for (char c : it->second) if (c == '\n') ++nlines;
-        if (parallel > 1 && nlines > 8000) chunks = splitUnitText(it->second, std::min(parallel, 4));
-        else chunks.push_back(it->second);
-      }
-      mj.split = chunks.size() > 1;
-      for (auto& ch : chunks) {
-        std::string srcPath = stageSrc(ch, ".s", err);
-        if (srcPath.empty()) return 1;
-        stagedSrcs.push_back(srcPath);
-        std::string tmpObj;
-        if (useObjCache) {
-          std::string tdir;
-          for (const auto& u2 : plans) if (u2.moduleId == up.moduleId) tdir = u2.cacheDir;
-          if (tdir.empty()) tdir = objcache::acacheDirForModule(g.at(up.moduleId).path);
-          std::filesystem::create_directories(tdir, ec);
-          tmpObj = tdir + "/tmp-" + std::to_string(::getpid()) + "-" + std::to_string(::rand()) + ".o";
-        } else {
-          tmpObj = tempPath("obj", "x.o");
-        }
-        jobsList.push_back({srcPath, tmpObj});
-        mj.chunkSrcs.push_back(srcPath);
-        mj.chunkObjs.push_back(tmpObj);
-      }
-      if (!mj.split) {
-        mj.mergedObj = mj.chunkObjs.front();
-        objPath[up.moduleId] = useObjCache ? up.cacheObj : mj.mergedObj;
-        if (!useObjCache) tempObjs.push_back(mj.mergedObj);
-        else tempObjs.push_back(mj.mergedObj);  // tmpObj renamed below
-      } else {
-        // Partial link chunks into one unit .o for cache / final link.
-        std::string merged = tempPath("obj", "x.o");
-        mj.mergedObj = merged;
-        objPath[up.moduleId] = useObjCache ? up.cacheObj : merged;
-        tempObjs.push_back(merged);
-      }
-      missJobs.push_back(std::move(mj));
-    }
-  }
-  // jobsList src->tmpObj ordering must match misses for rename below.
-  if (dotiming) err << "timing stagedsrc ms=" << ms_since(ts0) << "\n";
-  if (!jobsList.empty()) {
-    if (assembleAll(td.arch, td.os, azt.baseArgs, jobsList, parallel) != 0) {
-      err << "error: astra failed to assemble per-module units\n";
-      for (auto& s : stagedSrcs) std::filesystem::remove(s, ec);
-      // Remove partial tmp objs.
-      for (auto& o : tempObjs) std::filesystem::remove(o, ec);
+    optPath = tempPath("llvm", "x.ll");
+    if (runChild(opt, {optFlag, "-S", cur, "-o", optPath}) != 0) {
+      err << "error: llvm backend: opt failed on '" << llPath << "'\n";
+      cleanup();
       return 1;
     }
+    cur = optPath;
   }
-  for (auto& s : stagedSrcs) std::filesystem::remove(s, ec);
-  for (auto& mj : missJobs) {
-    if (mj.split) {
-      // Partial-link chunks into one unit .o (relocatable).
-      std::vector<std::string> pargs = azt.baseArgs;
-      pargs.push_back("-r");
-      for (auto& co : mj.chunkObjs) pargs.push_back(co);
-      pargs.push_back("-o");
-      pargs.push_back(mj.mergedObj);
-      if (runAstra(td.arch, td.os, pargs) != 0) {
-        err << "error: astra failed to merge split unit " << mj.moduleId << "\n";
-        for (auto& o : mj.chunkObjs) std::filesystem::remove(o, ec);
-        return 1;
-      }
-      for (auto& co : mj.chunkObjs) std::filesystem::remove(co, ec);
-    }
-    if (useObjCache) {
-      const std::string& dest = mj.mergedObj;
-      int mid = mj.moduleId;
-      std::string finalObj, finalKey, finalDir;
-      std::uint64_t sigh = 0;
-      for (const auto& u2 : plans) if (u2.moduleId == mid) {
-        finalObj = u2.cacheObj; finalKey = u2.key; finalDir = u2.cacheDir; sigh = u2.sigh;
-      }
-      std::error_code rec, dec;
-      std::filesystem::create_directories(finalDir, dec);
-      std::filesystem::rename(dest, finalObj, rec);
-      if (rec) {
-        std::error_code cec;
-        std::filesystem::copy_file(dest, finalObj, std::filesystem::copy_options::overwrite_existing, cec);
-        std::filesystem::remove(dest, ec);
-      }
-      std::ofstream sf(finalDir + "/" + finalKey + ".sym", std::ios::binary | std::ios::trunc);
-      if (sf) sf << objcache::hex64(sigh) << "\n";
-    }
+  // Stage 2: llc -> object file.
+  objPath = tempPath("llvm", "x.o");
+  if (runChild(llc, {optFlag, "-filetype=obj", cur, "-o", objPath}) != 0) {
+    err << "error: llvm backend: llc failed\n";
+    cleanup();
+    return 1;
   }
-  std::vector<std::string> objs;
-  objs.reserve(plans.size());
-  for (const auto& up : plans) objs.push_back(objPath[up.moduleId]);
-  if (dotiming) err << "timing assemble ms=" << ms_since(ts0) << "\n";
-  int rc = linkUnits(td.arch, td.os, azt, optimizationLevel, objs, outPath, err);
-  if (dotiming) err << "timing link ms=" << ms_since(ts0) << "\n";
-  for (auto& o : tempObjs) if (!useObjCache) std::filesystem::remove(o, ec);
+  // Stage 3: link the object with the A runtime archive.
+  std::string astraBin, runtimeC, runtimeDir;
+  if (!findRuntime(arch, hostOs(), astraBin, runtimeC, runtimeDir)) {
+    err << "error: llvm backend: cannot locate A runtime (a_runtime.c)\n";
+    cleanup();
+    return 1;
+  }
+  std::vector<std::string> rtCandidates = {
+      runtimeDir + "/libaruntime.a",
+      runtimeDir + "/../libaruntime.a",
+      runtimeDir + "/../../libaruntime.a",
+      "compiler/astra/runtime/libaruntime.a",
+      "./compiler/astra/runtime/libaruntime.a",
+  };
+  std::string rtLib;
+  for (const auto& c : rtCandidates) {
+    std::error_code ec2;
+    if (std::filesystem::exists(c, ec2)) { rtLib = c; break; }
+  }
+  if (rtLib.empty()) {
+    err << "error: llvm backend: cannot locate libaruntime.a\n";
+    cleanup();
+    return 1;
+  }
+  // llc emits a non-PIC object; -no-pie keeps the link consistent with it.
+  std::vector<std::string> args = {objPath, rtLib, "-o", outPath,
+                                   "-no-pie", "-lm", "-lpthread"};
+#ifndef __APPLE__
+  args.push_back("-ldl");
+#endif
+  int rc = runChild(cc, args);
+  cleanup();
+  if (rc != 0) err << "error: llvm backend: clang link failed\n";
   return rc == 0 ? 0 : 1;
+#endif
 }
 
-// Emits code for a checked program, compiles+links it with the target's
-// astra into runPath, and (for native targets) runs the binary.
-// `canExecute` is false for cross targets: the link still happens, but no
-// child process is spawned.
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
                   bool testMode = false, int optimizationLevel = 3,
                   const std::string* keepBin = nullptr,
                   const TargetDesc* td = nullptr,
                   const std::string* entrySource = nullptr,
-                  const std::string* testFilter = nullptr, int jobs = 0) {
-  (void)in; (void)out;
+                  const std::string* testFilter = nullptr, int jobs = 0,
+                  const std::string& backend = "llvm") {
+  (void)in; (void)out; (void)jobs;  // jobs: per-module split assemble removed with the asm backend
+  if (std::getenv("A_LLVM_DEBUG"))
+    err << "compileAndRun backend='" << backend << "'\n";
   TargetDesc localTd;
   if (!td) {
     if (!resolveTarget("", localTd, err)) return kCErr;
     td = &localTd;
   }
-  // Run cache: a hit skips emit+astra entirely (~2ms exec vs ~25ms build).
+  // Run cache: a hit skips emit+link entirely (~2ms exec vs ~25ms build).
   run_cache::Plan cache;
   if ((!keepBin || keepBin->empty()) && td->native) {
     cache = run_cache::plan(m, *td, testMode, optimizationLevel, entrySource,
@@ -2349,116 +1624,71 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
       // Unusable stale entry: fall through and recompile.
     }
   }
-  // Per-module split path (Phase 2 + 3): x86-64 SysV + native targets
-  // (functions-only split; top-levels stay in entry main). i8086
-  // (bare-metal flat image) stays single-unit. A_SPLIT_UNITS=0 forces
-  // the single-unit path everywhere.
-  if (objcache::splitUnitsEnabled() && td->arch != "i8086" && td->arch != "8086") {
-    std::string tmpBinS = tempPath("bin");
-    std::string runPathS = (keepBin && !keepBin->empty()) ? *keepBin : tmpBinS;
-    if (cache.active) {
-      std::error_code ec2;
-      std::string cdir = std::filesystem::path(cache.file).parent_path().string();
-      std::filesystem::create_directories(cdir, ec2);
-      runPathS = cdir + "/tmp-" +
-                 std::to_string(::getpid()) + "-" + std::to_string(::rand());
-    }
-    int src2 = buildSplitUnits(m, *td, runPathS, err, optimizationLevel,
-                               testMode, testFilter, entrySource, jobs);
-    if (cache.active && src2 == 0) {
-      std::error_code rec2;
-      std::filesystem::rename(runPathS, cache.file, rec2);
-      if (!rec2) runPathS = cache.file;
-    }
-    if (src2 != 0) {
-      std::error_code ec2;
-      std::filesystem::remove(runPathS, ec2);
-      return kCErr;
-    }
-    std::error_code ec2;
-    if (!td->native) {
-      if (!keepBin) std::filesystem::remove(runPathS, ec2);
-      err << "note: built '" << runPathS << "' for " << td->arch << " (cannot execute on this host)\n";
-      return 0;
-    }
-    int rrc = runBinary(runPathS);
-    if (cache.active && runPathS == cache.file) {
-    } else if (!keepBin) {
-      std::filesystem::remove(runPathS, ec2);
-    }
-    return rrc < 0 ? kCErr : rrc;
-  }
-  std::string srcSource, srcError;
   const char* forced = std::getenv("A_CODEGEN");
   if (forced && lowerStr(forced) == "c") {
     err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
-           "removed — every target compiles A -> assembly -> machine code\n";
+           "removed — the LLVM backend is the only native backend\n";
     return kCErr;
   }
-  bool strictAsm = forced && lowerStr(forced) == "asm";
-  // The target's assembly emitter is the only codegen path: emitAsm on
-  // x86-64 SysV (linux/macos), emitNative on every other arch (including
-  // Windows x86-64 via the Win64 MS ABI). A decline is a hard error
-  // carrying the emitter's reason — there is no C fallback.
-  bool asmOk = td->useAsm
-      ? emitAsm(*m.graph, *m.sema, srcSource, srcError, testMode, testFilter)
-      : emitNative(*m.graph, *m.sema, td->arch, td->os, srcSource, srcError,
-                   testMode, testFilter);
-  if (!asmOk) {
-    if (td->arch == "i8086")
-      err << "error: code generation failed for i8086 (asm-only target): "
-          << srcError << "\n";
-    else if (strictAsm)
-      err << "error: A_CODEGEN=asm: assembly backend declined: "
-          << srcError << "\n";
-    else
-      err << "error: code generation failed: " << srcError << "\n";
+  // LLVM is the only native backend and is host-only: a declined emission
+  // or a toolchain failure is a hard error — there is no asm fallback.
+  if (!td->native || td->arch != hostArch()) {
+    err << "error: llvm backend is host-only; cross compile unsupported"
+        << " (target '" << td->arch << "' != host '" << hostArch() << "')\n";
     return kCErr;
   }
-  std::string srcPath = stageSrc(srcSource, ".s", err);
-  if (srcPath.empty()) return kCErr;
-  std::string tmpBin = tempPath("bin");
-  std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
-  // On a cache miss compile to a temp name in the cache dir so the rename
-  // below is atomic and same-filesystem.
-  if (cache.active) {
+  if (std::getenv("A_LLVM_DEBUG"))
+    err << "td.native=" << td->native << " arch=" << td->arch
+        << " host=" << hostArch() << "\n";
+  {
+    std::string llSource, llError;
+    if (!emitLLVM(*m.graph, *m.sema, llSource, llError, testMode,
+                  testFilter)) {
+      err << "error: llvm backend: LLVM IR emission failed: " << llError
+          << "\n";
+      return kCErr;
+    }
+    if (std::getenv("A_LLVM_DEBUG"))
+      err << "llvm-emit: ok\n";
+    std::string llPath = stageSrc(llSource, ".ll", err);
+    if (llPath.empty()) return kCErr;
+    std::string tmpBin = tempPath("bin");
+    std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
+    // On a cache miss compile to a temp name in the cache dir so the rename
+    // below is atomic and same-filesystem.
+    if (cache.active) {
+      std::error_code ec;
+      std::string cdir = std::filesystem::path(cache.file).parent_path().string();
+      std::filesystem::create_directories(cdir, ec);
+      runPath = cdir + "/tmp-" +
+                std::to_string(::getpid()) + "-" + std::to_string(::rand());
+    }
+    int rc = llvmBuild(td->arch, llPath, runPath, optimizationLevel, err);
+    if (rc != 0 && std::getenv("A_LLVM_DEBUG"))
+      err << "llvm-cc failed; kept " << llPath << "\n";
+    else {
+      std::error_code ec;
+      std::filesystem::remove(llPath, ec);
+    }
+    if (cache.active && rc == 0) {
+      std::error_code ec2;
+      std::filesystem::rename(runPath, cache.file, ec2);
+      if (!ec2) runPath = cache.file;
+    }
     std::error_code ec;
-    std::string cdir = std::filesystem::path(cache.file).parent_path().string();
-    std::filesystem::create_directories(cdir, ec);
-    runPath = cdir + "/tmp-" +
-              std::to_string(::getpid()) + "-" + std::to_string(::rand());
+    if (rc != 0) {
+      std::filesystem::remove(runPath, ec);
+      return kCErr;
+    }
+    rc = runBinary(runPath);
+    // Delete only temp artifacts; a filled cache entry must stay.
+    if (cache.active && runPath == cache.file) {
+      // keep
+    } else if (!keepBin) {
+      std::filesystem::remove(runPath, ec);
+    }
+    return rc < 0 ? kCErr : rc;
   }
-  int rc = astraBuild(td->arch, td->os, srcPath, runPath, err, optimizationLevel);
-  if (cache.active && rc == 0) {
-    std::error_code ec;
-    std::filesystem::rename(runPath, cache.file, ec);
-    if (!ec) runPath = cache.file;
-  }
-  std::error_code ec;
-  std::filesystem::remove(srcPath, ec);
-  if (rc != 0) { std::filesystem::remove(runPath, ec); return kCErr; }
-#ifndef _WIN32
-  if (td->arch == "i8086") {
-    int qrc = runI8086Image(runPath);
-    if (!keepBin) std::filesystem::remove(runPath, ec);
-    if (qrc == 127) { err << "error: qemu-system-i386 not found (required for --target i8086 run)\n"; return kCErr; }
-    return qrc;
-  }
-#endif
-  if (!td->native) {
-    // Cross target: the binary was produced but cannot run on this host.
-    if (!keepBin) std::filesystem::remove(runPath, ec);
-    err << "note: built '" << runPath << "' for " << td->arch << " (cannot execute on this host)\n";
-    return 0;
-  }
-  rc = runBinary(runPath);
-  // Delete only temp artifacts; a filled cache entry must stay.
-  if (cache.active && runPath == cache.file) {
-    // keep
-  } else if (!keepBin) {
-    std::filesystem::remove(runPath, ec);
-  }
-  return rc < 0 ? kCErr : rc;
 }
 }
 
@@ -2466,18 +1696,22 @@ CompiledModule runFrontendPipeline(const std::string& path,std::string source,co
   ModuleLoaderOptions opts; opts.modulePaths=config.modulePaths; opts.stdlibRoot=config.stdlibRoot;
   ModuleLoader loader(std::move(opts),sink); ModuleGraph graph=loader.load(path,std::move(source));
   if(!flushErrors(sink,config,diagOut,diagErr)) return {};
+  // Comptime metaprogramming: specialize `comptime` parameters at call sites
+  // and resolve `comptime if`/`comptime for` before sema sees the AST, so all
+  // backends get ordinary functions and statements.
+  runComptimePass(graph,sink); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   Sema sema(graph,sink); SemaResult result = config.jobs > 1 ? sema.analyzeParallel(config.jobs) : sema.analyze(); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   analyzeOwnership(graph,sink); if(!flushErrors(sink,config,diagOut,diagErr)) return {};
   flushFinal(sink,config,diagOut,diagErr);
   CompiledModule m; m.graph=std::make_unique<ModuleGraph>(std::move(graph)); m.sema=std::make_unique<SemaResult>(std::move(result)); m.ok=true; return m;
 }
 int executePipeline(const std::string& path,std::string source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
-  // Execution: the frontend emits target assembly, Astra
-  // assembles it with the runtime into a binary, and the binary runs
-  // as a child process — host targets only.
+  // Execution: the frontend lowers the AST to LLVM IR, the LLVM
+  // toolchain (opt/llc/clang) builds a binary linked with the runtime,
+  // and the binary runs as a child process — host targets only.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
-  if(!td.native && !(td.arch=="i8086" && hostOs()=="linux")){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
+  if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
   if(config.checkOnly){
     DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; return kOk;
   }
@@ -2525,7 +1759,8 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
       if(sidecar) sidecar << diagCapture;
     }
     return compileAndRun(m,in,out,err,false,config.optimizationLevel,
-                       preBin.empty() ? nullptr : &preBin, &td, &source, nullptr, config.jobs);
+                       preBin.empty() ? nullptr : &preBin, &td, &source, nullptr,
+                       config.jobs, config.backend);
   }
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
@@ -2555,7 +1790,10 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
         }
       }
     }
-    if(!any){ err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kCErr; }
+    if(!any){
+      if(config.scanIgnoreFilterMismatch) return 3; // kTestSkip: no matching tests in this file (scan mode)
+      err<<"a test: no tests matched --filter '"<<config.testFilter<<"'\n"; return kCErr;
+    }
   }
   // test_* functions are invoked by the runtime harness as f(argv) with no
   // declared arguments; a parameter would silently read a padded A_NONE
@@ -2581,11 +1819,12 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     if(sink.hasErrors()){ sink.flush(err,config.useColor); return kCErr; }
   }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
-                       config.testFilter.empty()?nullptr:&config.testFilter, config.jobs);
+                       config.testFilter.empty()?nullptr:&config.testFilter, config.jobs,
+                       config.backend);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
-  // Guard `a build x.a -o x.a`: astra would overwrite the source file with
-  // the ELF. Compare canonical paths so `./x.a`, `sub/../x.a` and symlinks
+  // Guard `a build x.astra -o x.astra`: the linker would overwrite the source file with
+  // the ELF. Compare canonical paths so `./x.astra`, `sub/../x.astra` and symlinks
   // are caught too.
   {
     std::error_code eci, eco;
@@ -2610,49 +1849,38 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   }
   std::string src; if(!readAll(path,src,err)) return kNoIn;
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  // `a build`: emit target assembly (x86-64 SysV asm, per-arch native),
-  // then astra links a native executable for the target arch.
+  // `a build`: the LLVM backend is the only native backend and is
+  // host-only — a non-host target is a hard error.
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
-  if (objcache::splitUnitsEnabled() && td.arch != "i8086" && td.arch != "8086") {
-    return buildSplitUnits(m, td, outputPath, err, config.optimizationLevel,
-                           false, nullptr, nullptr, config.jobs) == 0 ? kOk : kCErr;
-  }
-  std::string srcSource, srcError;
   const char* forced = std::getenv("A_CODEGEN");
   if (forced && lowerStr(forced) == "c") {
     err << "error: A_CODEGEN=c is no longer supported: the C emitter was "
-           "removed — every target compiles A -> assembly -> machine code\n";
+           "removed — the LLVM backend is the only native backend\n";
     return kCErr;
   }
-  bool strictAsm = forced && lowerStr(forced) == "asm";
-  // The target's assembly emitter is the only codegen path (emitAsm on
-  // x86-64 SysV, emitNative elsewhere); a decline is a hard error.
-  bool asmOk = td.useAsm
-      ? emitAsm(*m.graph, *m.sema, srcSource, srcError)
-      : emitNative(*m.graph, *m.sema, td.arch, td.os, srcSource, srcError);
-  if (!asmOk) {
-    if (td.arch == "i8086")
-      err << "error: code generation failed for i8086 (asm-only target): "
-          << srcError << "\n";
-    else if (strictAsm)
-      err << "error: A_CODEGEN=asm: assembly backend declined: "
-          << srcError << "\n";
-    else
-      err << "error: code generation failed: " << srcError << "\n";
+  if (!td.native || td.arch != hostArch()) {
+    err << "error: llvm backend is host-only; cross compile unsupported"
+        << " (target '" << td.arch << "' != host '" << hostArch() << "')\n";
     return kCErr;
   }
-  std::string srcPath = stageSrc(srcSource, ".s", err);
-  if (srcPath.empty()) return kCErr;
-  int rc = astraBuild(td.arch, td.os, srcPath, outputPath, err, config.optimizationLevel);
-  std::error_code ec; std::filesystem::remove(srcPath, ec);
-  return rc;
-}
-int emitIRPipeline(const std::string& path,const PipelineConfig& config,bool optimize,std::ostream& out,std::ostream& err){
-  std::string src; if(!readAll(path,src,err)) return kNoIn; DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
-  ir::Program p=ir::lowerProgram(*m.graph,*m.sema);
-  if(optimize){ ir::OptLevel level = ir::OptLevel::O2; ir::optLevelFromInt(config.optimizationLevel, level); a::ir::runOptPipeline(p, level); }
-  out<<ir::printProgram(p); return kOk;
+  std::string llSource, llError;
+  if (!emitLLVM(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
+    err << "error: llvm backend: LLVM IR emission failed: " << llError
+        << "\n";
+    return kCErr;
+  }
+  std::string llPath = stageSrc(llSource, ".ll", err);
+  if (llPath.empty()) return kCErr;
+  int rc = llvmBuild(td.arch, llPath, outputPath,
+                     config.optimizationLevel, err);
+  std::error_code ec;
+  std::filesystem::remove(llPath, ec);
+  if (rc != 0) {
+    std::filesystem::remove(outputPath, ec);
+    return kCErr;
+  }
+  return 0;
 }
 ReplSession::~ReplSession() = default;
 int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
@@ -2661,6 +1889,185 @@ int replEval(ReplSession& session,const std::string& source,const PipelineConfig
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source,nullptr,config.jobs);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source,nullptr,config.jobs,config.backend);
+}
+
+namespace {
+bool shouldSkipTestDir(const std::string& name){
+  if(name.empty()) return false;
+  if(name[0]=='.') return true; // .git, .cache, .apm, hidden
+  if(name=="build" || name=="node_modules" || name=="third_party") return true;
+  if(name.rfind("cmake-build",0)==0) return true;
+  if(name.rfind("build-",0)==0) return true;
+  return false;
+}
+bool fileHasTestDecl(const std::filesystem::path& path){
+  std::ifstream f(path, std::ios::binary);
+  if(!f) return false;
+  std::string line;
+  while(std::getline(f,line)){
+    // skip line comments (common case) to reduce false positives
+    size_t i=0; while(i<line.size() && (line[i]==' '||line[i]=='\t')) ++i;
+    if(i<line.size() && line[i]=='#') continue;
+    // look for: fn <spaces/tabs> test_
+    for(size_t p=0; (p=line.find("fn", p))!=std::string::npos; ++p){
+      size_t j=p+2;
+      if(p>0){ char c=line[p-1]; if(std::isalnum((unsigned char)c)||c=='_') continue; }
+      while(j<line.size() && (line[j]==' '||line[j]=='\t')) ++j;
+      if(line.compare(j,5,"test_")==0){
+        char after = (j+5<line.size()) ? line[j+5] : '\0';
+        if(after=='\0' || std::isalnum((unsigned char)after) || after=='_' || after=='(' || after=='<' )
+          return true;
+      }
+    }
+  }
+  return false;
+}
+std::vector<std::filesystem::path> discoverTestFiles(const std::filesystem::path& root, std::ostream& err){
+  std::vector<std::filesystem::path> out;
+  std::error_code ec;
+  std::filesystem::recursive_directory_iterator it(root,
+      std::filesystem::directory_options::skip_permission_denied, ec), end;
+  if(ec){ err<<"error: cannot scan '"<<root.string()<<"': "<<ec.message()<<"\n"; return out; }
+  for(; it!=end; it.increment(ec)){
+    if(ec){ ec.clear(); continue; }
+    const auto& entry=*it;
+    if(entry.is_directory(ec)){
+      if(ec){ ec.clear(); continue; }
+      if(shouldSkipTestDir(entry.path().filename().string())) it.disable_recursion_pending();
+      continue;
+    }
+    if(ec){ ec.clear(); continue; }
+    if(!entry.is_regular_file(ec)){ ec.clear(); continue; }
+    const auto& p=entry.path();
+    if((p.extension()=="."+std::string(kSourceExt) || p.extension()=="."+std::string(kLegacySourceExt)) && fileHasTestDecl(p)) out.push_back(p);
+  }
+  std::sort(out.begin(), out.end());
+  return out;
+}
+bool parseTestSummary(const std::string& s, int& passed, int& failed){
+  // match "<int> passed, <int> failed" (last occurrence)
+  const std::string needle = " passed, ";
+  size_t pos = std::string::npos, search = 0;
+  while(true){
+    size_t f = s.find(needle, search);
+    if(f==std::string::npos) break;
+    pos = f; search = f + needle.size();
+  }
+  if(pos==std::string::npos) return false;
+  size_t nstart = pos;
+  while(nstart>0 && std::isdigit((unsigned char)s[nstart-1])) --nstart;
+  size_t fend = pos + needle.size();
+  size_t fstart = fend;
+  while(fend<s.size() && std::isdigit((unsigned char)s[fend])) ++fend;
+  if(fend + 7 > s.size() || s.compare(fend, 7, " failed")!=0) return false;
+  try {
+    passed = std::stoi(s.substr(nstart, pos-nstart));
+    failed = std::stoi(s.substr(fstart, fend-fstart));
+    return true;
+  } catch(...) { return false; }
+}
+} // namespace
+
+int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err){
+  const std::string target = path.empty() ? "." : path;
+  std::error_code ec;
+  if(std::filesystem::is_regular_file(target, ec)){
+    return testPipeline(target, config, in, out, err);
+  }
+  if(ec && ec!=std::errc::no_such_file_or_directory){
+    err<<"error: cannot access '"<<target<<"': "<<ec.message()<<"\n"; return kCErr;
+  }
+  if(!std::filesystem::is_directory(target, ec)){
+    // let testPipeline produce the canonical open/diagnostic error
+    return testPipeline(target, config, in, out, err);
+  }
+  auto files = discoverTestFiles(std::filesystem::path(target), err);
+  // discoverTestFiles only prints on scan errors; empty is valid to report below
+  if(files.empty()){
+    err<<"a test: no test files found in '"<<target<<"'\n";
+    if(!config.testFilter.empty()) err<<"  (filter: '"<<config.testFilter<<"')\n";
+    return kCErr;
+  }
+  PipelineConfig scanCfg = config;
+  scanCfg.scanIgnoreFilterMismatch = true;
+  std::filesystem::path root(target);
+  int totalPassed=0, totalFailed=0, fileErrors=0, filesRun=0, filesSkipped=0;
+  for(const auto& f : files){
+    std::ostringstream fout, ferr;
+    std::string capturedOut, capturedErr;
+    int rc = 0;
+#if defined(__unix__) || defined(__APPLE__)
+    int outPipe[2] = {-1,-1}, errPipe[2] = {-1,-1};
+    int savedOut = -1, savedErr = -1;
+    bool captured = false;
+    if(::pipe(outPipe)==0 && ::pipe(errPipe)==0){
+      savedOut = ::dup(STDOUT_FILENO);
+      savedErr = ::dup(STDERR_FILENO);
+      ::dup2(outPipe[1], STDOUT_FILENO);
+      ::dup2(errPipe[1], STDERR_FILENO);
+      ::close(outPipe[1]); ::close(errPipe[1]);
+      outPipe[1]=errPipe[1]=-1;
+      rc = testPipeline(f.string(), scanCfg, in, fout, ferr);
+      ::fflush(stdout); ::fflush(stderr);
+      ::dup2(savedOut, STDOUT_FILENO);
+      ::dup2(savedErr, STDERR_FILENO);
+      ::close(savedOut); ::close(savedErr);
+      char buf[4096]; ssize_t n;
+      while((n=::read(outPipe[0], buf, sizeof(buf)))>0) capturedOut.append(buf, (size_t)n);
+      while((n=::read(errPipe[0], buf, sizeof(buf)))>0) capturedErr.append(buf, (size_t)n);
+      ::close(outPipe[0]); ::close(errPipe[0]);
+      captured = true;
+    } else {
+      if(outPipe[0]>=0) ::close(outPipe[0]);
+      if(outPipe[1]>=0) ::close(outPipe[1]);
+      if(errPipe[0]>=0) ::close(errPipe[0]);
+      if(errPipe[1]>=0) ::close(errPipe[1]);
+    }
+    if(!captured)
+#endif
+    {
+      rc = testPipeline(f.string(), scanCfg, in, fout, ferr);
+      capturedOut = fout.str(); capturedErr = ferr.str();
+    }
+#if defined(__unix__) || defined(__APPLE__)
+    if(captured){
+      capturedOut += fout.str();
+      capturedErr += ferr.str();
+    }
+#endif
+    if(rc == 3){ // filter matched no tests in this file
+      filesSkipped++;
+      continue;
+    }
+    filesRun++;
+    std::error_code rec;
+    std::filesystem::path rel = std::filesystem::relative(f, root, rec);
+    std::string display = (rec ? f : rel).string();
+    out << "\n== " << display << " ==\n";
+    out << capturedOut;
+    if(!capturedOut.empty() && capturedOut.back()!='\n') out << "\n";
+    err << capturedErr;
+    int p=0, fl=0;
+    if(parseTestSummary(capturedOut, p, fl)){
+      totalPassed += p;
+      totalFailed += fl;
+      if(rc != 0 && fl == 0) fileErrors++; // nonzero without counted failures -> error
+    } else {
+      if(rc != 0) fileErrors++;
+    }
+  }
+  out << "\n== summary ==\n";
+  out << totalPassed << " passed, " << totalFailed << " failed";
+  if(fileErrors) out << ", " << fileErrors << " file error(s)";
+  out << " in " << filesRun << " file(s)";
+  if(filesSkipped) out << " (" << filesSkipped << " skipped by filter)";
+  if(filesRun==0 && !config.testFilter.empty()){
+    out << "\n";
+    err << "a test: no tests matched --filter '" << config.testFilter << "'\n";
+    return kCErr;
+  }
+  out << "\n";
+  return (totalFailed==0 && fileErrors==0) ? kOk : kCErr;
 }
 }

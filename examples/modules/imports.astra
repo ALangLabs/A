@@ -1,0 +1,12 @@
+# Module imports (run from repo root: ./build/a run examples/modules/imports.astra)
+import "lib/mathx.astra"
+import "lib/mathx.astra" as mx
+from "lib/mathx.astra" import add, Point
+import std:math
+import std:core
+
+print(mathx.add(2, 3))
+print(mx.mul(4, 5))
+print(add(10, 20))
+p = Point(x=1, y=2)
+print(p.sum(), math.sqrt(81))

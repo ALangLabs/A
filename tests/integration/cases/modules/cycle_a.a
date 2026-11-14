@@ -1,3 +1,0 @@
-import "lib/cycle_b.a"
-
-print("unreachable")

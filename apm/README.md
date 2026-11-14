@@ -11,16 +11,16 @@ directory), with no external dependencies beyond the A toolchain and
 # from the repo root (build the toolchain first, see ../README.md)
 ./apm/apm init myapp                 # scaffold a project (writes apm.json)
 ./apm/apm install string-utils       # add packages (resolves deps, locks)
-./build/a run main.a                 # plain `a` finds .apm/packages automatically
-./apm/apm run main.a                 # same, plus an explicit -I (for -I-less tools use apm exec)
+./build/a run main.astra              # plain `a` finds .apm/packages automatically
+./apm/apm run main.astra               # same, plus an explicit -I (for -I-less tools use apm exec)
 ```
 
 `apm/apm` is a small launcher: the A runtime exposes no `argv` to
 programs, so the launcher carries the real CLI in `APM_ARGS` and runs
-`apm.a`. You can also drive it directly:
+`apm.astra`. You can also drive it directly:
 
 ```sh
-APM_ARGS="install hello-lib" ./build/a run apm/apm.a
+APM_ARGS="install hello-lib" ./build/a run apm/apm.astra
 ```
 
 ## How it works
@@ -40,7 +40,7 @@ APM_ARGS="install hello-lib" ./build/a run apm/apm.a
 {
   "name": "myapp",
   "version": "0.1.0",
-  "main": "main.a",
+  "main": "main.astra",
   "dependencies": {"string-utils": "^0.3.0"}
 }
 ```
@@ -71,7 +71,7 @@ APM_ARGS="install hello-lib" ./build/a run apm/apm.a
 | `apm info <pkg>` | Registry details + install status |
 | `apm search <query>` | Search registry names/descriptions |
 | `apm update [pkg...]` | Re-resolve to the latest matching versions |
-| `apm run <file.a>` | `a run -I .apm/packages <file.a>` |
+| `apm run <file.astra>` | `a run -I .apm/packages <file.astra>` |
 | `apm exec <cmd...>` | Run a command with `A_PATH` set |
 | `apm publish` | Publish this package to the registry |
 | `apm doctor` | Check toolchain, git/tar, registry, project |
@@ -89,12 +89,12 @@ launcher also finds `../build/a` automatically).
 
 ## Writing a package
 
-A package is a directory with an `apm.json` plus your `.a` module(s):
+A package is a directory with an `apm.json` plus your `.astra` module(s):
 
 ```
 my-pkg/
   apm.json
-  my_pkg.a        # module file; must match the import name (name with '-' -> '_')
+  my_pkg.astra    # module file; must match the import name (name with '-' -> '_')
 ```
 
 `apm.json` for a package is the same shape as a project manifest
@@ -105,7 +105,7 @@ with `apm publish` (copies into the registry), then anyone can
 ## Developing apm itself
 
 ```sh
-./build/a test apm/selftest.a   # semver/manifest/registry/resolver tests
+./build/a test apm/selftest.astra  # semver/manifest/registry/resolver tests
 ```
 
 Seed registry packages (`hello-lib`, `math-utils`, `string-utils`) live

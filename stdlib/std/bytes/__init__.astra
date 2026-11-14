@@ -1,0 +1,12 @@
+# std.bytes — byte/char utilities and text encodings (multi-file, Python-like API).
+#
+# Easy API:
+#   from std:bytes import encode, decode
+#   b = encode("hello", "utf-8")      # Bytes
+#   s = decode(b, "utf-8")            # String
+#
+# Legacy helpers still available:
+#   utf8_encode, utf8_decode, b2s, s2b, s2b_fast, chr, ord
+from "codecs.astra" import encode, decode, encode_list, supported_encodings
+from "utf8.astra" import chr, ord, utf8_encode, utf8_decode
+from "latin1.astra" import b2s, s2b, s2b_fast

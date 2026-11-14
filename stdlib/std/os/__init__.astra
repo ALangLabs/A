@@ -1,0 +1,45 @@
+# std.os — a Python-compatible `os` surface for A.
+#
+# This package is a thin facade over the native `fs`, `env`, and `terminal`
+# modules plus small pure-A helpers. It is split into focused modules so each
+# part can be extended on its own:
+#
+#   constants.astra    platform constants (name, sep, F_OK, SEEK_*, ...)
+#   environment.astra  getenv/environ/putenv
+#   process.astra      pid/uid/gid, cwd, uname, cpu_count, system
+#   stat.astra         StatResult, stat/lstat, exists/isfile/isdir, chmod/utime
+#   dirs.astra         listdir/scandir, mkdir/makedirs/rmdir, walk
+#   files.astra        remove/rename/truncate, symlink/link/readlink
+#   pathns.astra       the os.path namespace object
+#   randbytes.astra    urandom/getrandom
+#   termsize.astra     get_terminal_size
+#   syscalls.astra     loadavg/hostname/umask/pagesize/popen/kill (C parity)
+#
+# Differences from CPython that are inherent to the A runtime:
+#   * Paths are UTF-8 strings; there is no separate bytes path type.
+#   * There is no file-descriptor-based API (open/read/write/fdopen, dir_fd=,
+#     os.stat_result.st_*_ns). `fwalk` and `sameopenfile` raise instead
+#     of returning partial data (`getloadavg` is implemented).
+#   * os.urandom returns a [i64] list of byte values (as random.randbytes does)
+#     because A has no first-class `bytes` for this API.
+#   * os.chmod/utime on Windows are no-ops or unsupported, as in the runtime.
+
+from "constants.astra" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS
+
+from "environment.astra" import getenv, getenv_default, getenvb, environ_get, environ_all, putenv, unsetenv, environ, Environ
+
+from "process.astra" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg, gethostname, umask, getpagesize, kill, _exit
+
+from "stat.astra" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, chown, utime, samefile, samestat, ismount, disk_usage
+
+from "dirs.astra" import DirEntry, listdir, scandir, mkdir, makedirs, rmdir, removedirs, walk, fwalk
+
+from "files.astra" import remove, unlink, rename, replace, renames, truncate, link, symlink, readlink
+
+from "randbytes.astra" import urandom, getrandom
+
+from "syscalls.astra" import popen
+
+from "termsize.astra" import get_terminal_size, TerminalSize
+
+from "pathns.astra" import path, PathNamespace

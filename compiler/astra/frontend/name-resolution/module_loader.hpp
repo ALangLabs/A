@@ -13,6 +13,14 @@
 
 namespace a {
 
+// Canonical source-file extension for A modules (without the leading dot).
+// `.astra` avoids colliding with the system static-library suffix `.a`
+// (Windows import libraries / Unix archives). Modules are also still resolved
+// with the legacy `.a` extension for backwards compatibility.
+inline constexpr const char* kSourceExt = "astra";
+// Legacy extension, still accepted on module resolution.
+inline constexpr const char* kLegacySourceExt = "a";
+
 // One parsed source file in a program. Modules are stored in a stable deque;
 // `id` is the index. A deque keeps references valid while imports recursively
 // append more modules during loading.

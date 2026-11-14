@@ -36,7 +36,7 @@ static void join_buf_array(Buf *b, const char *sep, uint64_t sn,
                 memcpy(out, sep, (size_t)sn);
                 out += sn;
             }
-            const AStr *s = (const AStr *)obj_of(a->items[i]);
+            const AStr *s = astr_flat(a->items[i]);
             memcpy(out, s->data, (size_t)s->h.len);
             out += s->h.len;
         }
@@ -68,7 +68,7 @@ aval bi_join(uint64_t n, aval *argv) {
             for (uint64_t i = 0; i < a->h.len; ++i) {
                 aval v = a->items[i];
                 AObj *o = a_is_ptr(v) ? (AObj *)(uintptr_t)A_PAYLOAD(v) : NULL;
-                if (!o || o->type != T_STR) { all_str = 0; break; }
+                if (!o || (o->type != T_STR && o->type != T_ROPE)) { all_str = 0; break; }
                 total += (uint64_t)((const AStr *)o)->h.len;
             }
             if (all_str && total <= 0xFFFFFFFFull) {
@@ -77,7 +77,7 @@ aval bi_join(uint64_t n, aval *argv) {
                 char *p = out->data;
                 for (uint64_t i = 0; i < a->h.len; ++i) {
                     if (i) { memcpy(p, sep, (size_t)sn); p += sn; }
-                    const AStr *s = (const AStr *)(uintptr_t)A_PAYLOAD(a->items[i]);
+                    const AStr *s = astr_flat(a->items[i]);
                     memcpy(p, s->data, (size_t)s->h.len);
                     p += s->h.len;
                 }
@@ -96,20 +96,20 @@ aval bi_join(uint64_t n, aval *argv) {
 aval a_join_len(aval values, aval sep) {
     AObj *so = a_is_ptr(sep) ? (AObj *)(uintptr_t)A_PAYLOAD(sep) : NULL;
     AObj *src = a_is_ptr(values) ? (AObj *)(uintptr_t)A_PAYLOAD(values) : NULL;
-    if (so && so->type == T_STR && src &&
+    if (so && (so->type == T_STR || so->type == T_ROPE) && src &&
         (src->type == T_LIST || src->type == T_TUPLE || src->type == T_SET) &&
         !arr_packed((const AArr *)src)) {
         const AArr *a = (const AArr *)src;
         uint64_t n = a->h.len;
-        const AStr *ss = (const AStr *)so;
+        const AStr *ss = astr_flat(sep);
         uint64_t sep_cp = u8_count(ss->data, ss->h.len);
         uint64_t total = n ? (n - 1) * sep_cp : 0;
         int all_str = 1;
         for (uint64_t i = 0; i < n; ++i) {
             aval v = a->items[i];
             AObj *o = a_is_ptr(v) ? (AObj *)(uintptr_t)A_PAYLOAD(v) : NULL;
-            if (!o || o->type != T_STR) { all_str = 0; break; }
-            const AStr *s = (const AStr *)o;
+            if (!o || (o->type != T_STR && o->type != T_ROPE)) { all_str = 0; break; }
+            const AStr *s = astr_flat(v);
             total += u8_count(s->data, s->h.len);
         }
         if (all_str) return mkint_full((int64_t)total);

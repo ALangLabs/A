@@ -1,0 +1,20 @@
+# Demo: apm-managed packages (pip-style, like Python imports).
+#
+# From the repo root:
+#   apm/apm init demo  (or reuse the apm.json next to this file)
+#   apm/apm install string-utils
+#   apm/apm run examples/apm/app.astra
+#
+# This file has its own apm.json in the same directory; pass -p examples/apm.
+import hello_lib
+from hello_lib import greet
+import math_utils
+from string_utils import slugify, truncate
+
+entry main():
+    print(greet("A-lang"))
+    print(slugify("Hello, apm world!"))
+    print(truncate("the quick brown fox", 7))
+    print("fact(5):", math_utils.factorial(5))
+    print("fib(10):", math_utils.fib(10))
+    print("gcd(12, 18):", math_utils.gcd(12, 18))

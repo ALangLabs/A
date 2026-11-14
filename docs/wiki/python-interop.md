@@ -35,10 +35,10 @@ access without copying. `py.buffer_info` reports layout.
 
 ## Examples
 
-- `examples/python-interop/json_pipeline.a` — JSON pipeline through Python.
-- `examples/python-interop/opaque_objects.a` — opaque object handling.
-- `examples/python-interop/optional/` — `numpy_array.a`, `py_buffer.a`,
-  `torch_tensor.a` (require the corresponding Python packages installed).
+- `examples/python-interop/json_pipeline.astra` — JSON pipeline through Python.
+- `examples/python-interop/opaque_objects.astra` — opaque object handling.
+- `examples/python-interop/optional/` — `numpy_array.astra`, `py_buffer.astra`,
+  `torch_tensor.astra` (require the corresponding Python packages installed).
 
 Requires a Python installation discoverable at run time; behavior can
 differ across target OSes (e.g. no interop on Windows), so validate with

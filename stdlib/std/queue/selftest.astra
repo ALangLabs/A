@@ -1,0 +1,108 @@
+# std.queue selftest — run: ./build/a test stdlib/std/queue/selftest.astra
+#
+# NOTE: the typechecker instantiates each generic class once per module,
+# so every Queue<T> use in this file shares T = i64 (LifoQueue and
+# PriorityQueue are separate classes and keep their own element types).
+from "std/queue/__init__.astra" import queue_new, Queue, lifo_queue_new, priority_queue_new
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(c):
+    assert(c)
+
+fn test_fifo():
+    q = queue_new()
+    assert_true(q.empty())
+    q.put(1)
+    q.put(2)
+    q.put(3)
+    assert_eq(q.qsize(), 3)
+    assert_eq(q.get(), 1)
+    assert_eq(q.get(), 2)
+    assert_eq(q.peek(), 3)
+    assert_eq(q.try_get(), 3)
+    assert_eq(q.try_get(), None)
+
+fn test_bounded():
+    q = queue_new(2)
+    assert_true(q.try_put(10))
+    assert_true(q.try_put(20))
+    assert_eq(q.try_put(30), false)
+    assert_eq(q.qsize(), 2)
+    q.get()
+    assert_true(q.try_put(30))
+    assert_eq(q.to_list(), [20, 30])
+
+fn test_task_done_join():
+    q = queue_new()
+    q.put(7)
+    q.put(8)
+    q.task_done()
+    q.get()
+    q.task_done()
+    q.get()
+    q.join()  # returns immediately once unfinished == 0
+
+fn test_unfinished():
+    q = queue_new()
+    q.put(1)
+    q.try_get()
+    # unfinished stays 1 until task_done (Python semantics)
+    q.task_done()
+    q.join()
+
+fn test_generic():
+    q = Queue([], 0, 0, 0)
+    q.put(5)
+    q.put(6)
+    assert_eq(q.get(), 5)
+    assert_eq(q.get(), 6)
+
+test_fifo()
+test_bounded()
+test_task_done_join()
+test_unfinished()
+test_generic()
+print("queue selftest ok")
+
+fn test_lifo_queue():
+    q = lifo_queue_new()
+    assert_eq(q.qsize(), 0)
+    q.put("first")
+    q.put("second")
+    q.put("third")
+    assert_eq(q.qsize(), 3)
+    assert_eq(q.peek(), "third")
+    assert_eq(q.get(), "third")
+    assert_eq(q.get(), "second")
+    assert_eq(q.try_get(), "first")
+    assert(q.try_get() == None)
+    q.task_done()
+    q.task_done()
+    q.task_done()
+
+fn test_priority_queue():
+    q = priority_queue_new()
+    q.put_prio(5.0, "five")
+    q.put_prio(1.0, "one")
+    q.put_prio(3.0, "three")
+    # equal priorities -> FIFO
+    q.put_prio(1.0, "one_b")
+    assert_eq(q.qsize(), 4)
+    assert_eq(q.peek(), "one")
+    assert_eq(q.get(), "one")
+    assert_eq(q.get(), "one_b")
+    assert_eq(q.get(), "three")
+    assert_eq(q.get(), "five")
+    assert(q.try_get() == None)
+    q.task_done()
+    q.task_done()
+    q.task_done()
+    q.task_done()
+    # bounded
+    b = priority_queue_new(2)
+    b.put_prio(1.0, "x")
+    b.put_prio(2.0, "y")
+    assert(not b.try_put_prio(3.0, "z"))
+    assert_eq(b.qsize(), 2)

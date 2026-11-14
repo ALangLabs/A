@@ -139,12 +139,12 @@
   },
   "Import from file": {
     "prefix": "from",
-    "body": "from \"${1:lib/module.a}\" import ${2:name}$0",
+    "body": "from \"${1:lib/module.astra}\" import ${2:name}$0",
     "description": "Import names from a quoted module path"
   },
   "Import file with alias": {
     "prefix": "importas",
-    "body": "import \"${1:lib/module.a}\" as ${2:alias}$0",
+    "body": "import \"${1:lib/module.astra}\" as ${2:alias}$0",
     "description": "Import a quoted module path under an alias"
   },
   "From stdlib import": {

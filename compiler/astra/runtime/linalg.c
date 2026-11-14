@@ -45,7 +45,7 @@ static const double *f64_ptr(AArr *a) {
     if (!(a->flags & ARR_F_F64)) {
         for (uint64_t i = 0; i < a->h.len; i++)
             if (!a_is_double(a->items[i])) return NULL;
-        a->flags |= ARR_F_F64;
+        arr_f64_mark(a);   /* items is raw double bits: exempt from GC scan */
     }
     return (const double *)(const void *)a->items;
 }
@@ -241,6 +241,7 @@ static aval f64_list(uint64_t n, const double *src) {
     a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
     a->iitems = NULL;
     a->flags = ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);   /* all-double items: no pointers inside */
     for (uint64_t i = 0; i < n; i++) a->items[i] = mkdouble(src[i]);
     return mkobj(a);
 }
@@ -563,4 +564,66 @@ aval bi_linalg_attention(uint64_t n, aval *argv) {
     free(tk);
     free(tv);
     return result;
+}
+
+/* ------------------------------------------------------------------ */
+/* f32s: bulk little-endian f32 -> [f64] decode                        */
+/* ------------------------------------------------------------------ */
+
+/* f32s(data, byte_offset, count) -> [f64]
+ * Decodes `count` IEEE-754 binary32 values (little-endian byte order, the
+ * safetensors/npz convention) starting at byte_offset inside a String or
+ * Bytes buffer. Each element is independent, so the range splits across
+ * the pool with bit-identical results. The output list is born verified
+ * all-double (ARR_F_F64 + GC_F_NOSCAN), so linalg kernels read it as raw
+ * doubles — this is the fast path for loading binary weight files without
+ * a per-element decode loop in generated code. */
+typedef struct {
+    const unsigned char *src;
+    aval *dst;
+    uint64_t byte0;
+} AF32sCtx;
+
+static void f32s_chunk(void *vctx, int64_t lo, int64_t hi) {
+    AF32sCtx *c = (AF32sCtx *)vctx;
+    const unsigned char *p = c->src + c->byte0 + (uint64_t)lo * 4u;
+    for (int64_t i = lo; i < hi; i++, p += 4) {
+        uint32_t bits = (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                        ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+        union { uint32_t u; float f; } cvt;
+        cvt.u = bits;
+        c->dst[i] = mkdouble((double)cvt.f);
+    }
+}
+
+aval bi_f32s(uint64_t n, aval *argv) {
+    want_args("f32s", n, 3, 3);
+    const char *data;
+    uint64_t dlen;
+    AObj *o = obj_of(argv[0]);
+    if (o && o->type == T_BYTES) {
+        ABytes *b = (ABytes *)o;
+        data = b->data;
+        dlen = b->h.len;
+    } else {
+        data = str_data(argv[0], &dlen);
+    }
+    int64_t off = a_int_full(argv[1]);
+    int64_t count = a_int_full(argv[2]);
+    if (off < 0 || count < 0)
+        panicf("f32s: negative byte offset or count");
+    if ((uint64_t)off > dlen || (uint64_t)count > (dlen - (uint64_t)off) / 4u ||
+        (uint64_t)count > UINT32_MAX)
+        panicf("f32s: range out of bounds");
+    AArr *a = (AArr *)xmalloc(sizeof(AArr));
+    a->h.type = T_LIST;
+    a->h.len = (uint32_t)count;
+    a->h.cap = (uint64_t)count;
+    a->items = (aval *)xmalloc((size_t)(count ? count : 1) * sizeof(aval));
+    a->iitems = NULL;
+    a->flags = ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);   /* all-double items: no pointers inside */
+    AF32sCtx c = { (const unsigned char *)data, a->items, (uint64_t)off };
+    a_par_for(count, (int64_t)1 << 16, f32s_chunk, &c);
+    return mkobj(a);
 }

@@ -16,8 +16,8 @@ entry main():
 ```
 
 Top-level statements run first; `entry name():` marks the function the
-compiler invokes once after imports initialize. Save as `hello.a` and run
-`./build/a run hello.a`.
+compiler invokes once after imports initialize. Save as `hello.astra` and run
+`./build/a run hello.astra`.
 
 ## Headline features
 
@@ -34,7 +34,7 @@ compiler invokes once after imports initialize. Save as `hello.a` and run
   destructuring, `do … while`, `loop`.
 - **Interop** — native modules (`math`, `fs`, `json`, `net`, `time`, …),
   `import std:` standard library, and `python:` modules for calling CPython.
-- **Tooling** — `a fmt`, `a doc`, `a ir`, a REPL, `a-lsp` language server, and
+- **Tooling** — `a fmt`, `a doc`, a REPL, `a-lsp` language server, and
   a VS Code extension.
 
 ## Getting started
@@ -42,7 +42,7 @@ compiler invokes once after imports initialize. Save as `hello.a` and run
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
-./build/a run examples/basics/hello.a
+./build/a run examples/basics/hello.astra
 ```
 
 See [cli.md](cli.md) for all commands and [examples.md](examples.md) for

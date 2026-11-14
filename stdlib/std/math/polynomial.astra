@@ -1,0 +1,619 @@
+#
+# numpy polynomial + set-ops + misc leftovers.
+#
+# np.poly* family: all polynomial coefficient lists use the NumPy convention —
+# coefficients are ordered HIGHEST degree first: c[0] * x^(n-1) + ... + c[n-1].
+#
+# DEVIATIONS from NumPy (A has no complex type, no first-class functions):
+#   * polyval/polyder/polyint/polymul/polyadd/polysub/polydiv accept either a
+#     [f64] coefficient list or a 1-D NDArray and always return [f64].
+#   * polyval returns an NDArray when x is an NDArray (or list), f64 for scalar.
+#   * polyfit solves the normal equations (X^T X) c = X^T y via Gaussian
+#     elimination with partial pivoting — less accurate than a QR/SVD fit.
+#   * polyroots returns REAL roots only, sorted ascending (NumPy returns complex).
+#     Degrees <= 2 use closed forms; higher degrees use a sign-change scan +
+#     Newton polish on a Cauchy-bound grid. Roots with even multiplicity (no
+#     sign change) are missed.
+#   * piecewise_const replaces np.piecewise: conditions are 0/1 masks instead
+#     of arbitrary predicates, and each branch yields a constant.
+#   * set ops (isin/in1d/intersect1d/union1d/setdiff1d/setxor1d) compare f64
+#     values with exact equality and return f64 0/1 masks (NumPy uses bool).
+#
+from "ndarray.astra" import NDArray
+
+# --- coefficient-list helpers --------------------------------------------------
+
+# Accept [f64], NDArray, or scalar -> flat [f64].
+fn _flat_f64(v: any) -> [f64]:
+    if isinstance(v, NDArray):
+        a: NDArray = v
+        return a.data
+    if isinstance(v, "list"):
+        xs: [f64] = v
+        return xs
+    return [v + 0.0]
+
+fn _trim_leading(c: [f64]) -> [f64]:
+    out = []
+    i = 0
+    while i < len(c):
+        if c[i] == 0.0:
+            i = i + 1
+        else:
+            break
+    while i < len(c):
+        out.append(c[i])
+        i = i + 1
+    return out
+
+fn _trim_trailing_zeros(c: [f64]) -> ([f64], i64):
+    # returns (coeffs without trailing zeros, count of trailing zeros)
+    n = len(c)
+    z = 0
+    i = n - 1
+    while i >= 0 and c[i] == 0.0:
+        z = z + 1
+        i = i - 1
+    out = []
+    j = 0
+    while j <= i:
+        out.append(c[j])
+        j = j + 1
+    return (out, z)
+
+# --- evaluation -----------------------------------------------------------------
+
+fn _polyval_f64(c: [f64], x: f64) -> f64:
+    # Horner; c highest-degree first
+    acc = 0.0
+    for coef in c:
+        acc = acc * x + coef
+    return acc
+
+fn polyval(c: any, x: any):
+    coeffs = _flat_f64(c)
+    if isinstance(x, NDArray):
+        xa: NDArray = x
+        out = []
+        for v in xa.data:
+            out.append(_polyval_f64(coeffs, v))
+        return NDArray(out, xa.shape)
+    if isinstance(x, "list"):
+        xl: [f64] = x
+        out = []
+        for v in xl:
+            out.append(_polyval_f64(coeffs, v))
+        return NDArray(out, [len(out)])
+    return _polyval_f64(coeffs, x + 0.0)
+
+fn polyval_arr(c, x: NDArray) -> NDArray:
+    # np.polyval with array x -> NDArray (same shape as x)
+    coeffs = _flat_f64(c)
+    out = []
+    for v in x.data:
+        out.append(_polyval_f64(coeffs, v))
+    return NDArray(out, x.shape)
+
+# --- fitting ----------------------------------------------------------------------
+
+fn _solve(A: [[f64]], b: [f64]) -> [f64]:
+    # Gaussian elimination with partial pivoting. A is n x n, b length n.
+    n = len(A)
+    # augmented rows
+    M = []
+    for i in 0..n:
+        row = []
+        for j in 0..n:
+            row.append(A[i][j])
+        row.append(b[i])
+        M.append(row)
+    col = 0
+    while col < n:
+        # partial pivot
+        piv = col
+        best = abs(M[col][col])
+        r = col + 1
+        while r < n:
+            if abs(M[r][col]) > best:
+                best = abs(M[r][col])
+                piv = r
+            r = r + 1
+        if piv != col:
+            tmp = M[col]
+            M[col] = M[piv]
+            M[piv] = tmp
+        d = M[col][col]
+        if abs(d) > 1e-300:
+            # eliminate below
+            r = col + 1
+            while r < n:
+                f = M[r][col] / d
+                if f != 0.0:
+                    k = col
+                    while k <= n:
+                        M[r][k] = M[r][k] - f * M[col][k]
+                        k = k + 1
+                r = r + 1
+        col = col + 1
+    # back substitution
+    x = []
+    for i in 0..n:
+        x.append(0.0)
+    i = n - 1
+    while i >= 0:
+        s = M[i][n]
+        j = i + 1
+        while j < n:
+            s = s - M[i][j] * x[j]
+            j = j + 1
+        if abs(M[i][i]) > 1e-300:
+            x[i] = s / M[i][i]
+        else:
+            x[i] = 0.0
+        i = i - 1
+    return x
+
+fn polyfit(x, y, deg: i64) -> [f64]:
+    # Least-squares polynomial fit. Returns coeffs highest-degree first.
+    # NOTE: solves normal equations (X^T X) c = X^T y — less accurate than
+    # NumPy's SVD/QR-based lstsq, especially for high deg or ill-conditioned x.
+    xs = _flat_f64(x)
+    ys = _flat_f64(y)
+    npts = len(xs)
+    m = deg + 1
+    if m < 1:
+        m = 1
+    # normal equations M c = rhs, M[j][k] = sum_i x_i^(2*deg-j-k), rhs[j] = sum_i x_i^(deg-j) y_i
+    M = []
+    for j in 0..m:
+        row = []
+        for k in 0..m:
+            row.append(0.0)
+        M.append(row)
+    rhs = []
+    for j in 0..m:
+        rhs.append(0.0)
+    for i in 0..npts:
+        xi = xs[i]
+        yi = ys[i]
+        # powers p[j] = xi^(deg-j), j = 0..deg
+        p = []
+        for j in 0..m:
+            p.append(pow(xi, deg - j))
+        for j in 0..m:
+            rhs[j] = rhs[j] + p[j] * yi
+            for k in 0..m:
+                M[j][k] = M[j][k] + p[j] * p[k]
+    return _solve(M, rhs)
+
+# --- derivative / integral ---------------------------------------------------------
+
+fn polyder(c, m: i64 = 1) -> [f64]:
+    # derivative of coeff list (highest-first); m = order
+    cur = _trim_leading(_flat_f64(c))
+    k = 0
+    while k < m and len(cur) > 1:
+        n = len(cur) - 1
+        out = []
+        i = 0
+        while i < n:
+            out.append(cur[i] * (n - i))
+            i = i + 1
+        cur = _trim_leading(out)
+        k = k + 1
+    return cur
+
+fn polyint(c, m: i64 = 1) -> [f64]:
+    # integral of coeff list (highest-first); m = order.
+    # Constant of integration is 0 (np.polyint default k=[0]); each integration
+    # appends one trailing zero coeff.
+    cur = _trim_leading(_flat_f64(c))
+    if len(cur) == 0:
+        return [0.0]
+    k = 0
+    while k < m:
+        n = len(cur) - 1
+        out = []
+        i = 0
+        while i < len(cur):
+            out.append(cur[i] / (n - i + 1.0))
+            i = i + 1
+        out.append(0.0)
+        cur = out
+        k = k + 1
+    return cur
+
+# --- coefficient arithmetic ---------------------------------------------------------
+
+fn _pad_front(c: [f64], n: i64) -> [f64]:
+    out = []
+    i = 0
+    while i < n:
+        out.append(0.0)
+        i = i + 1
+    for v in c:
+        out.append(v)
+    return out
+
+fn polyadd(c1, c2) -> [f64]:
+    a = _flat_f64(c1)
+    b = _flat_f64(c2)
+    la = len(a)
+    lb = len(b)
+    l = la
+    if lb > la:
+        l = lb
+    pa = _pad_front(a, l - la)
+    pb = _pad_front(b, l - lb)
+    out = []
+    for i in 0..l:
+        out.append(pa[i] + pb[i])
+    return _trim_leading(out)
+
+fn polysub(c1, c2) -> [f64]:
+    a = _flat_f64(c1)
+    b = _flat_f64(c2)
+    la = len(a)
+    lb = len(b)
+    l = la
+    if lb > la:
+        l = lb
+    pa = _pad_front(a, l - la)
+    pb = _pad_front(b, l - lb)
+    out = []
+    for i in 0..l:
+        out.append(pa[i] - pb[i])
+    return _trim_leading(out)
+
+fn polymul(c1, c2) -> [f64]:
+    a = _trim_leading(_flat_f64(c1))
+    b = _trim_leading(_flat_f64(c2))
+    if len(a) == 0 or len(b) == 0:
+        return []
+    out = []
+    for i in 0..(len(a) + len(b) - 1):
+        out.append(0.0)
+    for i in 0..len(a):
+        for j in 0..len(b):
+            out[i + j] = out[i + j] + a[i] * b[j]
+    return _trim_leading(out)
+
+fn _poly_divmod(a: [f64], b: [f64]) -> ([f64], [f64]):
+    # descending-power long division; returns (quotient, remainder)
+    aa = _trim_leading(a)
+    bb = _trim_leading(b)
+    if len(bb) == 0:
+        return ([], [])
+    if len(aa) < len(bb):
+        return ([], aa)
+    q = []
+    for i in 0..(len(aa) - len(bb) + 1):
+        q.append(0.0)
+    r = []
+    for v in aa:
+        r.append(v)
+    while len(r) >= len(bb) and len(r) > 0:
+        coef = r[0] / bb[0]
+        shift = len(r) - len(bb)
+        q[shift] = coef
+        # r = r - coef * x^shift * bb
+        for j in 0..len(bb):
+            r[j] = r[j] - coef * bb[j]
+        # strip leading zeros of r
+        k = 0
+        while k < len(r) and r[k] == 0.0:
+            k = k + 1
+        nr = []
+        while k < len(r):
+            nr.append(r[k])
+            k = k + 1
+        r = nr
+    return (_trim_leading(q), _trim_leading(r))
+
+fn polydiv(c1, c2):
+    # returns [quotient, remainder] as [f64] lists
+    a = _flat_f64(c1)
+    b = _flat_f64(c2)
+    qr = _poly_divmod(a, b)
+    return [qr[0], qr[1]]
+
+# --- roots -------------------------------------------------------------------------
+
+fn _peval(c: [f64], x: f64) -> f64:
+    return _polyval_f64(c, x)
+
+fn _pderiv_eval(c: [f64], x: f64) -> f64:
+    # derivative via Horner on the fly
+    n = len(c) - 1
+    acc = 0.0
+    i = 0
+    while i < n:
+        acc = acc * x + c[i] * (n - i)
+        i = i + 1
+    return acc
+
+fn _newton_polish(c: [f64], x0: f64) -> f64:
+    x = x0
+    i = 0
+    while i < 60:
+        f = _peval(c, x)
+        if abs(f) < 1e-14:
+            break
+        d = _pderiv_eval(c, x)
+        if abs(d) < 1e-300:
+            break
+        step = f / d
+        x = x - step
+        if abs(step) < 1e-13 * (1.0 + abs(x)):
+            break
+        i = i + 1
+    return x
+
+fn polyroots(c) -> [f64]:
+    # REAL roots only, sorted ascending. Degrees <= 2 closed-form; higher
+    # degrees: sign-change scan on a Cauchy-bound grid + bisection + Newton.
+    # Even-multiplicity roots produce no sign change and are missed.
+    coeffs = _flat_f64(c)
+    coeffs = _trim_leading(coeffs)
+    roots = []
+    if len(coeffs) <= 1:
+        return roots
+    # factor out roots at x = 0 (trailing zero coeffs)
+    ct = _trim_trailing_zeros(coeffs)
+    coeffs = ct[0]
+    z = ct[1]
+    i = 0
+    while i < z:
+        roots.append(0.0)
+        i = i + 1
+    deg = len(coeffs) - 1
+    if deg <= 0:
+        return roots
+    if deg == 1:
+        roots.append(-coeffs[1] / coeffs[0])
+        return roots
+    if deg == 2:
+        a = coeffs[0]
+        b = coeffs[1]
+        cc = coeffs[2]
+        disc = b * b - 4.0 * a * cc
+        if disc >= 0.0:
+            sq = sqrt(disc)
+            roots.append((-b - sq) / (2.0 * a))
+            roots.append((-b + sq) / (2.0 * a))
+        return roots
+    # Cauchy bound: all roots satisfy |x| <= 1 + max|c_i| / |c_0|
+    lead = abs(coeffs[0])
+    mx = 0.0
+    for i in 1..len(coeffs):
+        v = abs(coeffs[i])
+        if v > mx:
+            mx = v
+    R = 1.0 + mx / lead
+    # grid scan for sign changes
+    N = 20000
+    prevx = -R
+    prevf = _peval(coeffs, prevx)
+    step = (2.0 * R) / N
+    i = 1
+    while i <= N:
+        x = -R + i * step
+        fx = _peval(coeffs, x)
+        if prevf == 0.0:
+            roots.append(_newton_polish(coeffs, prevx))
+        elif fx == 0.0 or (prevf < 0.0 and fx > 0.0) or (prevf > 0.0 and fx < 0.0):
+            # bisection within [prevx, x]
+            lo = prevx
+            hi = x
+            flo = prevf
+            it = 0
+            while it < 80:
+                mid = (lo + hi) / 2.0
+                fm = _peval(coeffs, mid)
+                if (flo < 0.0 and fm < 0.0) or (flo > 0.0 and fm > 0.0):
+                    lo = mid
+                    flo = fm
+                else:
+                    hi = mid
+                if hi - lo < 1e-12 * (1.0 + abs(mid)):
+                    break
+                it = it + 1
+            roots.append(_newton_polish(coeffs, (lo + hi) / 2.0))
+        prevx = x
+        prevf = fx
+        i = i + 1
+    # dedupe near-identical roots and sort
+    roots = sorted(roots)
+    out = []
+    for r in roots:
+        if len(out) == 0 or abs(r - out[len(out) - 1]) > 1e-8 * (1.0 + abs(r)):
+            out.append(r)
+    return out
+
+fn roots(c) -> [f64]:
+    # alias of polyroots (np.roots analogue, real roots only)
+    return polyroots(c)
+
+# --- piecewise ---------------------------------------------------------------------
+
+fn piecewise_const(x: any, conds, values: [f64], default: f64):
+    # np.piecewise analogue without first-class functions: conds is a list of
+    # 0/1 masks (one per branch, same length as x's flat data; length 1 for a
+    # scalar x). First matching branch wins; else `default`.
+    nc = len(conds)
+    if isinstance(x, NDArray):
+        xa: NDArray = x
+        out = []
+        for i in 0..xa.size():
+            v = default
+            j = 0
+            while j < nc:
+                if conds[j][i] != 0.0:
+                    v = values[j]
+                    j = nc
+                else:
+                    j = j + 1
+            out.append(v)
+        return NDArray(out, xa.shape)
+    if isinstance(x, "list"):
+        xl: [f64] = x
+        out = []
+        for i in 0..len(xl):
+            v = default
+            j = 0
+            while j < nc:
+                if conds[j][i] != 0.0:
+                    v = values[j]
+                    j = nc
+                else:
+                    j = j + 1
+            out.append(v)
+        return NDArray(out, [len(out)])
+    # scalar: masks are length-1 lists
+    v = default
+    j = 0
+    while j < nc:
+        if conds[j][0] != 0.0:
+            v = values[j]
+            j = nc
+        else:
+            j = j + 1
+    return v
+
+# --- set operations --------------------------------------------------------------------
+
+fn _uniq_sorted(xs: [f64]) -> [f64]:
+    s = sorted(xs)
+    out = []
+    for v in s:
+        if len(out) == 0 or v != out[len(out) - 1]:
+            out.append(v)
+    return out
+
+fn _bsearch(xs: [f64], v: f64) -> bool:
+    lo = 0
+    hi = len(xs) - 1
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if xs[mid] == v:
+            return true
+        if xs[mid] < v:
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    return false
+
+fn isin(element, test_elements):
+    # elementwise membership; returns NDArray of 0.0/1.0 in element's shape
+    el = _flat_f64(element)
+    te = _uniq_sorted(_flat_f64(test_elements))
+    out = []
+    for v in el:
+        if _bsearch(te, v):
+            out.append(1.0)
+        else:
+            out.append(0.0)
+    if isinstance(element, NDArray):
+        ea: NDArray = element
+        return NDArray(out, ea.shape)
+    if isinstance(element, "list"):
+        return NDArray(out, [len(out)])
+    return NDArray(out, [])
+
+fn in1d(element, test_elements) -> NDArray:
+    # flattened membership -> 1-D NDArray of 0.0/1.0
+    el = _flat_f64(element)
+    te = _uniq_sorted(_flat_f64(test_elements))
+    out = []
+    for v in el:
+        if _bsearch(te, v):
+            out.append(1.0)
+        else:
+            out.append(0.0)
+    return NDArray(out, [len(out)])
+
+fn _merge_common(a: [f64], b: [f64]) -> [f64]:
+    # a, b sorted unique -> sorted common elements
+    out = []
+    i = 0
+    j = 0
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            out.append(a[i])
+            i = i + 1
+            j = j + 1
+        elif a[i] < b[j]:
+            i = i + 1
+        else:
+            j = j + 1
+    return out
+
+fn _merge_union(a: [f64], b: [f64]) -> [f64]:
+    out = []
+    i = 0
+    j = 0
+    while i < len(a) and j < len(b):
+        if a[i] == b[j]:
+            out.append(a[i])
+            i = i + 1
+            j = j + 1
+        elif a[i] < b[j]:
+            out.append(a[i])
+            i = i + 1
+        else:
+            out.append(b[j])
+            j = j + 1
+    while i < len(a):
+        out.append(a[i])
+        i = i + 1
+    while j < len(b):
+        out.append(b[j])
+        j = j + 1
+    return out
+
+fn _merge_diff(a: [f64], b: [f64]) -> [f64]:
+    # elements of sorted-unique a not in sorted-unique b
+    out = []
+    i = 0
+    j = 0
+    while i < len(a):
+        while j < len(b) and b[j] < a[i]:
+            j = j + 1
+        if j >= len(b) or b[j] != a[i]:
+            out.append(a[i])
+        i = i + 1
+    return out
+
+fn _arr1(xs: [f64]) -> NDArray:
+    return NDArray(xs, [len(xs)])
+
+fn intersect1d(a, b) -> NDArray:
+    # sorted unique common elements
+    ua = _uniq_sorted(_flat_f64(a))
+    ub = _uniq_sorted(_flat_f64(b))
+    return _arr1(_merge_common(ua, ub))
+
+fn union1d(a, b) -> NDArray:
+    ua = _uniq_sorted(_flat_f64(a))
+    ub = _uniq_sorted(_flat_f64(b))
+    return _arr1(_merge_union(ua, ub))
+
+fn setdiff1d(a, b) -> NDArray:
+    # unique elements of a not in b, sorted
+    ua = _uniq_sorted(_flat_f64(a))
+    ub = _uniq_sorted(_flat_f64(b))
+    return _arr1(_merge_diff(ua, ub))
+
+fn setxor1d(a, b) -> NDArray:
+    # elements in exactly one of a or b (unique), sorted
+    ua = _uniq_sorted(_flat_f64(a))
+    ub = _uniq_sorted(_flat_f64(b))
+    d1 = _merge_diff(ua, ub)
+    d2 = _merge_diff(ub, ua)
+    return _arr1(_merge_union(d1, d2))
+
+# --- finfo ----------------------------------------------------------------------------
+
+fn finfo_f64() -> [f64]:
+    # [eps, max, min_normal, precision_bits] for IEEE-754 binary64
+    return [2.220446049250313e-16, 1.7976931348623157e308, 2.2250738585072014e-308, 52.0]

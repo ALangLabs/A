@@ -1,0 +1,288 @@
+# std.http selftest — urls.astra / client.astra helpers plus the net socket layer.
+# Run: ./build/a test stdlib/std/http/selftest.astra
+from "urls.astra" import UrlParts, urlsplit, urlunsplit, quote, urlencode
+from "client.astra" import Response, _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport, _pool_key, get
+import std:net
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_urlsplit_basic():
+    p = urlsplit("http://example.com/")
+    assert(p != None)
+    q = p!
+    assert_eq(q.scheme, "http")
+    assert_eq(q.host, "example.com")
+    assert_eq(q.port, 80)
+    assert_eq(q.path, "/")
+    assert_eq(q.query, "")
+
+fn test_urlsplit_https_port_query_fragment():
+    p = urlsplit("https://example.com:8443/a/b?x=1&y=2#frag")
+    assert(p != None)
+    q = p!
+    assert_eq(q.scheme, "https")
+    assert_eq(q.host, "example.com")
+    assert_eq(q.port, 8443)
+    assert_eq(q.path, "/a/b")
+    assert_eq(q.query, "x=1&y=2")
+
+fn test_urlsplit_query_without_path_and_slash_in_query():
+    # '?' before any '/' must not leak into the authority
+    p = urlsplit("http://host?q=/x")
+    assert(p != None)
+    q = p!
+    assert_eq(q.host, "host")
+    assert_eq(q.port, 80)
+    assert_eq(q.path, "/")
+    assert_eq(q.query, "q=/x")
+
+fn test_urlsplit_auth_and_fragment_only_query():
+    p = urlsplit("http://user:pass@example.com:8080/p#frag?notquery")
+    assert(p != None)
+    q = p!
+    assert_eq(q.host, "example.com")
+    assert_eq(q.port, 8080)
+    assert_eq(q.path, "/p")
+    assert_eq(q.query, "")
+
+fn test_urlsplit_rejects_bad():
+    assert_eq(urlsplit("not a url") == None, true)
+    assert_eq(urlsplit("http:///path") == None, true)
+
+fn test_urlunsplit_roundtrip():
+    for u in ["http://example.com/", "https://example.com:8443/a/b?x=1", "http://h:81/p?q=2"]:
+        p = urlsplit(u)
+        assert(p != None)
+        assert_eq(urlunsplit(p!), u)
+    # default port is elided on output
+    p2 = urlsplit("http://example.com:80/x")
+    assert(p2 != None)
+    assert_eq(urlunsplit(p2!), "http://example.com/x")
+
+fn test_headers_map():
+    lines = ["Content-Type: Application/JSON", "X-A: 1", "bad line", "x-a: 2", "Empty:"]
+    m = _headers_map(lines)
+    assert_eq(m["content-type"], "Application/JSON")
+    assert_eq(m["x-a"], "2")
+    assert_eq(m["empty"], "")
+    assert_eq(m.get("missing") == None, true)
+
+fn test_parse_hex():
+    assert_eq(_parse_hex("1a"), 26)
+    assert_eq(_parse_hex("A"), 10)
+    assert_eq(_parse_hex("ff;ext=1"), 255)
+    assert_eq(_parse_hex("  10\r"), 16)
+    assert_eq(_parse_hex("zz"), 0)
+
+fn test_dechunk():
+    # two chunks, second contains CRLF inside the data
+    s = "5\r\nhello\r\n4\r\na\r\nb\r\n0\r\n\r\n"
+    assert_eq(_dechunk(s), "helloa\r\nb")
+    assert_eq(_dechunk("0\r\n\r\n"), "")
+    assert_eq(_dechunk("3;foo=bar\r\nabc\r\n0\r\n"), "abc")
+
+fn test_is_redirect_status():
+    assert_eq(_is_redirect_status(301), true)
+    assert_eq(_is_redirect_status(302), true)
+    assert_eq(_is_redirect_status(303), true)
+    assert_eq(_is_redirect_status(307), true)
+    assert_eq(_is_redirect_status(308), true)
+    assert_eq(_is_redirect_status(300), false)
+    assert_eq(_is_redirect_status(304), false)
+    assert_eq(_is_redirect_status(200), false)
+    assert_eq(_is_redirect_status(404), false)
+
+fn test_udp_roundtrip():
+    u = net.udp_socket()
+    assert(u > 0)
+    net.udp_bind(u, "127.0.0.1", 0)
+    port = net.local_port(u)
+    assert(port > 0)
+    assert_eq(net.udp_send(u, "127.0.0.1", port, "ping"), 4)
+    net.set_timeout(u, 1000)
+    (data, host, peer) = net.udp_recv(u, 64)
+    assert_eq(data, "ping")
+    assert_eq(host, "127.0.0.1")
+    assert_eq(peer, port)
+    assert_eq(net.recv_status(u), 0)
+    net.close(u)
+
+fn test_tcp_listen_nonblocking():
+    l = net.tcp_listen("127.0.0.1", 0)
+    assert(l > 0)
+    assert(net.local_port(l) > 0)
+    net.set_nonblocking(l, true)
+    assert_eq(net.accept(l), -1)  # nothing pending on a fresh listener
+    assert_eq(len(net.poll([l], 0)), 0)  # ...and nothing readable
+    net.close(l)
+
+fn test_quote_urlencode():
+    assert_eq(quote("a b/c&d"), "a%20b%2Fc%26d")
+    assert_eq(quote("plain-._~09"), "plain-._~09")
+    assert_eq(urlencode({"q": "a b"}), "q=a%20b")
+    # percent-encoding is byte-oriented over the UTF-8 encoding
+    assert_eq(quote("héllo"), "h%C3%A9llo")
+    assert_eq(quote("€"), "%E2%82%AC")
+    assert_eq(urlencode({"k": "é"}), "k=%C3%A9")
+
+fn test_urlsplit_edge_cases():
+    # host is lowercased for connection/pool-key stability
+    p = urlsplit("HTTP://EXAMPLE.COM:8080/P")
+    assert(p != None)
+    assert_eq(p!.host, "example.com")
+    assert_eq(p!.scheme, "http")
+    # invalid ports reject the URL instead of producing a bogus host
+    assert_eq(urlsplit("http://example.com:abc/x") == None, true)
+    assert_eq(urlsplit("http://example.com:99999/x") == None, true)
+    # empty port falls back to the scheme default
+    p2 = urlsplit("http://example.com:/x")
+    assert(p2 != None)
+    assert_eq(p2!.host, "example.com")
+    assert_eq(p2!.port, 80)
+    # bracketed IPv6: brackets are stripped for connect, re-added by urlunsplit
+    p3 = urlsplit("http://[::1]:8080/x")
+    assert(p3 != None)
+    assert_eq(p3!.host, "::1")
+    assert_eq(p3!.port, 8080)
+    assert_eq(urlunsplit(p3!), "http://[::1]:8080/x")
+    p4 = urlsplit("http://[::1]/x")
+    assert(p4 != None)
+    assert_eq(p4!.host, "::1")
+    assert_eq(p4!.port, 80)
+    # unsupported schemes parse but are rejected by request()
+    p5 = urlsplit("ftp://example.com/f")
+    assert(p5 != None)
+    assert_eq(p5!.scheme, "ftp")
+
+fn test_b_find_and_slice():
+    buf = [1, 2, 13, 10, 3, 13, 10]
+    assert_eq(_b_find_from(buf, [13, 10], 0), 2)
+    assert_eq(_b_find_from(buf, [13, 10], 3), 5)
+    assert_eq(_b_find_from(buf, [9, 9], 0), -1)
+    s = _b_slice(buf, 1, 4)
+    assert_eq(len(s), 3)
+    s.extend([7])  # must be a real list, not a view
+    assert_eq(len(s), 4)
+    assert_eq(join([str(x) for x in _b_slice(buf, 5, 99)], ","), "13,10")
+
+fn test_dechunk_bytes():
+    # "5\r\nhello\r\n4\r\na\r\nb\r\n0\r\n\r\n" as bytes
+    s = [
+        53,
+        13,
+        10,
+        104,
+        101,
+        108,
+        108,
+        111,
+        13,
+        10,
+        52,
+        13,
+        10,
+        97,
+        13,
+        10,
+        98,
+        13,
+        10,
+        48,
+        13,
+        10,
+        13,
+        10,
+    ]
+    out = _dechunk_bytes(s)
+    assert_eq(len(out), 9)
+    assert_eq(join([str(x) for x in out], ","), "104,101,108,108,111,97,13,10,98")
+
+fn test_split_hostport():
+    (h, p) = _split_hostport("proxy.local:3128")
+    assert_eq(h, "proxy.local")
+    assert_eq(p, 3128)
+    (h2, p2) = _split_hostport("proxy.local")
+    assert_eq(h2, "proxy.local")
+    assert_eq(p2, 80)
+
+fn test_net_byte_io():
+    l = net.tcp_listen("127.0.0.1", 0)
+    assert(l > 0)
+    port = net.local_port(l)
+    c = net.tcp_connect("127.0.0.1", port)
+    assert(c > 0)
+    s = net.accept(l)
+    assert(s > 0)
+    assert_eq(net.send_bytes(c, [0, 1, 255]), 3)
+    net.set_timeout(s, 1000)
+    got = net.recv_bytes(s, 16)
+    assert_eq(join([str(x) for x in got], ","), "0,1,255")
+    assert_eq(net.recv_status(s), 0)
+    net.close(c)
+    net.close(s)
+    net.close(l)
+
+fn test_inflate_gzip():
+    if net.inflate_available():
+        # gzip("hello gzip body")
+        gz = [
+            31,
+            139,
+            8,
+            0,
+            54,
+            49,
+            240,
+            106,
+            2,
+            255,
+            203,
+            72,
+            205,
+            201,
+            201,
+            87,
+            72,
+            175,
+            202,
+            44,
+            80,
+            72,
+            202,
+            79,
+            169,
+            4,
+            0,
+            173,
+            214,
+            201,
+            76,
+            15,
+            0,
+            0,
+            0,
+        ]
+        out = net.inflate_bytes(gz, 47)
+        assert_eq(len(out), 15)
+        assert_eq(out[0], 104)
+
+fn test_pool_key_identity():
+    assert_eq(_pool_key("http", "example.com", 80, "", true), "http://example.com:80##1")
+    assert_eq(
+        _pool_key("https", "example.com", 443, "proxy:8080", false),
+        "https://example.com:443#proxy:8080#0",
+    )
+
+fn test_response_content():
+    # text fast-path: body present, body_bytes empty -> encodes body
+    r = Response(200, "OK", {}, "hello", Bytes(0), "http://x/", "utf-8", true)
+    c = r.content()
+    assert_eq(len(c), 5)
+    assert_eq(r.text(), "hello")
+    # bytes payload: body_bytes present -> returns it
+    r2 = Response(200, "OK", {}, "", Bytes([104, 105]), "http://x/", "utf-8", true)
+    c2 = r2.content()
+    assert_eq(len(c2), 2)
+    assert_eq(c2[0], 104)
+    assert_eq(c2[1], 105)

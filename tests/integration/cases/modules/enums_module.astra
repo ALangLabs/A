@@ -1,0 +1,20 @@
+import "lib/colors.astra" as c
+from "lib/colors.astra" import LIMIT, name_of
+
+print(c.Color.Red)
+print(c.Color.Green)
+print(c.Color.Blue)
+print(c.LIMIT)
+print(LIMIT)
+
+v = c.Color.Blue
+print(name_of(v))
+
+s = c.Swatch(color = c.Color.Green, label = "grass")
+print(s.describe())
+
+r = match v:
+    c.Color.Red => "r"
+    c.Color.Green => "g"
+    _ => "other"
+print(r)

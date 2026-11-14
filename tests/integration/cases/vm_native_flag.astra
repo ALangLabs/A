@@ -1,0 +1,2 @@
+print("hello from native")
+print(6 * 7)

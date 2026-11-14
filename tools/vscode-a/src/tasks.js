@@ -2,7 +2,7 @@
 
 // Task support for the `a` task type: the TaskProvider that turns
 // {type:'a', action, file?} definitions into ProcessExecutions, plus
-// starter-tasks generation -- when a workspace folder contains .a files but
+// starter-tasks generation -- when a workspace folder contains .astra files but
 // no .vscode/tasks.json, we write one with Run/Build/Test/Check/Format
 // tasks (like the Python extension does), gated by a.tasks.autoGenerate.
 
@@ -50,7 +50,7 @@ function registerTaskProvider(context, env) {
     }));
 }
 
-// Starter tasks.json, written once per workspace folder that has .a files
+// Starter tasks.json, written once per workspace folder that has .astra files
 // and no tasks.json yet. Uses the contributed `a` task type so the tasks
 // resolve through the same provider as everything else.
 const STARTER_TASKS = {
@@ -67,7 +67,7 @@ const STARTER_TASKS = {
 async function folderHasAFile(folder) {
     try {
         const files = await vscode.workspace.findFiles(
-            new vscode.RelativePattern(folder, '**/*.a'),
+            new vscode.RelativePattern(folder, '**/*.{a,astra}'),
             '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}', 1);
         return files.length > 0;
     } catch {

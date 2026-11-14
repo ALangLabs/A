@@ -1,0 +1,56 @@
+# std.pprint selftest — PrettyPrinter_new + module-level helpers.
+# Run: ./build/a test stdlib/std/pprint/selftest.astra
+from "pretty.astra" import PrettyPrinter_new, PrettyPrinter, pprint, pformat, saferepr, isreadable, isrecursive, pp, pformat_full
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn assert_true(x):
+    assert(x == true)
+
+fn test_pformat_default():
+    assert_eq(pformat([1, 2, 3]), "[1, 2, 3]")
+    assert_eq(saferepr("hi"), "'hi'")
+    assert_true(isreadable([1, 2]))
+    assert_true(not isrecursive([1, 2]))
+
+fn test_pretty_printer_new():
+    # narrow width forces the dict onto multiple lines
+    p = PrettyPrinter_new(2, 20)
+    s = p.pformat({"aaaa": [1, 2, 3, 4], "bbbb": [5, 6, 7, 8]})
+    assert_true(s.contains("\n"))
+    # readable flag tracks whether the last format stayed on one line
+    assert_true(p.isreadable({"a": 1}))
+    # wide printer keeps it inline
+    wide = PrettyPrinter_new(1, 200)
+    s2 = wide.pformat({"a": 1})
+    assert_true(not s2.contains("\n"))
+
+fn test_sort_dicts():
+    # sort_dicts=false preserves insertion order in output
+    nosort = PrettyPrinter_new(1, 200, 0, false, false)
+    s = nosort.pformat({"z": 1, "a": 2})
+    zi = s.find("z")
+    ai = s.find("a")
+    assert_true(zi >= 0 and ai >= 0 and zi < ai)
+
+fn test_raw_constructor_still_works():
+    p = PrettyPrinter(1, 80, 0, false, true, false, true, true)
+    assert_eq(p.pformat([1]), "[1]")
+
+fn main():
+    test_pformat_default()
+    test_pretty_printer_new()
+    test_sort_dicts()
+    test_raw_constructor_still_works()
+    print("std.pprint selftest: all tests passed")
+
+fn test_pformat_full():
+    # pformat_full exposes the full parameter set positionally
+    s = pformat_full({"b": 1, "a": 2}, 1, 200, 0, false, false, false)
+    bi = s.find("'b'")
+    ai = s.find("'a'")
+    assert_true(bi >= 0 and ai >= 0 and bi < ai)
+    # underscore_numbers honoured for bare ints
+    n = pformat_full(1234567, 1, 200, 0, false, true, true)
+    assert_eq(n, "1_234_567")

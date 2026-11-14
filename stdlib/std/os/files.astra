@@ -1,0 +1,61 @@
+# std.os.files — link/symlink, rename, and removal primitives.
+
+import std:fs
+import std:core
+import std:path as pathlib
+from "dirs.astra" import isdir, listdir, makedirs, removedirs, rmdir
+
+"""remove(path, dir_fd=None) -> remove a file (not a directory)."""
+fn remove(path, dir_fd=None):
+    fs.remove_file(path)
+
+"""unlink(path, dir_fd=None) -> alias for remove()."""
+fn unlink(path, dir_fd=None):
+    fs.remove_file(path)
+
+"""rename(src, dst, src_dir_fd=None, dst_dir_fd=None) -> rename a file."""
+fn rename(src, dst, src_dir_fd=None, dst_dir_fd=None):
+    fs.rename(src, dst)
+
+"""replace(src, dst, src_dir_fd=None, dst_dir_fd=None) -> atomic rename."""
+fn replace(src, dst, src_dir_fd=None, dst_dir_fd=None):
+    fs.rename(src, dst)
+
+"""renames(old, new) -> rename, creating parents and pruning empty ones."""
+fn renames(old, new):
+    parent = pathlib.dirname(new)
+    if parent != "" and parent != "." and not isdir(parent):
+        makedirs(parent)
+    fs.rename(old, new)
+    parent = pathlib.dirname(old)
+    while parent != "" and parent != "." and parent != "/" and parent != old:
+        if not isdir(parent):
+            return None
+        if len(listdir(parent)) != 0:
+            return None
+        rmdir(parent)
+        nxt = pathlib.dirname(parent)
+        if nxt == parent:
+            return None
+        parent = nxt
+    return None
+
+"""truncate(path, length) -> resize a file to `length` bytes."""
+fn truncate(path, length):
+    fs.truncate(path, length)
+
+"""link(src, dst, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=True).
+
+Create a hard link. `follow_symlinks` is accepted for API compatibility; the
+runtime always links the path itself.
+"""
+fn link(src, dst, src_dir_fd=None, dst_dir_fd=None, follow_symlinks=true):
+    fs.link(src, dst)
+
+"""symlink(src, dst, target_is_directory=False, dir_fd=None)."""
+fn symlink(src, dst, target_is_directory=false, dir_fd=None):
+    fs.symlink(src, dst)
+
+"""readlink(path, dir_fd=None) -> the target of a symbolic link."""
+fn readlink(path, dir_fd=None):
+    return fs.readlink(path)

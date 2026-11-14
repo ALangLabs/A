@@ -31,6 +31,9 @@ void arr_reserve(AArr *a, uint64_t need) {
     if (need <= a->h.cap) return;
     uint64_t nc = arr_next_cap(a->h.cap, need);
     a->items = (aval *)xrealloc(a->items, (size_t)nc * sizeof(aval));
+    /* items was NULL (fresh buffer) or a realloc that kept the flag —
+       re-assert NOSCAN for F64 lists whose old block did not carry it. */
+    if (a->flags & ARR_F_F64) a_gc_set_noscan(a->items, 1);
     a->h.cap = nc;
 }
 
@@ -38,6 +41,7 @@ void arr_reserve_i64(AArr *a, uint64_t need) {
     if (need <= a->h.cap) return;
     uint64_t nc = arr_next_cap(a->h.cap, need);
     a->iitems = (int64_t *)xrealloc(a->iitems, (size_t)nc * sizeof(int64_t));
+    arr_iitems_raw(a);   /* packed int64 storage never holds pointers */
     a->h.cap = nc;
 }
 
@@ -68,6 +72,7 @@ static void arr_to_packed(AArr *a) {
     free(a->items);
     a->items = NULL;
     a->iitems = iitems;
+    arr_iitems_raw(a);
     a->flags = (a->flags & ~ARR_F_F64) | ARR_F_PACKED;
 }
 
@@ -114,6 +119,8 @@ void arr_shrink(AArr *a) {
         a->iitems = (int64_t *)xrealloc(a->iitems, (size_t)nc * sizeof(int64_t));
     else
         a->items = (aval *)xrealloc(a->items, (size_t)nc * sizeof(aval));
+    if (arr_packed(a)) arr_iitems_raw(a);
+    else if (a->flags & ARR_F_F64) a_gc_set_noscan(a->items, 1);
     a->h.cap = nc;
 }
 
@@ -145,7 +152,7 @@ void arr_push(AArr *a, aval v) {
         arr_ensure_aval(a);
     }
     arr_reserve(a, (uint64_t)a->h.len + 1);
-    if ((a->flags & ARR_F_F64) && !a_is_double(v)) a->flags &= ~ARR_F_F64;
+    if ((a->flags & ARR_F_F64) && !a_is_double(v)) arr_f64_unmark(a);
     a_region_store(a, v);   /* region write barrier */
     a->items[a->h.len++] = v;
 }

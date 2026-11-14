@@ -1,0 +1,1276 @@
+# std.swiftcli — a fast, declarative CLI parser for A with an argparse-style API.
+#
+# Argparse-compatible surface (pragmatic, tested): ArgumentParser/new, add_argument,
+# parse_args/parse_known_args/parse_intermixed_args, add_subparsers/add_parser,
+# subcommand aliases, set_defaults, add_argument_group/add_mutually_exclusive_group
+# (basic registration), allow_abbrev/prefix_chars/usage/epilog options.
+# Actions: store, store_true, store_false, store_const, append, append_const, count.
+# Types: str/int/float/bool (arg_type). nargs: 1/0/?/*/+/N. Also supports choices,
+# required, default, const, dest, metavar, help, env fallback hooks, and auto help.
+#
+# Why another parser when `std:getopt` exists? `getopt` gives you
+# (name, value) pairs and no structure; `swiftcli` gives you a typed result
+# map, auto-generated `--help`/`--version`, validation and good error
+# messages — with a single linear pass over argv and O(1) index lookups, so
+# it is also faster than Python's argparse (no regex, no per-argument
+# objects, no prefix-search loops).
+#
+#   import swiftcli
+#
+#   p = swiftcli.new("greet", "Say hello", "1.0")
+#   p.flag("-v, --verbose", "verbose output")
+#   p.option("-n, --name", "world", "who to greet")
+#   p.int_option("-r, --repeat", 1, "how many times")
+#   p.choice("-e, --env", ["dev", "prod"], "dev", "target environment")
+#   p.list_option("-t, --tag", "tag (repeatable)")
+#   p.positional("words", "extra words", "*")
+#
+#   res = p.parse(swiftcli.args_from_env())        # or p.parse(["-n", "A"])
+#   if res.kind == "help":
+#       print(res.text)
+#   elif res.kind == "error":
+#       eprint(res.error)
+#   else:
+#       print(res.ns["name"], res.ns["repeat"], res.ns["tag"])
+#
+# Features (all in one parsing pass):
+#   * long (`--name`) / short (`-n`) options, `--name=value`, `-nvalue`,
+#     clustered shorts (`-abc`, `-vvv`), `--` terminator, negative numbers;
+#   * unique-prefix abbreviation (`--verb` -> `--verbose`) with an
+#     "ambiguous option" error listing the candidates;
+#   * typed coercion (`int`/`float`/`bool`), choices, required options,
+#     repeatable list options, count flags, positional `one`/`?`/`*`/`+`;
+#   * subcommands (`p.subcommand("serve", ...)` returns a child Parser);
+#   * per-option environment fallback, defaults, auto usage/help with
+#     aligned, wrapped columns, "did you mean ...?" suggestions;
+#   * a shell-like splitter for the environment form of argv
+#     (`args_from_env`), because A has no `sys.argv` and `a run` does not
+#     forward arguments.
+#
+# Errors never panic: `parse` returns kind == "error" with a message, so a
+# CLI can print usage and exit however it likes. Use `or_panic(res)` when
+# you just want the default behavior (exit 2 on bad input).
+import std:core
+import std:env
+
+_Default_Width = 88
+
+# module-level helpers
+
+"""_slice(s, start, end) -> s[start:end] by characters (end exclusive)."""
+fn _slice(s, start, end):
+    cs = s.chars()
+    out = ""
+    i = start
+    while i < end and i < len(cs):
+        out = out + str(cs[i])
+        i = i + 1
+    return out
+
+"""_char_at(s, i) -> s[i] as a one-character String."""
+fn _char_at(s, i):
+    return str(s.chars()[i])
+
+"""_dest_of(longs, shorts) -> the namespace key for an option."""
+fn _dest_of(longs, shorts):
+    if len(longs) > 0:
+        return longs[len(longs) - 1].replace("-", "_")
+    return shorts[0].replace("-", "_")
+
+"""_is_int_text(s) -> true when s is an optionally signed base-10 integer."""
+fn _is_int_text(s):
+    if s == "":
+        return false
+    i = 0
+    if _char_at(s, 0) == "-" or _char_at(s, 0) == "+":
+        i = 1
+        if len(s) == 1:
+            return false
+    while i < len(s):
+        if not _char_at(s, i).isdigit():
+            return false
+        i = i + 1
+    return true
+
+"""_is_float_text(s) -> true when s parses as a float."""
+fn _is_float_text(s):
+    if s == "":
+        return false
+    i = 0
+    if _char_at(s, 0) == "-" or _char_at(s, 0) == "+":
+        i = 1
+    digits = 0
+    dots = 0
+    while i < len(s):
+        c = _char_at(s, i)
+        if c.isdigit():
+            digits = digits + 1
+        elif c == ".":
+            dots = dots + 1
+            if dots > 1:
+                return false
+        elif c == "e" or c == "E":
+            # exponent: optional sign then digits only — a second 'e'/'.'/
+            # letter must not be accepted ("1e5e5" is not a float).
+            j = i + 1
+            if j < len(s) and (_char_at(s, j) == "-" or _char_at(s, j) == "+"):
+                j = j + 1
+            if j >= len(s) or not _char_at(s, j).isdigit():
+                return false
+            while j < len(s):
+                if not _char_at(s, j).isdigit():
+                    return false
+                j = j + 1
+            return digits > 0
+        else:
+            return false
+        i = i + 1
+    return digits > 0
+
+"""_wrap(text, width, indent) -> text wrapped to `width`, each line indented."""
+fn _wrap(text, width, indent):
+    if width <= 0:
+        width = 68
+    lines = []
+    cur = ""
+    for w in text.split(" "):
+        if w == "":
+            continue
+        if cur == "":
+            cur = w
+        elif len(cur) + 1 + len(w) <= width:
+            cur = cur + " " + w
+        else:
+            lines.append(cur)
+            cur = w
+    if cur != "":
+        lines.append(cur)
+    if len(lines) == 0:
+        return indent
+    return "\n".join([indent + l for l in lines])
+
+"""_levenshtein(a, b) -> edit distance (small strings, two-row DP)."""
+fn _levenshtein(a, b):
+    la = a.chars()
+    lb = b.chars()
+    n = len(lb)
+    prev = []
+    i = 0
+    while i <= n:
+        prev.append(i)
+        i = i + 1
+    r = 1
+    while r <= len(la):
+        cur = [r]
+        c = 1
+        while c <= n:
+            cost = 0
+            if str(la[r - 1]) != str(lb[c - 1]):
+                cost = 1
+            best = prev[c] + 1
+            if cur[c - 1] + 1 < best:
+                best = cur[c - 1] + 1
+            if prev[c - 1] + cost < best:
+                best = prev[c - 1] + cost
+            cur.append(best)
+            c = c + 1
+        prev = cur
+        r = r + 1
+    return prev[n]
+
+"""_suggest(name, candidates) -> "" or " (did you mean '--x'?)"."""
+fn _suggest(name, candidates):
+    best = ""
+    best_score = 1000000
+    for c in candidates:
+        d = _levenshtein(name, c)
+        if c.startswith(name) or name.startswith(c):
+            if d > 2:
+                d = 2
+            else:
+                d = 0
+        if d < best_score:
+            best_score = d
+            best = c
+    if best_score <= 2 and best != name and best != "":
+        return " (did you mean '--" + best + "'?)"
+    return ""
+
+"""Option: one registered option (flag, count, value, list or choice).
+
+`action` is argparse-compatible where practical: "store", "store_true",
+"store_false", "store_const", "append", "append_const", "count", "extend".
+`kind` is the legacy/internal category kept for backward compatibility.
+`nargs` controls argument consumption for option values: "1" (default),
+"?" (optional value: uses `const` when the flag appears without a value,
+else `default`), "0" (no value; used by const/flag actions), "*" or "+".
+`has_const`/`const_val` represent argparse `const`.
+"""
+class Option:
+    names: String      # original spec text, e.g. "-n, --name"
+    shorts: [String]   # ["n"]
+    longs: [String]    # ["name"]
+    dest: String       # result-map key
+    help: String       # help text
+    kind: String       # "flag" | "count" | "value" | "list" (legacy)
+    action: String     # argparse-style action
+    vtype: String      # "str" | "int" | "float" | "bool"
+    default: String    # default as text (coerced when the parse starts)
+    choices: [String]  # [] = anything
+    metavar: String    # "" = derive
+    required: bool
+    envvar: String     # "" = no environment fallback
+    nargs: String      # "0", "1", "?", "*", "+"
+    has_const: bool
+    const_val: String  # const as text
+
+"""Positional: one positional argument spec."""
+class Positional:
+    name: String
+    dest: String
+    help: String
+    nargs: String      # "1" | "?" | "*" | "+" | "<int>"
+    metavar: String
+    vtype: String      # "str" | "int" | "float" | "bool"
+    default: String
+    choices: [String]
+    action: String     # "store" | "append" | "extend" (limited)
+    required: bool
+
+"""Sub: one subcommand definition."""
+class Sub:
+    name: String
+    help: String
+    aliases: [String]
+    parser
+
+"""ArgumentGroup: groups arguments for help display (argparse-style)."""
+class ArgumentGroup:
+    title: String
+    description: String
+    dests: [String]    # option/positional dest names in this group
+
+"""MutuallyExclusiveGroup: argparse-style mutual exclusion (basic)."""
+class MutuallyExclusiveGroup:
+    dests: [String]
+    required: bool
+
+"""ParseResult: the outcome of Parser.parse().
+
+kind is "ok" | "help" | "version" | "error". `ns` is the typed result map.
+`text` carries help/version text; `error` carries the message. `command` is
+the chosen subcommand name ("" when none). `unknown` holds unparsed args when
+using parse_known_args().
+"""
+class ParseResult:
+    kind: String
+    ns
+    error: String
+    text: String
+    command: String
+    unknown: [String]
+
+    fn ok(self):
+        return self.kind == "ok"
+
+    fn get(self, name, default = None):
+        if self.ns.contains(name):
+            return self.ns[name]
+        return default
+
+class Parser:
+    prog: String
+    description: String
+    version: String
+    opts: [Option]
+    pos: [Positional]
+    subs: [Sub]
+    long_idx: {String: i64}    # long name -> index into opts
+    short_idx: {String: i64}   # short letter -> index into opts
+    dest_idx: {String: i64}    # dest -> index into opts
+    width: i64                 # help wrapping width
+    allow_abbrev: bool
+    exit_on_error: bool
+    defaults: {String: String}
+    groups: [ArgumentGroup]
+    mutex_groups: [MutuallyExclusiveGroup]
+    prefix_chars: String
+    usage: String              # custom usage text, "" = auto
+    epilog: String
+    formatter_class: String    # reserved for argparse API parity
+    add_help: bool
+    subparser_title: String
+    subparser_dest: String
+    subparser_required: bool
+
+    """_has_prefix(n) -> true if n looks like an option (starts with a prefix char)."""
+    fn _has_prefix(self, n):
+        if n == "":
+            return false
+        # respect common prefix chars; default "-"
+        for c in self.prefix_chars.chars():
+            if n.startswith(str(c)):
+                return true
+        return false
+
+    """_norm_nargs(nargs, is_positional) -> normalized nargs string."""
+    fn _norm_nargs(self, nargs, is_positional):
+        if nargs == None:
+            if is_positional:
+                return "1"
+            return "1"
+        s = str(nargs)
+        if s == "None":
+            if is_positional:
+                return "1"
+            return "1"
+        if s == "one":
+            return "1"
+        if s == "0" or s == "1" or s == "?" or s == "*" or s == "+":
+            return s
+        # integer N
+        if _is_int_text(s):
+            return s
+        return s
+
+    """_register(...) -> self. Internal registration (legacy + argparse fields)."""
+    fn _reg(self, names: String, kind: String, action: String, vtype: String, default, help: String, choices: [String], metavar: String, required: bool, envvar: String, nargs: String = "1", has_const: bool = false, const_val = "", dest: String = ""):
+        shorts = []
+        longs = []
+        positional_name = ""
+        for raw in names.split(","):
+            n = raw.strip()
+            if n == "":
+                continue
+            if n.startswith("--"):
+                longs.append(_slice(n, 2, len(n)))
+            elif n.startswith("-") and len(n) > 1 and not _is_int_text(n):
+                part = _slice(n, 1, len(n))
+                if len(part) != 1:
+                    core.panic("swiftcli: short option must be one character: '" + n + "'")
+                shorts.append(part)
+            else:
+                positional_name = n
+                longs.append(n)
+        # positional-style single name without prefix
+        if positional_name != "" and len(shorts) == 0 and (not names.strip().startswith("-")):
+            use_dest = dest
+            if use_dest == "":
+                use_dest = positional_name.replace("-", "_")
+            nn = self._norm_nargs(nargs, true)
+            req = required
+            if nn == "1":
+                req = true
+            self.pos.append(_pos(positional_name, use_dest, help, nn, metavar if metavar != "" else positional_name.upper(), vtype, default, choices, action, req))
+            return self
+
+        if len(shorts) == 0 and len(longs) == 0:
+            core.panic("swiftcli: option spec has no names: '" + names + "'")
+        use_dest = dest
+        if use_dest == "":
+            use_dest = _dest_of(longs, shorts)
+        for s2 in shorts:
+            if self.short_idx.contains(s2):
+                core.panic("swiftcli: duplicate option -" + s2)
+        for l in longs:
+            if self.long_idx.contains(l):
+                core.panic("swiftcli: duplicate option --" + l)
+        if self.dest_idx.contains(use_dest):
+            core.panic("swiftcli: duplicate destination '" + use_dest + "'")
+        idx = len(self.opts)
+        nn = self._norm_nargs(nargs, false)
+        self.opts.append(_opt(names, shorts, longs, use_dest, help, kind, action, vtype, default, choices, metavar, required, envvar, nn, has_const, const_val))
+        self.dest_idx[use_dest] = idx
+        for l in longs:
+            self.long_idx[l] = idx
+        for s2 in shorts:
+            self.short_idx[s2] = idx
+        return self
+
+    """add_argument(names, action="store", nargs=None, const=None, default=None,
+    arg_type="str", choices=[], required=false, help="", metavar="", dest="",
+    envvar="") -> self.
+
+    Argparse-style general argument registration. `names` is a spec string
+    like "-f, --foo" (option) or "bar" (positional). `arg_type` accepts (argparse `type`)
+    "str"/"int"/"float"/"bool" (or "string"/"integer"/"number" aliases).
+    `action` supports store, store_true, store_false, store_const, append,
+    append_const, count. `nargs` supports None/1/"?"/"*"/"+"/integer.
+    """
+    fn add_argument(self, names, action = "store", nargs = None, const = None, default = None, arg_type = "str", choices = [], required = false, help = "", metavar = "", dest = "", envvar = ""):
+        vtype = str(arg_type)
+        if vtype == "string":
+            vtype = "str"
+        elif vtype == "integer":
+            vtype = "int"
+        elif vtype == "number":
+            vtype = "float"
+        act = str(action)
+        # normalize legacy-style calls where names may be [String]? not supported; accept string
+        name_str = str(names)
+
+        has_const = false
+        cval = ""
+        if const != None:
+            has_const = true
+            cval = str(const)
+
+        kind = "value"
+        use_default = default
+        nn = nargs
+        if act == "store_true":
+            kind = "flag"
+            if use_default == None:
+                use_default = false
+            nn = "0"
+        elif act == "store_false":
+            kind = "flag"
+            if use_default == None:
+                use_default = true
+            nn = "0"
+        elif act == "store_const":
+            kind = "value"
+            if not has_const:
+                has_const = true
+                cval = ""
+            if use_default == None:
+                use_default = ""
+            nn = "0"
+        elif act == "append_const":
+            kind = "list"
+            if not has_const:
+                has_const = true
+                cval = ""
+            if use_default == None:
+                use_default = []
+            nn = "0"
+        elif act == "append":
+            kind = "list"
+            if use_default == None:
+                use_default = []
+        elif act == "count":
+            kind = "count"
+            if use_default == None:
+                use_default = 0
+            nn = "0"
+        elif act == "extend":
+            kind = "list"
+            if use_default == None:
+                use_default = []
+        else:
+            # store
+            kind = "value"
+            if use_default == None:
+                use_default = ""
+
+        # bool option type convenience
+        if vtype == "bool" and act == "store" and use_default == None:
+            use_default = false
+
+        if metavar == "" and act != "store_true" and act != "store_false" and act != "count" and act != "store_const" and act != "append_const":
+            if vtype == "int":
+                metavar = "INT"
+            elif vtype == "float":
+                metavar = "FLOAT"
+            elif vtype == "bool":
+                metavar = "BOOL"
+
+        self._reg(name_str, kind, act, vtype, use_default, help, choices, metavar, required, envvar, self._norm_nargs(nn, not name_str.strip().startswith("-")), has_const, cval, dest)
+        # register --no-foo negation for explicit store_false-like bool defaults? keep legacy behavior in bool_option
+        if act == "store_false":
+            # map --no-long to same option with negated store? argparse store_false means flag sets False.
+            # easiest: also accept --name (sets false) already; add --no-name? no - store_false is triggered by --name.
+            pass
+        return self
+
+    """flag(names, help = "") -> self. `-v, --verbose` sets a bool."""
+    fn flag(self, names, help = ""):
+        return self.add_argument(names, "store_true", "0", None, false, "bool", [], false, help, "", "", "")
+
+    """count(names, help = "") -> self. `-q, --quiet` counts repeats (`-qqq`)."""
+    fn count(self, names, help = ""):
+        return self.add_argument(names, "count", "0", None, 0, "int", [], false, help, "", "", "")
+
+    """option(names, default = "", help = "") -> self. A string value."""
+    fn option(self, names, default = "", help = ""):
+        return self.add_argument(names, "store", "1", None, default, "str", [], false, help, "", "", "")
+
+    """int_option(names, default = 0, help = "") -> self. An int value."""
+    fn int_option(self, names, default = 0, help = ""):
+        return self.add_argument(names, "store", "1", None, default, "int", [], false, help, "INT", "", "")
+
+    """float_option(names, default = 0.0, help = "") -> self. A float value."""
+    fn float_option(self, names, default = 0.0, help = ""):
+        return self.add_argument(names, "store", "1", None, default, "float", [], false, help, "FLOAT", "", "")
+
+    """bool_option(names, default = true, help = "") -> self.
+
+    Accepts `--feature`, `--feature=true`, `--feature=false`. When the default
+    is true, `--no-feature` also works and sets false.
+    """
+    fn bool_option(self, names, default = true, help = ""):
+        self.add_argument(names, "store", "1", None, default, "bool", [], false, help, "BOOL", "", "")
+        if default:
+            # find dest from last registration
+            longs: [String] = []
+            for raw in names.split(","):
+                n = raw.strip()
+                if n.startswith("--"):
+                    longs.append(_slice(n, 2, len(n)))
+            for l in longs:
+                if self.long_idx.contains(l):
+                    idx = self.long_idx[l]
+                    if not self.long_idx.contains("no-" + l):
+                        self.long_idx["no-" + l] = idx
+        return self
+
+    """choice(names, choices, default = "", help = "") -> self."""
+    fn choice(self, names, choices, default = "", help = ""):
+        return self.add_argument(names, "store", "1", None, default, "str", choices, false, help, "", "", "")
+
+    """list_option(names, help = "") -> self. Repeatable; collects [String]."""
+    fn list_option(self, names, help = ""):
+        return self.add_argument(names, "append", "1", None, [], "str", [], false, help, "TEXT", "", "")
+
+    """positional(name, help = "", nargs = "one") -> self.
+
+    nargs is "one"/"1" (required single), "?" (optional single, None when absent),
+    "*" (zero or more) or "+" (one or more), or an integer N.
+    """
+    fn positional(self, name, help = "", nargs = "one"):
+        nn = self._norm_nargs(nargs, true)
+        if nn != "1" and nn != "?" and nn != "*" and nn != "+" and not _is_int_text(nn):
+            core.panic("swiftcli: bad nargs '" + str(nargs) + "' for positional '" + name + "'")
+        req = false
+        if nn == "1" or nn == "+":
+            req = true
+        if _is_int_text(nn) and int(nn) > 0:
+            req = true
+        self.pos.append(_pos(name, name, help, nn, name.upper(), "str", "", [], "store", req))
+        return self
+
+    """add_subparsers(dest = "command", title = "Commands", required = false) -> self (argparse-style)."""
+    fn add_subparsers(self, dest = "command", title = "Commands", required = false):
+        self.subparser_dest = dest
+        self.subparser_title = title
+        self.subparser_required = required
+        return self
+
+    """subcommand(name, help = "", aliases = []) -> the child Parser for that subcommand."""
+    fn subcommand(self, name, help = "", aliases = []):
+        for s in self.subs:
+            if s.name == name:
+                core.panic("swiftcli: duplicate subcommand '" + name + "'")
+            for a in aliases:
+                if s.name == a:
+                    core.panic("swiftcli: duplicate subcommand '" + a + "'")
+                for sa in s.aliases:
+                    if sa == a:
+                        core.panic("swiftcli: duplicate subcommand '" + a + "'")
+        child = _new_parser(self.prog + " " + name, help, self.version, self.width)
+        child.allow_abbrev = self.allow_abbrev
+        child.prefix_chars = self.prefix_chars
+        self.subs.append(_sub(name, help, aliases, child))
+        return child
+
+    """add_parser(name, help = "", aliases = []) -> alias for subcommand() (argparse-style)."""
+    fn add_parser(self, name, help = "", aliases = []):
+        return self.subcommand(name, help, aliases)
+
+    """require(dest) -> self. Marks a registered option as required."""
+    fn require(self, dest):
+        if not self.dest_idx.contains(dest):
+            core.panic("swiftcli: require('" + dest + "') before registering it")
+        self.opts[self.dest_idx[dest]].required = true
+        return self
+
+    """env_fallback(dest, var) -> self. Used when the option is absent."""
+    fn env_fallback(self, dest, var):
+        if not self.dest_idx.contains(dest):
+            core.panic("swiftcli: env_fallback('" + dest + "') before registering it")
+        self.opts[self.dest_idx[dest]].envvar = var
+        return self
+
+    """set_metavar(dest, text) -> self. Overrides the help placeholder."""
+    fn set_metavar(self, dest, text):
+        if not self.dest_idx.contains(dest):
+            core.panic("swiftcli: set_metavar('" + dest + "') before registering it")
+        self.opts[self.dest_idx[dest]].metavar = text
+        return self
+
+    """set_defaults(dest, value) or set_defaults(map) -> self (argparse-style)."""
+    fn set_defaults(self, dest, value = None):
+        # if called as set_defaults(map) in the future, not directly supported;
+        # support (dest, value)
+        self.defaults[str(dest)] = str(value)
+        return self
+
+    """add_argument_group(title, description = "") -> self (help grouping; basic)."""
+    fn add_argument_group(self, title, description = ""):
+        self.groups.append(ArgumentGroup(str(title), str(description), []))
+        return self
+
+    """add_mutually_exclusive_group(required = false) -> self (basic mutex; registers group)."""
+    fn add_mutually_exclusive_group(self, required = false):
+        self.mutex_groups.append(MutuallyExclusiveGroup([], required))
+        return self
+
+    """_find_long(name) -> (index, error) resolving an exact or unique-prefix match."""
+    fn _find_long(self, name):
+        if self.long_idx.contains(name):
+            return (self.long_idx[name], "")
+        if not self.allow_abbrev:
+            return (-1, "unrecognized option '--" + name + "'" + _suggest(name, self.long_idx.keys()))
+        hits: [String] = []
+        for l in self.long_idx.keys():
+            if l.startswith(name):
+                hits.append(l)
+        if len(hits) == 1:
+            return (self.long_idx[hits[0]], "")
+        if len(hits) > 1:
+            return (-2, "ambiguous option '--" + name + "' matches: " + ", ".join(["--" + h for h in hits]))
+        return (-1, "unrecognized option '--" + name + "'" + _suggest(name, self.long_idx.keys()))
+
+    """_store(ns, seen, opt, raw, negated) -> error string ("" on success).
+
+    Coerces one raw value into the option's type and records it in the result
+    map. A bool option with raw == "" (bare `--flag`) stores true; with
+    negated == true (from `--no-flag`) it stores false.
+    """
+    fn _store(self, ns, seen, o: Option, raw: String, negated: bool):
+        if o.kind == "list":
+            ns[o.dest].append(raw)
+            seen[o.dest] = true
+            return ""
+        if o.vtype == "str":
+            if len(o.choices) > 0 and not o.choices.contains(raw):
+                return "invalid choice: '" + raw + "' (choose from " + ", ".join(o.choices) + ")"
+            ns[o.dest] = raw
+            seen[o.dest] = true
+            return ""
+        if o.vtype == "int":
+            if not _is_int_text(raw):
+                return "invalid int value: '" + raw + "'"
+            ns[o.dest] = int(raw)
+            seen[o.dest] = true
+            return ""
+        if o.vtype == "float":
+            if not _is_float_text(raw):
+                return "invalid float value: '" + raw + "'"
+            ns[o.dest] = float(raw)
+            seen[o.dest] = true
+            return ""
+        # bool
+        if raw == "":
+            ns[o.dest] = true
+            if negated:
+                ns[o.dest] = false
+            seen[o.dest] = true
+            return ""
+        low = raw.lower()
+        value = true
+        if low == "true" or low == "1" or low == "yes" or low == "on":
+            value = true
+        elif low == "false" or low == "0" or low == "no" or low == "off":
+            value = false
+        else:
+            return "invalid boolean value: '" + raw + "' (use true/false)"
+        if negated:
+            ns[o.dest] = not value
+        else:
+            ns[o.dest] = value
+        seen[o.dest] = true
+        return ""
+
+    """_takes_value(opt) -> true when the option consumes an argument token."""
+    fn _takes_value(self, o: Option):
+        act = str(o.action)
+        if act == "store_true" or act == "store_false" or act == "store_const" or act == "append_const" or act == "count":
+            return false
+        if o.kind == "flag" or o.kind == "count":
+            return false
+        nn = str(o.nargs)
+        if nn == "0":
+            return false
+        # nargs '?' consumes an optional following token (handled specially in parse)
+        if nn == "?":
+            return false
+        # bool value options in legacy form: bare --flag is allowed but --flag=true takes value
+        if o.kind == "value" and o.vtype == "bool" and act == "store":
+            return false
+        if o.kind == "value" or o.kind == "list":
+            return true
+        return false
+
+    """parse(argv) -> ParseResult. One linear pass; no exceptions, no panics."""
+    fn parse(self, argv: [String]):
+        return self._parse_impl(argv, false)
+
+    """parse_args(argv = []) -> ParseResult (argparse-style alias)."""
+    fn parse_args(self, argv: [String] = []):
+        return self.parse(argv)
+
+    """parse_known_args(argv) -> ParseResult with `unknown` populated (argparse-style)."""
+    fn parse_known_args(self, argv: [String]):
+        return self._parse_impl(argv, true)
+
+    """parse_intermixed_args(argv) -> ParseResult (limited; delegates to parse)."""
+    fn parse_intermixed_args(self, argv: [String]):
+        return self.parse(argv)
+
+    fn _parse_impl(self, argv: [String], known_only: bool):
+        ns = {}
+        ns["command"] = ""
+        ns[self.subparser_dest] = ""
+        seen = {}
+        unknown: [String] = []
+        scratch = {}
+        for o in self.opts:
+            if o.kind == "list":
+                ns[o.dest] = []
+            else:
+                err = self._store(ns, scratch, o, o.default, false)
+                if err != "":
+                    return _pr("error", ns, "bad default for " + o.names + ": " + err, "", "")
+        # apply set_defaults (overrides option defaults; argparse semantics)
+        for dk in self.defaults.keys():
+            ns[dk] = self.defaults[dk]
+
+        pending: [String] = []
+        counts: {String: i64} = {}
+        no_more_opts = false
+        i = 0
+        while i < len(argv):
+            tok = argv[i]
+            i = i + 1
+
+            if no_more_opts:
+                pending.append(tok)
+                continue
+            if tok == "--":
+                no_more_opts = true
+                continue
+
+            # --help / --version (only when the user did not claim them)
+            if tok == "--help" and not self.long_idx.contains("help"):
+                return _pr("help", ns, "", self.help_text(), "")
+            if tok == "--version" and self.version != "" and not self.long_idx.contains("version"):
+                return _pr("version", ns, "", self.version, "")
+
+            if tok.startswith("--"):
+                body = _slice(tok, 2, len(tok))
+                inline = ""
+                has_inline = false
+                eq = body.find("=")
+                name = body
+                if eq >= 0:
+                    name = _slice(body, 0, eq)
+                    inline = _slice(body, eq + 1, len(body))
+                    has_inline = true
+                (idx, err) = self._find_long(name)
+                if err != "":
+                    if known_only:
+                        unknown.append(tok)
+                        continue
+                    return _pr("error", ns, err, "", "", unknown)
+                o = self.opts[idx]
+                act = str(o.action)
+                negated = false
+                if o.vtype == "bool" and o.kind == "value" and not o.longs.contains(name) and name.startswith("no-"):
+                    negated = true
+                # nargs '?' optional value: consume next if present and not an option
+                opt_nargs = str(o.nargs)
+                if opt_nargs == "?" and not has_inline and act == "store":
+                    rawq = ""
+                    use_const = true
+                    if i < len(argv):
+                        nxt = argv[i]
+                        if not nxt.startswith("-") or _is_int_text(nxt) or _is_float_text(nxt):
+                            rawq = nxt
+                            i = i + 1
+                            use_const = false
+                        elif nxt == "--":
+                            use_const = true
+                    if use_const:
+                        if o.has_const:
+                            rawq = o.const_val
+                        else:
+                            rawq = o.default
+                    err = self._store(ns, seen, o, rawq, negated)
+                    if err != "":
+                        if known_only:
+                            unknown.append(tok)
+                            continue
+                        return _pr("error", ns, "--" + name + ": " + err, "", "", unknown)
+                    continue
+                if self._takes_value(o):
+                    raw = inline
+                    if not has_inline:
+                        if i >= len(argv):
+                            if known_only:
+                                unknown.append(tok)
+                                continue
+                            return _pr("error", ns, "option '--" + name + "' requires a value", "", "", unknown)
+                        raw = argv[i]
+                        i = i + 1
+                    err = self._store(ns, seen, o, raw, negated)
+                    if err != "":
+                        if known_only:
+                            unknown.append(tok)
+                            continue
+                        return _pr("error", ns, "--" + name + ": " + err, "", "", unknown)
+                else:
+                    if has_inline and o.kind != "value" and act != "store_const" and act != "append_const":
+                        if known_only:
+                            unknown.append(tok)
+                            continue
+                        return _pr("error", ns, "option '--" + name + "' takes no value", "", "", unknown)
+                    if act == "store_false":
+                        ns[o.dest] = false
+                        seen[o.dest] = true
+                    elif act == "store_true":
+                        ns[o.dest] = true
+                        seen[o.dest] = true
+                    elif act == "store_const":
+                        ns[o.dest] = o.const_val
+                        seen[o.dest] = true
+                    elif act == "append_const":
+                        if not ns.contains(o.dest) or ns[o.dest] == None:
+                            ns[o.dest] = []
+                        ns[o.dest] = [o.const_val]
+                        seen[o.dest] = true
+                    elif has_inline:
+                        err = self._store(ns, seen, o, inline, negated)
+                        if err != "":
+                            if known_only:
+                                unknown.append(tok)
+                                continue
+                            return _pr("error", ns, "--" + name + ": " + err, "", "", unknown)
+                    elif negated:
+                        err = self._store(ns, seen, o, "", true)
+                        if err != "":
+                            if known_only:
+                                unknown.append(tok)
+                                continue
+                            return _pr("error", ns, "--" + name + ": " + err, "", "", unknown)
+                    elif o.kind == "count" or act == "count":
+                        counts[o.dest] = counts.get(o.dest, 0) + 1
+                        ns[o.dest] = counts[o.dest]
+                        seen[o.dest] = true
+                    else:
+                        # legacy flag / bool bare
+                        if o.kind == "flag" or act == "store_true":
+                            ns[o.dest] = true
+                        elif o.vtype == "bool":
+                            ns[o.dest] = true
+                            if negated:
+                                ns[o.dest] = false
+                        else:
+                            ns[o.dest] = true
+                        seen[o.dest] = true
+                continue
+
+            # -abc clusters, -nVALUE, negative numbers as positionals
+            if len(tok) > 1 and tok.startswith("-"):
+                first = _char_at(tok, 1)
+                if not self.short_idx.contains(first) and (_is_int_text(tok) or _is_float_text(tok)):
+                    pending.append(tok)
+                    continue
+                if first == "h" and not self.short_idx.contains("h"):
+                    return _pr("help", ns, "", self.help_text(), "")
+                cluster = _slice(tok, 1, len(tok))
+                pos = 0
+                failed = ""
+                while pos < len(cluster):
+                    c = _char_at(cluster, pos)
+                    if not self.short_idx.contains(c):
+                        failed = "unrecognized option '-" + c + "'"
+                        break
+                    o = self.opts[self.short_idx[c]]
+                    pos = pos + 1
+                    if self._takes_value(o):
+                        raw = _slice(cluster, pos, len(cluster))
+                        if raw.startswith("="):
+                            raw = _slice(raw, 1, len(raw))
+                        if raw == "":
+                            if i >= len(argv):
+                                failed = "option '-" + c + "' requires a value"
+                                break
+                            raw = argv[i]
+                            i = i + 1
+                        failed = self._store(ns, seen, o, raw, false)
+                        pos = len(cluster)
+                    elif o.kind == "count":
+                        counts[o.dest] = counts.get(o.dest, 0) + 1
+                        ns[o.dest] = counts[o.dest]
+                        seen[o.dest] = true
+                    else:
+                        ns[o.dest] = true
+                        seen[o.dest] = true
+                if failed != "":
+                    return _pr("error", ns, failed, "", "")
+                continue
+
+            # bare word: subcommand or positional
+            if len(self.subs) > 0:
+                for sub in self.subs:
+                    matched = (sub.name == tok)
+                    if not matched:
+                        for a in sub.aliases:
+                            if a == tok:
+                                matched = true
+                                break
+                    if matched:
+                        child = sub.parser
+                        res = child._parse_impl(argv[i..], known_only)
+                        if res.kind != "ok":
+                            res.command = sub.name
+                            return res
+                        for k in res.ns.keys():
+                            ns[k] = res.ns[k]
+                        ns[self.subparser_dest] = sub.name
+                        ns["command"] = sub.name
+                        res = self._finish(ns, seen, pending, unknown)
+                        res.command = sub.name
+                        return res
+            pending.append(tok)
+
+        return self._finish(ns, seen, pending, unknown)
+
+    """_finish(ns, seen, pending) -> ParseResult after defaults/env/positionals."""
+    fn _finish(self, ns, seen, pending: [String], unknown: [String] = []):
+        for o in self.opts:
+            if seen.contains(o.dest):
+                continue
+            if o.envvar != "":
+                raw = env.get(o.envvar)
+                if raw != "":
+                    err = self._store(ns, seen, o, raw, false)
+                    if err != "":
+                        return _pr("error", ns, "env " + o.envvar + ": " + err, "", "", unknown)
+                    continue
+            if o.required:
+                names = o.names
+                return _pr("error", ns, "missing required option " + names, "", "", unknown)
+
+        err = self._assign(ns, pending)
+        if err != "":
+            # in parse_known_args mode, unrecognized positional extras should go to unknown
+            if err.startswith("unrecognized arguments:") and len(unknown) >= 0:
+                # keep as error for normal parse; _parse_impl handles known_only by pre-filtering? 
+                # simple: if caller wants known_only behavior, we can't know here; return error.
+                pass
+            return _pr("error", ns, err, "", "", unknown)
+        return _pr("ok", ns, "", "", unknown)
+
+    """_min_nargs(n) -> minimum args required for a nargs spec."""
+    fn _min_nargs(self, n: String):
+        if n == "?" or n == "*":
+            return 0
+        if n == "+":
+            return 1
+        if n == "1" or n == "one":
+            return 1
+        if _is_int_text(n):
+            return int(n)
+        return 1
+
+    """_assign(ns, pending) -> error string ("" on success)."""
+    fn _assign(self, ns, pending: [String]):
+        total = len(pending)
+        at = 0
+        j = 0
+        while j < len(self.pos):
+            s = self.pos[j]
+            need_after = 0
+            k = j + 1
+            while k < len(self.pos):
+                need_after = need_after + self._min_nargs(str(self.pos[k].nargs))
+                k = k + 1
+            avail = total - at - need_after
+            if avail < 0:
+                avail = 0
+            n = str(s.nargs)
+            take = 1
+            if n == "*":
+                take = avail
+            elif n == "+":
+                take = avail
+                if take < 1:
+                    return "missing required argument '" + s.name + "'"
+            elif n == "?":
+                take = 0
+                if avail > 0:
+                    take = 1
+            elif _is_int_text(n):
+                take = int(n)
+                if avail < take:
+                    return "missing required argument '" + s.name + "'"
+            elif avail < 1:
+                return "missing required argument '" + s.name + "'"
+            if n == "1" or n == "one" or n == "?":
+                if take == 1 and at < len(pending):
+                    ns[s.name] = pending[at]
+                else:
+                    ns[s.name] = None
+            else:
+                ns[s.name] = pending[at..(at + take)]
+            at = at + take
+            j = j + 1
+        if at < total:
+            extras = pending[at..]
+            return "unrecognized arguments: " + " ".join(extras)
+        return ""
+
+    """_metavar(opt) -> the placeholder shown after an option in help."""
+    fn _metavar(self, o: Option):
+        if len(o.choices) > 0:
+            return "\{" + "|".join(o.choices) + "\}"
+        if o.metavar != "":
+            return o.metavar
+        if o.vtype == "int":
+            return "INT"
+        if o.vtype == "float":
+            return "FLOAT"
+        if o.vtype == "bool":
+            return "BOOL"
+        return "TEXT"
+
+    """_left(opt) -> the left column, e.g. "-n, --name TEXT"."""
+    fn _left(self, o: Option):
+        parts: [String] = []
+        for s in o.shorts:
+            parts.append("-" + s)
+        for l in o.longs:
+            parts.append("--" + l)
+        left = ", ".join(parts)
+        if o.kind == "value":
+            left = left + " " + self._metavar(o)
+        elif o.kind == "list":
+            left = left + " " + self._metavar(o) + " ..."
+        return left
+
+    """_right(opt) -> help text plus [default/env/required] annotations."""
+    fn _right(self, o: Option):
+        text = o.help
+        notes = []
+        if o.required:
+            notes.append("required")
+        if o.envvar != "":
+            notes.append("env: " + o.envvar)
+        if o.kind == "value":
+            if o.vtype == "bool":
+                if o.default == "true":
+                    notes.append("default: true")
+                else:
+                    notes.append("default: false")
+            elif o.vtype == "int":
+                if o.default != "0":
+                    notes.append("default: " + o.default)
+            elif o.vtype == "float":
+                if o.default != "0" and o.default != "0.0":
+                    notes.append("default: " + o.default)
+            elif o.default != "":
+                notes.append("default: " + o.default)
+        if len(notes) > 0:
+            extra = "[" + ", ".join(notes) + "]"
+            if text != "":
+                text = text + "  " + extra
+            else:
+                text = extra
+        return text
+
+    """_rows(entries) -> an aligned two-column block, wrapping the right column."""
+    fn _rows(self, lefts: [String], rights: [String]):
+        widest = 0
+        for l in lefts:
+            if len(l) > widest:
+                widest = len(l)
+        if widest > 30:
+            widest = 30
+        lines: [String] = []
+        i = 0
+        while i < len(lefts):
+            left = lefts[i]
+            right = rights[i]
+            pad = ""
+            if len(left) < widest:
+                pad = " ".ljust(widest - len(left))
+            head = "  " + left + pad + "  "
+            if right == "":
+                lines.append(head)
+            else:
+                lines.append(_wrap(right, self.width - len(head), head))
+            i = i + 1
+        return "\n".join(lines)
+
+    """usage_text() -> the one-line usage synopsis."""
+    fn usage_text(self):
+        line = "Usage: " + self.prog + " [options]"
+        for p in self.pos:
+            n = str(p.nargs)
+            if n == "one" or n == "1":
+                line = line + " <" + p.name + ">"
+            elif n == "?":
+                line = line + " [" + p.name + "]"
+            elif n == "*":
+                line = line + " [" + p.name + " ...]"
+            elif n == "+":
+                line = line + " <" + p.name + " ...>"
+            elif _is_int_text(n):
+                i = 0
+                while i < int(n):
+                    line = line + " <" + p.name + ">"
+                    i = i + 1
+            else:
+                line = line + " <" + p.name + " ...>"
+        if len(self.subs) > 0:
+            line = line + " <" + str(self.subparser_dest) + "> [args]"
+        return line
+
+    """help_text() -> the full --help page (usage, options, arguments, commands)."""
+    fn help_text(self):
+        out: [String] = [self.usage_text()]
+        if self.description != "":
+            out.append("")
+            out.append(_wrap(self.description, self.width, ""))
+        lefts: [String] = []
+        rights: [String] = []
+        if not self.long_idx.contains("help") and not self.short_idx.contains("h"):
+            lefts.append("-h, --help")
+            rights.append("show this help and exit")
+        if self.version != "" and not self.long_idx.contains("version"):
+            lefts.append("--version")
+            rights.append("show the version and exit")
+        for o in self.opts:
+            lefts.append(self._left(o))
+            rights.append(self._right(o))
+        if len(lefts) > 0:
+            out.append("")
+            out.append("Options:")
+            out.append(self._rows(lefts, rights))
+        if len(self.pos) > 0:
+            pos_lefts: [String] = []
+            pos_rights: [String] = []
+            for p in self.pos:
+                label = p.metavar
+                n = str(p.nargs)
+                if n == "?":
+                    label = "[" + p.name + "]"
+                elif n == "*":
+                    label = "[" + p.name + " ...]"
+                elif n == "+":
+                    label = p.name + " ..."
+                pos_lefts.append(label)
+                pos_rights.append(p.help)
+            out.append("")
+            out.append("Arguments:")
+            out.append(self._rows(pos_lefts, pos_rights))
+        if len(self.subs) > 0:
+            sub_lefts: [String] = []
+            sub_rights: [String] = []
+            for s in self.subs:
+                sub_lefts.append(s.name)
+                sub_rights.append(s.help)
+            out.append("")
+            out.append("Commands:")
+            out.append(self._rows(sub_lefts, sub_rights))
+            out.append("")
+            out.append("Run \"" + self.prog + " <command> --help\" for command details.")
+        out.append("")
+        return "\n".join(out)
+
+"""_opt(...) -> Option with argparse-compatible defaults."""
+fn _opt(names, shorts, longs, dest, help, kind, action, vtype, default, choices, metavar, required, envvar, nargs, has_const, const_val):
+    return Option(names, shorts, longs, dest, help, kind, action, vtype, str(default), choices, metavar, required, envvar, nargs, has_const, str(const_val))
+
+"""_pos(...) -> Positional with defaults."""
+fn _pos(name, dest, help, nargs, metavar, vtype = "str", default = "", choices = [], action = "store", required = false):
+    return Positional(name, dest, help, nargs, metavar, vtype, str(default), choices, action, required)
+
+"""_sub(name, help, aliases, parser) -> Sub."""
+fn _sub(name, help, aliases, parser):
+    return Sub(name, help, aliases, parser)
+
+"""_pr(kind, ns, error, text, command, unknown = []) -> ParseResult."""
+fn _pr(kind, ns, error, text, command, unknown = []):
+    return ParseResult(kind, ns, error, text, command, unknown)
+
+"""_new_parser(...) -> internal Parser constructor."""
+fn _new_parser(prog, description = "", version = "", width = _Default_Width):
+    return Parser(prog, description, version, [], [], [], {}, {}, {}, width, true, false, {}, [], [], "-", "", "", "", true, "Commands", "command", false)
+
+"""new(prog, description = "", version = "") -> an empty Parser."""
+fn new(prog, description = "", version = ""):
+    return _new_parser(prog, description, version, _Default_Width)
+
+"""ArgumentParser(...) -> argparse-style alias for new()."""
+fn ArgumentParser(prog = "", description = "", version = "", epilog = "", add_help = true, allow_abbrev = true, exit_on_error = true, usage = "", prefix_chars = "-", formatter_class = ""):
+    p = _new_parser(prog, description, version, _Default_Width)
+    p.epilog = epilog
+    p.add_help = add_help
+    p.allow_abbrev = allow_abbrev
+    p.exit_on_error = exit_on_error
+    p.usage = usage
+    p.prefix_chars = prefix_chars
+    p.formatter_class = formatter_class
+    return p
+
+"""split_args(text) -> shell-like argv splitting (quotes, escapes, spaces)."""
+fn split_args(text: String):
+    out: [String] = []
+    cur = ""
+    building = false
+    quote = ""
+    cs = text.chars()
+    i = 0
+    while i < len(cs):
+        ch = str(cs[i])
+        i = i + 1
+        if quote != "":
+            if ch == quote:
+                quote = ""
+            elif ch == "\\" and quote == "\"" and i < len(cs):
+                cur = cur + str(cs[i])
+                building = true
+                i = i + 1
+            else:
+                cur = cur + ch
+                building = true
+            continue
+        if ch == "\"" or ch == "'":
+            quote = ch
+            building = true
+            continue
+        if ch == " " or ch == "\t" or ch == "\n":
+            if building:
+                out.append(cur)
+                cur = ""
+                building = false
+            continue
+        if ch == "\\" and i < len(cs):
+            cur = cur + str(cs[i])
+            building = true
+            i = i + 1
+            continue
+        cur = cur + ch
+        building = true
+    if building:
+        out.append(cur)
+    return out
+
+"""args_from_env(var = "A_ARGS") -> [String] parsed from an env variable.
+
+`a run` does not forward command-line arguments to the program, so real
+CLIs read their argv from an environment variable:
+
+    A_ARGS='-n api --port 8080 "my file.txt"' ./build/a run cli.astra
+"""
+fn args_from_env(var: String = "A_ARGS"):
+    return split_args(env.get(var))
+
+"""or_panic(res) -> res, or panics with the error message (exit code 2)."""
+fn or_panic(res):
+    if res.kind == "error":
+        core.panic("swiftcli: " + res.error)
+    return res

@@ -1,0 +1,149 @@
+# Check for NDArray NumPy-style methods added in ndarray.astra.
+# Run: ./build/a run stdlib/std/math/_check_methods.astra   (exit 0 = pass)
+from "ndarray.astra" import NDArray
+
+fn _approx(a: f64, b: f64, eps: f64) -> bool:
+    d = a - b
+    if d < 0:
+        d = -d
+    return d <= eps
+
+fn _assert(name: str, got: f64, want: f64):
+    assert(_approx(got, want, 1e-9), name + " got " + str(got) + " want " + str(want))
+
+fn _assert_arr(name: str, got: NDArray, want_data: [f64], want_shape: [i64]):
+    assert(got.shape == want_shape, name + " shape got " + str(got.shape) + " want " + str(want_shape))
+    assert(len(got.data) == len(want_data), name + " len got " + str(len(got.data)) + " want " + str(len(want_data)))
+    i = 0
+    while i < len(want_data):
+        assert(_approx(got.data[i], want_data[i], 1e-9), name + " data[" + str(i) + "] got " + str(got.data[i]) + " want " + str(want_data[i]))
+        i = i + 1
+
+# fixtures
+a1 = NDArray([1.0, 2.0, 3.0, 4.0], [4])
+a2 = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])   # [[1,2,3],[4,5,6]]
+sq = NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])               # [[1,2],[3,4]]
+one = NDArray([7.5], [])
+zero = NDArray([0.0], [1])
+
+# reductions
+_assert("sum", a1.sum(), 10.0)
+_assert("sum2d", a2.sum(), 21.0)
+_assert("mean", a1.mean(), 2.5)
+_assert("mean2d", a2.mean(), 3.5)
+_assert("min", a1.min(), 1.0)
+_assert("max", a2.max(), 6.0)
+_assert("min2d", a2.min(), 1.0)
+_assert("var", a1.var(), 1.25)          # population var of 1..4
+_assert("std", a1.std(), sqrt(1.25))
+_assert("var2d", sq.var(), 1.25)
+_assert("prod", a1.prod(), 24.0)
+_assert("prod2", NDArray([2.0, 3.0, 4.0], [3]).prod(), 24.0)
+
+# argmax / argmin (flat index)
+_assert("argmax", NDArray([3.0, 9.0, 1.0, 7.0], [4]).argmax(), 1.0)
+_assert("argmin", a2.argmin(), 0.0)
+_assert("argmax2d", a2.argmax(), 5.0)   # flat index of 6.0 is 5
+assert(NDArray([], [0]).argmax() == -1, "argmax empty")
+assert(NDArray([], [0]).argmin() == -1, "argmin empty")
+
+# shape ops
+r = a2.reshape([3, 2])
+_assert_arr("reshape", r, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2])
+_assert_arr("ravel", a2.ravel(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6])
+_assert_arr("flatten", a2.flatten(), [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6])
+
+# transpose + T alias
+t = sq.transpose()
+_assert_arr("transpose", t, [1.0, 3.0, 2.0, 4.0], [2, 2])
+t2 = sq.T()
+_assert_arr("T", t2, [1.0, 3.0, 2.0, 4.0], [2, 2])
+t1 = a1.transpose()   # 1-D: reverses axes -> still [4]
+assert(t1.shape == [4], "transpose 1d shape")
+
+# copy independence
+c = a2.copy()
+c.data[0] = 99.0
+c.shape[0] = 9
+assert(a2.data[0] == 1.0, "copy data independent")
+assert(a2.shape[0] == 2, "copy shape independent")
+_assert("copy val", c.sum(), 99.0 + 2.0 + 3.0 + 4.0 + 5.0 + 6.0)
+
+# tolist
+l2 = a2.tolist()
+assert(l2[0][0] == 1.0 and l2[0][2] == 3.0 and l2[1][0] == 4.0 and l2[1][2] == 6.0, "tolist 2d")
+l1 = a1.tolist()
+assert(l1[0][0] == 1.0 and l1[3][0] == 4.0, "tolist 1d")
+l0 = one.tolist()
+assert(l0[0][0] == 7.5, "tolist 0d")
+
+# array_str / __str__
+s = sq.array_str()
+assert(len(s) > 0, "array_str nonempty")
+s2 = sq.__str__()
+assert(s == s2, "__str__ == array_str")
+
+# dot
+# 1-D . 1-D -> scalar NDArray
+v1 = NDArray([1.0, 2.0, 3.0], [3])
+v2 = NDArray([4.0, 5.0, 6.0], [3])
+d1 = v1.dot(v2)
+assert(d1.shape == [], "dot 1d shape")
+_assert("dot 1d", d1.data[0], 32.0)
+# 2-D . 1-D -> [rows]: [[1,2,3],[4,5,6]] . [1,1,1] = [6,15]
+d2 = a2.dot(NDArray([1.0, 1.0, 1.0], [3]))
+_assert_arr("dot 2dx1", d2, [6.0, 15.0], [2])
+# 1-D . 2-D -> [cols]: [1,1,1] . [[1,2,3],[4,5,6]] = [5,7,9]
+d3 = NDArray([1.0, 1.0, 1.0], [3]).dot(a2)
+_assert_arr("dot 1dx2", d3, [5.0, 7.0, 9.0], [3])
+# 2-D . 2-D matmul: [[1,2],[3,4]] . [[5,6],[7,8]] = [[19,22],[43,50]]
+m1 = NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])
+m2 = NDArray([5.0, 6.0, 7.0, 8.0], [2, 2])
+d4 = m1.dot(m2)
+_assert_arr("dot 2dx2", d4, [19.0, 22.0, 43.0, 50.0], [2, 2])
+# mismatched inner dim -> empty
+d5 = NDArray([1.0, 2.0], [1, 2]).dot(NDArray([1.0, 2.0, 3.0], [1, 3]))
+assert(len(d5.data) == 0, "dot mismatch empty")
+
+# cumsum / cumprod (flat)
+_assert_arr("cumsum", a1.cumsum(), [1.0, 3.0, 6.0, 10.0], [4])
+_assert_arr("cumsum2d", a2.cumsum(), [1.0, 3.0, 6.0, 10.0, 15.0, 21.0], [6])
+_assert_arr("cumprod", NDArray([1.0, 2.0, 3.0, 4.0], [4]).cumprod(), [1.0, 2.0, 6.0, 24.0], [4])
+
+# trace
+_assert("trace", sq.trace(), 5.0)          # 1+4
+assert(sq.transpose().trace() == sq.trace(), "trace transpose-invariant")
+assert(a1.trace() != a1.trace(), "trace 1d is NaN")
+
+# item
+_assert("item", one.item(), 7.5)
+assert(a1.item() != a1.item(), "item multi is NaN")
+
+# all / any
+assert(a1.all(), "all nonzero")
+assert(not zero.all(), "all with zero")
+assert(a1.any(), "any nonzero")
+assert(not zero.any(), "any all-zero")
+assert(NDArray([], [0]).all(), "all empty")
+assert(not NDArray([], [0]).any(), "any empty")
+assert(NDArray([0.0, 1.0], [2]).any(), "any mixed")
+
+# empty-array edge cases
+empty = NDArray([], [0])
+assert(empty.sum() == 0.0, "empty sum")
+assert(empty.prod() == 1.0, "empty prod")
+assert(empty.mean() != empty.mean(), "empty mean NaN")
+assert(empty.min() != empty.min(), "empty min NaN")
+assert(empty.max() != empty.max(), "empty max NaN")
+assert(empty.var() != empty.var(), "empty var NaN")
+_assert_arr("empty cumsum", empty.cumsum(), [], [0])
+
+# method locals must not clobber caller variables (flat slot namespace bug)
+mi = 111
+mm = 222.0
+md = 333.0
+res = a1.sum()
+assert(mi == 111 and mm == 222.0 and md == 333.0, "caller vars clobbered")
+_assert("post-clobber sum", res, 10.0)
+
+print("all method checks passed")

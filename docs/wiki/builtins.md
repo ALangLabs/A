@@ -7,7 +7,7 @@ Core builtin functions are available without imports (verified against
 
 | Category | Functions |
 | --- | --- |
-| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.a" import read_line`), which returns `""` at end-of-file |
+| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.astra" import read_line`), which returns `""` at end-of-file |
 | Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)` — `T` is a runtime type-name string (`isinstance(xs, "list")`) or a bare type name (`isinstance(xs, list)`, `isinstance(x, int)`, or a `class` name); sized values (str, list, tuple, set, map) also accept the method form `x.len()` |
 
 Boolean literals are the lowercase keywords `true` and `false` (not Python's
@@ -16,7 +16,7 @@ Boolean literals are the lowercase keywords `true` and `false` (not Python's
 [syntax and types](syntax-and-types.md) and
 [statements and expressions](statements-and-expressions.md)).
 | Math | `abs`, `min`, `max`, `sum`, `pow`, `divmod` (returns `(quotient, remainder)` with floor-division semantics), `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int` |
-| Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops |
+| Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops. `f32s(data, byte_offset, count)` bulk-decodes `count` little-endian binary32 values from a `String`/`Bytes` buffer into `[f64]` — the fast path for binary weight files (safetensors) |
 | Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `bytes` (alias of `Bytes`), `range(n)`/`range(a, b[, step])`, plus `a..b` range literals. `map`/`filter` accept both `(fn, xs)` and `(xs, fn)`; `any(xs)`/`all(xs)` check truthiness with one arg or take a predicate as a second arg |
 | Option/Result | `Some(v)`, `Ok(v)`, `Err(e)` constructors; `None` literal |
 | Assertions | `assert(cond)`, `assert_eq(a, b)`, `panic(msg)` |

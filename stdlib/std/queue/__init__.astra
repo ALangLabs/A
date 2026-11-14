@@ -1,0 +1,344 @@
+# std.queue — port of Python Lib/queue.py (pure-A subset).
+#
+# A FIFO queue with an optional size bound. Python's Queue is thread-safe
+# and blocks on put/get when full/empty; A has no blocking primitives in
+# this port, so `put`/`get` PANIC on a full/empty queue (the
+# `put_nowait`/`get_nowait` behaviour) and `join` busy-waits with
+# `time.sleep(1)` ms between polls. Use `try_put`/`try_get` for the
+# non-blocking Optional-returning variants (Python's `put_nowait` /
+# `get_nowait` with `queue.Empty`/`queue.Full` mapped to None).
+#
+# Deviations:
+#   * `maxsize <= 0` means unbounded (Python `maxsize=0`).
+#   * `task_done`/`join` track the unfinished-task counter exactly like
+#     Python: every successful `put` increments it, `task_done` decrements
+#     (panics below zero like Python's ValueError).
+#   * `queue.Empty`/`queue.Full` exceptions -> core.panic / None returns.
+import std:core
+import std:time
+
+"""
+Queue<T>: bounded FIFO queue.
+`items` is public for inspection; prefer the methods. `head` is the
+index of the oldest live element — consumed slots stay in `items`
+until an amortized compaction (keeps get()/try_get() O(1) instead of
+list.pop(0)'s O(n) memmove).
+"""
+class Queue<T>:
+    items: [T]
+    maxsize: i64
+    unfinished: i64
+    head: i64
+
+    """_live() -> number of waiting items (Python `qsize()`)."""
+    fn _live(self):
+        return len(self.items) - self.head
+
+    """_pop_front(self) -> oldest item; compacts when the dead prefix
+    dominates the backing list (amortized O(1))."""
+    fn _pop_front(self) -> T:
+        v = self.items[self.head]
+        self.head = self.head + 1
+        if self.head > 64 and self.head * 2 > len(self.items):
+            self.items = self.items[self.head..]
+            self.head = 0
+        return v
+
+    """_check_open / capacity helpers."""
+    fn full(self):
+        return self.maxsize > 0 and self._live() >= self.maxsize
+
+    """empty(self) -> true when no items are waiting."""
+    fn empty(self):
+        return self._live() == 0
+
+    """qsize(self) -> number of waiting items (Python `qsize()`)."""
+    fn qsize(self):
+        return self._live()
+
+    """size(self) -> alias of qsize."""
+    fn size(self):
+        return self.qsize()
+
+    """
+    put(self, item) -> append item and count one unfinished task;
+    panics when the queue is full (Python `put_nowait` -> queue.Full).
+    """
+    fn put(self, item):
+        if self.full():
+            core.panic("Queue is full")
+        self.items.append(item)
+        self.unfinished = self.unfinished + 1
+
+    """
+    try_put(self, item) -> true when the item was queued, false when
+    the queue is full (non-blocking; never panics on capacity).
+    """
+    fn try_put(self, item):
+        if self.full():
+            return false
+        self.put(item)
+        return true
+
+    """
+    get(self) -> remove and return the oldest item; panics when empty
+    (Python `get_nowait` -> queue.Empty).
+    """
+    fn get(self) -> T:
+        if self._live() == 0:
+            core.panic("Queue is empty")
+        return self._pop_front()
+
+    """
+    try_get(self) -> oldest item or None when empty (non-blocking).
+    """
+    fn try_get(self):
+        if self._live() == 0:
+            return None
+        return self._pop_front()
+
+    """peek(self) -> oldest item without removing; None when empty."""
+    fn peek(self):
+        if self._live() == 0:
+            return None
+        return self.items[self.head]
+
+    """
+    task_done(self) -> mark one unfinished task complete; panics when
+    the counter would go negative (Python ValueError).
+    """
+    fn task_done(self):
+        if self.unfinished <= 0:
+            core.panic("task_done() called too many times")
+        self.unfinished = self.unfinished - 1
+
+    """
+    join(self) -> block until every queued item has had task_done()
+    called (Python `join`). Busy-waits on a 1 ms sleep.
+    """
+    fn join(self):
+        while self.unfinished > 0:
+            time.sleep(1)
+
+    """clear(self) -> drop all waiting items (unfinished count kept)."""
+    fn clear(self):
+        self.items = []
+        self.head = 0
+
+    """to_list(self) -> copy of the waiting items, oldest first."""
+    fn to_list(self):
+        return self.items[self.head..]
+
+"""
+queue_new<T>(maxsize = 0) -> empty unbounded (or bounded when maxsize > 0)
+Queue. `maxsize <= 0` means infinite capacity. T is inferred per call
+site from later put()/get() use.
+"""
+fn queue_new<T>(maxsize = 0) -> Queue<T>:
+    return Queue([], maxsize, 0, 0)
+
+# -- LifoQueue -----------------------------------------------------------------
+#
+# Python queue.LifoQueue: last-in-first-out with the same task_done/join
+# accounting as Queue. Implemented as a separate class (A has no
+# inheritance); `items` is a plain array used as a stack.
+
+"""
+LifoQueue<T>: bounded LIFO (stack) queue; same contract as Queue but
+get()/peek() return the MOST recently put item.
+"""
+class LifoQueue<T>:
+    items: [T]
+    maxsize: i64
+    unfinished: i64
+
+    fn full(self):
+        return self.maxsize > 0 and len(self.items) >= self.maxsize
+
+    fn empty(self):
+        return len(self.items) == 0
+
+    fn qsize(self):
+        return len(self.items)
+
+    fn size(self):
+        return self.qsize()
+
+    """put(self, item) -> push item; panics when full."""
+    fn put(self, item):
+        if self.full():
+            core.panic("LifoQueue is full")
+        self.items.append(item)
+        self.unfinished = self.unfinished + 1
+
+    """try_put(self, item) -> true when queued, false when full."""
+    fn try_put(self, item):
+        if self.full():
+            return false
+        self.put(item)
+        return true
+
+    """get(self) -> most recently put item; panics when empty."""
+    fn get(self) -> T:
+        if len(self.items) == 0:
+            core.panic("LifoQueue is empty")
+        return self.items.pop()
+
+    """try_get(self) -> newest item or None when empty."""
+    fn try_get(self):
+        if len(self.items) == 0:
+            return None
+        return self.items.pop()
+
+    """peek(self) -> newest item without removing; None when empty."""
+    fn peek(self):
+        if len(self.items) == 0:
+            return None
+        return self.items[len(self.items) - 1]
+
+    """task_done(self) -> mark one unfinished task complete."""
+    fn task_done(self):
+        if self.unfinished <= 0:
+            core.panic("task_done() called too many times")
+        self.unfinished = self.unfinished - 1
+
+    """join(self) -> wait until all queued items are task_done()."""
+    fn join(self):
+        while self.unfinished > 0:
+            time.sleep(1)
+
+    """clear(self) -> drop all waiting items (unfinished count kept)."""
+    fn clear(self):
+        self.items = []
+
+    """to_list(self) -> copy of waiting items, oldest first."""
+    fn to_list(self):
+        return self.items.copy()
+
+"""lifo_queue_new<T>(maxsize = 0) -> empty LifoQueue (bounded when maxsize > 0)."""
+fn lifo_queue_new<T>(maxsize = 0) -> LifoQueue<T>:
+    return LifoQueue([], maxsize, 0)
+
+# -- PriorityQueue --------------------------------------------------------------
+#
+# Python queue.PriorityQueue: items are (priority, insertion_order, item)
+# tuples kept in a binary min-heap; equal priorities dequeue in FIFO
+# order. Entries are stored as TUPLES (priority, seq, item) so the item
+# itself may be any type; `priority` should be numeric and `item` should
+# not need comparison (the heap never compares items directly — ties
+# break on `seq`).
+#
+# The heap uses the same sift algorithms as std:heapq via its internal
+# `_heappush_c`/`_heappop_c` with a tuple comparator.
+import "std/heapq/heapq.astra"
+
+fn _pq_lt(a, b):
+    "entry a pops before entry b: lower priority, then lower sequence."
+    (pa, sa, _ia) = a
+    (pb, sb, _ib) = b
+    if pa < pb:
+        return true
+    if pa > pb:
+        return false
+    return sa < sb
+
+"""
+PriorityQueue<T>: bounded priority queue; get() returns the item with
+the smallest priority (ties: earliest put first).
+"""
+class PriorityQueue<T>:
+    heap: [(f64, i64, T)]
+    maxsize: i64
+    unfinished: i64
+    _seq: i64
+
+    fn full(self):
+        return self.maxsize > 0 and len(self.heap) >= self.maxsize
+
+    fn empty(self):
+        return len(self.heap) == 0
+
+    fn qsize(self):
+        return len(self.heap)
+
+    fn size(self):
+        return self.qsize()
+
+    """
+    put(self, item) -> enqueue `item` with priority `item` itself when
+    numeric? NO — use put_prio(priority, item). Kept for Queue parity:
+    panics with a hint (PriorityQueue requires an explicit priority).
+    """
+    fn put(self, item):
+        core.panic("PriorityQueue.put requires put_prio(priority, item)")
+
+    """try_put(self, item) -> always false; see put_prio."""
+    fn try_put(self, item):
+        return false
+
+    """
+    put_prio(self, priority, item) -> enqueue item under `priority`;
+    panics when full (priority, item order matches heapq.heapreplace
+    conventions — priority first).
+    """
+    fn put_prio(self, priority, item):
+        if self.full():
+            core.panic("PriorityQueue is full")
+        self._seq = self._seq + 1
+        heapq._heappush_c(self.heap, (priority + 0.0, self._seq, item), _pq_lt)
+        self.unfinished = self.unfinished + 1
+
+    """try_put_prio(self, priority, item) -> true when queued, false when full."""
+    fn try_put_prio(self, priority, item):
+        if self.full():
+            return false
+        self.put_prio(priority, item)
+        return true
+
+    """get(self) -> item with the smallest priority; panics when empty."""
+    fn get(self) -> T:
+        if len(self.heap) == 0:
+            core.panic("PriorityQueue is empty")
+        (_p, _s, item) = heapq._heappop_c(self.heap, _pq_lt)
+        return item
+
+    """try_get(self) -> smallest-priority item or None when empty."""
+    fn try_get(self):
+        if len(self.heap) == 0:
+            return None
+        (_p, _s, item) = heapq._heappop_c(self.heap, _pq_lt)
+        return item
+
+    """peek(self) -> smallest-priority item without removing; None when empty."""
+    fn peek(self):
+        if len(self.heap) == 0:
+            return None
+        (_p, _s, item) = self.heap[0]
+        return item
+
+    """task_done(self) -> mark one unfinished task complete."""
+    fn task_done(self):
+        if self.unfinished <= 0:
+            core.panic("task_done() called too many times")
+        self.unfinished = self.unfinished - 1
+
+    """join(self) -> wait until all queued items are task_done()."""
+    fn join(self):
+        while self.unfinished > 0:
+            time.sleep(1)
+
+    """clear(self) -> drop all waiting items (unfinished count kept)."""
+    fn clear(self):
+        self.heap = []
+
+    """to_list(self) -> items in heap order (NOT sorted); for inspection."""
+    fn to_list(self):
+        out = []
+        for e in self.heap:
+            (_p, _s, item) = e
+            out.append(item)
+        return out
+
+"""priority_queue_new<T>(maxsize = 0) -> empty PriorityQueue."""
+fn priority_queue_new<T>(maxsize = 0) -> PriorityQueue<T>:
+    return PriorityQueue([], maxsize, 0, 0)

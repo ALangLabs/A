@@ -255,6 +255,7 @@ bool Sema::occursIn(TypePtr var, TypePtr type) {
     case TypeKind::Range:
     case TypeKind::Optional:
     case TypeKind::Result:
+    case TypeKind::Vector:
       return occursIn(var, type->elem) || occursIn(var, type->errorType);
     case TypeKind::Map:
     case TypeKind::Set:
@@ -264,7 +265,8 @@ bool Sema::occursIn(TypePtr var, TypePtr type) {
       }
       return false;
     case TypeKind::Tuple:
-    case TypeKind::Function: {
+    case TypeKind::Function:
+    case TypeKind::Union: {
       for (const auto& p : type->params) {
         if (occursIn(var, p)) return true;
       }
@@ -285,6 +287,14 @@ bool Sema::bindVar(TypePtr var, TypePtr type) {
   if (resolved->kind == TypeKind::Var) return unify(var, resolved);
   if (resolved->kind == TypeKind::Error) return true;
   if (resolved->kind == TypeKind::Void) return false;
+
+  // A constrained literal var (e.g. the `2` in `f(2)`) satisfies `T?` through
+  // its payload type: bind it to the element instead of the Optional itself,
+  // which would fail the constraint check below. Unconstrained vars still
+  // bind to the whole Optional so `x = maybe` keeps its optional type.
+  if (resolved->kind == TypeKind::Optional && var->constraint != Constraint::None) {
+    return unify(var, resolved->elem);
+  }
 
   switch (var->constraint) {
     case Constraint::Integer:
@@ -314,6 +324,10 @@ bool Sema::unify(TypePtr a, TypePtr b) {
   if (!a || !b) return true;
   if (a->kind == TypeKind::Error || b->kind == TypeKind::Error) return true;
   if (a == b) return true;
+  // `any` is the dynamic top type: it unifies with everything and never
+  // binds (checked before Var handling so `unify(var, any)` leaves `var`
+  // free to be constrained by other uses).
+  if (a->kind == TypeKind::Any || b->kind == TypeKind::Any) return true;
 
   if (a->kind == TypeKind::Var && b->kind == TypeKind::Var) {
     if (a->varId == b->varId) return true;
@@ -336,6 +350,16 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     return true;
   }
 
+  // A variable against a union target tries each member so the variable is
+  // constrained to (and reported as) a member type rather than the union
+  // itself — bindVar would reject the Union kind for constrained vars.
+  if (a->kind == TypeKind::Var && b->kind == TypeKind::Union) {
+    for (const auto& mb : b->params) {
+      if (unify(a, mb)) return true;
+    }
+    return false;
+  }
+
   if (a->kind == TypeKind::Var) return bindVar(a, b);
   if (b->kind == TypeKind::Var) return bindVar(b, a);
   if (isNumericType(a) && isNumericType(b)) return true;
@@ -347,6 +371,36 @@ bool Sema::unify(TypePtr a, TypePtr b) {
   // way `return x` satisfies `-> T?` and `f(point)` satisfies `p: Point?`.
   if (a->kind == TypeKind::Optional && b->kind != TypeKind::Optional) return unify(a->elem, b);
   if (b->kind == TypeKind::Optional && a->kind != TypeKind::Optional) return unify(a, b->elem);
+
+  // Union types (`T | U`, `Union[T, U]`). Direction matters: a union-typed
+  // *value* is assignable only when every member fits the target, while a
+  // union-typed *target* accepts the value when any member does.
+  const bool aUnion = a->kind == TypeKind::Union;
+  const bool bUnion = b->kind == TypeKind::Union;
+  if (aUnion || bUnion) {
+    if (aUnion && bUnion) {
+      // Every member of `a` must fit some member of `b`.
+      for (const auto& ma : a->params) {
+        bool fits = false;
+        for (const auto& mb : b->params) {
+          if (unify(ma, mb)) { fits = true; break; }
+        }
+        if (!fits) return false;
+      }
+      return true;
+    }
+    if (aUnion) {
+      for (const auto& ma : a->params) {
+        if (!unify(ma, b)) return false;
+      }
+      return true;
+    }
+    for (const auto& mb : b->params) {
+      if (unify(a, mb)) return true;
+    }
+    return false;
+  }
+
   if (a->kind != b->kind) return false;
 
   switch (a->kind) {
@@ -371,6 +425,8 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     case TypeKind::Array:
       if (a->length >= 0 && b->length >= 0 && a->length != b->length) return false;
       return unify(a->elem, b->elem);
+    case TypeKind::Vector:
+      return a->length == b->length && unify(a->elem, b->elem);
     case TypeKind::Range:
     case TypeKind::Optional:
       return unify(a->elem, b->elem);
@@ -382,6 +438,30 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     case TypeKind::Result:
       return unify(a->elem, b->elem) && unify(a->errorType, b->errorType);
     case TypeKind::Tuple: {
+      // `tuple[T, ...]` (length == -2) matches a tuple of any arity whose
+      // elements all unify with T — including the empty tuple.
+      const bool aVar = a->length == -2;
+      const bool bVar = b->length == -2;
+      if (aVar && bVar) return unify(a->params[0], b->params[0]);
+      if (aVar) {
+        for (const auto& p : b->params) {
+          if (!unify(a->params[0], p)) return false;
+        }
+        return true;
+      }
+      if (bVar) {
+        for (const auto& p : a->params) {
+          if (!unify(p, b->params[0])) return false;
+        }
+        return true;
+      }
+      // `tuple` (bare) resolves to Tuple{any}: a wildcard matching tuples of
+      // any arity, like Python's bare `tuple` annotation.
+      auto anyTuple = [](const TypePtr& t) {
+        return t->params.size() == 1 &&
+               resolveType(t->params[0])->kind == TypeKind::Any;
+      };
+      if (anyTuple(a) || anyTuple(b)) return true;
       if (a->params.size() != b->params.size()) return false;
       for (std::size_t i = 0; i < a->params.size(); ++i) {
         if (!unify(a->params[i], b->params[i])) return false;
@@ -438,6 +518,13 @@ void markFromAnnotation(const TypePtr& t) {
   markFromAnnotation(t->ret);
   for (const auto& p : t->params) markFromAnnotation(p);
 }
+// `None` written in type position (the parser carries it as a NamedTypeExpr
+// named "None" because `None` is a keyword, not an identifier).
+bool isNoneTypeExpr(const TypeExpr& expr) {
+  const auto* named = dynamic_cast<const NamedTypeExpr*>(&expr);
+  return named && named->qualifiers.empty() && named->name == "None" &&
+         named->typeArgs.empty();
+}
 }  // namespace
 
 TypePtr Sema::resolveTypeExpr(TypeExpr& expr) {
@@ -473,6 +560,46 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
     for (auto& param : fn->params) params.push_back(resolveTypeExpr(*param));
     TypePtr ret = fn->returnType ? resolveTypeExpr(*fn->returnType) : typeVoid();
     return typeFunction(std::move(params), std::move(ret));
+  }
+  if (auto* uni = dynamic_cast<UnionTypeExpr*>(&expr)) {
+    // `T | U | ...`. A `None` member folds into an Optional around the rest
+    // (`int | None` == `int?`, `int | str | None` == `(int | str)?`), matching
+    // Python's `Optional`/`Union` semantics. Nested unions flatten.
+    std::vector<TypePtr> members;
+    bool hasNone = false;
+    for (auto& element : uni->elements) {
+      if (isNoneTypeExpr(*element)) {
+        hasNone = true;
+        continue;
+      }
+      TypePtr member = resolveTypeExpr(*element);
+      TypePtr resolved = resolveType(member);
+      if (resolved && resolved->kind == TypeKind::Union) {
+        for (const auto& sub : resolved->params) members.push_back(sub);
+        continue;
+      }
+      members.push_back(member);
+    }
+    TypePtr result;
+    if (members.empty()) {
+      // `x: None` / `None | None`: the type of the `None` literal itself —
+      // an optional whose payload stays dynamic.
+      TypePtr elem = freshVar(Constraint::None, expr.span,
+                              "the value type of 'None'");
+      elem->allowUnresolved = true;
+      result = typeOptional(elem);
+    } else if (members.size() == 1) {
+      result = members.front();
+    } else {
+      result = typeUnion(std::move(members));
+    }
+    if (hasNone) result = typeOptional(result);
+    return result;
+  }
+  if (dynamic_cast<EllipsisTypeExpr*>(&expr)) {
+    sink_.error(expr.span, "'...' is only valid inside a type argument list, "
+                           "e.g. tuple[int, ...].");
+    return typeError();
   }
   auto* named = dynamic_cast<NamedTypeExpr*>(&expr);
   if (!named) return typeError();
@@ -519,6 +646,193 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
       }
       return typeOptional(resolveTypeExpr(*named->typeArgs[0]));
     }
+    // Fixed-width SIMD vectors: `vector[T, N]` (alias `simd[T, N]`) where T
+    // is a numeric element type and N is a comptime lane count (1..64).
+    if ((named->name == "vector" || named->name == "simd") &&
+        !named->typeArgs.empty()) {
+      if (named->typeArgs.size() != 2) {
+        sink_.error(named->span,
+                    "'" + named->name + "' takes two type arguments: " +
+                        named->name + "[T, N] (element type, lane count).");
+        return typeError();
+      }
+      TypePtr elem = resolveTypeExpr(*named->typeArgs[0]);
+      TypePtr elemResolved = resolveType(elem);
+      if (!elemResolved ||
+          (elemResolved->kind != TypeKind::Int &&
+           elemResolved->kind != TypeKind::Float)) {
+        sink_.error(named->typeArgs[0]->span,
+                    "Vector element type must be numeric (int or float), found " +
+                        typeName(elem) + ".");
+        return typeError();
+      }
+      auto* lanesArg = dynamic_cast<ConstTypeExpr*>(named->typeArgs[1].get());
+      if (!lanesArg) {
+        sink_.error(named->typeArgs[1]->span,
+                    "Vector lane count must be an integer literal, e.g. " +
+                        named->name + "[float, 4].");
+        return typeError();
+      }
+      if (lanesArg->value < 1 || lanesArg->value > 64) {
+        sink_.error(named->typeArgs[1]->span,
+                    "Vector lane count must be between 1 and 64, found " +
+                        std::to_string(lanesArg->value) + ".");
+        return typeError();
+      }
+      return typeVector(elem, lanesArg->value);
+    }
+
+    // ---- Python-typing compatibility names -------------------------------
+    // These are recognized after user-defined structs/enums/aliases so a
+    // user type with the same name still shadows them.
+    auto typeArgCount = [&](std::size_t expected, const char* usage) -> bool {
+      if (named->typeArgs.size() == expected) return true;
+      sink_.error(named->span,
+                  "'" + named->name + "' expects " + usage + ", found " +
+                      std::to_string(named->typeArgs.size()) + " type argument(s).");
+      return false;
+    };
+    auto resolveArgs = [&]() {
+      std::vector<TypePtr> args;
+      args.reserve(named->typeArgs.size());
+      for (auto& a : named->typeArgs) args.push_back(resolveTypeExpr(*a));
+      return args;
+    };
+    // `T` or bare `name` (no arguments): bare forms use `any` element types,
+    // matching Python's bare `list`/`dict`/`set`/`tuple` annotations.
+    auto containerElem = [&](std::size_t i, const std::vector<TypePtr>& args) {
+      return i < args.size() ? args[i] : typeAny();
+    };
+
+    if (named->name == "any" || named->name == "Any") {
+      if (!named->typeArgs.empty()) {
+        sink_.error(named->span, "'any' does not take type arguments.");
+        return typeError();
+      }
+      return typeAny();
+    }
+    if (named->name == "None") {
+      if (!named->typeArgs.empty()) {
+        sink_.error(named->span, "'None' does not take type arguments.");
+        return typeError();
+      }
+      // The type of the `None` literal: an optional with a dynamic payload.
+      TypePtr elem = freshVar(Constraint::None, named->span,
+                              "the value type of 'None'");
+      elem->allowUnresolved = true;
+      return typeOptional(elem);
+    }
+    if (named->name == "Optional") {
+      if (!typeArgCount(1, "one type argument: Optional[T]")) return typeError();
+      return typeOptional(resolveArgs().front());
+    }
+    if (named->name == "Union") {
+      if (named->typeArgs.empty()) {
+        sink_.error(named->span, "'Union' expects at least one type argument: Union[T, U].");
+        return typeError();
+      }
+      std::vector<TypePtr> members = resolveArgs();
+      bool hasNone = false;
+      std::vector<TypePtr> kept;
+      for (auto& m : members) {
+        TypePtr r = resolveType(m);
+        if (r && r->kind == TypeKind::Optional &&
+            r->elem && resolveType(r->elem)->kind == TypeKind::Var &&
+            resolveType(r->elem)->allowUnresolved) {
+          // A resolved `None` type argument (Optional<dynamic>) marks the
+          // union as optional.
+          hasNone = true;
+          continue;
+        }
+        if (r && r->kind == TypeKind::Union) {
+          for (const auto& sub : r->params) kept.push_back(sub);
+          continue;
+        }
+        kept.push_back(m);
+      }
+      TypePtr result;
+      if (kept.empty()) {
+        TypePtr elem = freshVar(Constraint::None, named->span,
+                                "the value type of 'None'");
+        elem->allowUnresolved = true;
+        result = typeOptional(elem);
+      } else if (kept.size() == 1) {
+        result = kept.front();
+      } else {
+        result = typeUnion(std::move(kept));
+      }
+      if (hasNone) result = typeOptional(result);
+      return result;
+    }
+    if (named->name == "list" || named->name == "List" ||
+        named->name == "Sequence") {
+      if (named->typeArgs.size() > 1) {
+        sink_.error(named->span, "'" + named->name +
+                                 "' expects at most one type argument: " +
+                                 named->name + "[T].");
+        return typeError();
+      }
+      std::vector<TypePtr> args = resolveArgs();
+      return typeArray(containerElem(0, args));
+    }
+    if (named->name == "dict" || named->name == "Dict" ||
+        named->name == "Mapping") {
+      if (named->typeArgs.size() > 2) {
+        sink_.error(named->span, "'" + named->name +
+                                 "' expects at most two type arguments: " +
+                                 named->name + "[K, V].");
+        return typeError();
+      }
+      std::vector<TypePtr> args = resolveArgs();
+      return typeMap(containerElem(0, args), containerElem(1, args));
+    }
+    if (named->name == "set" || named->name == "Set" ||
+        named->name == "frozenset" || named->name == "FrozenSet") {
+      if (named->typeArgs.size() > 1) {
+        sink_.error(named->span, "'" + named->name +
+                                 "' expects at most one type argument: " +
+                                 named->name + "[T].");
+        return typeError();
+      }
+      std::vector<TypePtr> args = resolveArgs();
+      return typeSet(containerElem(0, args));
+    }
+    if (named->name == "tuple" || named->name == "Tuple") {
+      // `tuple[T, ...]` is a homogeneous variable-length tuple; `...` is only
+      // valid as the last argument. Check it before resolving the arguments
+      // (the marker itself has no type).
+      if (!named->typeArgs.empty() &&
+          dynamic_cast<EllipsisTypeExpr*>(named->typeArgs.back().get())) {
+        if (named->typeArgs.size() != 2) {
+          sink_.error(named->typeArgs.back()->span,
+                      "'tuple[T, ...]' takes exactly one element type before '...'.");
+          return typeError();
+        }
+        TypePtr elem = resolveTypeExpr(*named->typeArgs[0]);
+        return typeTupleVariadic(elem);
+      }
+      for (auto& a : named->typeArgs) {
+        if (dynamic_cast<EllipsisTypeExpr*>(a.get())) {
+          sink_.error(a->span, "'...' is only allowed as the last tuple type argument.");
+          return typeError();
+        }
+      }
+      std::vector<TypePtr> args = resolveArgs();
+      if (args.empty()) return typeTuple({typeAny()});
+      return typeTuple(std::move(args));
+    }
+    if (named->name == "Literal") {
+      sink_.error(named->span,
+                  "Literal types are not supported.",
+                  "Annotate the parameter with the value's type instead, e.g. int or str.");
+      return typeError();
+    }
+    if (named->name == "Callable") {
+      sink_.error(named->span,
+                  "Callable[...] is not supported; use the function type syntax instead.",
+                  "Write fn(T1, T2) -> R, e.g. fn(int, str) -> bool.");
+      return typeError();
+    }
     std::string unknownType = "Unknown type '" + named->name + "'.";
     if (std::string sug = suggestName(named->name); !sug.empty())
       unknownType += " Did you mean '" + sug + "'?";
@@ -556,11 +870,16 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
 }
 
 TypePtr Sema::instantiateType(TypePtr type, const std::unordered_map<TypePtr, TypePtr>& mapping) {
+  if (!type) return type;
+  // Consult the mapping on the unresolved node first: a mapped type variable
+  // must substitute even if it has already been linked by an earlier use.
+  auto direct = mapping.find(type);
+  if (direct != mapping.end()) return direct->second;
   type = resolveType(type);
   if (!type) return type;
+  auto resolved = mapping.find(type);
+  if (resolved != mapping.end()) return resolved->second;
   if (type->kind == TypeKind::Var) {
-    auto it = mapping.find(type);
-    if (it != mapping.end()) return it->second;
     // create a fresh var preserving constraints
     TypePtr fresh = makeType(TypeKind::Var);
     fresh->varId = nextVarId_++;
@@ -652,6 +971,7 @@ void Sema::declareVar(const std::string& name, Span span, TypePtr type, bool mut
   info.name = name;
   info.span = span;
   info.type = scope[name].type;
+  info.variableDecl = std::string(what) == "variable";
   declaredVariables_.push_back(std::move(info));
 }
 

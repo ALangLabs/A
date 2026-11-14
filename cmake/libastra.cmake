@@ -214,102 +214,94 @@ elseif(NOT APPLE)
     list(APPEND astra1_srcs lib/dsohandle.c)
 endif()
 
-# -B is the staged directory the compiled program will also be built against;
-# -I reaches config.h, which some of these sources include.
-set(astra1_flags -B${ASTRA_STAGE} -nostdinc -nostdlib -Wl,-nostdlib
-               -I${ASTRA_STAGE}/include -I${ASTRA_BUILD} -I${ASTRA_SRC})
+# Astra no longer compiles C: the support objects below are built by the
+# system C compiler for the host target (and by a detected cross C
+# toolchain for cross targets, see the astralib-<arch> loop).
+set(astra1_cc_flags -O2 -std=gnu11 -w -fno-semantic-interposition
+    -I${ASTRA_STAGE} -I${ASTRA_STAGE}/include -I${ASTRA_BUILD} -I${ASTRA_SRC})
 if(WIN32)
-    list(APPEND astra1_flags -I${ASTRA_STAGE}/include/winapi)
+    list(APPEND astra1_cc_flags -I${ASTRA_STAGE}/include/winapi)
 endif()
 set(astra1_objs "")
-file(MAKE_DIRECTORY "${ASTRA_BUILD}/obj")   # astra writes objects, it does not create paths.
+file(MAKE_DIRECTORY "${ASTRA_BUILD}/obj")
 foreach(src IN LISTS astra1_srcs)
     get_filename_component(obj "${src}" NAME_WE)
     set(obj "${ASTRA_BUILD}/obj/${obj}.o")
     add_custom_command(OUTPUT "${obj}"
-        COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${astra1_flags}
+        COMMAND ${CMAKE_C_COMPILER} ${astra1_cc_flags}
                 -c "${ASTRA_SRC}/${src}" -o "${obj}"
-        DEPENDS astra_driver "${ASTRA_SRC}/${src}"
-        COMMENT "astra ${src}"
+        DEPENDS "${ASTRA_SRC}/${src}"
+        COMMENT "cc ${src}"
         VERBATIM)
     list(APPEND astra1_objs "${obj}")
 endforeach()
 
 add_custom_command(OUTPUT "${astra_libdir}/libastra1.a"
-    COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
-            "${astra_libdir}/libastra1.a" ${astra1_objs}
+    COMMAND ${CMAKE_AR} rcs "${astra_libdir}/libastra1.a" ${astra1_objs}
     DEPENDS ${astra1_objs}
-    COMMENT "astra -ar libastra1.a"
+    COMMENT "ar libastra1.a"
     VERBATIM)
 
 # astra_run() loads this one separately: it is what calls the program's main and
 # runs its constructors, so it is deliberately not inside the archive.
 add_custom_command(OUTPUT "${astra_libdir}/runmain.o"
-    COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${astra1_flags}
+    COMMAND ${CMAKE_C_COMPILER} ${astra1_cc_flags}
             -c "${ASTRA_SRC}/lib/runmain.c" -o "${astra_libdir}/runmain.o"
-    DEPENDS astra_driver "${ASTRA_SRC}/lib/runmain.c"
-    COMMENT "astra lib/runmain.c"
+    DEPENDS "${ASTRA_SRC}/lib/runmain.c"
+    COMMENT "cc lib/runmain.c"
     VERBATIM)
 
 # Prebuild the A runtime modules once into libaruntime.a so `a run`/`a build`
-# link an archive instead of recompiling every runtime .c per program. Only
-# the ELF path is archived; other targets keep the compile-sources fallback.
-# The host archive prefers the system C compiler: Astra's C frontend is a
-# tiny-compiler fork and emits unoptimized frame code for runtime kernels.
-option(A_RUNTIME_SYSTEM_CC "Build the host A runtime archive with the system C compiler" ON)
-set(ASTRA_RUNTIME_ARCHIVE "")
-if(NOT WIN32 AND NOT APPLE)
-    set(ASTRA_RT_OBJS "")
-    if(A_RUNTIME_SYSTEM_CC)
-        set(ASTRA_RT_CC_FLAGS -O3 -std=gnu11 -w -fno-semantic-interposition
-            -I${ASTRA_STAGE})
-        if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686")
-            list(APPEND ASTRA_RT_CC_FLAGS -march=native -mtune=native)
-        endif()
-    else()
-        set(ASTRA_RT_FLAGS -O2 -I${ASTRA_STAGE}
-                   -I/usr/include -I/usr/include/x86_64-linux-gnu
-                   -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/local/include)
-    endif()
-    foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
-        get_filename_component(rt_c_name "${rt_c}" NAME)
-        if(A_RUNTIME_SYSTEM_CC)
-            set(rt_obj "${ASTRA_BUILD}/obj/cc_rt_${rt_c_name}.o")
-            add_custom_command(OUTPUT "${rt_obj}"
-                COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS}
-                        -c "${rt_c}" -o "${rt_obj}"
-                DEPENDS "${rt_c}"
-                COMMENT "system runtime ${rt_c_name}"
-                VERBATIM)
-        else()
-            set(rt_obj "${ASTRA_BUILD}/obj/rt_${rt_c_name}.o")
-            add_custom_command(OUTPUT "${rt_obj}"
-                COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" ${ASTRA_RT_FLAGS}
-                        -c "${rt_c}" -o "${rt_obj}"
-                # libastra1.a must exist first: without -B the driver finds its
-                # staged include/lib dir by probing for it next to the binary.
-                DEPENDS astra_driver "${astra_libdir}/libastra1.a" "${rt_c}"
-                COMMENT "astra runtime ${rt_c_name}"
-                VERBATIM)
-        endif()
-        list(APPEND ASTRA_RT_OBJS "${rt_obj}")
-    endforeach()
-    set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
-    if(A_RUNTIME_SYSTEM_CC)
-        add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
-            COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
-            DEPENDS ${ASTRA_RT_OBJS}
-            COMMENT "system C runtime libaruntime.a"
-            VERBATIM)
-    else()
-        add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
-            COMMAND "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
-                    "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
-            DEPENDS ${ASTRA_RT_OBJS}
-            COMMENT "astra -ar libaruntime.a"
-            VERBATIM)
-    endif()
+# link an archive instead of recompiling every runtime .c per program. Built
+# by the system C compiler on every host OS — Astra's C frontend is gone, so
+# this archive is required for every target (the `a` pipeline errors clearly
+# when it is missing).
+set(ASTRA_RT_OBJS "")
+set(ASTRA_RT_CC_FLAGS -O3 -std=gnu11 -w -fno-semantic-interposition
+    -I${ASTRA_STAGE})
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686")
+    list(APPEND ASTRA_RT_CC_FLAGS -march=native -mtune=native)
 endif()
+foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
+    get_filename_component(rt_c_name "${rt_c}" NAME)
+    set(rt_obj "${ASTRA_BUILD}/obj/cc_rt_${rt_c_name}.o")
+    add_custom_command(OUTPUT "${rt_obj}"
+        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS}
+                -c "${rt_c}" -o "${rt_obj}"
+        DEPENDS "${rt_c}"
+        COMMENT "system runtime ${rt_c_name}"
+        VERBATIM)
+    list(APPEND ASTRA_RT_OBJS "${rt_obj}")
+endforeach()
+# Vendored mimalloc (compiler/astra/runtime/vendor/mimalloc): compiled as a
+# single TU exposing mi_* symbols. Not yet wired into the GC allocator —
+# kept as a ready fast allocator for runtime allocation paths.
+set(ASTRA_MIMALLOC_SRC "${CMAKE_SOURCE_DIR}/compiler/astra/runtime/vendor/mimalloc/src/static.c")
+if(EXISTS "${ASTRA_MIMALLOC_SRC}")
+    set(mimalloc_obj "${ASTRA_BUILD}/obj/cc_rt_mimalloc.o")
+    # MI_MALLOC_OVERRIDE interposes malloc/calloc/realloc/free/posix_memalign
+    # so every runtime allocation (xmalloc/xrealloc/GC blocks) runs on
+    # mimalloc's size-classed allocator. POSIX hosts only: the Win32 CRT
+    # pairing (_aligned_malloc/_aligned_free) is not override-safe.
+    set(ASTRA_MIMALLOC_DEFS "")
+    if(NOT WIN32)
+        set(ASTRA_MIMALLOC_DEFS -DMI_MALLOC_OVERRIDE=1)
+    endif()
+    add_custom_command(OUTPUT "${mimalloc_obj}"
+        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${ASTRA_MIMALLOC_DEFS}
+                -I${CMAKE_SOURCE_DIR}/compiler/astra/runtime/vendor/mimalloc/include
+                -c "${ASTRA_MIMALLOC_SRC}" -o "${mimalloc_obj}"
+        DEPENDS "${ASTRA_MIMALLOC_SRC}"
+        COMMENT "system runtime mimalloc"
+        VERBATIM)
+    list(APPEND ASTRA_RT_OBJS "${mimalloc_obj}")
+endif()
+set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
+add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
+    COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
+    DEPENDS ${ASTRA_RT_OBJS}
+    COMMENT "system C runtime libaruntime.a"
+    VERBATIM)
 
 set(ASTRA_RUNTIME_DEPS "${astra_libdir}/libastra1.a" "${astra_libdir}/runmain.o"
                       ${ASTRA_RUNTIME_STAGED_OUTPUTS})
@@ -390,6 +382,52 @@ function(astra_arch_libpaths arch out_var)
     else()
         set(${out_var} "" PARENT_SCOPE)
     endif()
+endfunction()
+
+# arch -> C compiler candidates for building runtime/support objects.
+# Astra assembles and links only; every .c -> .o step needs a real C
+# compiler for the target. A_RUNTIME_CC_<ARCH> (arch uppercased, '-' -> '_')
+# overrides the search.
+function(astra_find_cc arch out_var)
+    if(arch STREQUAL "i8086")
+        set(${out_var} "" PARENT_SCOPE)
+        return()
+    endif()
+    string(TOUPPER "${arch}" arch_up)
+    string(REPLACE "-" "_" arch_up "${arch_up}")
+    set(env_var "A_RUNTIME_CC_${arch_up}")
+    if(DEFINED ENV{${env_var}} AND NOT "$ENV{${env_var}}" STREQUAL "")
+        set(${out_var} "$ENV{${env_var}}" PARENT_SCOPE)
+        return()
+    endif()
+    set(cands "")
+    if(arch STREQUAL "i386")
+        set(cands "i686-linux-gnu-gcc;i386-linux-gnu-gcc;i686-linux-gnu-clang")
+    elseif(arch STREQUAL "arm")
+        set(cands "arm-linux-gnueabihf-gcc;arm-linux-gnueabi-gcc;arm-linux-gnueabihf-clang")
+    elseif(arch STREQUAL "arm64")
+        if(APPLE)
+            set(cands "aarch64-apple-darwin-clang")
+        else()
+            set(cands "aarch64-linux-gnu-gcc;aarch64-linux-gnu-clang")
+        endif()
+    elseif(arch STREQUAL "riscv64")
+        set(cands "riscv64-linux-gnu-gcc;riscv64-linux-gnu-clang")
+    elseif(arch STREQUAL "x86_64" AND WIN32)
+        set(cands "x86_64-w64-mingw32-gcc;i686-w64-mingw32-gcc")
+    elseif(arch STREQUAL "i386" AND WIN32)
+        set(cands "i686-w64-mingw32-gcc;x86_64-w64-mingw32-gcc")
+    elseif(arch STREQUAL "arm64" AND WIN32)
+        set(cands "aarch64-w64-mingw32-gcc")
+    endif()
+    foreach(c IN LISTS cands)
+        find_program(found_${c} NAMES ${c})
+        if(found_${c})
+            set(${out_var} "${found_${c}}" PARENT_SCOPE)
+            return()
+        endif()
+    endforeach()
+    set(${out_var} "" PARENT_SCOPE)
 endfunction()
 
 # Per-target libastra1.a object list (backend/lib/Makefile OBJ-<t>-<os>).
@@ -535,52 +573,80 @@ foreach(xarch IN LISTS ASTRA_ALL_ARCHES)
         list(APPEND XSTAGED_OUTPUTS "${xstaged}")
     endforeach()
 
-    # libastra1-<arch>.a from the per-target object list.
-    set(xflags -B${XSTAGE} -nostdinc -nostdlib -Wl,-nostdlib
-               -I${XSTAGE}/include -I${XBUILD} -I${ASTRA_SRC})
-    if(WIN32)
-        list(APPEND xflags -I${XSTAGE}/include/winapi)
-    endif()
-    set(xobjs "")
-    foreach(src IN LISTS xlib1_srcs)
-        get_filename_component(obj "${src}" NAME_WE)
-        set(obj "${XBUILD}/obj/${obj}.o")
-        add_custom_command(OUTPUT "${obj}"
-            COMMAND "${ASTRA_BUILD}/astra-${xarch}${CMAKE_EXECUTABLE_SUFFIX}" ${xflags}
-                    -c "${ASTRA_SRC}/${src}" -o "${obj}"
-            DEPENDS astra_driver_${xarch} "${ASTRA_SRC}/${src}"
-            COMMENT "astra-${xarch} ${src}"
+    # libastra1-<arch>.a + libaruntime-<arch>.a + runmain.o are built by a
+    # real C compiler for the target (Astra assembles/links only). Without
+    # one, the astra-<arch> driver still builds but nothing can link.
+    astra_find_cc(${xarch} xcc)
+    if(xcc)
+        message(STATUS "libastra: ${xarch} runtime objects via ${xcc}")
+        set(xcc_flags -O2 -std=gnu11 -w -fno-semantic-interposition
+            -I${XSTAGE} -I${ASTRA_ROOT}/runtime -I${ASTRA_ROOT}/backend/python
+            -I${XSTAGE}/include -I${XBUILD} -I${ASTRA_SRC})
+        if(WIN32)
+            list(APPEND xcc_flags -I${XSTAGE}/include/winapi)
+        endif()
+        set(xobjs "")
+        foreach(src IN LISTS xlib1_srcs)
+            get_filename_component(obj "${src}" NAME_WE)
+            set(obj "${XBUILD}/obj/cc_${obj}.o")
+            add_custom_command(OUTPUT "${obj}"
+                COMMAND "${xcc}" ${xcc_flags}
+                        -c "${ASTRA_SRC}/${src}" -o "${obj}"
+                DEPENDS "${ASTRA_SRC}/${src}"
+                COMMENT "cc-${xarch} ${src}"
+                VERBATIM)
+            list(APPEND xobjs "${obj}")
+        endforeach()
+        add_custom_command(OUTPUT "${XLIBDIR}/libastra1.a"
+            COMMAND ${CMAKE_AR} rcs "${XLIBDIR}/libastra1.a" ${xobjs}
+            DEPENDS ${xobjs}
+            COMMENT "ar-${xarch} libastra1.a"
             VERBATIM)
-        list(APPEND xobjs "${obj}")
-    endforeach()
-    # DEPENDS on the driver target directly: i8086 has no lib1 objects, so
-    # without it the archive races astra_driver_i8086 and fails with
-    # "astra/astra-i8086: No such file or directory" on parallel builds.
-    add_custom_command(OUTPUT "${XLIBDIR}/libastra1.a"
-        COMMAND "${ASTRA_BUILD}/astra-${xarch}${CMAKE_EXECUTABLE_SUFFIX}" -ar rcs
-                "${XLIBDIR}/libastra1.a" ${xobjs}
-        DEPENDS astra_driver_${xarch} ${xobjs}
-        COMMENT "astra-${xarch} -ar libastra1.a"
-        VERBATIM)
 
-    # runmain.o: the astra_run() entry used by JIT/in-process runs.
-    if(NOT xarch STREQUAL "i8086")
-    add_custom_command(OUTPUT "${XLIBDIR}/runmain.o"
-        COMMAND "${ASTRA_BUILD}/astra-${xarch}${CMAKE_EXECUTABLE_SUFFIX}" ${xflags}
-                -c "${ASTRA_SRC}/lib/runmain.c" -o "${XLIBDIR}/runmain.o"
-        DEPENDS astra_driver_${xarch} "${ASTRA_SRC}/lib/runmain.c"
-        COMMENT "astra-${xarch} lib/runmain.c"
-        VERBATIM)
-    endif()
+        # runmain.o: the astra_run() entry used by JIT/in-process runs.
+        if(NOT xarch STREQUAL "i8086")
+        add_custom_command(OUTPUT "${XLIBDIR}/runmain.o"
+            COMMAND "${xcc}" ${xcc_flags}
+                    -c "${ASTRA_SRC}/lib/runmain.c" -o "${XLIBDIR}/runmain.o"
+            DEPENDS "${ASTRA_SRC}/lib/runmain.c"
+            COMMENT "cc-${xarch} lib/runmain.c"
+            VERBATIM)
+        endif()
 
-    # NOTE: no prebuilt libaruntime-<arch>.a — compiling the runtime for a
-    # foreign arch needs that target's libc headers (sysroot); the `a`
-    # pipeline falls back to compiling runtime sources per program, which
-    # works wherever the target sysroot is installed.
-
-    set(XDEPS "${XLIBDIR}/libastra1.a" ${XSTAGED_OUTPUTS})
-    if(NOT xarch STREQUAL "i8086")
-        list(APPEND XDEPS "${XLIBDIR}/runmain.o")
+        # libaruntime-<arch>.a: the A runtime modules, once per target.
+        set(xrt_objs "")
+        foreach(rt_file IN LISTS ASTRA_RUNTIME_SOURCES)
+            if(NOT rt_file MATCHES "\\.c$")
+                continue()
+            endif()
+            get_filename_component(rt_name "${rt_file}" NAME)
+            set(rt_obj "${XBUILD}/obj/cc_rt_${rt_name}.o")
+            add_custom_command(OUTPUT "${rt_obj}"
+                COMMAND "${xcc}" ${xcc_flags}
+                        -c "${rt_file}" -o "${rt_obj}"
+                DEPENDS "${rt_file}"
+                COMMENT "cc-${xarch} runtime ${rt_name}"
+                VERBATIM)
+            list(APPEND xrt_objs "${rt_obj}")
+        endforeach()
+        add_custom_command(OUTPUT "${XSTAGE}/libaruntime.a"
+            COMMAND ${CMAKE_AR} rcs "${XSTAGE}/libaruntime.a" ${xrt_objs}
+            DEPENDS ${xrt_objs}
+            COMMENT "ar-${xarch} libaruntime.a"
+            VERBATIM)
+        set(XDEPS "${XLIBDIR}/libastra1.a" ${XSTAGED_OUTPUTS}
+                  "${XSTAGE}/libaruntime.a")
+        if(NOT xarch STREQUAL "i8086")
+            list(APPEND XDEPS "${XLIBDIR}/runmain.o")
+        endif()
+    else()
+        if(NOT xarch STREQUAL "i8086")
+            message(WARNING
+                "libastra: no C compiler found for ${xarch}; install a "
+                "cross toolchain (<arch>-gcc) or set A_RUNTIME_CC_${xarch} "
+                "— 'a build --target ${xarch}' will fail at link time")
+        endif()
+        set(XDEPS ${XSTAGED_OUTPUTS})
     endif()
     add_custom_target(astra_runtime_${xarch} ALL DEPENDS ${XDEPS})
     list(APPEND ASTRA_ALL_DEPS astra_runtime_${xarch})

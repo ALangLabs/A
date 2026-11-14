@@ -1,0 +1,182 @@
+#
+# Scratch verification for indexing.astra — exercises every function with
+# hand-computed expected values. Run: ./build/a run _check_indexing.astra
+#
+# NOTE: all top-level variables use a CK_ prefix because of a compiler bug:
+# function-local variable names collide with top-level script bindings of
+# the same name (a local `data`/`c`/`n` inside a callee overwrites the
+# caller's top-level variable). See report.
+#
+from "ndarray.astra" import NDArray, array2string
+from "indexing.astra" import take, put_flat, diagonal, diag, compress, compress_mask, compress_idx, extract, extract_mask, place, place_mask, argwhere, nonzero, flatnonzero, slice_nd, slice_axis, select, select_bool, choose_idx, trim_zeros
+
+CK_fails = 0
+
+fn expect(CK_name: str, CK_got: NDArray, CK_want_data: [f64], CK_want_shape: [i64]) -> void:
+    ok = len(CK_got.shape) == len(CK_want_shape)
+    if ok:
+        for i in 0..len(CK_want_shape):
+            if CK_got.shape[i] != CK_want_shape[i]:
+                ok = false
+    if ok and len(CK_got.data) != len(CK_want_data):
+        ok = false
+    if ok:
+        for i in 0..len(CK_want_data):
+            if CK_got.data[i] != CK_want_data[i]:
+                ok = false
+    if not ok:
+        CK_fails = CK_fails + 1
+        # avoid array2string: it divides by zero on 0-row arrays (ndarray.astra bug)
+        print("FAIL " + CK_name + ": got shape=" + str(CK_got.shape) + " data=" + str(CK_got.data))
+        print("  want data=" + str(CK_want_data) + " shape=" + str(CK_want_shape))
+    else:
+        print("ok   " + CK_name)
+
+fn expect_list(CK_name: str, CK_got: [f64], CK_want: [f64]) -> void:
+    ok = len(CK_got) == len(CK_want)
+    if ok:
+        for i in 0..len(CK_want):
+            if CK_got[i] != CK_want[i]:
+                ok = false
+    if not ok:
+        CK_fails = CK_fails + 1
+        print("FAIL " + CK_name + ": got " + str(CK_got) + " want " + str(CK_want))
+    else:
+        print("ok   " + CK_name)
+
+# base 3x4: rows 0..2, cols 0..3
+CK_a = NDArray([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [3, 4])
+
+# --- take ---
+expect("take axis0", take(CK_a, [2, 0, -1], 0),
+    [8, 9, 10, 11, 0, 1, 2, 3, 8, 9, 10, 11], [3, 4])
+expect("take axis-1 (last)", take(CK_a, [3, 0, 2], -1),
+    [3, 0, 2, 7, 4, 6, 11, 8, 10], [3, 3])
+expect("take axis1 == -1", take(CK_a, [1], 1),
+    [1, 5, 9], [3, 1])
+expect("take flat (axis out of range)", take(CK_a, [11, 0, -1], 99),
+    [11, 0, 11], [3])
+expect("take flat axis=-3", take(CK_a, [5], -3),
+    [5], [1])
+CK_v = NDArray([10, 20, 30, 40], [4])
+expect("take 1-D", take(CK_v, [3, 0], 0), [40, 10], [2])
+
+# --- put_flat ---
+CK_p1 = NDArray([0, 0, 0, 0], [4])
+put_flat(CK_p1, [0, 2, -1], [10, 20, 30], "wrap")
+expect("put_flat wrap", CK_p1, [10, 0, 20, 30], [4])
+CK_p2 = NDArray([0, 0, 0, 0], [4])
+put_flat(CK_p2, [-1, 99], [7, 8], "clip")
+expect("put_flat clip", CK_p2, [7, 0, 0, 8], [4])
+CK_p3 = NDArray([0, 0, 0], [3])
+put_flat(CK_p3, [1], [5], "raise")
+expect("put_flat raise in-range", CK_p3, [0, 5, 0], [3])
+CK_p4 = NDArray([1, 2, 3, 4], [2, 2])
+put_flat(CK_p4, [0, 3], [9, 9], "raise")  # flat indices
+expect("put_flat flat indexing", CK_p4, [9, 2, 3, 9], [2, 2])
+# values cycling
+CK_p5 = NDArray([0, 0, 0], [3])
+put_flat(CK_p5, [0, 1, 2], [7], "raise")
+expect("put_flat vals cycle", CK_p5, [7, 7, 7], [3])
+
+# --- diagonal / diag ---
+CK_b = NDArray([1, 2, 3, 4, 5, 6, 7, 8, 9], [3, 3])
+expect("diagonal off0", diagonal(CK_b, 0), [1, 5, 9], [3])
+expect("diagonal off+1", diagonal(CK_b, 1), [2, 6], [2])
+expect("diagonal off-1", diagonal(CK_b, -1), [4, 8], [2])
+expect("diagonal off+2", diagonal(CK_b, 2), [3], [1])
+expect("diagonal off-3 (empty)", diagonal(CK_b, -3), [], [0])
+CK_d1 = NDArray([1, 2, 3], [3])
+expect("diag 1-D -> matrix", diag(CK_d1), [1, 0, 0, 0, 2, 0, 0, 0, 3], [3, 3])
+expect("diag 2-D -> vector", diag(CK_b), [1, 5, 9], [3])
+# 3-D diagonal over axes 0,1: shape (2,2,2) -> out shape (2, diaglen=2)
+CK_c3 = NDArray([1, 2, 3, 4, 5, 6, 7, 8], [2, 2, 2])
+# diag j-i=0: (0,0): k0=1,k1=2 ; (1,1): k0=7,k1=8
+# out shape [rest=2, diag=2] -> flat order rest-major: k0:(1,7) k1:(2,8)
+expect("diagonal 3-D", diagonal(CK_c3, 0), [1, 7, 2, 8], [2, 2])
+
+# --- compress ---
+expect("compress axis0 bool", compress([true, false, true], CK_a, 0),
+    [0, 1, 2, 3, 8, 9, 10, 11], [2, 4])
+expect("compress axis-1 bool", compress([true, false, true, false], CK_a, -1),
+    [0, 2, 4, 6, 8, 10], [3, 2])
+expect("compress_mask axis0", compress_mask([1, 0, 1], CK_a, 0),
+    [0, 1, 2, 3, 8, 9, 10, 11], [2, 4])
+expect("compress_idx axis0", compress_idx([2, -1, 0], CK_a, 0),
+    [8, 9, 10, 11, 8, 9, 10, 11, 0, 1, 2, 3], [3, 4])
+expect("compress flat axis=99", compress([true, false, true, false, true, false, true, false, true, false, true, false], CK_a, 99),
+    [0, 2, 4, 6, 8, 10], [6])
+expect("compress all-false axis0", compress([false, false, false], CK_a, 0),
+    [], [0, 4])
+
+# --- extract ---
+CK_evens = [true, false, true, false, true, false, true, false, true, false, true, false]
+expect("extract bool", extract(CK_evens, CK_a), [0, 2, 4, 6, 8, 10], [6])
+CK_odds = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1]
+expect("extract_mask", extract_mask(CK_odds, CK_a), [1, 3, 5, 7, 9, 11], [6])
+expect("extract none", extract([false, false], CK_a), [], [0])
+
+# --- place ---
+CK_pl = NDArray([0, 0, 0, 0, 0, 0], [6])
+place(CK_pl, [true, false, true, false, true, false], [9, 8])
+expect("place bool cycle", CK_pl, [9, 0, 8, 0, 9, 0], [6])
+CK_plm = NDArray([0, 0, 0, 0, 0, 0], [3, 2])
+place_mask(CK_plm, [1, 0, 1, 0, 1, 0], [5])
+expect("place_mask", CK_plm, [5, 0, 5, 0, 5, 0], [3, 2])
+CK_plnone = NDArray([1, 2], [2])
+place(CK_plnone, [false, false], [9])
+expect("place no-op", CK_plnone, [1, 2], [2])
+
+# --- argwhere / nonzero / flatnonzero ---
+CK_c = NDArray([1, 0, 2, 0, 3, 0], [2, 3])
+# nonzeros: (0,0)=1, (0,2)=2, (1,1)=3
+expect("argwhere", argwhere(CK_c), [0, 0, 0, 2, 1, 1], [3, 2])
+CK_nz = nonzero(CK_c)
+expect("nonzero axis0", CK_nz[0], [0, 0, 1], [3])
+expect("nonzero axis1", CK_nz[1], [0, 2, 1], [3])
+expect("flatnonzero", flatnonzero(CK_c), [0, 2, 4], [3])
+expect("argwhere empty", argwhere(NDArray([0, 0], [2])), [], [0, 1])
+CK_nz0 = nonzero(NDArray([0, 0], [2]))
+expect("nonzero empty", CK_nz0[0], [], [0])
+
+# --- slice_nd / slice_axis ---
+expect("slice_nd basic", slice_nd(CK_a, [0, 1], [3, 4], [2, 1]),
+    [1, 2, 3, 9, 10, 11], [2, 3])
+expect("slice_nd step2 both", slice_nd(CK_a, [0, 0], [3, 4], [2, 2]),
+    [0, 2, 8, 10], [2, 2])
+# starts [-2,-1] -> row 1, col 3 ; ends [3,4] -> rows 1..2, col 3 only
+expect("slice_nd negative start", slice_nd(CK_a, [-2, -1], [3, 4], [1, 1]),
+    [7, 11], [2, 1])
+expect("slice_axis neg step", slice_axis(CK_a, 0, 2, -4, -1),
+    [8, 9, 10, 11, 4, 5, 6, 7, 0, 1, 2, 3], [3, 4])
+expect("slice_axis step3", slice_axis(CK_a, 1, 0, 4, 3),
+    [0, 3, 4, 7, 8, 11], [3, 2])
+expect("slice_axis out-of-range clamps", slice_axis(CK_a, 0, -99, 99, 1),
+    [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [3, 4])
+# 1-D slice
+expect("slice_nd 1-D", slice_nd(CK_v, [1], [4], [1]), [20, 30, 40], [3])
+expect("slice_nd 1-D neg step", slice_nd(CK_v, [3], [-5], [-1]), [40, 30, 20, 10], [4])
+
+# --- select ---
+expect_list("select i64", select([[1, 0, 1], [0, 1, 0]], [[10, 20, 30], [40, 50, 60]], 0),
+    [10, 50, 30])
+expect_list("select_bool", select_bool([[true, false, true], [false, true, false]], [[1, 2, 3], [4, 5, 6]], -1),
+    [1, 5, 3])
+expect_list("select default", select([[0, 0]], [[9, 9]], 7), [7, 7])
+
+# --- choose_idx ---
+# np.choose: out[j] = choices[idx[j]][j] -> [100, 2, 30, 400]
+expect_list("choose_idx", choose_idx([2, 0, 1, 2], [[1, 2, 3, 4], [10, 20, 30, 40], [100, 200, 300, 400]]),
+    [100, 2, 30, 400])
+
+# --- trim_zeros ---
+expect("trim_zeros 1-D", trim_zeros(NDArray([0, 0, 5, 0, 7, 0], [6])), [5, 0, 7], [3])
+expect("trim_zeros 1-D all zero", trim_zeros(NDArray([0, 0, 0], [3])), [], [0])
+CK_t2 = NDArray([0, 0, 1, 0, 0, 0, 0, 2], [4, 2])
+expect("trim_zeros 2-D", trim_zeros(CK_t2), [1, 0, 0, 0, 0, 2], [3, 2])
+expect("trim_zeros 2-D none", trim_zeros(CK_a), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [3, 4])
+
+if CK_fails == 0:
+    print("ALL PASS")
+else:
+    panic(str(CK_fails) + " FAILURES")

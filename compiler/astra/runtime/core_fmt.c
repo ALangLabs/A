@@ -5,6 +5,9 @@
    cache entries are immutable AStr objects; per-thread copies only cost
    a little duplicated memory (32 KiB TLS each). */
 static A_RT_TLS aval g_int_str_cache[4096];
+/* Cached "None"/"true"/"false" renderings (see a_str_kw below); marked by
+   fmt_active_gc_roots alongside the int cache. */
+static A_RT_TLS aval g_kw_strs[3];
 /* 2 MiB: one huge page per chunk, so refills are cheap. */
 static const size_t kSmallStrChunk = 2u << 20;
 static A_RT_TLS char *g_small_str = NULL;
@@ -22,7 +25,7 @@ int kind_of(aval v) {
     AObj *o = obj_of(v);
     if (!o) return K_OTHER;
     switch (o->type) {
-        case T_STR: return K_STR;
+        case T_STR: case T_ROPE: return K_STR;
         case T_BYTES: return K_BYTES;
         case T_LIST: return K_LIST;
         case T_TUPLE: return K_TUPLE;
@@ -220,38 +223,55 @@ static int fmt_dbl_min_prec(double d, char *tmp) {
 }
 #endif  /* A_FMT_FAST_DOUBLE */
 
-static void format_double_buf(Buf *b, double d) {
-    if (isnan(d)) { buf_adds(b, "nan"); return; }
-    if (isinf(d)) { buf_adds(b, d < 0 ? "-inf" : "inf"); return; }
-    if (d == 0.0) { buf_adds(b, signbit(d) ? "-0.0" : "0.0"); return; }
-    char tmp[64];
+/* Render a double into tmp (caller provides >= 72 bytes) and return the
+   length. Same output as the old format_double_buf Buf version, including
+   the trailing ".0" for integral-looking results. */
+size_t fmt_double_render(double d, char *tmp) {
+    if (isnan(d)) { memcpy(tmp, "nan", 4); return 3; }
+    if (isinf(d)) {
+        if (d < 0) { memcpy(tmp, "-inf", 5); return 4; }
+        memcpy(tmp, "inf", 4); return 3;
+    }
+    if (d == 0.0) {
+        if (signbit(d)) { memcpy(tmp, "-0.0", 5); return 4; }
+        memcpy(tmp, "0.0", 4); return 3;
+    }
+    char num[64];
     int prec = -1;
 #ifdef A_FMT_FAST_DOUBLE
-    prec = fmt_dbl_min_prec(d, tmp);
+    prec = fmt_dbl_min_prec(d, num);
 #endif
     if (prec > 0) {
-        snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
+        snprintf(num, sizeof(num), "%.*g", prec, d);
     } else {
         for (prec = 1; prec <= 17; ++prec) {
-            snprintf(tmp, sizeof(tmp), "%.*g", prec, d);
-            if (strtod(tmp, NULL) == d) break;
+            snprintf(num, sizeof(num), "%.*g", prec, d);
+            if (strtod(num, NULL) == d) break;
         }
     }
     /* Avoid scientific notation for ordinary magnitudes (Python-style);
        expand to plain decimal that still round-trips. */
-    if (strchr(tmp, 'e') || strchr(tmp, 'E')) {
+    if (strchr(num, 'e') || strchr(num, 'E')) {
         double ad = d < 0.0 ? -d : d;
         if (ad >= 1e-4 && ad < 1e16) {
             for (int prec = 1; prec <= 25; ++prec) {
-                snprintf(tmp, sizeof(tmp), "%.*f", prec, d);
-                if (strtod(tmp, NULL) == d) break;
+                snprintf(num, sizeof(num), "%.*f", prec, d);
+                if (strtod(num, NULL) == d) break;
             }
         }
     }
-    buf_adds(b, tmp);
-    if (strchr(tmp, '.') == NULL && strchr(tmp, 'e') == NULL &&
-        strchr(tmp, 'E') == NULL)
-        buf_adds(b, ".0");
+    size_t n = strlen(num);
+    memcpy(tmp, num, n);
+    if (strchr(num, '.') == NULL && strchr(num, 'e') == NULL &&
+        strchr(num, 'E') == NULL) {
+        tmp[n] = '.'; tmp[n + 1] = '0'; n += 2;
+    }
+    return n;
+}
+
+static void format_double_buf(Buf *b, double d) {
+    char tmp[72];
+    buf_addn(b, tmp, fmt_double_render(d, tmp));
 }
 
 static int fmt_needs_quote_escape(unsigned char c) {
@@ -305,6 +325,8 @@ static void fmt_active_gc_roots(void) {
     a_gc_mark_ptr(g_fmt_active);
     for (int i = 0; i < 4096; ++i)
         if (g_int_str_cache[i]) a_gc_mark_aval(g_int_str_cache[i]);
+    for (int i = 0; i < 3; ++i)
+        if (g_kw_strs[i]) a_gc_mark_aval(g_kw_strs[i]);
 }
 static int g_fmt_gc_hooked;
 static void fmt_active_gc_hook(void) {
@@ -583,11 +605,55 @@ static aval a_str_i64(int64_t v) {
     return r;
 }
 
+/* Cached "None"/"true"/"false" strings for str()/repr() of the three
+   singleton kinds — same lifetime rules as g_int_str_cache (arena objects
+   pinned by the GC root callback below). g_kw_strs is declared at the top
+   of the file so fmt_active_gc_roots can mark it. */
+static const char *const kKwStrs[3] = { "None", "true", "false" };
+
+static aval a_str_kw(int which) {
+    fmt_active_gc_hook();
+    if (!g_kw_strs[which])
+        g_kw_strs[which] = a_str_new(kKwStrs[which], strlen(kKwStrs[which]));
+    return g_kw_strs[which];
+}
+
+/* Scalar fast path shared by a_str/a_repr: kinds whose rendering is a
+   short fixed string or a direct byte copy skip the Buf growth +
+   buf_take double copy. Containers and other kinds still go through
+   format_aval. `quote` only matters for K_STR (repr quotes it). */
+static aval a_str_scalar(aval v, int quote) {
+    int k = kind_of(v);
+    if (k == K_STR) {
+        if (!quote) return v;   /* str(s) is s; immutable -> alias safe */
+        return A_NONE;          /* sentinel: caller falls through */
+    }
+    if (k == K_CHAR) {
+        /* Chars print unquoted even under repr(): same bytes as str(). */
+        uint64_t n;
+        const char *p = str_data(v, &n);
+        return a_str_new(p ? p : "", n);
+    }
+    if (k == K_BOOL) return a_str_kw(v == A_TRUE ? 1 : 2);
+    if (k == K_NONE) return a_str_kw(0);
+    if (k == K_FLOAT) {
+        char tmp[72];
+        return a_str_new(tmp, fmt_double_render(a_double_val(v), tmp));
+    }
+    return A_NONE;
+}
+
 aval a_str(aval v) {
     if (is_int_val(v)) return a_str_i64(int_val_full(v));
+    aval s = a_str_scalar(v, 0);
+    if (s != A_NONE) return s;
     return format_aval(v, 0);
 }
-aval a_repr(aval v) { return format_aval(v, 1); }
+aval a_repr(aval v) {
+    aval s = a_str_scalar(v, 1);
+    if (s != A_NONE) return s;
+    return format_aval(v, 1);
+}
 
 aval a_list_push_int_str(aval list, int64_t v) {
     AArr *a = arr_of(list, "list");
@@ -598,6 +664,7 @@ aval a_list_push_int_str(aval list, int64_t v) {
         arr_push(a, s);
         return list;
     }
+    arr_f64_unmark(a);   /* string avals may be pointers: restore scanning */
     if (a->h.len + 1 > a->h.cap) arr_reserve(a, (uint64_t)a->h.len + 1);
     a->items[a->h.len++] = s;
     return list;
@@ -607,7 +674,7 @@ aval a_list_fill_str_range(aval list, int64_t lo, int64_t hi, int64_t step) {
     if (step == 0) panicf("range() step must be positive, found 0.");
     AArr *a = arr_of(list, "list");
     if (arr_packed(a)) arr_ensure_aval(a);
-    a->flags &= ~ARR_F_F64;
+    arr_f64_unmark(a);
     uint64_t count = 0;
     if (step > 0) {
         if (lo < hi) {

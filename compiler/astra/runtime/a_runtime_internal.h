@@ -190,10 +190,32 @@ typedef struct AObj {
 enum {
     T_STR = 1, T_LIST, T_TUPLE, T_DICT, T_SET, T_RANGE, T_ITER,
     T_FNON, T_ENV, T_RESULT, T_INT64, T_CHAR, T_VIEW, T_ARENA, T_PYOBJ,
-    T_PYBUF, T_STRUCT, T_BYTES
+    T_PYBUF, T_STRUCT, T_BYTES, T_ROPE
 };
 
 typedef struct { AObj h; char data[]; } AStr;
+
+/* Rope string: the result of concatenating two string-kind values when the
+   combined size is large (or either side is already a rope). Keeping the
+   concat as a tree makes `s += x` / `s = s + x` loops O(1) per append
+   instead of O(n) bytes copied per step; the tree is flattened lazily into
+   a canonical AStr on first read (str_data/str_of/astr_flat).
+   - h.type   = T_ROPE
+   - h.len    = total BYTE length (same meaning as AStr.h.len)
+   - h.cap    = code-point cache, identical layout to AStr: high 32 bits
+                hold cp+1 (0 = not computed), low 32 bits unused.
+   - left/right = the two concatenated string-kind avals (T_STR/T_CHAR/
+                T_ROPE); byte order is left followed by right.
+   - flat     = A_NONE until flattened, then the aval of the canonical
+                AStr every reader goes through.
+   Ropes are immutable like AStr, so sharing/aliasing is always safe. */
+typedef struct { AObj h; aval left, right, flat; } ARope;
+
+/* Concatenations whose result is smaller than this stay on the flat
+   exact-size path: a rope node costs an allocation plus a later flatten
+   copy, which only pays off once the same buffer would otherwise be
+   re-copied (the `s += x` loop shape). */
+#define A_STR_ROPE_MIN ((uint64_t)2048)
 
 /* len() on a string is a code-point count, i.e. a UTF-8 scan. The result is
    cached in the otherwise-unused high half of the string's cap word (the low
@@ -350,6 +372,14 @@ aval bi_net_recv_buf(uint64_t n, aval *argv);
 aval bi_net_recv_buf_all(uint64_t n, aval *argv);
 aval a_str_new_uninit(uint64_t len);
 aval a_char_new(const char *p, uint64_t len);
+/* Rope-aware string accessors: astr_flat accepts any string-kind value
+   (T_STR/T_CHAR/T_ROPE) and returns the flat AStr readers may use;
+   str_of/str_data route through it. a_str_cat concatenates two string-kind
+   avals, producing a rope for large results. a_str_cpcount is the cached
+   code-point count used by len(). */
+AStr *astr_flat(aval v);
+aval a_str_cat(aval l, aval r);
+uint32_t a_str_cpcount(aval v);
 const char *str_data(aval v, uint64_t *len);
 int u8_len(unsigned char c);
 uint64_t u8_count(const char *p, uint64_t n);
@@ -369,6 +399,28 @@ void arr_push_int(AArr *a, aval v);
 aval arr_elem(const AArr *a, uint64_t i);
 void arr_shrink(AArr *a);
 void arr_note_view(aval parent);
+void a_gc_set_noscan(void *p, int on);   /* gc.c: exempt a raw-data block
+                                           (no pointers inside) from the
+                                           conservative mark scan */
+/* iitems is packed int64 storage — never avals, so its block is always
+   registered GC_F_NOSCAN: int64 bit patterns can alias heap addresses
+   and would otherwise retain phantom objects. Call after every (re)alloc
+   of a->iitems; a_gc_reregister also preserves the flag across realloc. */
+static inline void arr_iitems_raw(AArr *a) { a_gc_set_noscan(a->iitems, 1); }
+/* ARR_F_F64 lists hold only unboxed-double avals in items[]: raw IEEE-754
+   bits that alias heap addresses just like int64s, so once verified the
+   buffer is GC_F_NOSCAN too. Every store path that can introduce a
+   non-double MUST call arr_f64_unmark BEFORE the store — it restores
+   scanning so the incoming pointer is seen by the marker. */
+static inline void arr_f64_mark(AArr *a) {
+    a->flags |= ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);
+}
+static inline void arr_f64_unmark(AArr *a) {
+    if (!(a->flags & ARR_F_F64)) return;
+    a->flags &= ~ARR_F_F64;
+    a_gc_set_noscan(a->items, 0);
+}
 /* Equality of a packed int64 element against an arbitrary aval, matching
    values_equal's numeric rules (int-int compares int64, int-float compares
    doubles, everything else is unequal). Lets read-only scans (index,
@@ -391,6 +443,11 @@ const char *type_name_error_cstr(aval v);
 aval a_type_name(aval v);
 int a_obj_is_instance(aval v, const char *type_name);
 void format_into(Buf *b, aval v, int quote);
+/* Shortest-round-trip double rendering shared by str() and json.stringify:
+   writes into caller buffer (>= 72 bytes), returns length. Integral-looking
+   results get a trailing ".0"; NaN/Inf render as "nan"/"inf" (json.c maps
+   non-finite to null before calling). */
+size_t fmt_double_render(double d, char *tmp);
 aval a_str(aval v);
 aval a_repr(aval v);
 int truthy(aval v);
@@ -677,6 +734,7 @@ aval bi_linalg_matvec_t(uint64_t n, aval *argv);
 aval bi_linalg_matmul(uint64_t n, aval *argv);
 aval bi_linalg_softmax(uint64_t n, aval *argv);
 aval bi_linalg_attention(uint64_t n, aval *argv);
+aval bi_f32s(uint64_t n, aval *argv);
 aval bi_unsafe_get(uint64_t n, aval *argv);
 aval bi_unsafe_set(uint64_t n, aval *argv);
 aval bi_unsafe_address_of(uint64_t n, aval *argv);
@@ -738,6 +796,8 @@ aval a_py_delitem(aval obj, aval key);
 aval a_py_import_module(const char *name);
 aval a_printv(uint64_t n, aval *argv);
 aval a_eprintv(uint64_t n, aval *argv);
+aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
+                  int is_stderr);
 aval a_panic_msg(const char *msg);
 aval a_list_push(aval list, aval v);
 aval a_list_push_int_str(aval list, int64_t v);

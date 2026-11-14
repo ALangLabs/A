@@ -1,3 +1,4 @@
+#include <cctype>
 #include <filesystem>
 #include <iostream>
 #include <string>
@@ -10,6 +11,7 @@
 
 #include "driver/driver.hpp"
 #include "driver/version.hpp"
+#include "exe_path.hpp"
 
 namespace {
 
@@ -17,7 +19,7 @@ constexpr int kExitUsage = 64;
 
 // Walks up from the entry file's directory looking for an `apm.json`
 // project manifest and returns that directory ("" when there is none).
-// Every file command (`run`, `build`, `check`, `test`, `ir`) uses it to
+// Every file command (`run`, `build`, `check`, `test`) uses it to
 // find apm-installed packages automatically: `<root>/.apm/packages` is
 // added to the module search paths, so `import <pkg>` resolves without
 // needing `apm run` or an explicit `-I`.
@@ -37,17 +39,16 @@ void printUsage(std::ostream& os) {
   os << "A language toolchain " << a::kVersion << " (v2)\n"
      << "\n"
      << "Usage:\n"
-     << "  a <command> [options] <file.a>\n"
+     << "  a <command> [options] <file.astra>\n"
      << "\n"
      << "Commands:\n"
      << "  repl             start the interactive REPL\n"
-     << "  run <file.a>     compile and execute a program\n"
-     << "  build <file.a>   compile to a native binary (-o <bin>)\n"
-     << "  check <file.a>   type-check without running\n"
-     << "  test <file.a>    run every fn test_*() (--filter <substr> runs a subset)\n"
-     << "  fmt <file.a>     format source (stdout; -w to write)\n"
-     << "  doc <file.a>     generate documentation (markdown; --json)\n"
-     << "  ir <file.a>      print the typed SSA IR\n"
+     << "  run <file.astra>     compile and execute a program\n"
+     << "  build <file.astra>   compile to a native binary (-o <bin>)\n"
+     << "  check <file.astra>   type-check without running\n"
+     << "  test [path]      run fn test_*() in a file, or discover tests in a dir/codebase (default: .); --filter <substr> selects by name\n"
+     << "  fmt <file.astra>     format source (stdout; -w to write)\n"
+     << "  doc <file.astra>     generate documentation (markdown; --json)\n"
      << "  version          print version\n"
      << "  help             show this message\n"
      << "\n"
@@ -63,16 +64,18 @@ void printUsage(std::ostream& os) {
      << "  -O0/-O1/-O2/-O3/-Os/-Oz/-Ofast  optimization level (clang style)\n"
      << "  --opt-level=N  optimization level 0..3 (alias of -O)\n"
      << "  --optnone    disable all optimizations (LLVM optnone attribute)\n"
-     << "  --opt            run optimization passes (ir)\n"
      << "  -I <dir>         add module search directory (repeatable)\n"
       << "                     (.apm/packages of an apm.json project is\n"
-      << "                     added automatically for run/build/check/test/ir)\n"
+      << "                     added automatically for run/build/check/test)\n"
      << "  --stdlib <dir>   override standard library directory\n"
      << "  --target <t>     cross-compile target arch:\n"
      << "                    x86_64, i386, arm, aarch64/arm64, riscv64, i8086\n"
      << "                    (optional -linux/-windows/-macos suffix; must\n"
-     << "                    match the host OS — astra cannot cross OSes;\n"
-     << "                    a run --target i8086 uses QEMU on Linux)\n"
+     << "                    match the host OS — the LLVM backend cannot\n"
+     << "                    cross OSes or arches; host target only)\n"
+     << "  --native         force the native codegen backend (default)\n"
+     << "  --backend <b>    select backend: 'llvm' (default; 'asm'/'native'\n"
+     << "                    are accepted aliases)\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
@@ -85,6 +88,11 @@ bool isTerminal() {
 #else
   return false;
 #endif
+}
+
+std::string lowerAscii(std::string s) {
+  for (char& c : s) c = (char)::tolower((unsigned char)c);
+  return s;
 }
 
 struct Options {
@@ -100,9 +108,9 @@ struct Options {
   bool checkOnly = false;
   bool writeInPlace = false;
   bool jsonOutput = false;
-  bool optimize = false;
   bool optnone = false;
-  bool optFlagSet = false;
+  bool native = false;
+  std::string backend = "llvm";
   int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;
@@ -113,10 +121,19 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   bool colorDisabled = false;
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
+    // Python-style passthrough: once `run <file>` or `test <path>` is seen,
+    // everything after belongs to the program (exported via A_ARGS).
+    // `--filter` stays a compiler option for `test` even after the path.
+    if (positional.size() >= 2 &&
+        (positional[0] == "run" ||
+         (positional[0] == "test" && arg != "--filter" &&
+          arg.rfind("--filter=", 0) != 0))) {
+      positional.push_back(arg);
+      continue;
+    }
   // LLVM/clang-style optimization levels: -O0..-O3, -Os, -Oz, -Ofast.
   auto parseOptFlag = [&](const std::string& value, bool& ok) {
     ok = true;
-    options.optFlagSet = true;
     if (value == "O0" || value == "-O0") options.optimizationLevel = 0;
     else if (value == "O1" || value == "-O1") options.optimizationLevel = 1;
     else if (value == "O2" || value == "-O2") options.optimizationLevel = 2;
@@ -143,6 +160,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
                     arg == "-Os" || arg == "-Oz" || arg == "-Ofast" ||
                     arg.rfind("--opt-level=", 0) == 0 || arg == "--opt-level");
   if (arg == "--optnone") options.optnone = true;
+  else if (arg == "--native") { options.native = true; }
   else if (isOptFlag) {
     bool ok = false;
     if (!parseOptFlag(arg, ok)) { err << "error: invalid optimization level '" << arg << "'\n"; return false; }
@@ -150,7 +168,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
   else if (arg == "--check") options.checkOnly = true;
   else if (arg == "-w" || arg == "--write") options.writeInPlace = true;
   else if (arg == "--json") options.jsonOutput = true;
-  else if (arg == "--opt") options.optimize = true;
     else if (arg == "--parallel") options.jobs = 0;
     else if (arg == "--jobs" || arg == "-j") {
       if (i + 1 >= argc) { err << "error: '--jobs' requires a number\n"; return false; }
@@ -164,11 +181,16 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
     }
     else if (arg == "--backend") {
-      // Accepted for compatibility; A v2 uses a single LLVM-oriented backend.
       if (i + 1 >= argc) { err << "error: '--backend' requires a name\n"; return false; }
-      ++i;
+      std::string name = lowerAscii(argv[++i]);
+      // 'llvm' is the only backend; 'asm'/'native' map to it for
+      // compatibility.
+      if (name == "llvm" || name == "native" || name == "asm") { options.native = true; options.backend = "llvm"; }
+      else { err << "error: unknown backend '" << name << "' (expected 'llvm')\n"; return false; }
     } else if (arg.rfind("--backend=", 0) == 0) {
-      // compatibility no-op
+      std::string name = lowerAscii(arg.substr(10));
+      if (name == "llvm" || name == "native" || name == "asm") { options.native = true; options.backend = "llvm"; }
+      else { err << "error: unknown backend '" << name << "' (expected 'llvm')\n"; return false; }
     } else if (arg == "--indent") {
       if (i + 1 >= argc) { err << "error: '--indent' requires a number\n"; return false; }
       try { options.indentWidth = std::stoi(argv[++i]); } catch (...) { err << "error: invalid indentation width\n"; return false; }
@@ -225,9 +247,43 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       err << "error: '-c' cannot be combined with a file argument\n"; return false;
     }
     if (options.commandCode.empty()) {
-      if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
-      if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
-      options.path = positional[1];
+      if (options.command == "test") {
+        if (positional.size() > 2) { err << "error: unexpected argument '" << positional[2] << "'\n"; return false; }
+        if (positional.size() == 2) options.path = positional[1];
+        // empty path => scan current directory
+      } else {
+        if (positional.size() < 2) { err << "error: missing input file for '" << options.command << "'\n"; return false; }
+        options.path = positional[1];
+        // Extra args after the file are forwarded to the program via A_ARGS
+        // (like `python script.py args...`); std:swiftcli's args_from_env
+        // reads them. Only meaningful for run/test/repl-style execution.
+        if (positional.size() > 2 &&
+            (options.command == "run" || options.command == "test" ||
+             options.command == "repl")) {
+          std::string joined;
+          for (std::size_t i = 2; i < positional.size(); ++i) {
+            if (i > 2) joined += ' ';
+            const std::string& a = positional[i];
+            bool simple = !a.empty();
+            for (char ch : a)
+              if (!(std::isalnum((unsigned char)ch) || ch == '_' || ch == '-' ||
+                    ch == '.' || ch == '/' || ch == ':' || ch == '='))
+                simple = false;
+            if (simple) joined += a;
+            else {
+              joined += '\'';
+              for (char ch : a) {
+                if (ch == '\'') joined += "'\\''";
+                else joined += ch;
+              }
+              joined += '\'';
+            }
+          }
+          setenv("A_ARGS", joined.c_str(), 1);
+        } else if (positional.size() > 2) {
+          err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
+        }
+      }
     } else if (positional.size() > 2) {
       err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
     }
@@ -240,10 +296,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
     err << "error: '--json' is only valid with 'doc' or 'check'\n"; return false;
   }
   if (options.optnone) options.optimizationLevel = 0;
-  // `a ir -O<level>` implies `a ir --opt` (clang-style: the level selects the
-  // pipeline); `a run`/`a build -O` only forwards to the C backend.
-  if (options.command == "ir" && options.optFlagSet) options.optimize = true;
-  if (options.command != "ir" && options.optimize) { err << "error: '--opt' is only valid with 'ir'\n"; return false; }
   if (options.command != "test" && !options.testFilter.empty()) { err << "error: '--filter' is only valid with 'test'\n"; return false; }
   if (options.writeInPlace && options.checkOnly) { err << "error: '--write' and '--check' cannot be combined\n"; return false; }
   options.useColor = isTerminal() && !colorDisabled;
@@ -257,9 +309,8 @@ int main(int argc, char** argv) {
 #if defined(__unix__) || defined(__APPLE__)
   // Let compiled programs (e.g. repl.eval in the self-hosted REPL) locate
   // this toolchain binary regardless of the caller's PATH/cwd.
-  char exeBuf[4096];
-  ssize_t exeLen = ::readlink("/proc/self/exe", exeBuf, sizeof(exeBuf) - 1);
-  if (exeLen > 0) { exeBuf[exeLen] = '\0'; ::setenv("A_A_BIN", exeBuf, 1); }
+  const std::string exePath = a::exePath();
+  if (!exePath.empty()) ::setenv("A_A_BIN", exePath.c_str(), 1);
 #endif
   Options options;
   if (!parseOptions(argc, argv, options, std::cerr)) return kExitUsage;
@@ -267,7 +318,11 @@ int main(int argc, char** argv) {
   config.checkOnly = options.command == "check";
   config.useColor = options.useColor;
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
-  config.backend = "llvm"; // single backend (LLVM pipeline)
+  config.backend = options.backend;
+  if (const char* be = std::getenv("A_BACKEND"); be && *be) {
+    // 'llvm' is the only native backend; 'asm' is no longer selectable.
+    if (lowerAscii(be) == "llvm") config.backend = "llvm";
+  }
   config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count
   config.optimizationLevel = options.optimizationLevel;
   if (const char* env = std::getenv("A_JOBS")) {
@@ -276,16 +331,20 @@ int main(int argc, char** argv) {
   config.modulePaths = options.modulePaths;
   // apm packages are found automatically: for an `apm.json` project, add
   // `<root>/.apm/packages` to the module search paths for every file
-  // command (run/build/check/test/ir), so `import <pkg>` works without
+  // command (run/build/check/test), so `import <pkg>` works without
   // `apm run` or an explicit `-I` flag.
-  if (!options.path.empty()) {
-    namespace fs = std::filesystem;
-    const std::string root = findProjectDir(options.path);
-    if (!root.empty()) {
-      std::error_code ec;
-      const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
-      if (fs::is_directory(pkgDir, ec)) {
-        config.modulePaths.insert(config.modulePaths.begin(), pkgDir.string());
+  {
+    const std::string apmBase = !options.path.empty() ? options.path
+                               : (options.command == "test" ? "." : "");
+    if (!apmBase.empty()) {
+      namespace fs = std::filesystem;
+      const std::string root = findProjectDir(apmBase);
+      if (!root.empty()) {
+        std::error_code ec;
+        const fs::path pkgDir = fs::path(root) / ".apm" / "packages";
+        if (fs::is_directory(pkgDir, ec)) {
+          config.modulePaths.insert(config.modulePaths.begin(), pkgDir.string());
+        }
       }
     }
   }
@@ -299,11 +358,11 @@ int main(int argc, char** argv) {
     return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
   }
   if (options.command == "repl") return a::repl(config, std::cin, std::cout, std::cerr);
-  if (options.command == "test") return a::testFile(options.path, config, std::cin, std::cout, std::cerr);
+  if (options.command == "test") return a::testPath(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "build") {
     std::string out = options.outputPath;
     if (out.empty()) out = "a.out";
-    return a::buildFile(options.path, out, config, "astra", std::cerr);
+    return a::buildFile(options.path, out, config, std::cerr);
   }
   if (options.command == "check") return a::runFile(options.path, config, std::cin, std::cout, std::cerr);
   if (options.command == "fmt") {
@@ -314,7 +373,6 @@ int main(int argc, char** argv) {
     a::DocFileOptions doc; doc.json = options.jsonOutput; doc.useColor = options.useColor; doc.outputPath = options.outputPath;
     return a::documentFile(options.path, doc, std::cout, std::cerr);
   }
-  if (options.command == "ir") return a::emitIRFile(options.path, config, options.optimize, std::cout, std::cerr);
   std::cerr << "error: unknown command '" << options.command << "'\n";
   printUsage(std::cerr);
   return kExitUsage;

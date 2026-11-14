@@ -79,12 +79,16 @@ TypePtr Sema::checkBuiltinIo(const std::string& name, CallExpr& call) {
       inferCallArgTypes(call);
       return typeVoid();
     }
-    for (std::size_t i = 0; i < 2; ++i) {
-      TypePtr type = inferExpr(*call.args[i].value);
-      if (!unify(type, typeString())) {
-        reportMismatch(type, typeString(), call.args[i].value->span,
-                       "in argument " + std::to_string(i + 1) + " to '" + name + "'");
-      }
+    TypePtr path = inferExpr(*call.args[0].value);
+    if (!unify(path, typeString())) {
+      reportMismatch(path, typeString(), call.args[0].value->span,
+                     "in argument 1 to '" + name + "'");
+    }
+    TypePtr content = inferExpr(*call.args[1].value);
+    TypePtr resolved = resolveType(content);
+    if (resolved->kind != TypeKind::String && resolved->kind != TypeKind::Bytes) {
+      reportMismatch(content, typeString(), call.args[1].value->span,
+                     "in argument 2 to '" + name + "'");
     }
     return typeVoid();
   }

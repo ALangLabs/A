@@ -4,7 +4,7 @@
 # isa-debug-exit port 0xf4, which QEMU reports as exit status (value<<1)|1
 # (the i8086 _entry writes 42 -> status 85).
 #
-# Usage: tests/integration/i8086_image.sh <path-to-a> <source.a> [expected.out]
+# Usage: tests/integration/i8086_image.sh <path-to-a> <source.astra> [expected.out]
 set -u
 
 A_BIN="$1"; SRC="$2"; EXPECT="${3:-}"

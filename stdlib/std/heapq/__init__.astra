@@ -1,0 +1,7 @@
+# std.heapq package — port of Python 3.14 Lib/heapq.py.
+from "heapq.astra" import heappush, heappop, heapify, heapreplace, heappushpop
+from "heapq.astra" import heappush_max, heappop_max, heapify_max, heapreplace_max, heappushpop_max
+from "heapq.astra" import nlargest, nsmallest, nlargest_key, nsmallest_key
+from "heapq.astra" import merge, merge_key, merge_reverse, merge_key_reverse
+from "heapq.astra" import _heappush_max, _heappop_max, _heapreplace_max
+from "heapq.astra" import _heappushpop_max, _heapify_max, _heapify

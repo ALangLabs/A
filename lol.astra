@@ -1,0 +1,17 @@
+fn is_palindrome(s: String) -> bool:
+    n = len(s)
+    i = 0
+    while i < n / 2:
+        if s[i] != s[n - 1 - i]:
+            return false
+        i = i + 1
+    return true
+
+entry main():
+    test_words = ["racecar", "madam", "radar", "level", "hello", "world", "a", ""]
+
+    for word in test_words:
+        if is_palindrome(word):
+            print("'{word}' is a palindrome")
+        else:
+            print("'{word}' is not a palindrome")

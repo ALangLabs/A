@@ -15,21 +15,101 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     return false;
   };
 
-  if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
+    /* dynamic (untyped, union, or any): inferred at runtime */
     for (auto& arg : call.args) inferExpr(*arg.value);
     auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+  }
+
+  // Fixed-width SIMD vectors: lane reductions and conversions. These are
+  // compiler intrinsics lowered to native <N x ty> IR by the LLVM backend.
+  if (object->kind == TypeKind::Vector) {
+    if (rejectNamed()) return typeError();
+    auto noArgs = [&](const char* usage) {
+      if (call.args.size() != 0) {
+        sink_.error(call.span,
+                    "Method '" + method + "' expects " + usage +
+                        ", found " + std::to_string(call.args.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        return false;
+      }
+      return true;
+    };
+    if (method == "sum" || method == "min" || method == "max") {
+      if (!noArgs("no arguments")) return typeError();
+      return object->elem;
+    }
+    if (method == "to_list") {
+      if (!noArgs("no arguments")) return typeError();
+      return typeArray(object->elem);
+    }
+    if (method == "dot") {
+      if (call.args.size() != 1) {
+        sink_.error(call.span,
+                    "Method 'dot' expects 1 argument (vector), found " +
+                        std::to_string(call.args.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        return typeError();
+      }
+      TypePtr argType = inferExpr(*call.args[0].value);
+      TypePtr arg = resolveType(argType);
+      if (!arg || arg->kind != TypeKind::Vector ||
+          arg->length != object->length) {
+        sink_.error(call.args[0].value->span,
+                    "'dot' expects a vector[" + typeName(object->elem) + ", " +
+                        std::to_string(object->length) + "].");
+        return typeError();
+      }
+      if (!unify(arg->elem, object->elem)) {
+        reportMismatch(argType, object, call.args[0].value->span, "in 'dot'");
+        return typeError();
+      }
+      return object->elem;
+    }
+    sink_.error(field.fieldSpan,
+                "vector[" + typeName(object->elem) + ", " +
+                    std::to_string(object->length) +
+                    "] has no method '" + method + "'.",
+                "Vector methods: sum(), min(), max(), dot(other), to_list().");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    return typeError();
   }
 
   if (object->kind == TypeKind::Struct) {
     auto structIt = structs_.find(object->structName);
     if (structIt == structs_.end()) return typeError();
+    // Generic classes instantiate per type-argument combination: the stored
+    // field/method types reference the class's shared type-parameter vars, so
+    // each use must substitute this object's actual type arguments (and fresh
+    // vars for any type parameters the member declares itself) before
+    // checking. Without this the first call site would bind the shared vars
+    // for every other instantiation in the module.
+    const StructSym& structSym = structIt->second;
+    auto memberMapping = [&]() {
+      std::unordered_map<TypePtr, TypePtr> mapping;
+      for (std::size_t i = 0; i < structSym.typeParamVars.size(); ++i) {
+        if (i < object->params.size()) {
+          mapping[structSym.typeParamVars[i]] = object->params[i];
+        } else {
+          TypePtr fresh = freshVar(Constraint::None, structSym.typeParamVars[i]->varSpan,
+                                   "type parameter '" + structSym.typeParams[i] + "'");
+          fresh->allowUnresolved = true;
+          mapping[structSym.typeParamVars[i]] = fresh;
+        }
+      }
+      return mapping;
+    };
     auto methodIt = structIt->second.methods.find(method);
     if (methodIt == structIt->second.methods.end()) {
       for (const auto& fieldEntry : structIt->second.fields) {
         if (fieldEntry.first != method) continue;
         TypePtr fieldType = resolveType(fieldEntry.second);
         if (fieldType->kind == TypeKind::Function) {
+          if (!structSym.typeParamVars.empty()) {
+            return checkFunctionValueCall(method, instantiateType(fieldType, memberMapping()),
+                                          call);
+          }
           return checkFunctionValueCall(method, fieldEntry.second, call);
         }
         sink_.error(field.fieldSpan,
@@ -45,7 +125,66 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
       return typeError();
     }
     if (rejectNamed()) return typeError();
-    const FnSig& sig = methodIt->second;
+    // Instantiate the stored signature for this object's type arguments so
+    // each generic-class instantiation is checked independently (see the
+    // memberMapping comment above). The method's own type parameters (those
+    // beyond the class's) get fresh vars per call, like generic functions —
+    // or the explicit `<T, ...>` arguments when the call supplies them.
+    FnSig effective = methodIt->second;
+    const std::size_t structParamCount = structSym.typeParamVars.size();
+    const std::size_t ownParamCount =
+        effective.typeParamVars.size() > structParamCount
+            ? effective.typeParamVars.size() - structParamCount
+            : 0;
+    std::vector<TypePtr> explicitTypes;
+    if (!call.typeArgs.empty()) {
+      if (ownParamCount == 0) {
+        sink_.error(call.span,
+                    "Method '" + method + "' is not generic; it takes no "
+                    "type arguments.");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+        return typeError();
+      }
+      if (call.typeArgs.size() != ownParamCount) {
+        sink_.error(call.span,
+                    "Method '" + method + "' expects " +
+                        std::to_string(ownParamCount) +
+                        " type argument(s), found " +
+                        std::to_string(call.typeArgs.size()) + ".");
+        for (auto& arg : call.args) inferExpr(*arg.value);
+        for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+        return typeError();
+      }
+      explicitTypes.reserve(call.typeArgs.size());
+      for (auto& ta : call.typeArgs) explicitTypes.push_back(resolveTypeExpr(*ta));
+    }
+    if (!effective.typeParamVars.empty()) {
+      auto mapping = memberMapping();
+      for (std::size_t i = structParamCount;
+           i < effective.typeParamVars.size(); ++i) {
+        TypePtr var = effective.typeParamVars[i];
+        std::size_t own = i - structParamCount;
+        TypePtr fresh;
+        if (own < explicitTypes.size()) {
+          fresh = explicitTypes[own];
+        } else {
+          fresh = freshVar(var->constraint, var->varSpan,
+                           var->varDescription.empty() ? "type parameter"
+                                                       : var->varDescription,
+                           var->allowDefault);
+          fresh->allowUnresolved = var->allowUnresolved;
+        }
+        mapping[var] = fresh;
+      }
+      std::vector<TypePtr> params;
+      params.reserve(effective.paramTypes.size());
+      for (const auto& p : effective.paramTypes)
+        params.push_back(instantiateType(p, mapping));
+      effective.paramTypes = std::move(params);
+      effective.retType = instantiateType(effective.retType, mapping);
+    }
+    const FnSig& sig = effective;
     std::size_t total = sig.paramTypes.size();
     std::size_t expected = total - 1;  // exclude self
     // self is always required, so user-facing required count is requiredArgs()-1.
@@ -88,6 +227,17 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
                       "in argument " + std::to_string(i + 1) + " to method '" + method + "'");
     }
     return sig.retType;
+  }
+
+  // Only generic struct methods accept explicit `<T, ...>` call-site type
+  // arguments; builtin container/string methods are not generic.
+  if (!call.typeArgs.empty()) {
+    sink_.error(call.span,
+                "Method '" + method + "' on type '" + typeName(object) +
+                    "' does not take type arguments.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+    return typeError();
   }
 
   if (object->kind == TypeKind::Array) {

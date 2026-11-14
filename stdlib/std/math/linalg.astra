@@ -1,0 +1,852 @@
+#
+# numpy.linalg subset — dense linear algebra on NDArray (f64, C-order).
+#
+# Built on ndarray.astra primitives plus the native linalg kernels where their
+# flat-list ABI matches:
+#   linalg_dot(a, b)            -> f64        (1-D · 1-D)
+#   linalg_matmul(a, b, m,k,n)  -> [f64]      (m×k)·(k×n), row-major
+#   linalg_matvec(x, w, bias,   -> [f64]      w stored [in][out], i.e. the
+#                    nin, nout)                            (nin, nout)
+#                                                     row-major W of x @ W
+#   linalg_matvec_t(x, w, bias, -> [f64]      w stored [out][in], i.e. W is
+#                    nout, nin)                            (nout, nin) and
+#                                                     computes x @ W.T
+#
+# All kernels take/return plain [f64] lists (verified all-double fast path
+# inside the runtime), so they are wrapped here — NDArray.data is already a
+# [f64] list and is passed directly. Bias is passed as [] when absent (the
+# C side treats a too-short/empty bias list as "no bias").
+#
+# Deviations / gaps vs NumPy:
+#   * f64 only; no complex, no int dtypes.
+#   * ord="fro"/"nuc"/"inf"/"-inf" are Str ords (A has no IEEE inf literal —
+#     1.0/0.0 is a runtime error). Numeric ords are int/float.
+#   * matrix_norm(ord="2") is a power-iteration approximation, not a
+#     guaranteed-exact SVD spectral norm.
+#   * lstsq uses normal equations + tiny ridge — NOT SVD-based; expect loss
+#     of precision on ill-conditioned A and it requires m >= n to be
+#     meaningful (it still returns a result otherwise).
+#   * eig/eigh/svd/pinv/cond/cholesky/tensorinv/tensorsolve/slogdet/qr are
+#     NOT implemented (see module report). eigvalsh_2x2 covers the 2×2
+#     symmetric case only.
+#   * cross() requires equal leading shapes (no broadcasting of leading
+#     dims); the vector case requires exactly 3 elements.
+#   * tensordot accepts an integer `axes` only (not the (k_a, k_b) tuple or
+#     per-axis list forms).
+
+import std:core
+
+from "ndarray.astra" import NDArray, ndarray, zeros, eye, transpose, reshape, ravel
+from "ndarray.astra" import _shape_size, _broadcast_shape, _ew_bin, _scalar_or_arr
+
+# --- small shape helpers ------------------------------------------------------
+
+fn _ndim(a: NDArray) -> i64:
+    return len(a.shape)
+
+fn _drop_last(shape: [i64]) -> [i64]:
+    out = []
+    for i in 0..len(shape) - 1:
+        out.append(shape[i])
+    return out
+
+fn _drop_last2(shape: [i64]) -> [i64]:
+    out = []
+    for i in 0..len(shape) - 2:
+        out.append(shape[i])
+    return out
+
+fn _last1(shape: [i64]) -> [i64]:
+    return [shape[len(shape) - 1]]
+
+fn _cat(s1: [i64], s2: [i64]) -> [i64]:
+    out = []
+    for v in s1:
+        out.append(v)
+    for v in s2:
+        out.append(v)
+    return out
+
+fn _prod_range(shape: [i64], lo: i64, hi: i64) -> i64:
+    # prod of shape[lo..hi) (hi exclusive); empty -> 1
+    n = 1
+    for i in lo..hi:
+        n = n * shape[i]
+    return n
+
+fn _coords_of(shape: [i64], i: i64) -> [i64]:
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]
+        k = k - 1
+    return coords
+
+fn _check(cond: bool, msg: str):
+    if cond == false:
+        core.panic(msg)
+
+# --- 2-D cores over the native kernels ----------------------------------------
+
+fn _matmul2(a: NDArray, b: NDArray) -> NDArray:
+    # a: (m,k), b: (k,n) row-major -> (m,n). Native blocked kernel.
+    m = a.shape[0]
+    k = a.shape[1]
+    n = b.shape[1]
+    if m == 0 or k == 0 or n == 0:
+        return zeros([m, n])
+    _check(b.shape[0] == k, "matmul: inner dimensions mismatch")
+    out = linalg_matmul(a.data, b.data, m, k, n)
+    return NDArray(out, [m, n])
+
+fn _matvec2(a: NDArray, x: NDArray) -> NDArray:
+    # (m,k) @ (k,) -> (m,). w stored [out][in] == a's row-major rows.
+    m = a.shape[0]
+    k = a.shape[1]
+    if m == 0 or k == 0:
+        return zeros([m])
+    _check(x.shape[0] == k, "matvec: inner dimensions mismatch")
+    out = linalg_matvec_t(x.data, a.data, [], m, k)
+    return NDArray(out, [m])
+
+fn _rmatvec2(w: NDArray, x: NDArray) -> NDArray:
+    # (k,) @ (k,n) -> (n,). w stored [in][out] == row-major (k,n).
+    k = w.shape[0]
+    n = w.shape[1]
+    if k == 0 or n == 0:
+        return zeros([n])
+    _check(x.shape[0] == k, "matvec: inner dimensions mismatch")
+    out = linalg_matvec(x.data, w.data, [], k, n)
+    return NDArray(out, [n])
+
+fn _contract_rhs(b: NDArray) -> NDArray:
+    # b.ndim >= 2. Contract axis ndim-2. Returns matrix (kb, P*L) where the
+    # column index enumerates (b.shape[:-2] C-order, then last dim) — exactly
+    # the trailing dims of the np.dot result.
+    nd = len(b.shape)
+    kb = b.shape[nd - 2]
+    L = b.shape[nd - 1]
+    P = _prod_range(b.shape, 0, nd - 2)
+    pb = P * L
+    data = []
+    for k in 0..kb:
+        for p in 0..P:
+            base = (p * kb + k) * L
+            for l in 0..L:
+                data.append(b.data[base + l])
+    return NDArray(data, [kb, pb])
+
+# --- dot / matmul --------------------------------------------------------------
+
+fn dot(a: NDArray, b: NDArray) -> NDArray:
+    # np.dot: sum product over last axis of a and second-to-last of b.
+    na = len(a.shape)
+    nb = len(b.shape)
+    if na == 0:
+        return _ew_bin("mul", _scalar_or_arr(a.data[0], b.shape), b)
+    if nb == 0:
+        return _ew_bin("mul", a, _scalar_or_arr(b.data[0], a.shape))
+    if na <= 1 and nb <= 1:
+        _check(a.size() == b.size(), "dot: shape mismatch")
+        return NDArray([linalg_dot(a.data, b.data)], [])
+    if nb == 1:
+        # contract a's last axis with the vector -> a.shape[:-1]
+        ka = a.shape[na - 1]
+        _check(b.shape[0] == ka, "dot: shape mismatch")
+        pa = _prod_range(a.shape, 0, na - 1)
+        a2 = reshape(a, [pa, ka])
+        b2 = reshape(b, [ka, 1])
+        c = _matmul2(a2, b2)
+        outshape = _drop_last(a.shape)
+        if len(outshape) == 0:
+            return NDArray(c.data, [])
+        return reshape(c, outshape)
+    if na == 1:
+        # vector . N-D: contract with b's second-to-last axis
+        ka = a.shape[0]
+        kb = b.shape[nb - 2]
+        _check(ka == kb, "dot: shape mismatch")
+        b2 = _contract_rhs(b)
+        a2 = reshape(a, [1, ka])
+        c = _matmul2(a2, b2)
+        outshape = _cat(_drop_last2(b.shape), _last1(b.shape))
+        return reshape(c, outshape)
+    # both >= 2
+    ka = a.shape[na - 1]
+    kb = b.shape[nb - 2]
+    _check(ka == kb, "dot: shape mismatch")
+    pa = _prod_range(a.shape, 0, na - 1)
+    a2 = reshape(a, [pa, ka])
+    b2 = _contract_rhs(b)
+    c = _matmul2(a2, b2)
+    outshape = _cat(_cat(_drop_last(a.shape), _drop_last2(b.shape)), _last1(b.shape))
+    return reshape(c, outshape)
+
+fn inner(a: NDArray, b: NDArray) -> NDArray:
+    # np.inner contracts the last axis of a with the second-to-last of b —
+    # identical semantics to np.dot.
+    return dot(a, b)
+
+fn vdot(a: NDArray, b: NDArray) -> f64:
+    # np.vdot: conjugate dot over flattened arrays. dtype is f64 (real), so
+    # conjugation is the identity. Returns a scalar f64.
+    _check(a.size() == b.size(), "vdot: shape mismatch")
+    return linalg_dot(ravel(a).data, ravel(b).data)
+
+fn outer(a: NDArray, b: NDArray) -> NDArray:
+    # np.outer: flattened outer product -> (size(a), size(b)).
+    sa = a.size()
+    sb = b.size()
+    a2 = reshape(a, [sa, 1])
+    b2 = reshape(b, [1, sb])
+    c = _matmul2(a2, b2)
+    return reshape(c, [sa, sb])
+
+fn kron(a: NDArray, b: NDArray) -> NDArray:
+    # np.kron: shapes are aligned (leading 1s prepended to the smaller ndim)
+    # and multiplied elementwise; out coord c_i = i_a*b_dim_i + i_b.
+    na = len(a.shape)
+    nb = len(b.shape)
+    nd = na
+    if nb > nd:
+        nd = nb
+    ash = []
+    bsh = []
+    for i in 0..nd:
+        ai = i - (nd - na)
+        bi = i - (nd - nb)
+        if ai >= 0:
+            ash.append(a.shape[ai])
+        else:
+            ash.append(1)
+        if bi >= 0:
+            bsh.append(b.shape[bi])
+        else:
+            bsh.append(1)
+    outshape = []
+    for i in 0..nd:
+        outshape.append(ash[i] * bsh[i])
+    total = _shape_size(outshape)
+    # strides for a/b flat indexing (units of elements)
+    astr = []
+    astride = 1
+    i = nd - 1
+    while i >= 0:
+        astr.insert(0, astride)
+        astride = astride * ash[i]
+        i = i - 1
+    bstr = []
+    bstride = 1
+    i = nd - 1
+    while i >= 0:
+        bstr.insert(0, bstride)
+        bstride = bstride * bsh[i]
+        i = i - 1
+    data = []
+    for t in 0..total:
+        coords = _coords_of(outshape, t)
+        fa = 0
+        fb = 0
+        for i in 0..nd:
+            ia = coords[i] // bsh[i]
+            ib = coords[i] % bsh[i]
+            fa = fa + ia * astr[i]
+            fb = fb + ib * bstr[i]
+        data.append(a.data[fa] * b.data[fb])
+    return NDArray(data, outshape)
+
+fn matmul(a: NDArray, b: NDArray) -> NDArray:
+    # np.matmul: 2-D core via native kernel; N-D batch dims broadcast
+    # (right-aligned, dim-1 broadcast) then looped per batch index.
+    na = len(a.shape)
+    nb = len(b.shape)
+    if na == 0 or nb == 0:
+        # scalar operand -> elementwise multiply (np.matmul scalar rules)
+        if na == 0 and nb == 0:
+            return NDArray([a.data[0] * b.data[0]], [])
+        if na == 0:
+            return _ew_bin("mul", _scalar_or_arr(a.data[0], b.shape), b)
+        return _ew_bin("mul", a, _scalar_or_arr(b.data[0], a.shape))
+
+    a_vec = na == 1
+    b_vec = nb == 1
+    if a_vec:
+        a = reshape(a, [1, a.shape[0]])
+        na = 2
+    if b_vec:
+        b = reshape(b, [b.shape[0], 1])
+        nb = 2
+
+    m = a.shape[na - 2]
+    k = a.shape[na - 1]
+    kk = b.shape[nb - 2]
+    n = b.shape[nb - 1]
+    _check(k == kk, "matmul: inner dimensions mismatch")
+
+    if na == 2 and nb == 2:
+        c = _matmul2(a, b)
+        if a_vec and b_vec:
+            return NDArray(c.data, [])
+        if a_vec:
+            return reshape(c, [n])
+        if b_vec:
+            return reshape(c, [m])
+        return c
+
+    # batch dimensions
+    ash = _drop_last2(a.shape)
+    bsh = _drop_last2(b.shape)
+    bshape = _broadcast_shape(ash, bsh)
+    if len(bshape) == 0 and (len(ash) > 0 or len(bsh) > 0):
+        # _broadcast_shape returns [] on mismatch; both-empty is the only
+        # legitimate empty result and is handled by the 2-D path above.
+        core.panic("matmul: batch dimensions not broadcastable")
+    nbatch_dims = len(bshape)
+    B = _shape_size(bshape)
+    mk = m * k
+    kn = k * n
+
+    # element strides for batch dims (0 where the operand broadcasts)
+    astr = []
+    abase = nbatch_dims - (na - 2)
+    for j in 0..na - 2:
+        if a.shape[j] == 1 and nbatch_dims > 0 and abase + j < nbatch_dims and bshape[abase + j] != 1:
+            astr.append(0)
+        else:
+            astr.append(_prod_range(a.shape, j + 1, na - 2) * mk)
+    bstr = []
+    bbase = nbatch_dims - (nb - 2)
+    for j in 0..nb - 2:
+        if b.shape[j] == 1 and nbatch_dims > 0 and bbase + j < nbatch_dims and bshape[bbase + j] != 1:
+            bstr.append(0)
+        else:
+            bstr.append(_prod_range(b.shape, j + 1, nb - 2) * kn)
+
+    outdata = []
+    for t in 0..B:
+        coords = _coords_of(bshape, t)
+        offa = 0
+        for j in 0..na - 2:
+            ci = abase + j
+            if ci >= 0 and ci < nbatch_dims:
+                offa = offa + coords[ci] * astr[j]
+        offb = 0
+        for j in 0..nb - 2:
+            ci = bbase + j
+            if ci >= 0 and ci < nbatch_dims:
+                offb = offb + coords[ci] * bstr[j]
+        ad = []
+        for i in 0..mk:
+            ad.append(a.data[offa + i])
+        bd = []
+        for i in 0..kn:
+            bd.append(b.data[offb + i])
+        c = _matmul2(NDArray(ad, [m, k]), NDArray(bd, [k, n]))
+        for v in c.data:
+            outdata.append(v)
+
+    outshape = _cat(bshape, [m, n])
+    c = NDArray(outdata, outshape)
+    if a_vec and b_vec:
+        return NDArray(c.data, [])
+    if a_vec:
+        return reshape(c, _cat(bshape, [n]))
+    if b_vec:
+        return reshape(c, _cat(bshape, [m]))
+    return c
+
+fn matvec(x: NDArray, w: NDArray, bias: any = None) -> NDArray:
+    # x·W (+b) helper: x is 1-D (nin,), w is 2-D (nin, nout) row-major,
+    # bias optional 1-D (nout,). Returns 1-D (nout,).
+    # Uses the native linalg_matvec kernel (w stored [in][out] — identical
+    # layout to row-major (nin, nout)).
+    _check(len(x.shape) == 1, "matvec: x must be 1-D")
+    _check(len(w.shape) == 2, "matvec: w must be 2-D (nin, nout)")
+    nin = x.shape[0]
+    nout = w.shape[1]
+    _check(w.shape[0] == nin, "matvec: inner dimensions mismatch")
+    b = []
+    if bias != None and isinstance(bias, NDArray):
+        b = bias.data
+    if nin == 0 or nout == 0:
+        return zeros([nout])
+    out = linalg_matvec(x.data, w.data, b, nin, nout)
+    return NDArray(out, [nout])
+
+fn cross(a: NDArray, b: NDArray) -> NDArray:
+    # np.cross: vector case needs exactly 3 elements; otherwise the last
+    # axis must be 3 and leading shapes must match (no leading-dim
+    # broadcasting — documented deviation).
+    na = len(a.shape)
+    nb = len(b.shape)
+    if na == 1 and nb == 1:
+        _check(a.shape[0] == 3 and b.shape[0] == 3, "cross: vectors must have 3 elements")
+        x0 = a.data[0]
+        x1 = a.data[1]
+        x2 = a.data[2]
+        y0 = b.data[0]
+        y1 = b.data[1]
+        y2 = b.data[2]
+        return NDArray([x1 * y2 - x2 * y1, x2 * y0 - x0 * y2, x0 * y1 - x1 * y0], [3])
+    _check(na >= 1 and nb >= 1, "cross: unsupported shapes")
+    _check(a.shape[na - 1] == 3, "cross: last axis must be 3")
+    _check(b.shape[nb - 1] == 3, "cross: last axis must be 3")
+    # leading dims broadcast (right-aligned); vector operands have none
+    ash = _drop_last(a.shape)
+    bsh = _drop_last(b.shape)
+    lead = _broadcast_shape(ash, bsh)
+    _check(len(lead) > 0 or (len(ash) == 0 and len(bsh) == 0), "cross: leading shapes not broadcastable")
+    if len(lead) == 0:
+        lead = []
+    L = _shape_size(lead)
+    la = len(ash)
+    lb = len(bsh)
+    abase = len(lead) - la
+    bbase = len(lead) - lb
+    # per-leading-dim strides in units of 3-vectors (0 where broadcast)
+    astr = []
+    for j in 0..la:
+        if ash[j] == 1:
+            astr.append(0)
+        else:
+            astr.append(_prod_range(ash, j + 1, la))
+    bstr = []
+    for j in 0..lb:
+        if bsh[j] == 1:
+            bstr.append(0)
+        else:
+            bstr.append(_prod_range(bsh, j + 1, lb))
+    data = []
+    for p in 0..L:
+        coords = _coords_of(lead, p)
+        fa = 0
+        for j in 0..la:
+            ci = abase + j
+            if ci >= 0:
+                fa = fa + coords[ci] * astr[j]
+        fb = 0
+        for j in 0..lb:
+            ci = bbase + j
+            if ci >= 0:
+                fb = fb + coords[ci] * bstr[j]
+        x0 = a.data[fa * 3]
+        x1 = a.data[fa * 3 + 1]
+        x2 = a.data[fa * 3 + 2]
+        y0 = b.data[fb * 3]
+        y1 = b.data[fb * 3 + 1]
+        y2 = b.data[fb * 3 + 2]
+        data.append(x1 * y2 - x2 * y1)
+        data.append(x2 * y0 - x0 * y2)
+        data.append(x0 * y1 - x1 * y0)
+    outshape = _cat(lead, [3])
+    return NDArray(data, outshape)
+
+# --- norms ---------------------------------------------------------------------
+
+fn _p_norm(data: [f64], p: f64) -> f64:
+    if p == 0.0:
+        cnt = 0
+        for v in data:
+            if v != 0.0:
+                cnt = cnt + 1
+        return cnt + 0.0
+    if p == 1.0:
+        s = 0.0
+        for v in data:
+            s = s + abs(v)
+        return s
+    if p == 2.0:
+        s = 0.0
+        for v in data:
+            s = s + v * v
+        return sqrt(s)
+    s = 0.0
+    for v in data:
+        s = s + pow(abs(v), p)
+    if s == 0.0:
+        return 0.0
+    return pow(s, 1.0 / p)
+
+fn vector_norm(x: NDArray, ord: any = 2.0) -> f64:
+    # ord: numeric p, or "inf" / "-inf" (no IEEE inf literal in A).
+    if type(ord) == "str":
+        if ord == "inf":
+            m = 0.0
+            for v in x.data:
+                if abs(v) > m:
+                    m = abs(v)
+            return m
+        if ord == "-inf":
+            m = abs(x.data[0])
+            for v in x.data:
+                if abs(v) < m:
+                    m = abs(v)
+            return m
+        # "fro"/"nuc" on a vector fall back to 2-norm
+        return _p_norm(x.data, 2.0)
+    return _p_norm(x.data, ord + 0.0)
+
+fn matrix_norm(a: NDArray, ord: any = "fro") -> f64:
+    # ord: "fro"/"nuc" (both Frobenius here), "1", "inf", "-inf", "2"
+    # (spectral, power-iteration approximation).
+    _check(len(a.shape) == 2, "matrix_norm: input must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    if type(ord) != "str":
+        p = ord + 0.0
+        if p == 1.0:
+            ord = "1"
+        elif p == 2.0:
+            ord = "2"
+        else:
+            core.panic("matrix_norm: unsupported ord")
+    if ord == "fro" or ord == "nuc":
+        s = 0.0
+        for v in a.data:
+            s = s + v * v
+        return sqrt(s)
+    if ord == "1":
+        # max column sum of abs
+        best = 0.0
+        for j in 0..n:
+            s = 0.0
+            for i in 0..m:
+                s = s + abs(a.data[i * n + j])
+            if s > best:
+                best = s
+        return best
+    if ord == "inf":
+        best = 0.0
+        for i in 0..m:
+            s = 0.0
+            for j in 0..n:
+                s = s + abs(a.data[i * n + j])
+            if s > best:
+                best = s
+        return best
+    if ord == "-inf":
+        best = -1.0
+        for i in 0..m:
+            s = 0.0
+            for j in 0..n:
+                s = s + abs(a.data[i * n + j])
+            if best < 0.0 or s < best:
+                best = s
+        return best
+    if ord == "2":
+        # spectral norm via power iteration on A^T A (approximate).
+        if m == 0 or n == 0:
+            return 0.0
+        dim = n
+        v = []
+        for i in 0..dim:
+            v.append(1.0)
+        lam = 0.0
+        for it in 0..200:
+            # w = A v  (m,)
+            w = []
+            for i in 0..m:
+                s = 0.0
+                for j in 0..n:
+                    s = s + a.data[i * n + j] * v[j]
+                w.append(s)
+            # u = A^T w  (n,)
+            u = []
+            for j in 0..n:
+                s = 0.0
+                for i in 0..m:
+                    s = s + a.data[i * n + j] * w[i]
+                u.append(s)
+            nrm = 0.0
+            for x in u:
+                nrm = nrm + x * x
+            nrm = sqrt(nrm)
+            if nrm == 0.0:
+                return 0.0
+            lam = 0.0
+            for j in 0..n:
+                v[j] = u[j] / nrm
+                lam = lam + v[j] * u[j]
+        if lam < 0.0:
+            lam = 0.0
+        return sqrt(lam)
+    core.panic("matrix_norm: unknown ord '" + str(ord) + "'")
+    return 0.0
+
+fn norm(x: NDArray, ord: any = None) -> f64:
+    # np.linalg.norm dispatcher.
+    if ord == None:
+        if len(x.shape) <= 1:
+            return vector_norm(x, 2.0)
+        return matrix_norm(x, "fro")
+    if type(ord) == "str":
+        if len(x.shape) <= 1:
+            return vector_norm(x, ord)
+        return matrix_norm(x, ord)
+    p = ord + 0.0
+    if len(x.shape) <= 1:
+        return vector_norm(x, p)
+    if len(x.shape) == 2:
+        if p == 1.0:
+            return matrix_norm(x, "1")
+        if p == 2.0:
+            return matrix_norm(x, "2")
+    # N-D or other ords: flatten and use the vector p-norm
+    return vector_norm(ravel(x), p)
+
+# --- factorizations / solves ----------------------------------------------------
+
+fn _lu(a: NDArray) -> (NDArray, [i64], i64):
+    # LU with partial pivoting. Returns (LU, perm, sign) where LU holds L
+    # (unit diagonal, below) and U (diagonal and above) in one n×n matrix,
+    # and perm[i] is the original row now at position i (PA = LU).
+    _check(len(a.shape) == 2 and a.shape[0] == a.shape[1], "lu: input must be square 2-D")
+    n = a.shape[0]
+    data = []
+    for v in a.data:
+        data.append(v)
+    lu = NDArray(data, [n, n])
+    perm = []
+    for i in 0..n:
+        perm.append(i)
+    sign = 1
+    for k in 0..n:
+        p = k
+        best = abs(lu.data[k * n + k])
+        for i in k + 1..n:
+            v = abs(lu.data[i * n + k])
+            if v > best:
+                best = v
+                p = i
+        if p != k:
+            for j in 0..n:
+                tmp = lu.data[k * n + j]
+                lu.data[k * n + j] = lu.data[p * n + j]
+                lu.data[p * n + j] = tmp
+            tp = perm[k]
+            perm[k] = perm[p]
+            perm[p] = tp
+            sign = -sign
+        d = lu.data[k * n + k]
+        if d == 0.0:
+            continue
+        for i in k + 1..n:
+            lu.data[i * n + k] = lu.data[i * n + k] / d
+            lik = lu.data[i * n + k]
+            for j in k + 1..n:
+                lu.data[i * n + j] = lu.data[i * n + j] - lik * lu.data[k * n + j]
+    return (lu, perm, sign)
+
+fn lu(a: NDArray) -> (NDArray, NDArray, [i64]):
+    # np-ish lu: returns (L, U, pivots) with L unit-diagonal.
+    r = _lu(a)
+    lu_m = r[0]
+    perm = r[1]
+    n = a.shape[0]
+    ldata = []
+    udata = []
+    for i in 0..n:
+        for j in 0..n:
+            if i == j:
+                ldata.append(1.0)
+                udata.append(lu_m.data[i * n + j])
+            elif i > j:
+                ldata.append(lu_m.data[i * n + j])
+                udata.append(0.0)
+            else:
+                ldata.append(0.0)
+                udata.append(lu_m.data[i * n + j])
+    return (NDArray(ldata, [n, n]), NDArray(udata, [n, n]), perm)
+
+fn _lu_solve(lu_m: NDArray, perm: [i64], b: [f64], nrhs: i64) -> [f64]:
+    # Solve A X = B where B is n×nrhs row-major in `b`; returns n×nrhs.
+    n = lu_m.shape[0]
+    # gather rhs columns: work column by column
+    out = []
+    for c in 0..nrhs:
+        # y = P b_col : (PA)[i] = A[perm[i]]  =>  rhs'[i] = b[perm[i], c]
+        y = []
+        for i in 0..n:
+            y.append(b[perm[i] * nrhs + c])
+        # forward: L y = rhs'  (L unit lower, stored below diag)
+        for i in 0..n:
+            s = y[i]
+            for j in 0..i:
+                s = s - lu_m.data[i * n + j] * y[j]
+            y[i] = s
+        # back: U x = y
+        x = []
+        for i in 0..n:
+            x.append(0.0)
+        i = n - 1
+        while i >= 0:
+            s = y[i]
+            for j in i + 1..n:
+                s = s - lu_m.data[i * n + j] * x[j]
+            x[i] = s / lu_m.data[i * n + i]
+            i = i - 1
+        for i in 0..n:
+            out.append(x[i])
+    # `out` currently holds columns concatenated; repack row-major n×nrhs
+    res = []
+    for i in 0..n:
+        for c in 0..nrhs:
+            res.append(out[c * n + i])
+    return res
+
+fn det(a: NDArray) -> f64:
+    # determinant via LU partial pivoting.
+    _check(len(a.shape) == 2 and a.shape[0] == a.shape[1], "det: input must be square 2-D")
+    n = a.shape[0]
+    if n == 0:
+        return 1.0
+    r = _lu(a)
+    lu_m = r[0]
+    sign = r[2]
+    d = sign + 0.0
+    for i in 0..n:
+        d = d * lu_m.data[i * n + i]
+    return d
+
+fn inv(a: NDArray) -> NDArray:
+    # inverse via LU + solve against the identity (Gauss elimination with
+    # partial pivoting).
+    _check(len(a.shape) == 2 and a.shape[0] == a.shape[1], "inv: input must be square 2-D")
+    n = a.shape[0]
+    if n == 0:
+        return NDArray([], [0, 0])
+    r = _lu(a)
+    lu_m = r[0]
+    perm = r[1]
+    idata = []
+    for i in 0..n:
+        for j in 0..n:
+            if i == j:
+                idata.append(1.0)
+            else:
+                idata.append(0.0)
+    x = _lu_solve(lu_m, perm, idata, n)
+    # x is n×n row-major = A^-1
+    return NDArray(x, [n, n])
+
+fn solve(a: NDArray, b: NDArray) -> NDArray:
+    # solve A x = b. a: (n,n); b: (n,) or (n, nrhs). Returns same ndim as b.
+    _check(len(a.shape) == 2 and a.shape[0] == a.shape[1], "solve: a must be square 2-D")
+    n = a.shape[0]
+    _check(len(b.shape) == 1 or len(b.shape) == 2, "solve: b must be 1-D or 2-D")
+    _check(b.shape[0] == n, "solve: shape mismatch")
+    if n == 0:
+        return b
+    r = _lu(a)
+    lu_m = r[0]
+    perm = r[1]
+    if len(b.shape) == 1:
+        x = _lu_solve(lu_m, perm, b.data, 1)
+        return NDArray(x, [n])
+    nrhs = b.shape[1]
+    x = _lu_solve(lu_m, perm, b.data, nrhs)
+    return NDArray(x, [n, nrhs])
+
+fn lstsq(a: NDArray, b: NDArray, rcond: any = None) -> NDArray:
+    # Least squares via NORMAL EQUATIONS (A^T A) x = A^T b plus a small
+    # ridge for stability. NOT SVD-based: loses precision on ill-conditioned
+    # A (condition number is squared). rcond scales the ridge relative to
+    # the largest diagonal of A^T A; default 1e-12.
+    _check(len(a.shape) == 2, "lstsq: a must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    _check(len(b.shape) == 1 or (len(b.shape) == 2 and b.shape[0] == m), "lstsq: b shape mismatch")
+    at = transpose(a)
+    ata = _matmul2(at, a)          # (n,n)
+    b2 = b
+    single = len(b.shape) == 1
+    if single:
+        b2 = reshape(b, [m, 1])
+    atb = _matmul2(at, b2)         # (n,1) or (n,nrhs)
+    # ridge
+    rc = 1e-12
+    if rcond != None:
+        rc = rcond + 0.0
+    maxd = 0.0
+    for i in 0..n:
+        v = abs(ata.data[i * n + i])
+        if v > maxd:
+            maxd = v
+    lam = rc * maxd
+    if lam == 0.0:
+        lam = rc
+    for i in 0..n:
+        ata.data[i * n + i] = ata.data[i * n + i] + lam
+    x = solve(ata, atb)
+    if single:
+        return reshape(x, [n])
+    return x
+
+fn matrix_power(a: NDArray, n: i64) -> NDArray:
+    # A^n for square 2-D a; negative n uses the inverse. Binary exponentiation.
+    _check(len(a.shape) == 2 and a.shape[0] == a.shape[1], "matrix_power: input must be square 2-D")
+    sz = a.shape[0]
+    if n == 0:
+        return eye(sz)
+    base = a
+    e = n
+    if e < 0:
+        base = inv(a)
+        e = -e
+    result = eye(sz)
+    while e > 0:
+        if e % 2 == 1:
+            result = _matmul2(result, base)
+        e = e // 2
+        if e > 0:
+            base = _matmul2(base, base)
+    return result
+
+fn multi_dot(arrays: [NDArray]) -> NDArray:
+    # np.multi_dot: chain of dot products (== matmul for 2-D operands).
+    _check(len(arrays) > 0, "multi_dot: empty input")
+    result = arrays[0]
+    for i in 1..len(arrays):
+        result = dot(result, arrays[i])
+    return result
+
+fn tensordot(a: NDArray, b: NDArray, axes: i64) -> NDArray:
+    # np.tensordot with integer axes: contract the last `axes` axes of a
+    # with the first `axes` axes of b. Result shape = a.shape[:-axes] ++
+    # b.shape[axes:]. axes = 0 is the outer product.
+    k = axes
+    na = len(a.shape)
+    nb = len(b.shape)
+    _check(k >= 0 and k <= na and k <= nb, "tensordot: bad axes")
+    if k == 0:
+        return outer(a, b)
+    ca = _prod_range(a.shape, na - k, na)
+    cb = _prod_range(b.shape, 0, k)
+    _check(ca == cb, "tensordot: contracted axes size mismatch")
+    pa = _prod_range(a.shape, 0, na - k)
+    pb = _prod_range(b.shape, k, nb)
+    a2 = reshape(a, [pa, ca])
+    b2 = reshape(b, [cb, pb])
+    c = _matmul2(a2, b2)
+    # outshape = a.shape[:-k] ++ b.shape[k:]
+    outshape = []
+    for i in 0..na - k:
+        outshape.append(a.shape[i])
+    for i in k..nb:
+        outshape.append(b.shape[i])
+    return reshape(c, outshape)
+
+fn eigvalsh_2x2(a: NDArray) -> NDArray:
+    # Eigenvalues of a symmetric 2x2 [[a,b],[b,c]], ascending. Closed form.
+    _check(len(a.shape) == 2 and a.shape[0] == 2 and a.shape[1] == 2, "eigvalsh_2x2: input must be 2x2")
+    _check(abs(a.data[1] - a.data[2]) < 1e-12, "eigvalsh_2x2: matrix must be symmetric")
+    av = a.data[0]
+    bv = a.data[1]
+    cv = a.data[3]
+    tr = av + cv
+    disc = sqrt((av - cv) * (av - cv) + 4.0 * bv * bv)
+    l1 = (tr - disc) / 2.0
+    l2 = (tr + disc) / 2.0
+    return NDArray([l1, l2], [2])

@@ -1,0 +1,473 @@
+#
+# numpy logic/comparison ufuncs — f64-only, built on ndarray.astra.
+#
+# Boolean arrays are represented as NDArrays of 0.0/1.0 (there is no bool
+# dtype). Every comparison/logical ufunc returns such an NDArray.
+#
+# ufunc entry points accept `any` so they cover the NumPy call shapes
+#   (NDArray, NDArray), (NDArray, scalar), (scalar, NDArray), (scalar, scalar)
+# in one function — A has no overloading. Scalars must be numeric
+# (int/float); `true`/`false` are NOT accepted as scalar operands
+# (documented deviation: `bool + 0.0` is a runtime error).
+#
+# dtype predicates (isreal/iscomplex/...) return constants because the only
+# dtype here is f64. may_share_memory/shares_memory always return 0.0 — A
+# has no pointer identity for lists, so aliasing cannot be detected
+# (documented deviation).
+
+from "ndarray.astra" import NDArray, ndarray, _broadcast_shape, _broadcast_strides, _shape_size
+
+# --- small helpers ------------------------------------------------------------
+
+fn _num(v: any) -> f64:
+    # dynamic numeric -> f64 (int promotes; bool is rejected at runtime)
+    return v + 0.0
+
+fn _is_arr(v: any) -> bool:
+    return isinstance(v, "NDArray")
+
+fn _coords(shape: [i64], i: i64) -> [i64]:
+    # C-order multi-index of flat position i
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]  # NOTE: ndarray.astra uses `/` here — float div
+                              # corrupts coords for ndim >= 2 (bug, not fixed
+                              # per constraints; worked around locally).
+        k = k - 1
+    return coords
+
+fn _offset(strides: [i64], coords: [i64]) -> i64:
+    off = 0
+    k = 0
+    while k < len(strides):
+        off = off + coords[k] * strides[k]
+        k = k + 1
+    return off
+
+fn _fill(shape: [i64], v: f64) -> NDArray:
+    # broadcast a scalar to `shape` (shape [] -> 0-d NDArray)
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(v)
+    return NDArray(data, shape)
+
+# --- comparison core ----------------------------------------------------------
+# ops: "gt" "ge" "lt" "le" "eq" "ne" — result is 1.0/0.0
+
+fn _cmp_val(op: str, va: f64, vb: f64) -> f64:
+    if op == "gt":
+        if va > vb:
+            return 1.0
+        return 0.0
+    elif op == "ge":
+        if va >= vb:
+            return 1.0
+        return 0.0
+    elif op == "lt":
+        if va < vb:
+            return 1.0
+        return 0.0
+    elif op == "le":
+        if va <= vb:
+            return 1.0
+        return 0.0
+    elif op == "eq":
+        if va == vb:
+            return 1.0
+        return 0.0
+    else:  # "ne"
+        if va != vb:
+            return 1.0
+        return 0.0
+
+fn _cmp(op: str, a: NDArray, b: NDArray) -> NDArray:
+    # mirrors ndarray.astra _ew_bin broadcast logic; comparisons produce 0/1.
+    shape = _broadcast_shape(a.shape, b.shape)
+    sa = a.size()
+    sb = b.size()
+    if len(shape) == 0:
+        # only a genuine 0-d x 0-d comparison yields a scalar result;
+        # anything else is a broadcast mismatch (empty sentinel).
+        if sa == 1 and sb == 1 and len(a.data) > 0 and len(b.data) > 0:
+            return NDArray([_cmp_val(op, a.data[0], b.data[0])], [])
+        return NDArray([], [])
+    n = _shape_size(shape)
+    stra = _broadcast_strides(a.shape, shape)
+    strb = _broadcast_strides(b.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords(shape, i)
+        va = a.data[_offset(stra, coords)]
+        vb = b.data[_offset(strb, coords)]
+        data.append(_cmp_val(op, va, vb))
+    return NDArray(data, shape)
+
+# dispatch: accepts (NDArray,NDArray) | (NDArray,scalar) | (scalar,NDArray) | (scalar,scalar)
+fn _cmp_dispatch(op: str, a: any, b: any) -> NDArray:
+    aa = _is_arr(a)
+    bb = _is_arr(b)
+    if aa and bb:
+        return _cmp(op, a, b)
+    if aa:
+        return _cmp(op, a, _fill(a.shape, _num(b)))
+    if bb:
+        return _cmp(op, _fill(b.shape, _num(a)), b)
+    return _cmp(op, NDArray([_num(a)], []), NDArray([_num(b)], []))
+
+# --- public comparison ufuncs --------------------------------------------------
+
+fn greater(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("gt", a, b)
+
+fn greater_equal(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("ge", a, b)
+
+fn less(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("lt", a, b)
+
+fn less_equal(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("le", a, b)
+
+fn equal(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("eq", a, b)
+
+fn not_equal(a: any, b: any) -> NDArray:
+    return _cmp_dispatch("ne", a, b)
+
+# --- logical ufuncs ------------------------------------------------------------
+# truthiness: v != 0.0. ops: "and" "or" "xor"; result 1.0/0.0.
+
+fn _truth(v: f64) -> bool:
+    return v != 0.0
+
+fn _logical_val(op: str, ta: bool, tb: bool) -> f64:
+    if op == "and":
+        if ta and tb:
+            return 1.0
+        return 0.0
+    elif op == "or":
+        if ta or tb:
+            return 1.0
+        return 0.0
+    else:  # "xor"
+        if ta != tb:
+            return 1.0
+        return 0.0
+
+fn _logical_bin(op: str, a: NDArray, b: NDArray) -> NDArray:
+    shape = _broadcast_shape(a.shape, b.shape)
+    if len(shape) == 0:
+        if a.size() == 1 and b.size() == 1 and len(a.data) > 0 and len(b.data) > 0:
+            return NDArray([_logical_val(op, _truth(a.data[0]), _truth(b.data[0]))], [])
+        return NDArray([], [])
+    n = _shape_size(shape)
+    stra = _broadcast_strides(a.shape, shape)
+    strb = _broadcast_strides(b.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords(shape, i)
+        va = a.data[_offset(stra, coords)]
+        vb = b.data[_offset(strb, coords)]
+        data.append(_logical_val(op, _truth(va), _truth(vb)))
+    return NDArray(data, shape)
+
+fn _logical_un(op: str, a: NDArray) -> NDArray:
+    data = []
+    for v in a.data:
+        if _truth(v):
+            data.append(0.0)
+        else:
+            data.append(1.0)
+    return NDArray(data, a.shape)
+
+fn _logical_dispatch(op: str, a: any, b: any) -> NDArray:
+    aa = _is_arr(a)
+    bb = _is_arr(b)
+    if aa and bb:
+        return _logical_bin(op, a, b)
+    if aa:
+        return _logical_bin(op, a, _fill(a.shape, _num(b)))
+    if bb:
+        return _logical_bin(op, _fill(b.shape, _num(a)), b)
+    return _logical_bin(op, NDArray([_num(a)], []), NDArray([_num(b)], []))
+
+fn logical_and(a: any, b: any) -> NDArray:
+    return _logical_dispatch("and", a, b)
+
+fn logical_or(a: any, b: any) -> NDArray:
+    return _logical_dispatch("or", a, b)
+
+fn logical_xor(a: any, b: any) -> NDArray:
+    return _logical_dispatch("xor", a, b)
+
+fn logical_not(a: any) -> NDArray:
+    if _is_arr(a):
+        return _logical_un("not", a)
+    if _num(a) != 0.0:
+        return NDArray([0.0], [])
+    return NDArray([1.0], [])
+
+# --- reductions over truthiness -------------------------------------------------
+
+fn _all_data(a: NDArray) -> f64:
+    for v in a.data:
+        if v == 0.0:
+            return 0.0
+    return 1.0
+
+fn _any_data(a: NDArray) -> f64:
+    for v in a.data:
+        if v != 0.0:
+            return 1.0
+    return 0.0
+
+fn all(a: any) -> f64:
+    # NOTE: shadows builtin all() only inside this module's namespace;
+    # callers import explicitly. Returns 1.0/0.0 (numpy bool).
+    if _is_arr(a):
+        return _all_data(a)
+    if _num(a) != 0.0:
+        return 1.0
+    return 0.0
+
+fn any(a: any) -> f64:
+    # same shadowing note as all().
+    if _is_arr(a):
+        return _any_data(a)
+    if _num(a) != 0.0:
+        return 1.0
+    return 0.0
+
+fn count_nonzero(a: any) -> f64:
+    # numpy returns intp; we return f64 (dtype is f64-only).
+    if not _is_arr(a):
+        if _num(a) != 0.0:
+            return 1.0
+        return 0.0
+    n = 0.0
+    for v in a.data:
+        if v != 0.0:
+            n = n + 1.0
+    return n
+
+# --- isclose / allclose ----------------------------------------------------------
+# |a - b| <= atol + rtol * |b|  elementwise, with broadcasting.
+
+fn _isclose(a: NDArray, b: NDArray, rtol: f64, atol: f64) -> NDArray:
+    shape = _broadcast_shape(a.shape, b.shape)
+    if len(shape) == 0:
+        if a.size() == 1 and b.size() == 1 and len(a.data) > 0 and len(b.data) > 0:
+            d = a.data[0] - b.data[0]
+            if d < 0:
+                d = -d
+            t = atol + rtol * abs(b.data[0])
+            if d <= t:
+                return NDArray([1.0], [])
+            return NDArray([0.0], [])
+        return NDArray([], [])
+    n = _shape_size(shape)
+    stra = _broadcast_strides(a.shape, shape)
+    strb = _broadcast_strides(b.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords(shape, i)
+        va = a.data[_offset(stra, coords)]
+        vb = b.data[_offset(strb, coords)]
+        d = va - vb
+        if d < 0:
+            d = -d
+        t = atol + rtol * abs(vb)
+        if d <= t:
+            data.append(1.0)
+        else:
+            data.append(0.0)
+    return NDArray(data, shape)
+
+fn _isclose_dispatch(a: any, b: any, rtol: f64, atol: f64) -> NDArray:
+    aa = _is_arr(a)
+    bb = _is_arr(b)
+    if aa and bb:
+        return _isclose(a, b, rtol, atol)
+    if aa:
+        return _isclose(a, _fill(a.shape, _num(b)), rtol, atol)
+    if bb:
+        return _isclose(_fill(b.shape, _num(a)), b, rtol, atol)
+    return _isclose(NDArray([_num(a)], []), NDArray([_num(b)], []), rtol, atol)
+
+fn isclose(a: any, b: any, rtol: f64 = 0.00001, atol: f64 = 0.00000001) -> NDArray:
+    return _isclose_dispatch(a, b, rtol, atol)
+
+fn allclose(a: any, b: any, rtol: f64 = 0.00001, atol: f64 = 0.00000001) -> f64:
+    r = _isclose_dispatch(a, b, rtol, atol)
+    for v in r.data:
+        if v == 0.0:
+            return 0.0
+    return 1.0
+
+# --- array equality ---------------------------------------------------------------
+
+fn _shape_eq(x: [i64], y: [i64]) -> bool:
+    if len(x) != len(y):
+        return false
+    for i in 0..len(x):
+        if x[i] != y[i]:
+            return false
+    return true
+
+fn _data_eq(x: [f64], y: [f64]) -> bool:
+    if len(x) != len(y):
+        return false
+    for i in 0..len(x):
+        if x[i] != y[i]:
+            return false
+    return true
+
+fn array_equal(a: any, b: any) -> f64:
+    # numpy.array_equal: shape AND elements must match.
+    aa = _is_arr(a)
+    bb = _is_arr(b)
+    if aa and bb:
+        if not _shape_eq(a.shape, b.shape):
+            return 0.0
+        if _data_eq(a.data, b.data):
+            return 1.0
+        return 0.0
+    if aa or bb:
+        return 0.0
+    if _num(a) == _num(b):
+        return 1.0
+    return 0.0
+
+fn array_equiv(a: any, b: any) -> f64:
+    # same contract as array_equal for this dtype (numpy differs only for
+    # shape-(1,) vs scalar edge cases we do not model).
+    return array_equal(a, b)
+
+# --- sign -------------------------------------------------------------------------
+
+fn sign(a: any) -> NDArray:
+    # NOTE: may collide with a `sign` defined by the ufuncs module at
+    # __init__ merge time; dedupe there if both exist.
+    if _is_arr(a):
+        data = []
+        for v in a.data:
+            if v > 0.0:
+                data.append(1.0)
+            elif v < 0.0:
+                data.append(-1.0)
+            else:
+                data.append(0.0)
+        return NDArray(data, a.shape)
+    v = _num(a)
+    if v > 0.0:
+        return NDArray([1.0], [])
+    elif v < 0.0:
+        return NDArray([-1.0], [])
+    return NDArray([0.0], [])
+
+# --- dtype predicates (f64-only constants) ------------------------------------------
+
+fn isreal(a: any) -> NDArray:
+    # every element of an f64 array is real -> all 1.0
+    if _is_arr(a):
+        return _fill(a.shape, 1.0)
+    return NDArray([1.0], [])
+
+fn iscomplex(a: any) -> NDArray:
+    # no complex dtype -> all 0.0
+    if _is_arr(a):
+        return _fill(a.shape, 0.0)
+    return NDArray([0.0], [])
+
+fn isrealobj(a: any) -> f64:
+    return 1.0
+
+fn iscomplexobj(a: any) -> f64:
+    return 0.0
+
+# --- memory / type helpers (documented simplifications) ------------------------------
+
+fn shares_memory(a: any, b: any) -> f64:
+    # A lists have no pointer identity; aliasing is undetectable. Always 0.0.
+    return 0.0
+
+fn may_share_memory(a: any, b: any) -> f64:
+    # same limitation as shares_memory.
+    return 0.0
+
+fn can_cast(from_: str, to: str, casting: str = "safe") -> f64:
+    # simplified: everything is safely castable to f64; named dtypes other
+    # than float64 are unknown here.
+    if casting == "no":
+        if from_ == to:
+            return 1.0
+        return 0.0
+    if to == "f64" or to == "float64" or to == "float":
+        return 1.0
+    if from_ == to:
+        return 1.0
+    return 0.0
+
+fn min_scalar_type(v: any) -> str:
+    if _is_arr(v):
+        return "float64"
+    if isinstance(v, "float"):
+        return "float64"
+    return "int64"
+
+fn result_type(a: any, b: any) -> str:
+    # f64 dominates everything in this library.
+    if _is_arr(a) or _is_arr(b):
+        return "float64"
+    if isinstance(a, "float") or isinstance(b, "float"):
+        return "float64"
+    return "int64"
+
+# --- packbits / unpackbits -----------------------------------------------------------
+# DEVIATION: numpy returns uint8 arrays; we only have f64, so packbits
+# returns an NDArray of floats in 0..255. Bit order is 'big' (NumPy default):
+# element 0 of each group of 8 is the most-significant bit.
+
+fn packbits(a: NDArray) -> NDArray:
+    n = len(a.data)
+    nbytes = (n + 7) // 8
+    data = []
+    for byte in 0..nbytes:
+        v = 0.0
+        bit = 0
+        while bit < 8:
+            idx = byte * 8 + bit
+            if idx < n and a.data[idx] != 0.0:
+                v = v + pow(2.0, 7.0 - bit)
+            bit = bit + 1
+        data.append(v)
+    return NDArray(data, [nbytes])
+
+fn unpackbits(a: NDArray, count: i64 = -1) -> NDArray:
+    # expands each 0..255 value into 8 bits, MSB first.
+    # weights[w] = 2^(7-w), MSB first
+    weights = [128, 64, 32, 16, 8, 4, 2, 1]
+    data = []
+    for v in a.data:
+        iv = int(v)
+        w = 0
+        while w < 8:
+            if (iv // weights[w]) % 2 == 1:
+                data.append(1.0)
+            else:
+                data.append(0.0)
+            w = w + 1
+    if count >= 0:
+        if count < len(data):
+            out = []
+            for i in 0..count:
+                out.append(data[i])
+            data = out
+        elif count > len(data):
+            while len(data) < count:
+                data.append(0.0)
+    return NDArray(data, [len(data)])

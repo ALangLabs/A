@@ -5,16 +5,9 @@
 /* ------------------------------------------------------------------ */
 
 aval a_str_concat(aval l, aval r) {
-    uint64_t ln, rn;
-    const char *lp = str_data(l, &ln), *rp = str_data(r, &rn);
-    if ((uint64_t)UINT32_MAX - ln < rn) panicf("string too large");
-    /* Small results come from the bump arena (AStr objects are never freed
-       individually), so a concat loop allocates without touching malloc. */
-    aval outv = a_str_new_uninit(ln + rn);
-    AStr *s = (AStr *)obj_of(outv);
-    if (ln) memcpy(s->data, lp, (size_t)ln);
-    if (rn) memcpy(s->data + ln, rp, (size_t)rn);
-    return outv;
+    /* Rope-aware: large results become T_ROPE trees (see core_str.c), so
+       concat loops stay O(1) per append. */
+    return a_str_cat(l, r);
 }
 
 void avec_push(AVec *v, aval x) {
@@ -82,6 +75,7 @@ aval a_list_from_i64(const int64_t *v, uint64_t n) {
     a->items = NULL;
     a->iitems = (int64_t *)xmalloc((size_t)(n ? n : 1) * sizeof(int64_t));
     if (n) memcpy(a->iitems, v, (size_t)n * sizeof(int64_t));
+    arr_iitems_raw(a);
     a->flags = ARR_F_PACKED;
     return mkobj(&a->h);
 }
@@ -95,6 +89,7 @@ aval a_list_take_i64(int64_t *v, uint64_t n) {
     a->h.cap = n;
     a->items = NULL;
     a->iitems = v;
+    arr_iitems_raw(a);
     a->flags = ARR_F_PACKED;
     return mkobj(&a->h);
 }

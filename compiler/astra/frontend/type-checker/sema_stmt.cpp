@@ -121,7 +121,10 @@ void Sema::checkLet(LetStmt& stmt) {
       declared = typeError();
     }
     declaredTypeForCheck = declared;
-    if (!unify(initType, declared)) {
+    if (coerceVectorInit(*stmt.init, declared)) {
+      // List literal / scalar broadcast adopted as vector[T, N].
+      variableType = declared;
+    } else if (!unify(initType, declared)) {
       reportMismatch(initType, declared, stmt.init->span,
                      "in the initializer for '" + stmt.name + "'");
       variableType = declared;
@@ -202,7 +205,8 @@ void Sema::checkAssign(AssignStmt& stmt) {
       TypePtr declared = sym->declaredType ? resolveType(sym->declaredType) : nullptr;
       if (declared && declared->kind != TypeKind::Var &&
           declared->kind != TypeKind::Error && declared->kind != TypeKind::Void) {
-        if (!unify(valueType, sym->declaredType)) {
+        if (!coerceVectorInit(*stmt.value, sym->declaredType) &&
+            !unify(valueType, sym->declaredType)) {
           reportMismatch(valueType, sym->declaredType, stmt.value->span,
                          "in assignment to '" + ident->name + "'");
         } else {
@@ -475,6 +479,9 @@ TypePtr Sema::iterableElementType(TypePtr iterableType, Span span, const std::st
       resolved->kind == TypeKind::Set) {
     return resolved->elem;
   }
+  // Vectors iterate their lanes; the boxed representation is a plain list,
+  // so the backend's normal iteration path handles them unchanged.
+  if (resolved->kind == TypeKind::Vector) return resolved->elem;
   if (resolved->kind == TypeKind::Map) return resolved->elem;  // keys
   if (resolved->kind == TypeKind::String) return typeChar();
   if (resolved->kind == TypeKind::Bytes) return typeInt(64, true);
@@ -538,7 +545,8 @@ void Sema::checkReturn(ReturnStmt& stmt) {
                       "' has return type void and cannot return a value.");
       return;
     }
-    if (!unify(valueType, expected)) {
+    if (!coerceVectorInit(*stmt.value, expected) &&
+        !unify(valueType, expected)) {
       // A function with no declared return type has its return inferred (and is
       // dynamically typed in practice), so do not hard-fail later `return`s
       // that disagree with the first one; only enforce an explicit `-> T`.

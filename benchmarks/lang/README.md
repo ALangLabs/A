@@ -86,7 +86,7 @@ string building is no longer a weak spot.
 - `dict500k`: C uses a hand-rolled open-addressing int→int table (22.4 ms);
   Rust uses `std::collections::HashMap` with SipHash (85 ms). A's `dict` is a
   general-purpose ordered map and is compared against both.
-- `bench.a` gives each benchmark its own LCG state variable on purpose: a
+- `bench.astra` gives each benchmark its own LCG state variable on purpose: a
   variable shared between two sub-benchmarks loses its proven range, and the
   suite would then measure something other than the loop it names.
 - `str200k`: the C version builds the result with an offset copy (a naive

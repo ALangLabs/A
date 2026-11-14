@@ -442,434 +442,6 @@ ST_FUNC void store(int r, SValue *sv)
        ptrreg, rr, fc);                                   // RR, fc(base)
 }
 
-static void gcall_or_jmp(int docall)
-{
-    int tr = docall ? 1 : 5; // ra or t0
-    if ((vtop->r & (VT_VALMASK | VT_LVAL)) == VT_CONST &&
-        ((vtop->r & VT_SYM) && vtop->c.i == (int)vtop->c.i)) {
-        /* constant symbolic case -> simple relocation */
-        greloca(cur_text_section, vtop->sym, ind,
-                R_RISCV_CALL_PLT, (int)vtop->c.i);
-        o(0x17 | (tr << 7));   // auipc TR, 0 %call(func)
-        EI(0x67, 0, tr, tr, 0);// jalr  TR, r(TR)
-    } else if (vtop->r < VT_CONST) {
-        int r = ireg(vtop->r);
-        EI(0x67, 0, tr, r, 0);      // jalr TR, 0(R)
-    } else {
-        int r = TREG_RA;
-        load(r, vtop);
-        r = ireg(r);
-        EI(0x67, 0, tr, r, 0);      // jalr TR, 0(R)
-    }
-}
-
-
-static void reg_pass_rec(CType *type, int *rc, int *fieldofs, int ofs)
-{
-    if ((type->t & VT_BTYPE) == VT_STRUCT) {
-        Sym *f;
-        if (type->ref->type.t == VT_UNION)
-          rc[0] = -1;
-        else for (f = type->ref->next; f; f = f->next)
-          reg_pass_rec(&f->type, rc, fieldofs, ofs + f->c);
-    } else if (type->t & VT_ARRAY) {
-        if (type->ref->c < 0 || type->ref->c > 2)
-          rc[0] = -1;
-        else {
-            int a, sz = type_size(&type->ref->type, &a);
-            reg_pass_rec(&type->ref->type, rc, fieldofs, ofs);
-            if (rc[0] > 2 || (rc[0] == 2 && type->ref->c > 1))
-              rc[0] = -1;
-            else if (type->ref->c == 2 && rc[0] && rc[1] == RC_FLOAT) {
-              rc[++rc[0]] = RC_FLOAT;
-              fieldofs[rc[0]] = ((ofs + sz) << 4)
-                                | (type->ref->type.t & VT_BTYPE);
-            } else if (type->ref->c == 2)
-              rc[0] = -1;
-        }
-    } else if (rc[0] == 2 || rc[0] < 0 || (type->t & VT_BTYPE) == VT_LDOUBLE)
-      rc[0] = -1;
-    else if (!rc[0] || rc[1] == RC_FLOAT || is_float(type->t)) {
-      rc[++rc[0]] = is_float(type->t) ? RC_FLOAT : RC_INT;
-      fieldofs[rc[0]] = (ofs << 4) | ((type->t & VT_BTYPE) == VT_PTR ? VT_LLONG : type->t & VT_BTYPE);
-    } else
-      rc[0] = -1;
-}
-
-static void reg_pass(CType *type, int *prc, int *fieldofs, int named)
-{
-    prc[0] = 0;
-    reg_pass_rec(type, prc, fieldofs, 0);
-    if (prc[0] <= 0 || !named) {
-        int align, size = type_size(type, &align);
-        prc[0] = (size + 7) >> 3;
-        prc[1] = prc[2] = RC_INT;
-        fieldofs[1] = (0 << 4) | (size <= 1 ? VT_BYTE : size <= 2 ? VT_SHORT : size <= 4 ? VT_INT : VT_LLONG);
-        fieldofs[2] = (8 << 4) | (size <= 9 ? VT_BYTE : size <= 10 ? VT_SHORT : size <= 12 ? VT_INT : VT_LLONG);
-    }
-}
-
-ST_FUNC void gfunc_call(int nb_args)
-{
-    int i, align, size, areg[2];
-    int *info = astra_malloc((nb_args + 1) * sizeof (int));
-    int stack_adj = 0, tempspace = 0, stack_add, ofs, splitofs = 0;
-    int old = (vtop[-nb_args].type.ref->f.func_type == FUNC_OLD);
-    SValue *sv;
-    Sym *sa;
-
-
-    areg[0] = 0; /* int arg regs */
-    areg[1] = 8; /* float arg regs */
-    sa = vtop[-nb_args].type.ref->next;
-    for (i = 0; i < nb_args; i++) {
-        int nregs, byref = 0, tempofs;
-        int prc[3], fieldofs[3];
-        sv = &vtop[1 + i - nb_args];
-        sv->type.t &= ~VT_ARRAY; // XXX this should be done in astragen.c
-        size = type_size(&sv->type, &align);
-        if (size > 16) {
-            if (align < XLEN)
-              align = XLEN;
-            tempspace = (tempspace + align - 1) & -align;
-            tempofs = tempspace;
-            tempspace += size;
-            size = align = 8;
-            byref = 64 | (tempofs << 7);
-        }
-        reg_pass(&sv->type, prc, fieldofs, old || sa != 0);
-        if (!old && !sa && align == 2*XLEN && size <= 2*XLEN)
-          areg[0] = (areg[0] + 1) & ~1;
-        nregs = prc[0];
-        if (size == 0)
-            info[i] = 0;
-        else if ((prc[1] == RC_INT && areg[0] >= 8)
-            || (prc[1] == RC_FLOAT && areg[1] >= 16)
-            || (nregs == 2 && prc[1] == RC_FLOAT && prc[2] == RC_FLOAT
-                && areg[1] >= 15)
-            || (nregs == 2 && prc[1] != prc[2]
-                && (areg[1] >= 16 || areg[0] >= 8))) {
-            info[i] = 32;
-            if (align < XLEN)
-              align = XLEN;
-            stack_adj += (size + align - 1) & -align;
-            if (!old && !sa) /* one vararg on stack forces the rest on stack */
-              areg[0] = 8, areg[1] = 16;
-        } else {
-            info[i] = areg[prc[1] - 1]++;
-            if (!byref)
-              info[i] |= (fieldofs[1] & VT_BTYPE) << 12;
-            assert(!(fieldofs[1] >> 4));
-            if (nregs == 2) {
-                if (prc[2] == RC_FLOAT || areg[0] < 8)
-                  info[i] |= (1 + areg[prc[2] - 1]++) << 7;
-                else {
-                    info[i] |= 16;
-                    stack_adj += 8;
-                }
-                if (!byref) {
-                    assert((fieldofs[2] >> 4) < 2048);
-                    info[i] |= fieldofs[2] << (12 + 4); // includes offset
-                }
-            }
-        }
-        info[i] |= byref;
-        if (sa)
-          sa = sa->next;
-    }
-    stack_adj = (stack_adj + 15) & -16;
-    tempspace = (tempspace + 15) & -16;
-    stack_add = stack_adj + tempspace;
-
-    if (stack_add) {
-        if (stack_add >= 0x800) {
-            o(0x37 | (5 << 7) | UPPER(-stack_add)); //lui t0, upper(v)
-            EI(0x13, 0, 5, 5, SIGN11(-stack_add)); // addi t0, t0, lo(v)
-            ER(0x33, 0, 2, 2, 5, 0); // add sp, sp, t0
-        }
-        else
-            EI(0x13, 0, 2, 2, -stack_add);   // addi sp, sp, -adj
-        for (i = ofs = 0; i < nb_args; i++) {
-            if (info[i] & (64 | 32)) {
-                vrotb(nb_args - i);
-                size = type_size(&vtop->type, &align);
-                if (info[i] & 64) {
-                    vset(&char_pointer_type, TREG_SP, 0);
-                    vpushi(stack_adj + (info[i] >> 7));
-                    gen_op('+');
-                    vpushv(vtop); // this replaces the old argument
-                    vrott(3);
-                    indir();
-                    vtop->type = vtop[-1].type;
-                    vswap();
-                    vstore();
-                    vpop();
-                    size = align = 8;
-                }
-                if (info[i] & 32) {
-                    if (align < XLEN)
-                      align = XLEN;
-                    /* Once we support offseted regs we can do this:
-                       vset(&vtop->type, TREG_SP | VT_LVAL, ofs);
-                       to construct the lvalue for the outgoing stack slot,
-                       until then we have to jump through hoops.  */
-                    vset(&char_pointer_type, TREG_SP, 0);
-                    ofs = (ofs + align - 1) & -align;
-                    vpushi(ofs);
-                    gen_op('+');
-                    indir();
-                    vtop->type = vtop[-1].type;
-                    vswap();
-                    vstore();
-                    vtop->r = vtop->r2 = VT_CONST; // this arg is done
-                    ofs += size;
-                }
-                vrott(nb_args - i);
-            } else if (info[i] & 16) {
-                assert(!splitofs);
-                splitofs = ofs;
-                ofs += 8;
-            }
-        }
-    }
-    for (i = 0; i < nb_args; i++) {
-        int ii = info[nb_args - 1 - i], r = ii, r2 = r;
-        if (!(r & 32)) {
-            CType origtype;
-            int loadt;
-            r &= 15;
-            r2 = r2 & 64 ? 0 : (r2 >> 7) & 31;
-            assert(r2 <= 16);
-            vrotb(i+1);
-            origtype = vtop->type;
-            size = type_size(&vtop->type, &align);
-            if (size == 0)
-                goto done;
-            loadt = vtop->type.t & VT_BTYPE;
-            if (loadt == VT_STRUCT) {
-                loadt = (ii >> 12) & VT_BTYPE;
-            }
-            if (info[nb_args - 1 - i] & 16) {
-                assert(!r2);
-                r2 = 1 + TREG_RA;
-            }
-            if (loadt == VT_LDOUBLE) {
-                assert(r2);
-                r2--;
-            } else if (r2) {
-                test_lvalue();
-                vpushv(vtop);
-            }
-            vtop->type.t = loadt | (vtop->type.t & VT_UNSIGNED);
-            gv(r < 8 ? RC_R(r) : RC_F(r - 8));
-            vtop->type = origtype;
-
-            if (r2 && loadt != VT_LDOUBLE) {
-                r2--;
-                assert(r2 < 16 || r2 == TREG_RA);
-                vswap();
-                gaddrof();
-                vtop->type = char_pointer_type;
-                vpushi(ii >> 20);
-                gen_op('+');
-                indir();
-                vtop->type = origtype;
-                loadt = vtop->type.t & VT_BTYPE;
-                if (loadt == VT_STRUCT) {
-                    loadt = (ii >> 16) & VT_BTYPE;
-                }
-                save_reg_upstack(r2, 1);
-                vtop->type.t = loadt | (vtop->type.t & VT_UNSIGNED);
-                load(r2, vtop);
-                assert(r2 < VT_CONST);
-                vtop--;
-                vtop->r2 = r2;
-            }
-            if (info[nb_args - 1 - i] & 16) {
-                ES(0x23, 3, 2, ireg(vtop->r2), splitofs); // sd t0, ofs(sp)
-                vtop->r2 = VT_CONST;
-            } else if (loadt == VT_LDOUBLE && vtop->r2 != r2) {
-                assert(vtop->r2 <= 7 && r2 <= 7);
-                /* XXX we'd like to have 'gv' move directly into
-                   the right class instead of us fixing it up.  */
-                EI(0x13, 0, ireg(r2), ireg(vtop->r2), 0); // mv Ra+1, RR2
-                vtop->r2 = r2;
-            }
-done:
-            vrott(i+1);
-        }
-    }
-    vrotb(nb_args + 1);
-    save_regs(nb_args + 1);
-    gcall_or_jmp(1);
-    vtop -= nb_args + 1;
-    if (stack_add) {
-        if (stack_add >= 0x800) {
-            o(0x37 | (5 << 7) | UPPER(stack_add)); //lui t0, upper(v)
-            EI(0x13, 0, 5, 5, SIGN11(stack_add)); // addi t0, t0, lo(v)
-            ER(0x33, 0, 2, 2, 5, 0); // add sp, sp, t0
-        }
-        else
-            EI(0x13, 0, 2, 2, stack_add);      // addi sp, sp, adj
-   }
-   astra_free(info);
-}
-
-static int func_sub_sp_offset, num_va_regs, func_va_list_ofs;
-
-ST_FUNC void gfunc_prolog(Sym *func_sym)
-{
-    CType *func_type = &func_sym->type;
-    int i, addr, align, size;
-    int param_addr = 0;
-    int areg[2];
-    Sym *sym;
-    CType *type;
-
-    sym = func_type->ref;
-    loc = -16; // for ra and s0
-    func_sub_sp_offset = ind;
-    ind += 5 * 4;
-
-    areg[0] = 0, areg[1] = 0;
-    addr = 0;
-    /* if the function returns by reference, then add an
-       implicit pointer parameter */
-    size = type_size(&func_vt, &align);
-    if (size > 2 * XLEN) {
-        loc -= 8;
-        func_vc = loc;
-        ES(0x23, 3, 8, 10 + areg[0]++, loc); // sd a0, loc(s0)
-    }
-    /* define parameters */
-    while ((sym = sym->next) != NULL) {
-        int byref = 0;
-        int regcount;
-        int prc[3], fieldofs[3];
-        type = &sym->type;
-        size = type_size(type, &align);
-        if (size > 2 * XLEN) {
-            type = &char_pointer_type;
-            size = align = byref = 8;
-        }
-        reg_pass(type, prc, fieldofs, 1);
-        regcount = prc[0];
-        if (areg[prc[1] - 1] >= 8
-            || (regcount == 2
-                && ((prc[1] == RC_FLOAT && prc[2] == RC_FLOAT && areg[1] >= 7)
-                    || (prc[1] != prc[2] && (areg[1] >= 8 || areg[0] >= 8))))) {
-            if (align < XLEN)
-              align = XLEN;
-            addr = (addr + align - 1) & -align;
-            param_addr = addr;
-            addr += size;
-        } else {
-            loc -= regcount * 8; // XXX could reserve only 'size' bytes
-            param_addr = loc;
-            for (i = 0; i < regcount; i++) {
-                if (areg[prc[1+i] - 1] >= 8) {
-                    assert(i == 1 && regcount == 2 && !(addr & 7));
-                    EI(0x03, 3, 5, 8, addr); // ld t0, addr(s0)
-                    addr += 8;
-                    ES(0x23, 3, 8, 5, loc + i*8); // sd t0, loc(s0)
-                } else if (prc[1+i] == RC_FLOAT) {
-                    ES(0x27, (size / regcount) == 4 ? 2 : 3, 8, 10 + areg[1]++, loc + (fieldofs[i+1] >> 4)); // fs[wd] FAi, loc(s0)
-                } else {
-                    ES(0x23, 3, 8, 10 + areg[0]++, loc + i*8); // sd aX, loc(s0) // XXX
-                }
-            }
-        }
-        gfunc_set_param(sym, param_addr, byref);
-    }
-    func_va_list_ofs = addr;
-    num_va_regs = 0;
-    if (func_var) {
-        for (; areg[0] < 8; areg[0]++) {
-            num_va_regs++;
-            ES(0x23, 3, 8, 10 + areg[0], -8 + num_va_regs * 8); // sd aX, loc(s0)
-        }
-    }
-}
-
-ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret,
-                       int *ret_align, int *regsize)
-{
-    int align, size = type_size(vt, &align), nregs;
-    int prc[3], fieldofs[3];
-    *ret_align = 1;
-    *regsize = 8;
-    if (size > 16)
-      return 0;
-    reg_pass(vt, prc, fieldofs, 1);
-    nregs = prc[0];
-    if (nregs == 2 && prc[1] != prc[2])
-      return -1;  /* generic code can't deal with this case */
-    if (prc[1] == RC_FLOAT) {
-        *regsize = size / nregs;
-    }
-    ret->t = fieldofs[1] & VT_BTYPE;
-    ret->ref = NULL;
-    return nregs;
-}
-
-ST_FUNC void arch_transfer_ret_regs(int aftercall)
-{
-    int prc[3], fieldofs[3];
-    reg_pass(&vtop->type, prc, fieldofs, 1);
-    assert(prc[0] == 2 && prc[1] != prc[2] && !(fieldofs[1] >> 4));
-    assert(vtop->r == (VT_LOCAL | VT_LVAL));
-    vpushv(vtop);
-    vtop->type.t = fieldofs[1] & VT_BTYPE;
-    (aftercall ? store : load)(prc[1] == RC_INT ? REG_IRET : REG_FRET, vtop);
-    vtop->c.i += fieldofs[2] >> 4;
-    vtop->type.t = fieldofs[2] & VT_BTYPE;
-    (aftercall ? store : load)(prc[2] == RC_INT ? REG_IRET : REG_FRET, vtop);
-    vtop--;
-}
-
-ST_FUNC void gfunc_epilog(void)
-{
-    int v, saved_ind, d, large_ofs_ind;
-
-
-    loc = (loc - num_va_regs * 8);
-    d = v = (-loc + 15) & -16;
-
-    EI(0x13, 0, 2, 8, num_va_regs * 8); // addi sp, s0, num_va_regs*8
-    EI(0x03, 3, 1, 8, -8); // ld ra, -8(s0)
-    EI(0x03, 3, 8, 8, -16); // ld s0, -16(s0)
-    EI(0x67, 0, 0, 1, 0); // jalr x0, 0(x1), aka ret
-
-    large_ofs_ind = ind;
-    if (v >= (1 << 11)) {
-        d = 16;
-        EI(0x13, 0, 8, 2, d - num_va_regs * 8);      // addi s0, sp, d
-        o(0x37 | (5 << 7) | UPPER(v-16)); //lui t0, upper(v)
-        EI(0x13, 0, 5, 5, SIGN11(v-16)); // addi t0, t0, lo(v)
-        ER(0x33, 0, 2, 2, 5, 0x20); // sub sp, sp, t0
-        gjmp_addr(func_sub_sp_offset + 5*4);
-    }
-    saved_ind = ind;
-
-    ind = func_sub_sp_offset;
-    EI(0x13, 0, 2, 2, -d);     // addi sp, sp, -d
-    ES(0x23, 3, 2, 1, d - 8 - num_va_regs * 8);  // sd ra, d-8(sp)
-    ES(0x23, 3, 2, 8, d - 16 - num_va_regs * 8); // sd s0, d-16(sp)
-    if (v < (1 << 11))
-      EI(0x13, 0, 8, 2, d - num_va_regs * 8);      // addi s0, sp, d
-    else
-      gjmp_addr(large_ofs_ind);
-    if ((ind - func_sub_sp_offset) != 5*4)
-      EI(0x13, 0, 0, 0, 0);      // addi x0, x0, 0 == nop
-    ind = saved_ind;
-}
-
-ST_FUNC void gen_va_start(void)
-{
-    vtop--;
-    vset(&char_pointer_type, VT_LOCAL, func_va_list_ofs);
-}
-
 ST_FUNC void gen_fill_nops(int bytes)
 {
     if ((bytes & 3))
@@ -1334,41 +906,9 @@ ST_FUNC void gen_increment_tcov (SValue *sv)
 
 ST_FUNC void ggoto(void)
 {
-    gcall_or_jmp(0);
-    vtop--;
+    astra_error("C goto is not supported");
 }
 
-ST_FUNC void gen_vla_sp_save(int addr)
-{
-    if (LOW_OVERFLOW(addr)) {
-	o(0x37 | (5 << 7) | UPPER(addr)); //lui t0,upper(addr)
-        ER(0x33, 0, 5, 5, 8, 0); // add t0, t0, s0
-        ES(0x23, 3, 5, 2, SIGN11(addr)); // sd sp, fc(t0)
-    }
-    else
-        ES(0x23, 3, 8, 2, addr); // sd sp, fc(s0)
-}
-
-ST_FUNC void gen_vla_sp_restore(int addr)
-{
-    if (LOW_OVERFLOW(addr)) {
-	o(0x37 | (5 << 7) | UPPER(addr)); //lui t0,upper(addr)
-        ER(0x33, 0, 5, 5, 8, 0); // add t0, t0, s0
-        EI(0x03, 3, 2, 5, SIGN11(addr)); // ld sp, fc(t0)
-    }
-    else
-        EI(0x03, 3, 2, 8, addr); // ld sp, fc(s0)
-}
-
-ST_FUNC void gen_vla_alloc(CType *type, int align)
-{
-    int rr;
-    rr = ireg(gv(RC_INT));
-    EI(0x13, 0, rr, rr, 15);   // addi RR, RR, 15
-    EI(0x13, 7, rr, rr, -16);  // andi, RR, RR, -16
-    ER(0x33, 0, 2, 2, rr, 0x20); // sub sp, sp, rr
-    vpop();
-}
 
 ST_FUNC void gen_clear_cache(void)
 {
@@ -1377,4 +917,37 @@ ST_FUNC void gen_clear_cache(void)
     o(0x0ff0000f); // fence iorw, iorw
     o(0x0000100f); // fence.i
 }
+
+/* C-call/VA machinery removed; stubs satisfy dead C-only paths in the
+   shared expression parser (unreachable for assembly input). */
+ST_FUNC void gfunc_call(int nb_args)
+{
+    (void)nb_args;
+    astra_error("C function calls are not supported");
+}
+
+ST_FUNC int gfunc_sret(CType *vt, int variadic, CType *ret, int *align, int *regsize)
+{
+    (void)vt; (void)variadic; (void)ret; (void)align; (void)regsize;
+    return 0;
+}
+
+ST_FUNC void gen_va_start(void)
+{
+    astra_error("C varargs are not supported");
+}
+
+ST_FUNC void gen_va_arg(CType *t)
+{
+    (void)t;
+    astra_error("C varargs are not supported");
+}
+
+
+void gcall_or_jmp(int docall)
+{
+    (void)docall;
+    astra_error("C calls are not supported");
+}
+
 #endif

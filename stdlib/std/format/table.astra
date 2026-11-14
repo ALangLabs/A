@@ -1,0 +1,22 @@
+# std.format.table (format helper).
+
+fn table(headers: [str], rows: [[str]]) -> str:
+    width = len(headers)
+    lines = []
+    lines.append(" | ".join(headers))
+    # One "---" cell per column, "-|-" between them.
+    sep_cells = []
+    i = 0
+    while i < width:
+        sep_cells.append("---")
+        i = i + 1
+    lines.append("-|-".join(sep_cells))
+    for r in rows:
+        lines.append(" | ".join(r))
+    return "\n".join(lines)
+
+fn join_rows(rows: [i64]) -> str:
+    out = []
+    for r in rows:
+        out.append([str(r)])
+    return table(["row"], out)

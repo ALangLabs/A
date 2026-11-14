@@ -1,0 +1,762 @@
+# std.datetime — date/time helpers (Python `datetime` subset, UTC only).
+#
+# Pure-A port built on the native `time.now()` millisecond clock.
+# All values are UTC; there is no timezone database and no `date`/`time`
+# standalone types — use the DateTime struct fields or the
+# `date_parts`/`time_parts` helpers. `strptime` parses a useful subset of
+# strftime codes (see its docstring).
+#
+#   import std:datetime
+#   dt = datetime.now()
+#   print(dt.isoformat())          # "2025-01-02T03:04:05.678"
+#   print(dt.strftime("%Y-%m-%d"))
+#   ms = datetime.timestamp(dt)    # epoch milliseconds
+#   dt2 = datetime.from_timestamp(0)   # 1970-01-01T00:00:00.000 UTC
+#
+# Deviations from Python:
+#   * UTC only — no tzinfo, no astimezone, %z always "+0000", %Z "UTC".
+#   * Precision is milliseconds (the runtime clock); %f emits 6 digits
+#     with the last three always '0' (ms * 1000, Python-compatible width).
+#   * date()/time()/timetz() return 3-/4-element arrays instead of
+#     date/time objects: date_parts(dt) -> [y, m, d],
+#     time_parts(dt) -> [h, m, s, ms].
+#   * strptime supports %Y %y %m %d %H %M %S %I %f %j %p %a %A %b %B %z %Z
+#     %w %u %U %W %% and the composites %F %T %D %R %r; %z/%Z/%a/%A/%U/%W
+#     are consumed but ignored (UTC only). Returns None on mismatch
+#     (Python raises ValueError).
+#   * weekday() follows Python: 0 = Monday .. 6 = Sunday.
+import std:core
+import std:time
+import std:bytes
+
+class DateTime:
+    year: i64
+    month: i64
+    day: i64
+    hour: i64
+    minute: i64
+    second: i64
+    millisecond: i64
+
+    """isoformat(self) -> "YYYY-MM-DDTHH:MM:SS.mmm" (UTC, ms precision)."""
+    fn isoformat(self):
+        date_part = _pad4(self.year) + "-" + _pad2(self.month) + "-" + _pad2(self.day)
+        time_part = _pad2(self.hour) + ":" + _pad2(self.minute) + ":" + _pad2(self.second)
+        return date_part + "T" + time_part + "." + _pad3(self.millisecond)
+
+    """strftime(self, fmt) -> formatted string; see _FORMAT_CODES."""
+    fn strftime(self, fmt):
+        return _strftime(self, fmt)
+
+    """timestamp(self) -> epoch milliseconds (UTC)."""
+    fn timestamp(self):
+        return timestamp(self)
+
+    """weekday(self) -> 0=Monday .. 6=Sunday (Python convention)."""
+    fn weekday(self):
+        return weekday(self)
+
+    """isoweekday(self) -> 1=Monday .. 7=Sunday."""
+    fn isoweekday(self):
+        return self.weekday() + 1
+
+    """date_parts(self) -> [year, month, day]."""
+    fn date_parts(self):
+        return [self.year, self.month, self.day]
+
+    """time_parts(self) -> [hour, minute, second, millisecond]."""
+    fn time_parts(self):
+        return [self.hour, self.minute, self.second, self.millisecond]
+
+    """to_string? -- isoformat is the canonical text form."""
+    fn __str__(self):
+        return self.isoformat()
+
+# -- calendar math (Howard Hinnant's civil-from-days algorithms) --------------
+
+"""_fdiv(a, b) -> floor division for i64 (b > 0)."""
+fn _fdiv(a, b):
+    q = a // b
+    r = a % b
+    if r != 0 and r < 0:
+        q = q - 1
+    return q
+
+"""_days_from_civil(y, m, d) -> days since 1970-01-01."""
+fn _days_from_civil(y, m, d):
+    yy = y
+    if m <= 2:
+        yy = yy - 1
+    era = _fdiv(yy, 400)
+    yoe = yy - era * 400
+    mp = m
+    if mp > 2:
+        mp = mp - 3
+    else:
+        mp = mp + 9
+    doy = (153 * mp + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
+    return era * 146097 + doe - 719468
+
+"""_civil_from_days(z) -> [year, month, day]."""
+fn _civil_from_days(z):
+    zz = z + 719468
+    era = _fdiv(zz, 146097)
+    doe = zz - era * 146097
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
+    y = yoe + era * 400
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
+    m = mp
+    if mp < 10:
+        m = mp + 3
+    else:
+        m = mp - 9
+    if m <= 2:
+        y = y + 1
+    return [y, m, d]
+
+"""_dt_from_ms(ms) -> DateTime for epoch milliseconds (UTC, floor semantics)."""
+fn _dt_from_ms(ms):
+    days = _fdiv(ms, 86400000)
+    rem = ms - days * 86400000
+    if rem < 0:
+        rem = rem + 86400000
+        days = days - 1
+    h = rem // 3600000
+    rem = rem - h * 3600000
+    mi = rem // 60000
+    rem = rem - mi * 60000
+    s = rem // 1000
+    msec = rem - s * 1000
+    ymd = _civil_from_days(days)
+    return DateTime(ymd[0], ymd[1], ymd[2], h, mi, s, msec)
+
+# -- formatting helpers --------------------------------------------------------
+
+"""_pad2/_pad3/_pad4(n) -> zero-padded decimal strings."""
+fn _pad2(n):
+    s = str(n)
+    if n >= 0 and n < 10:
+        return "0" + s
+    return s
+
+fn _pad3(n):
+    s = str(n)
+    if n >= 0 and n < 10:
+        return "00" + s
+    if n >= 0 and n < 100:
+        return "0" + s
+    return s
+
+fn _pad4(n):
+    s = str(n)
+    if n >= 0 and n < 10:
+        return "000" + s
+    if n >= 0 and n < 100:
+        return "00" + s
+    if n >= 0 and n < 1000:
+        return "0" + s
+    return s
+
+# NOTE: name tables live inside _strftime as locals — module-level
+# variables read as 0.0 inside `a test` test functions (toolchain quirk),
+# which would break the array indexing below.
+
+"""_yday(dt) -> day of year 1..366."""
+fn _yday(dt):
+    first = _days_from_civil(dt.year, 1, 1)
+    today = _days_from_civil(dt.year, dt.month, dt.day)
+    return today - first + 1
+
+"""_dow_mon(dt) -> weekday 0=Monday..6=Sunday."""
+fn _dow_mon(dt):
+    days = _days_from_civil(dt.year, dt.month, dt.day)
+    # 1970-01-01 was Thursday (index 3 in Mon=0 scheme).
+    r = (days + 3) % 7
+    if r < 0:
+        r = r + 7
+    return r
+
+"""_dow_sun(dt) -> weekday 0=Sunday..6=Saturday."""
+fn _dow_sun(dt):
+    return (_dow_mon(dt) + 1) % 7
+
+"""_week_num(dt, monday_first) -> %U/%W style week number."""
+fn _week_num(dt, monday_first):
+    yday = _yday(dt)
+    dow = _dow_sun(dt)
+    if monday_first:
+        dow = _dow_mon(dt)
+    # Days before the first target weekday are week 0.
+    w = (yday - 1 - dow + 7) // 7
+    return w
+
+"""
+_strftime(dt, fmt) -> strftime-style formatting. Supported codes:
+%Y %y %m %d %H %M %S %f %j %U %W %w %u %a %A %b %B %p %z %Z %%
+Unknown codes pass through literally (documented deviation: Python raises).
+"""
+fn _strftime(dt, fmt):
+    months = ["January", "February", "March", "April", "May", "June",
+              "July", "August", "September", "October", "November", "December"]
+    months_abbr = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    days_abbr = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    # Calendar values are loop-invariant: compute the civil-day number
+    # and everything derived from it ONCE instead of letting each
+    # %j/%U/%W/%w/%u/%a/%A code re-run _days_from_civil.
+    z = _days_from_civil(dt.year, dt.month, dt.day)
+    yday_v = z - _days_from_civil(dt.year, 1, 1) + 1
+    r = (z + 3) % 7
+    dowm = r
+    if dowm < 0:
+        dowm = dowm + 7
+    dows = (dowm + 1) % 7
+    w_sun = (yday_v - 1 - dows + 7) // 7
+    w_mon = (yday_v - 1 - dowm + 7) // 7
+    # Accumulate fragments and join once — `out = out + c` per char is
+    # O(len^2) in string copies; join is a single native pass.
+    parts = []
+    i = 0
+    n = len(fmt)
+    while i < n:
+        c = str(fmt[i])
+        if c != "%" or i + 1 >= n:
+            parts.append(c)
+            i = i + 1
+            continue
+        code = str(fmt[i + 1])
+        i = i + 2
+        if code == "Y":
+            parts.append(_pad4(dt.year))
+        elif code == "y":
+            parts.append(_pad2(dt.year % 100))
+        elif code == "m":
+            parts.append(_pad2(dt.month))
+        elif code == "d":
+            parts.append(_pad2(dt.day))
+        elif code == "H":
+            parts.append(_pad2(dt.hour))
+        elif code == "M":
+            parts.append(_pad2(dt.minute))
+        elif code == "S":
+            parts.append(_pad2(dt.second))
+        elif code == "f":
+            # Milliseconds widened to Python's 6-digit %f width.
+            parts.append(_pad3(dt.millisecond) + "000")
+        elif code == "j":
+            parts.append(_pad3(yday_v))
+        elif code == "U":
+            parts.append(_pad2(w_sun))
+        elif code == "W":
+            parts.append(_pad2(w_mon))
+        elif code == "w":
+            parts.append(str(dows))
+        elif code == "u":
+            parts.append(str(dowm + 1))
+        elif code == "a":
+            parts.append(days_abbr[dowm])
+        elif code == "A":
+            parts.append(days[dowm])
+        elif code == "b" or code == "h":
+            parts.append(months_abbr[dt.month - 1])
+        elif code == "B":
+            parts.append(months[dt.month - 1])
+        elif code == "p":
+            if dt.hour < 12:
+                parts.append("AM")
+            else:
+                parts.append("PM")
+        elif code == "z":
+            parts.append("+0000")
+        elif code == "Z":
+            parts.append("UTC")
+        elif code == "%":
+            parts.append("%")
+        else:
+            parts.append("%" + code)
+    return parts.join("")
+
+# -- public API -----------------------------------------------------------------
+
+"""from_timestamp(ms) -> DateTime for epoch milliseconds (UTC)."""
+fn from_timestamp(ms):
+    return _dt_from_ms(ms)
+
+"""utcfromtimestamp(ms) -> alias of from_timestamp (Python name parity)."""
+fn utcfromtimestamp(ms):
+    return _dt_from_ms(ms)
+
+"""now() -> DateTime for the current wall-clock time (UTC)."""
+fn now():
+    return _dt_from_ms(time.now())
+
+"""timestamp(dt) -> epoch milliseconds for a DateTime."""
+fn timestamp(dt):
+    days = _days_from_civil(dt.year, dt.month, dt.day)
+    secs = days * 86400 + dt.hour * 3600 + dt.minute * 60 + dt.second
+    return secs * 1000 + dt.millisecond
+
+"""date(year, month, day) -> DateTime at midnight UTC."""
+fn date(year, month, day):
+    return DateTime(year, month, day, 0, 0, 0, 0)
+
+"""time_of_day(hour, minute, second, millisecond = 0) -> DateTime on 1970-01-01."""
+fn time_of_day(hour, minute, second, millisecond = 0):
+    return DateTime(1970, 1, 1, hour, minute, second, millisecond)
+
+"""weekday(dt) -> 0=Monday .. 6=Sunday."""
+fn weekday(dt):
+    return _dow_mon(dt)
+
+"""isoweekday(dt) -> 1=Monday .. 7=Sunday."""
+fn isoweekday(dt):
+    return _dow_mon(dt) + 1
+
+"""date_parts(dt) -> [year, month, day]."""
+fn date_parts(dt):
+    return [dt.year, dt.month, dt.day]
+
+"""time_parts(dt) -> [hour, minute, second, millisecond]."""
+fn time_parts(dt):
+    return [dt.hour, dt.minute, dt.second, dt.millisecond]
+
+"""add_seconds(dt, seconds) -> new DateTime shifted by whole seconds."""
+fn add_seconds(dt, seconds):
+    return _dt_from_ms(timestamp(dt) + seconds * 1000)
+
+"""add_ms(dt, ms) -> new DateTime shifted by milliseconds."""
+fn add_ms(dt, ms):
+    return _dt_from_ms(timestamp(dt) + ms)
+
+"""diff_ms(a, b) -> milliseconds from b to a (a - b)."""
+fn diff_ms(a, b):
+    return timestamp(a) - timestamp(b)
+
+"""combine(date_dt, time_dt) -> DateTime merging date of `date_dt` and time of `time_dt`."""
+fn combine(date_dt, time_dt):
+    return DateTime(date_dt.year, date_dt.month, date_dt.day,
+                    time_dt.hour, time_dt.minute, time_dt.second, time_dt.millisecond)
+
+"""is_leap_year(year) -> true for Gregorian leap years."""
+fn is_leap_year(year):
+    if year % 4 != 0:
+        return false
+    if year % 100 != 0:
+        return true
+    return year % 400 == 0
+
+"""days_in_month(year, month) -> 28..31; panics on month outside 1..12."""
+fn days_in_month(year, month):
+    if month == 2:
+        if is_leap_year(year):
+            return 29
+        return 28
+    if month == 4 or month == 6 or month == 9 or month == 11:
+        return 30
+    if month == 1 or month == 3 or month == 5 or month == 7 or month == 8 or month == 10 or month == 12:
+        return 31
+    core.panic("days_in_month: month out of range")
+    return 0
+
+# -- timedelta ------------------------------------------------------------------
+#
+# Python datetime.timedelta stores days/seconds/microseconds normalized.
+# This port stores total MILLISECONDS in `ms` (the runtime clock precision)
+# and exposes normalized components via methods. Deviations:
+#   * constructor argument order is (days, hours, minutes, seconds,
+#     milliseconds) — Python's order puts microseconds/milliseconds before
+#     minutes/hours/weeks, which is unusable positionally in A.
+#   * precision is milliseconds; there is no microseconds component.
+#   * `timedelta_from_ms(ms)` is the raw constructor; `timedelta_new`
+#     takes the component form above.
+
+"""
+TimeDelta: a duration stored as total milliseconds (`ms` field).
+"""
+class TimeDelta:
+    ms: i64
+
+    """total_ms(self) -> total duration in milliseconds."""
+    fn total_ms(self):
+        return self.ms
+
+    """total_seconds(self) -> total duration in seconds (float)."""
+    fn total_seconds(self):
+        return self.ms / 1000.0
+
+    """days(self) -> whole days component (floor; may be negative)."""
+    fn days(self):
+        return _fdiv(self.ms, 86400000)
+
+    """seconds(self) -> seconds component within the day (0..86399)."""
+    fn seconds(self):
+        d = self.days()
+        rem = self.ms - d * 86400000
+        return rem // 1000
+
+    """milliseconds(self) -> ms component within the second (0..999)."""
+    fn milliseconds(self):
+        d = self.days()
+        rem = self.ms - d * 86400000
+        return rem % 1000
+
+    """neg(self) -> new TimeDelta with the sign flipped."""
+    fn neg(self):
+        return TimeDelta(-self.ms)
+
+    """abs_val(self) -> new TimeDelta with a non-negative duration."""
+    fn abs_val(self):
+        if self.ms < 0:
+            return TimeDelta(-self.ms)
+        return TimeDelta(self.ms)
+
+    """add_to(self, dt) -> DateTime shifted by this duration."""
+    fn add_to(self, dt):
+        return _dt_from_ms(timestamp(dt) + self.ms)
+
+    """text(self) -> 'D days, H:MM:SS.mmm' (sign on the whole duration).
+    NOTE: str(td) prints the struct repr — A does not dispatch __str__
+    for class instances; use .text() (same caveat as DateTime)."""
+    fn text(self):
+        neg = false
+        v = self.ms
+        if v < 0:
+            neg = true
+            v = -v
+        d = v // 86400000
+        rem = v - d * 86400000
+        h = rem // 3600000
+        rem = rem - h * 3600000
+        mi = rem // 60000
+        rem = rem - mi * 60000
+        s = rem // 1000
+        msec = rem - s * 1000
+        # Python str(timedelta) does not zero-pad the hours field
+        time_part = str(h) + ":" + _pad2(mi) + ":" + _pad2(s) + "." + _pad3(msec)
+        out = time_part
+        if d != 0:
+            if d == 1:
+                out = "1 day, " + time_part
+            else:
+                out = str(d) + " days, " + time_part
+        if neg:
+            return "-" + out
+        return out
+
+"""
+timedelta_new(days = 0, hours = 0, minutes = 0, seconds = 0,
+milliseconds = 0) -> TimeDelta. NOTE: argument order differs from
+Python (which interleaves microseconds/milliseconds before
+minutes/hours/weeks) — see the module header.
+"""
+fn timedelta_new(days = 0, hours = 0, minutes = 0, seconds = 0, milliseconds = 0):
+    return TimeDelta(days * 86400000 + hours * 3600000 + minutes * 60000 +
+                     seconds * 1000 + milliseconds)
+
+"""timedelta_from_ms(ms) -> TimeDelta of `ms` milliseconds."""
+fn timedelta_from_ms(ms):
+    return TimeDelta(ms)
+
+"""diff_dt(a, b) -> TimeDelta of (a - b) — Python `a - b`."""
+fn diff_dt(a, b):
+    return TimeDelta(timestamp(a) - timestamp(b))
+
+"""add_timedelta(dt, td) -> DateTime shifted by td (Python `dt + td`)."""
+fn add_timedelta(dt, td):
+    return _dt_from_ms(timestamp(dt) + td.ms)
+
+# -- strptime -----------------------------------------------------------------
+
+"""
+_Strp is the strptime cursor: text + pos + failed flag + the fields being
+collected. Field defaults follow CPython: 1900-01-01 00:00:00.000.
+"""
+class _Strp:
+    text
+    pos
+    failed
+    year
+    month
+    day
+    hour
+    minute
+    second
+    milli
+    yday
+    hour12
+    pm
+    cps
+
+    # _ch works on code points: `cps` is the text pre-converted to an
+    # [i64] of code points once, so _ch is a plain list index returning
+    # the code point (or -1 at end of input) with no per-char ord call
+    # or string allocation. Callers advance `pos` directly once a code
+    # point is validated.
+    fn _ch(self):
+        if self.pos >= len(self.cps):
+            return -1
+        return self.cps[self.pos]
+
+    fn _eat_ws(self):
+        # format whitespace matches a (possibly empty) whitespace run
+        while true:
+            c = self._ch()
+            if c == 32 or c == 9 or c == 10 or c == 13:
+                self.pos = self.pos + 1
+            else:
+                break
+        return 0
+
+    fn _num(self, maxd):
+        v = 0
+        n = 0
+        while n < maxd:
+            c = self._ch()
+            if c < 48 or c > 57:
+                break
+            v = v * 10 + c - 48
+            n = n + 1
+            self.pos = self.pos + 1
+        if n == 0:
+            self.failed = true
+            return 0
+        return v
+
+    fn _alpha(self):
+        # consume a run of ASCII letters -> lowercase string
+        parts = []
+        while true:
+            cp = self._ch()
+            if cp < 65 or (cp > 90 and cp < 97) or cp > 122:
+                break
+            if cp < 97:
+                cp = cp + 32
+            parts.append(bytes.chr(cp)!)
+            self.pos = self.pos + 1
+        return parts.join("")
+
+    fn _parse_fmt(self, fmt):
+        fcs = str(fmt).chars()
+        i = 0
+        n = len(fcs)
+        while i < n and not self.failed:
+            fc = fcs[i]
+            if fc == '%':
+                i = i + 1
+                if i >= n:
+                    self.failed = true
+                    break
+                code = fcs[i]
+                i = i + 1
+                self._code(code)
+            elif fc == ' ' or fc == '\t':
+                self._eat_ws()
+                i = i + 1
+            else:
+                if self._ch() != (bytes.ord(fc) ?? -1):
+                    self.failed = true
+                else:
+                    self.pos = self.pos + 1
+                i = i + 1
+        return 0
+
+    fn _code(self, code):
+        if code == 'Y':
+            self.year = self._num(4)
+        elif code == 'y':
+            v = self._num(2)
+            if v >= 69:
+                self.year = 1900 + v
+            else:
+                self.year = 2000 + v
+        elif code == 'm':
+            self.month = self._num(2)
+        elif code == 'd':
+            self.day = self._num(2)
+        elif code == 'H':
+            self.hour = self._num(2)
+        elif code == 'M':
+            self.minute = self._num(2)
+        elif code == 'S':
+            self.second = self._num(2)
+        elif code == 'I':
+            self.hour12 = self._num(2)
+        elif code == 'f':
+            self.milli = self._frac()
+        elif code == 'j':
+            self.yday = self._num(3)
+        elif code == 'p':
+            w = self._alpha()
+            if w == "pm":
+                self.pm = true
+            elif w == "am":
+                self.pm = false
+            else:
+                self.failed = true
+        elif code == 'a' or code == 'A':
+            self._alpha()
+        elif code == 'b' or code == 'B' or code == 'h':
+            w = self._alpha()
+            self.month = _month_from_name(w)
+            if self.month == 0:
+                self.failed = true
+        elif code == 'z':
+            self._tz()
+        elif code == 'Z':
+            self._alpha()
+        elif code == 'w' or code == 'u':
+            self._num(1)
+        elif code == 'U' or code == 'W':
+            self._num(2)
+        elif code == '%':
+            if self._ch() != 37:
+                self.failed = true
+            else:
+                self.pos = self.pos + 1
+        elif code == 'F':
+            self._parse_fmt("%Y-%m-%d")
+        elif code == 'T':
+            self._parse_fmt("%H:%M:%S")
+        elif code == 'D':
+            self._parse_fmt("%m/%d/%y")
+        elif code == 'R':
+            self._parse_fmt("%H:%M")
+        elif code == 'r':
+            self._parse_fmt("%I:%M:%S %p")
+        elif code == 'c' or code == 'x' or code == 'X':
+            core.panic("strptime: %" + str(code) + " (locale format) is not supported")
+        else:
+            core.panic("strptime: unsupported format code %" + str(code))
+        return 0
+
+    fn _frac(self):
+        # %f: 1-6 digits -> milliseconds (first three digits, right-padded)
+        ds = 0
+        n = 0
+        while n < 6:
+            c = self._ch()
+            if c < 48 or c > 57:
+                break
+            ds = ds * 10 + c - 48
+            n = n + 1
+            self.pos = self.pos + 1
+        if n == 0:
+            self.failed = true
+            return 0
+        if n <= 3:
+            # short fraction: right-pad with zeros (".5" -> 500 ms)
+            while n < 3:
+                ds = ds * 10
+                n = n + 1
+        else:
+            # keep only the first three digits
+            div = 1
+            k = 3
+            while k < n:
+                div = div * 10
+                k = k + 1
+            ds = ds // div
+        return ds
+
+    fn _tz(self):
+        # %z: consume and ignore (UTC only). Accepts +HHMM/-HHMM or 'Z'.
+        c = self._ch()
+        if c == 90 or c == 122:  # 'Z' or 'z'
+            self.pos = self.pos + 1
+        elif c == 43 or c == 45:  # '+' or '-'
+            self.pos = self.pos + 1
+            i = 0
+            while i < 4 and not self.failed:
+                d = self._ch()
+                if d < 48 or d > 57:
+                    self.failed = true
+                else:
+                    self.pos = self.pos + 1
+                    i = i + 1
+        else:
+            self.failed = true
+        return 0
+
+"""
+_month_from_name(w) -> month 1..12 for an English month name or
+abbreviation (lowercase input), 0 when unknown. Local table (module-level
+vars read as 0.0 under `a test`).
+"""
+fn _month_from_name(w):
+    names = ["january", "february", "march", "april", "may", "june",
+             "july", "august", "september", "october", "november", "december"]
+    abbr = ["jan", "feb", "mar", "apr", "may", "jun",
+            "jul", "aug", "sep", "oct", "nov", "dec"]
+    i = 0
+    while i < 12:
+        if w == names[i] or w == abbr[i]:
+            return i + 1
+        i = i + 1
+    return 0
+
+"""
+strptime(text, fmt) -> DateTime? parsing `text` per `fmt`.
+
+Supported codes: %Y %y %m %d %H %M %S %I %f %j %p %a %A %b %B %h %z %Z
+%w %u %U %W %% and composites %F %T %D %R %r. Whitespace in fmt matches a
+whitespace run in text. %z/%Z/%a/%A/%U/%W/%w/%u are consumed but ignored
+(UTC only, no week-of-year reconstruction). %c %x %X panic (locale).
+
+Defaults match CPython: year 1900, month/day 1, time 00:00:00.000.
+%I is 12-hour clock (1-12); %p AM/PM adjusts it. %j is day-of-year.
+Returns None on any mismatch or out-of-range field (Python raises
+ValueError); trailing unparsed text also yields None.
+"""
+fn strptime(text, fmt) -> DateTime?:
+    t = str(text)
+    cps = []
+    for c in t.chars():
+        cps.append(bytes.ord(c) ?? -1)
+    sp = _Strp(t, 0, false, 1900, 1, 1, 0, 0, 0, 0, 0, -1, false, cps)
+    sp._parse_fmt(str(fmt))
+    if sp.failed or sp.pos != len(sp.text):
+        return None
+    y = sp.year
+    mo = sp.month
+    d = sp.day
+    if mo < 1 or mo > 12:
+        return None
+    if d < 1 or d > days_in_month(y, mo):
+        return None
+    if sp.yday > 0:
+        # convert day-of-year to month/day
+        if sp.yday > 366:
+            return None
+        rem = sp.yday
+        m2 = 1
+        found = false
+        while m2 <= 12 and not found:
+            dim = days_in_month(y, m2)
+            if rem <= dim:
+                mo = m2
+                d = rem
+                found = true
+            else:
+                rem = rem - dim
+                m2 = m2 + 1
+        if not found:
+            return None
+    # 12-hour clock + AM/PM
+    h = sp.hour
+    if sp.hour12 >= 0:
+        h = sp.hour12 % 12
+        if sp.pm:
+            h = h + 12
+    if h < 0 or h > 23:
+        return None
+    if sp.minute < 0 or sp.minute > 59:
+        return None
+    if sp.second < 0 or sp.second > 59:
+        return None
+    if sp.milli < 0 or sp.milli > 999:
+        return None
+    return DateTime(y, mo, d, h, sp.minute, sp.second, sp.milli)

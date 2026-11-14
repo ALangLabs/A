@@ -1,0 +1,18 @@
+# Exports a superset of the historical API and the richer simd implementation.
+import prelude
+from "simd.astra" import vec4_new, splat, dot, add, add_lists, scale_list, length, normalize, lerp, sum_vecs, sum_axis, unroll, parallel_reduce, Vec8, vec8_from_list, vec8_broadcast, dot_list, hadamard_list, broadcast_list, vectorize_list, unroll_list
+
+fn vec_new(x: i64, y: i64, z: i64, w: i64) -> prelude.Vec4:
+    return vec4_new(x, y, z, w)
+
+fn scale(v: prelude.Vec4, s: i64) -> prelude.Vec4:
+    return prelude.Vec4(v.x * s, v.y * s, v.z * s, v.w * s)
+
+fn dot_lists(a: [i64], b: [i64]) -> i64:
+    return dot_list(a, b)
+
+fn hadamard(a: [i64], b: [i64]) -> [i64]:
+    return hadamard_list(a, b)
+
+fn dot_unrolled(a: [i64], b: [i64]) -> i64:
+    return dot_list(a, b)

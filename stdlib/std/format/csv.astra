@@ -1,0 +1,221 @@
+# std.format.csv (format helper).
+#
+# Port of CPython's `csv` module core: RFC 4180-style quoting on write and
+# a state-machine parser on read. Deviations from CPython:
+#   * QUOTE_MINIMAL only for fields (always-quote variant provided);
+#     QUOTE_NONE / QUOTE_NONNUMERIC / escapechar / dialect objects absent.
+#   * `csv_text` writes '\r\n' line terminators like csv.writer's default
+#     lineterminator; pass a different terminator as the optional arg.
+#   * `csv_parse` returns a materialized array of rows (Python yields
+#     iterators). Truly blank physical lines are skipped.
+#   * No `csv.field_size_limit` / Sniffer.
+#
+# Parsing scans the UTF-8 bytes (`Bytes(s)`): every byte of a multi-byte
+# character is >= 0x80, so ASCII delimiters (',' '"' '\n' '\r') can never
+# alias inside one. Literal field text is emitted as native Bytes slices
+# appended with `core.bytes_append` (memcpy) and decoded once per field
+# with `core.bytes_to_str` — no per-char string allocation in the loop.
+import std:core
+
+fn _needs_quote(f: str) -> bool:
+    # Native substring scans beat a per-char A loop here.
+    return f.contains(",") or f.contains("\"") or f.contains("\n") or f.contains("\r")
+
+fn _quote_field(f: str) -> str:
+    # Double every '"' and wrap in quotes (native replace, no char loop).
+    return "\"" + f.replace("\"", "\"\"") + "\""
+
+"""
+csv_field(v) -> single CSV field, quoted only when required
+(contains ',', '"', '\n' or '\r') — csv.QUOTE_MINIMAL semantics.
+"""
+fn csv_field(v):
+    f = str(v)
+    if _needs_quote(f):
+        return _quote_field(f)
+    return f
+
+"""
+csv_field_always(v) -> single CSV field always wrapped in quotes
+(csv.QUOTE_ALL semantics for one field).
+"""
+fn csv_field_always(v):
+    return _quote_field(str(v))
+
+"""
+csv_row(values) -> one CSV record (no line terminator), fields quoted
+per QUOTE_MINIMAL. `values` may be any array; elements are str()'d.
+"""
+fn csv_row(values):
+    parts = []
+    for v in values:
+        parts.append(csv_field(v))
+    return ",".join(parts)
+
+"""
+csv_rows(rows) -> array of CSV record strings, one per row.
+"""
+fn csv_rows(rows):
+    out = []
+    for r in rows:
+        out.append(csv_row(r))
+    return out
+
+"""
+csv_text(rows, lineterminator) -> full CSV document text.
+lineterminator defaults to "\r\n" (csv.writer default).
+"""
+fn csv_text(rows, lineterminator = "\r\n"):
+    recs = csv_rows(rows)
+    if len(recs) == 0:
+        return ""
+    # Terminator after every record, including the last (csv.writer
+    # semantics) — join puts it between records, so append one more.
+    return lineterminator.join(recs) + lineterminator
+
+# --- parsing ---
+# Byte values used below: ',' = 44, '"' = 34, '\n' = 10, '\r' = 13.
+
+fn _is_nl_at(bs, i):
+    # returns 1 for '\n', 2 for '\r\n', 3 for lone '\r', else 0
+    n = len(bs)
+    if i >= n:
+        return 0
+    b = bs[i]
+    if b == 10:
+        return 1
+    if b == 13:
+        if i + 1 < n and bs[i + 1] == 10:
+            return 2
+        return 3
+    return 0
+
+fn _nl_len(kind):
+    if kind == 2:
+        return 2
+    return 1
+
+"""
+_parse_record(bb, pos) -> (fields, new_pos, kind)
+
+Parses one CSV record starting at byte offset `pos`. Returns the field
+list, the position just past the record terminator (or len(bb) at EOF),
+and the terminator kind (0 = EOF). Handles quoted fields, embedded
+newlines in quotes, and doubled-quote escapes. A record may span
+multiple physical lines when quotes are open. Literal field bytes are
+flushed to `fb` (a Bytes buffer) as native slices; only field
+boundaries and '""' escapes do work per field.
+"""
+fn _parse_record(bb, pos: i64):
+    n = len(bb)
+    row = []
+    fb = core.bytes_new()
+    i = pos
+    # Pending literal run: bytes [run_bs, i).
+    run_bs = -1
+    # state: 0 = start of field, 1 = in unquoted field, 2 = in quoted field,
+    #        3 = just closed quote (only delimiter/newline may follow)
+    state = 0
+    while i < n:
+        b = bb[i]
+        if state == 2:
+            if b == 34:
+                if i + 1 < n and bb[i + 1] == 34:
+                    # '""' escape: flush the run, emit one '"'
+                    if run_bs >= 0:
+                        core.bytes_append(fb, bb[run_bs..i])
+                        run_bs = -1
+                    core.bytes_append(fb, 34)
+                    i = i + 2
+                    continue
+                # closing quote: flush the run
+                if run_bs >= 0:
+                    core.bytes_append(fb, bb[run_bs..i])
+                    run_bs = -1
+                state = 3
+                i = i + 1
+                continue
+            if run_bs < 0:
+                run_bs = i
+            i = i + 1
+            continue
+        # states 0, 1, 3
+        if b == 44:
+            if run_bs >= 0:
+                core.bytes_append(fb, bb[run_bs..i])
+                run_bs = -1
+            row.append(core.bytes_to_str(fb)!)
+            fb = core.bytes_new()
+            state = 0
+            i = i + 1
+            continue
+        if b == 10 or b == 13:
+            if run_bs >= 0:
+                core.bytes_append(fb, bb[run_bs..i])
+            row.append(core.bytes_to_str(fb)!)
+            if b == 10:
+                return (row, i + 1, 1)
+            if i + 1 < n and bb[i + 1] == 10:
+                return (row, i + 2, 2)
+            return (row, i + 1, 3)
+        if state == 3:
+            # stray characters after closing quote: keep literally
+            state = 1
+        if b == 34 and state == 0:
+            state = 2
+            i = i + 1
+            continue
+        # ordinary byte (incl. '"' inside an unquoted field: literal,
+        # matching CPython behaviour)
+        state = 1
+        if run_bs < 0:
+            run_bs = i
+        i = i + 1
+    # EOF: flush pending run and field
+    if run_bs >= 0:
+        core.bytes_append(fb, bb[run_bs..i])
+    row.append(core.bytes_to_str(fb)!)
+    return (row, i, 0)
+
+"""
+csv_parse(text) -> [[str]] — parse CSV document text into rows.
+
+Blank physical lines (zero characters between terminators) are skipped.
+A line containing only a terminator yields no row (matches the common
+expectation that empty lines carry no data).
+"""
+fn csv_parse(text):
+    bb = Bytes(str(text))
+    n = len(bb)
+    rows = []
+    pos = 0
+    while pos < n:
+        # skip blank lines
+        nl = _is_nl_at(bb, pos)
+        if nl != 0:
+            pos = pos + _nl_len(nl)
+            continue
+        (row, next_pos, kind) = _parse_record(bb, pos)
+        rows.append(row)
+        pos = next_pos
+        if kind == 0:
+            break
+    return rows
+
+"""
+parse_row(line) -> [str] — parse a single CSV record (no embedded
+newlines). Equivalent to csv_parse(line + "\\n")[0] but without the
+allocation; a record containing an opening quote with no close consumes
+to end of line.
+"""
+fn parse_row(line):
+    bb = Bytes(str(line))
+    n = len(bb)
+    # strip a trailing newline pair if present so the record ends cleanly
+    end = n
+    if n >= 2 and bb[n - 2] == 13 and bb[n - 1] == 10:
+        end = n - 2
+    elif n >= 1 and (bb[n - 1] == 10 or bb[n - 1] == 13):
+        end = n - 1
+    (row, _, _) = _parse_record(bb[0..end], 0)
+    return row
