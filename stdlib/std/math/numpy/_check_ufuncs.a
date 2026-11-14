@@ -1,0 +1,344 @@
+#
+# Self-check for ufuncs.a: exercises every public function on small arrays
+# with known results. Run: ./build/a run stdlib/std/math/numpy/_check_ufuncs.a
+# Exits non-zero (assert panic) on any mismatch.
+#
+import std:math
+from "ndarray.a" import NDArray, array_from_list, zeros, ones, arange1, full
+from "ufuncs.a" import add, subtract, multiply, divide, power, float_power, remainder, mod, fmod, floor_divide, hypot, maximum, minimum, fmax, fmin, copysign, arctan2
+from "ufuncs.a" import add_scalar, subtract_scalar, multiply_scalar, divide_scalar, power_scalar, float_power_scalar, remainder_scalar, mod_scalar, fmod_scalar, floor_divide_scalar, hypot_scalar, maximum_scalar, minimum_scalar, fmax_scalar, fmin_scalar, copysign_scalar, arctan2_scalar
+from "ufuncs.a" import radd_scalar, rsubtract_scalar, rmultiply_scalar, rdivide_scalar, rpower_scalar, rfloat_power_scalar, rremainder_scalar, rmod_scalar, rfmod_scalar, rfloor_divide_scalar, rhypot_scalar, rmaximum_scalar, rminimum_scalar, rfmax_scalar, rfmin_scalar, rcopysign_scalar, rarctan2_scalar
+from "ufuncs.a" import negative, positive, absolute, rint, round, sign, reciprocal, sqrt, square, exp, exp2, expm1, log, log2, log10, log1p, sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh, deg2rad, rad2deg, floor, ceil, trunc, fix, isnan, isinf, isfinite, signbit, sinc
+from "ufuncs.a" import where_, where_scalar, clip, clip_min, clip_max, clip_arr, nan_to_num, nan_to_num_full
+
+fn _eq(x: f64, y: f64) -> bool:
+    return abs(x - y) < 1e-9
+
+fn _arr_eq(a: NDArray, b: [f64]) -> bool:
+    if a.size() != len(b):
+        return false
+    i = 0
+    while i < a.size():
+        if not _eq(a.data[i], b[i]):
+            return false
+        i = i + 1
+    return true
+
+fn _shape_eq(a: NDArray, s: [i64]) -> bool:
+    if len(a.shape) != len(s):
+        return false
+    i = 0
+    while i < len(s):
+        if a.shape[i] != s[i]:
+            return false
+        i = i + 1
+    return true
+
+fn _b(x: f64) -> NDArray:
+    # 1-element array for boolean-as-float checks
+    return NDArray([x], [1])
+
+entry main():
+    a12 = NDArray([1.0, 2.0], [2])
+    a34 = NDArray([3.0, 4.0], [2])
+
+    # --- binary array-array ---
+    r = add(a12, a34)
+    assert(_arr_eq(r, [4.0, 6.0]) and _shape_eq(r, [2]))
+    r = subtract(a34, a12)
+    assert(_arr_eq(r, [2.0, 2.0]))
+    r = multiply(a12, a34)
+    assert(_arr_eq(r, [3.0, 8.0]))
+    r = divide(a34, a12)
+    assert(_arr_eq(r, [3.0, 2.0]))
+    r = power(a12, a34)
+    assert(_arr_eq(r, [1.0, 16.0]))
+    r = float_power(a12, a34)
+    assert(_arr_eq(r, [1.0, 16.0]))
+    r = hypot(NDArray([3.0], [1]), NDArray([4.0], [1]))
+    assert(_arr_eq(r, [5.0]))
+    r = maximum(NDArray([1.0, 9.0], [2]), NDArray([5.0, 3.0], [2]))
+    assert(_arr_eq(r, [5.0, 9.0]))
+    r = minimum(NDArray([1.0, 9.0], [2]), NDArray([5.0, 3.0], [2]))
+    assert(_arr_eq(r, [1.0, 3.0]))
+    r = fmax(NDArray([1.0, 9.0], [2]), NDArray([5.0, 3.0], [2]))
+    assert(_arr_eq(r, [5.0, 9.0]))
+    r = fmin(NDArray([1.0, 9.0], [2]), NDArray([5.0, 3.0], [2]))
+    assert(_arr_eq(r, [1.0, 3.0]))
+    r = copysign(NDArray([-2.0, 3.0], [2]), NDArray([1.0, -1.0], [2]))
+    assert(_arr_eq(r, [2.0, -3.0]))
+    r = arctan2(NDArray([1.0], [1]), NDArray([1.0], [1]))
+    assert(_eq(r.data[0], 0.7853981633974483))
+
+    # broadcasting: [2,1] x [1,3] -> [2,3]
+    ba = array_from_list([[1.0], [2.0]])
+    bb = array_from_list([[10.0, 20.0, 30.0]])
+    r = add(ba, bb)
+    assert(_shape_eq(r, [2, 3]))
+    assert(_arr_eq(r, [11.0, 21.0, 31.0, 12.0, 22.0, 32.0]))
+
+    # --- remainder family ---
+    r = remainder(NDArray([5.0, -5.0], [2]), NDArray([3.0, 3.0], [2]))
+    # floor-mod: sign of divisor -> [2, 1]
+    assert(_arr_eq(r, [2.0, 1.0]))
+    r = mod(NDArray([5.0, -5.0], [2]), NDArray([3.0, 3.0], [2]))
+    assert(_arr_eq(r, [2.0, 1.0]))
+    r = fmod(NDArray([5.0, -5.0], [2]), NDArray([3.0, 3.0], [2]))
+    # trunc-mod: sign of dividend -> [2, -2]
+    assert(_arr_eq(r, [2.0, -2.0]))
+    r = floor_divide(NDArray([-5.0, 5.0], [2]), NDArray([3.0, 3.0], [2]))
+    assert(_arr_eq(r, [-2.0, 1.0]))
+
+    # division by zero -> IEEE, no panic
+    r = divide(NDArray([1.0, 0.0, -1.0], [3]), NDArray([0.0, 0.0, 0.0], [3]))
+    assert(isinf(r).data[0] == 1.0)
+    assert(isnan(r).data[1] == 1.0)
+    assert(isinf(r).data[2] == 1.0)
+    assert(r.data[2] < 0.0)
+
+    # --- scalar variants ---
+    r = add_scalar(a12, 10.0)
+    assert(_arr_eq(r, [11.0, 12.0]))
+    r = radd_scalar(10.0, a12)
+    assert(_arr_eq(r, [11.0, 12.0]))
+    r = subtract_scalar(a34, 1.0)
+    assert(_arr_eq(r, [2.0, 3.0]))
+    r = rsubtract_scalar(10.0, a12)
+    assert(_arr_eq(r, [9.0, 8.0]))
+    r = multiply_scalar(a12, 3.0)
+    assert(_arr_eq(r, [3.0, 6.0]))
+    r = rmultiply_scalar(3.0, a12)
+    assert(_arr_eq(r, [3.0, 6.0]))
+    r = divide_scalar(a34, 2.0)
+    assert(_arr_eq(r, [1.5, 2.0]))
+    r = rdivide_scalar(12.0, a12)
+    assert(_arr_eq(r, [12.0, 6.0]))
+    r = power_scalar(NDArray([2.0, 3.0], [2]), 2.0)
+    assert(_arr_eq(r, [4.0, 9.0]))
+    r = rpower_scalar(2.0, NDArray([3.0, 4.0], [2]))
+    assert(_arr_eq(r, [8.0, 16.0]))
+    r = remainder_scalar(NDArray([5.0], [1]), 3.0)
+    assert(_arr_eq(r, [2.0]))
+    r = rremainder_scalar(5.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [2.0]))
+    r = fmod_scalar(NDArray([-5.0], [1]), 3.0)
+    assert(_arr_eq(r, [-2.0]))
+    r = rfmod_scalar(-5.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [-2.0]))
+    r = floor_divide_scalar(NDArray([-5.0], [1]), 3.0)
+    assert(_arr_eq(r, [-2.0]))
+    r = rfloor_divide_scalar(-5.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [-2.0]))
+    r = hypot_scalar(NDArray([3.0], [1]), 4.0)
+    assert(_arr_eq(r, [5.0]))
+    r = rhypot_scalar(4.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [5.0]))
+    r = maximum_scalar(NDArray([1.0], [1]), 5.0)
+    assert(_arr_eq(r, [5.0]))
+    r = rmaximum_scalar(5.0, NDArray([1.0], [1]))
+    assert(_arr_eq(r, [5.0]))
+    r = minimum_scalar(NDArray([1.0], [1]), 5.0)
+    assert(_arr_eq(r, [1.0]))
+    r = rminimum_scalar(5.0, NDArray([1.0], [1]))
+    assert(_arr_eq(r, [1.0]))
+    r = fmax_scalar(NDArray([1.0], [1]), 5.0)
+    assert(_arr_eq(r, [5.0]))
+    r = rfmax_scalar(5.0, NDArray([1.0], [1]))
+    assert(_arr_eq(r, [5.0]))
+    r = fmin_scalar(NDArray([1.0], [1]), 5.0)
+    assert(_arr_eq(r, [1.0]))
+    r = rfmin_scalar(5.0, NDArray([1.0], [1]))
+    assert(_arr_eq(r, [1.0]))
+    r = copysign_scalar(NDArray([-2.0], [1]), 1.0)
+    assert(_arr_eq(r, [2.0]))
+    r = rcopysign_scalar(-1.0, NDArray([2.0], [1]))
+    # copysign(s, a): magnitude of s (-1 -> 1), sign of a (2 -> +) => +1
+    assert(_arr_eq(r, [1.0]))
+    r = arctan2_scalar(NDArray([1.0], [1]), 1.0)
+    assert(_eq(r.data[0], 0.7853981633974483))
+    r = rarctan2_scalar(1.0, NDArray([1.0], [1]))
+    assert(_eq(r.data[0], 0.7853981633974483))
+    # mod / float_power scalar aliases
+    r = mod_scalar(NDArray([5.0], [1]), 3.0)
+    assert(_arr_eq(r, [2.0]))
+    r = rmod_scalar(5.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [2.0]))
+    r = float_power_scalar(NDArray([2.0], [1]), 3.0)
+    assert(_arr_eq(r, [8.0]))
+    r = rfloat_power_scalar(2.0, NDArray([3.0], [1]))
+    assert(_arr_eq(r, [8.0]))
+
+    # --- unary basics ---
+    r = negative(a12)
+    assert(_arr_eq(r, [-1.0, -2.0]))
+    r = positive(a12)
+    assert(_arr_eq(r, [1.0, 2.0]))
+    r = absolute(NDArray([-1.0, 2.0], [2]))
+    assert(_arr_eq(r, [1.0, 2.0]))
+    r = sqrt(NDArray([1.0, 4.0, 9.0], [3]))
+    assert(_arr_eq(r, [1.0, 2.0, 3.0]))
+    r = square(NDArray([1.0, 2.0, 3.0], [3]))
+    assert(_arr_eq(r, [1.0, 4.0, 9.0]))
+    r = exp(NDArray([0.0, 1.0], [2]))
+    assert(_eq(r.data[0], 1.0) and _eq(r.data[1], 2.718281828459045))
+    r = exp2(NDArray([3.0], [1]))
+    assert(_eq(r.data[0], 8.0))
+    r = expm1(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = log(NDArray([1.0, 2.718281828459045], [2]))
+    assert(_eq(r.data[0], 0.0) and _eq(r.data[1], 1.0))
+    r = log2(NDArray([8.0], [1]))
+    assert(_eq(r.data[0], 3.0))
+    r = log10(NDArray([100.0], [1]))
+    assert(_eq(r.data[0], 2.0))
+    r = log1p(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = sin(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = cos(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 1.0))
+    r = tan(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arcsin(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arccos(NDArray([1.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arctan(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = sinh(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = cosh(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 1.0))
+    r = tanh(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arcsinh(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arccosh(NDArray([1.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = arctanh(NDArray([0.0], [1]))
+    assert(_eq(r.data[0], 0.0))
+    r = deg2rad(NDArray([180.0], [1]))
+    assert(_eq(r.data[0], 3.141592653589793))
+    r = rad2deg(NDArray([3.141592653589793], [1]))
+    assert(_eq(r.data[0], 180.0))
+
+    # --- rounding / sign / misc unary ---
+    r = floor(NDArray([-1.5, 1.5], [2]))
+    assert(_arr_eq(r, [-2.0, 1.0]))
+    r = ceil(NDArray([-1.5, 1.5], [2]))
+    assert(_arr_eq(r, [-1.0, 2.0]))
+    r = trunc(NDArray([-1.5, 1.5], [2]))
+    assert(_arr_eq(r, [-1.0, 1.0]))
+    r = fix(NDArray([-1.5, 1.5], [2]))
+    assert(_arr_eq(r, [-1.0, 1.0]))
+    # rint: half to even -> [0, 2, 2, 4]
+    r = rint(NDArray([0.5, 1.5, 2.5, 3.5], [4]))
+    assert(_arr_eq(r, [0.0, 2.0, 2.0, 4.0]))
+    r = round(NDArray([0.5, 1.5, 2.5], [3]))
+    assert(_arr_eq(r, [0.0, 2.0, 2.0]))
+    r = sign(NDArray([-2.0, 0.0, 3.0, -0.0], [4]))
+    assert(_arr_eq(r, [-1.0, 0.0, 1.0, -0.0]))
+    r = reciprocal(NDArray([1.0, 2.0, 4.0], [3]))
+    assert(_arr_eq(r, [1.0, 0.5, 0.25]))
+    r = reciprocal(NDArray([0.0], [1]))
+    assert(isinf(r).data[0] == 1.0)
+    # sinc: [0 -> 1, 0.5 -> 2/pi]
+    r = sinc(NDArray([0.0, 0.5], [2]))
+    assert(_eq(r.data[0], 1.0) and _eq(r.data[1], 0.6366197723675814))
+
+    # domain guards produce NaN / -inf instead of panicking
+    r = sqrt(NDArray([-1.0], [1]))
+    assert(isnan(r).data[0] == 1.0)
+    r = log(NDArray([0.0, -1.0], [2]))
+    assert(isinf(r).data[0] == 1.0 and r.data[0] < 0.0)
+    assert(isnan(r).data[1] == 1.0)
+    r = arcsin(NDArray([2.0], [1]))
+    assert(isnan(r).data[0] == 1.0)
+    r = arccosh(NDArray([0.5], [1]))
+    assert(isnan(r).data[0] == 1.0)
+    r = arctanh(NDArray([2.0], [1]))
+    assert(isnan(r).data[0] == 1.0)
+    r = log1p(NDArray([-1.0, -2.0], [2]))
+    assert(isinf(r).data[0] == 1.0 and r.data[0] < 0.0)
+    assert(isnan(r).data[1] == 1.0)
+
+    # --- isnan/isinf/isfinite/signbit (0.0/1.0 floats) ---
+    pinf = 1e308 * 10.0
+    ninf = -pinf
+    nanv = math.pow(-1.0, 0.5)
+    special = NDArray([nanv, pinf, ninf, 5.0, -0.0], [5])
+    r = isnan(special)
+    assert(_arr_eq(r, [1.0, 0.0, 0.0, 0.0, 0.0]))
+    r = isinf(special)
+    assert(_arr_eq(r, [0.0, 1.0, 1.0, 0.0, 0.0]))
+    r = isfinite(special)
+    assert(_arr_eq(r, [0.0, 0.0, 0.0, 1.0, 1.0]))
+    r = signbit(special)
+    assert(_arr_eq(r, [0.0, 0.0, 1.0, 0.0, 1.0]))
+    # signbit on plain negatives/positives
+    r = signbit(NDArray([-3.0, 3.0], [2]))
+    assert(_arr_eq(r, [1.0, 0.0]))
+
+    # NaN propagation in maximum/minimum vs fmax/fmin
+    nanarr = NDArray([nanv, 1.0], [2])
+    onearr = NDArray([2.0, 3.0], [2])
+    r = maximum(nanarr, onearr)
+    assert(isnan(r).data[0] == 1.0)
+    r = minimum(nanarr, onearr)
+    assert(isnan(r).data[0] == 1.0)
+    r = fmax(nanarr, onearr)
+    assert(_eq(r.data[0], 2.0))
+    r = fmin(nanarr, onearr)
+    assert(_eq(r.data[0], 2.0))
+
+    # --- where_ / where_scalar ---
+    cond = NDArray([1.0, 0.0, 2.0, 0.0], [4])
+    xv = NDArray([10.0, 20.0, 30.0, 40.0], [4])
+    yv = NDArray([100.0, 200.0, 300.0, 400.0], [4])
+    r = where_(cond, xv, yv)
+    assert(_arr_eq(r, [10.0, 200.0, 30.0, 400.0]))
+    r = where_scalar(cond, 7.0, 9.0)
+    assert(_arr_eq(r, [7.0, 9.0, 7.0, 9.0]))
+    # broadcasting in where_: cond [2,1], x [1,3], y scalar-array [3]
+    c2 = array_from_list([[1.0], [0.0]])
+    x2 = array_from_list([[10.0, 20.0, 30.0]])
+    y2 = NDArray([100.0, 200.0, 300.0], [3])
+    r = where_(c2, x2, y2)
+    assert(_shape_eq(r, [2, 3]))
+    assert(_arr_eq(r, [10.0, 20.0, 30.0, 100.0, 200.0, 300.0]))
+
+    # --- clip family ---
+    r = clip(NDArray([1.0, 5.0, 9.0], [3]), 3.0, 7.0)
+    assert(_arr_eq(r, [3.0, 5.0, 7.0]))
+    r = clip_min(NDArray([1.0, 5.0, 9.0], [3]), 3.0)
+    assert(_arr_eq(r, [3.0, 5.0, 9.0]))
+    r = clip_max(NDArray([1.0, 5.0, 9.0], [3]), 7.0)
+    assert(_arr_eq(r, [1.0, 5.0, 7.0]))
+    # clip_arr: a [3], lo [3], hi broadcast scalar-array [1]
+    r = clip_arr(NDArray([1.0, 5.0, 9.0], [3]), NDArray([2.0, 4.0, 8.0], [3]), NDArray([8.0], [1]))
+    assert(_arr_eq(r, [2.0, 5.0, 8.0]))
+    # clip preserves NaN input
+    r = clip(nanarr, 0.0, 10.0)
+    assert(isnan(r).data[0] == 1.0 and _eq(r.data[1], 1.0))
+
+    # --- nan_to_num ---
+    mixed = NDArray([nanv, pinf, ninf, 5.0], [4])
+    r = nan_to_num(mixed)
+    assert(_eq(r.data[0], 0.0))
+    assert(_eq(r.data[1], 1.7976931348623157e308))
+    assert(_eq(r.data[2], -1.7976931348623157e308))
+    assert(_eq(r.data[3], 5.0))
+    r = nan_to_num_full(mixed, -1.0, 100.0, -100.0)
+    assert(_arr_eq(r, [-1.0, 100.0, -100.0, 5.0]))
+
+    # shape preserved on 2-D unary
+    m = array_from_list([[1.0, 4.0], [9.0, 16.0]])
+    r = sqrt(m)
+    assert(_shape_eq(r, [2, 2]) and _arr_eq(r, [1.0, 2.0, 3.0, 4.0]))
+
+    # mismatch broadcast -> empty sentinel NDArray([],[])
+    r = add(NDArray([1.0, 2.0], [2]), NDArray([1.0, 2.0, 3.0], [3]))
+    assert(len(r.data) == 0)
+
+    print("ufuncs self-check: ALL PASS")
+    return 0

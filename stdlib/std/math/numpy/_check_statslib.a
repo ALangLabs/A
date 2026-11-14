@@ -1,0 +1,266 @@
+# Self-check for statslib.a — run: ./build/a run _check_statslib.a
+# Exercises histogram, bincount, percentiles, median, cov/corrcoef,
+# digitize, interp, gradient, trapz, diff, ediff1d, unwrap, windows,
+# meshgrid, diag/tril/triu indices, i0.
+
+from "ndarray.a" import NDArray, zeros, ones, arange, linspace, array_from_list, get, set, tolist, str_arr
+from "statslib.a" import histogram, histogram2d, histogram2d_edges, bincount, percentile, percentile_list, quantile, quantile_list, percentile_axis, quantile_axis, percentile_axis_list, median, median_axis, cov, corrcoef, digitize, interp, interp_scalar, gradient, gradient_axis, trapz, trapz_axis, diff, ediff1d, unwrap, bartlett, blackman, hamming, hann, hanning, kaiser, i0, i0_arr, meshgrid, meshgrid_ij, meshgrid_list, diag_indices, tril_indices, triu_indices
+
+fn _approx(a: f64, b: f64, tol: f64) -> bool:
+    d = abs(a - b)
+    if d < tol:
+        return true
+    if abs(b) > 1.0:
+        return d / abs(b) < tol
+    return false
+
+fn _check(name: str, got: f64, want: f64):
+    if not _approx(got, want, 1e-9):
+        print("FAIL " + name + ": got " + str(got) + " want " + str(want))
+        panic("check failed")
+
+fn _check_arr(name: str, a: NDArray, want: [f64], tol: f64):
+    if len(a.data) != len(want):
+        print("FAIL " + name + ": len " + str(len(a.data)) + " != " + str(len(want)))
+        panic("check failed")
+    for i in 0..len(want):
+        if not _approx(a.data[i], want[i], tol):
+            print("FAIL " + name + "[" + str(i) + "]: got " + str(a.data[i]) + " want " + str(want[i]))
+            panic("check failed")
+
+fn _check_shape(name: str, a: NDArray, want: [i64]):
+    if len(a.shape) != len(want):
+        print("FAIL " + name + " ndim")
+        panic("check failed")
+    for i in 0..len(want):
+        if a.shape[i] != want[i]:
+            print("FAIL " + name + " shape[" + str(i) + "]")
+            panic("check failed")
+
+entry main():
+    # --- histogram: int bins, equal width -------------------------------------
+    # data 0..9 -> 5 bins over [0,9]: edges 0,1.8,...,9 ; counts
+    # values 0,1 -> bin0; 2,3 -> bin1; 4,5 -> bin2; 6,7 -> bin3; 8,9 -> bin4
+    # (v=9 == last edge -> last bin)
+    hres = histogram(arange(0.0, 10.0, 1.0), 5)
+    hist = hres[0]
+    edges = hres[1]
+    _check_arr("hist counts", hist, [2.0, 2.0, 2.0, 2.0, 2.0], 1e-12)
+    _check_shape("hist edges shape", edges, [6])
+    _check("edge0", edges.data[0], 0.0)
+    _check("edge5", edges.data[5], 9.0)
+
+    # explicit edges
+    hres2 = histogram(arange(0.0, 5.0, 1.0), [0.0, 2.0, 4.0, 10.0])
+    # bins [0,2),[2,4),[4,10]: 0,1->b0; 2,3->b1; 4->b2 (4==edge -> bin2? v=4>=e[2]=4 -> b=2)
+    _check_arr("hist expl", hres2[0], [2.0, 2.0, 1.0], 1e-12)
+    _check_shape("hist expl edges", hres2[1], [4])
+
+    # values outside range ignored
+    hres3 = histogram(NDArray([0.5, 1.5, 5.5, 9.5], [4]), 2, [0.0, 5.0])
+    # range [0,5], 2 bins edges 0,2.5,5: 0.5,1.5->b0; 5.5,9.5 ignored... wait 5.5>5 ignore; also nothing in b1? 1.5<2.5 b0. Hmm need a b1 value: use 3.5
+    _check_arr("hist range", hres3[0], [2.0, 0.0], 1e-12)
+
+    # --- histogram2d ----------------------------------------------------------
+    # x = [0,0,1,1], y = [0,1,0,1] over 2x2 bins range [0,2]x[0,2]
+    xd = NDArray([0.0, 0.0, 1.0, 1.0], [4])
+    yd = NDArray([0.0, 1.0, 0.0, 1.0], [4])
+    h2 = histogram2d(xd, yd, 2, [0.0, 2.0, 0.0, 2.0])
+    _check_shape("h2d H", h2[0], [2, 2])
+    # edges x: 0,1,2 ; y: 0,1,2 ; points: (0,0)->(0,0); (0,1)->x bin0? 0<1 -> xb0, y=1 -> yb1
+    # (1,0): x=1 -> xb1, y=0 -> yb0 ; (1,1) -> (1,1)
+    _check_arr("h2d H flat", h2[0], [1.0, 1.0, 1.0, 1.0], 1e-12)
+    h2e = histogram2d_edges(xd, yd, [0.0, 1.0, 2.0], [0.0, 1.0, 2.0])
+    _check_arr("h2d edges H", h2e[0], [1.0, 1.0, 1.0, 1.0], 1e-12)
+
+    # --- bincount ---------------------------------------------------------------
+    bc = bincount(NDArray([0.0, 1.0, 1.0, 3.0, 3.0, 3.0], [6]))
+    _check_arr("bincount", bc, [1.0, 2.0, 0.0, 3.0], 1e-12)
+    bcw = bincount(NDArray([0.0, 1.0, 3.0], [3]), NDArray([10.0, 20.0, 30.0], [3]))
+    _check_arr("bincount w", bcw, [10.0, 20.0, 0.0, 30.0], 1e-12)
+    bcm = bincount(NDArray([2.0], [1]), None, 5)
+    _check_arr("bincount min", bcm, [0.0, 0.0, 1.0, 0.0, 0.0], 1e-12)
+
+    # --- percentile / quantile / median ------------------------------------------
+    xs = arange(0.0, 10.0, 1.0)  # 0..9
+    _check("p50", percentile(xs, 50.0), 4.5)
+    _check("p0", percentile(xs, 0.0), 0.0)
+    _check("p100", percentile(xs, 100.0), 9.0)
+    _check("p25", percentile(xs, 25.0), 2.25)
+    pl = percentile_list(xs, [0.0, 50.0, 100.0])
+    _check_arr("plist", pl, [0.0, 4.5, 9.0], 1e-12)
+    _check("q50", quantile(xs, 0.5), 4.5)
+    ql = quantile_list(xs, [0.0, 1.0])
+    _check_arr("qlist", ql, [0.0, 9.0], 1e-12)
+    _check("median odd", median(NDArray([3.0, 1.0, 2.0], [3])), 2.0)
+    _check("median even", median(NDArray([4.0, 1.0, 3.0, 2.0], [4])), 2.5)
+
+    # axis variants on 2-D [[0,1,2],[3,4,5]] (rows)
+    m2 = array_from_list([[0.0, 1.0, 2.0], [3.0, 4.0, 5.0]])
+    pa = percentile_axis(m2, 50.0, 1)
+    _check_arr("paxis r", pa, [1.0, 4.0], 1e-12)
+    pa0 = percentile_axis(m2, 50.0, 0)
+    _check_arr("paxis c", pa0, [1.5, 2.5, 3.5], 1e-12)
+    qa = quantile_axis(m2, 0.5, 1)
+    _check_arr("qaxis r", qa, [1.0, 4.0], 1e-12)
+    pal = percentile_axis_list(m2, [0.0, 100.0], 1)
+    _check_shape("palist", pal, [2, 2])
+    _check_arr("palist flat", pal, [0.0, 3.0, 2.0, 5.0], 1e-12)
+    ma = median_axis(m2, 1)
+    _check_arr("medaxis", ma, [1.0, 4.0], 1e-12)
+
+    # --- cov / corrcoef -----------------------------------------------------------
+    # x=[0,1,2], y=[0,2,4] -> perfect corr
+    cx = NDArray([0.0, 1.0, 2.0], [3])
+    cy = NDArray([0.0, 2.0, 4.0], [3])
+    cv = cov(cx, cy)
+    _check_shape("cov 1d1d", cv, [2, 2])
+    _check_arr("cov flat", cv, [1.0, 2.0, 2.0, 4.0], 1e-12)
+    cv1 = cov(cx)
+    _check("cov scalar", cv1.data[0], 1.0)
+    cc = corrcoef(cx, cy)
+    _check_arr("corrcoef", cc, [1.0, 1.0, 1.0, 1.0], 1e-9)
+    # 2-D: rows are variables [[0,1,2],[2,4,6]]
+    m3 = array_from_list([[0.0, 1.0, 2.0], [2.0, 4.0, 6.0]])
+    c3 = cov(m3)
+    _check_shape("cov 2d", c3, [2, 2])
+    _check_arr("cov 2d flat", c3, [1.0, 2.0, 2.0, 4.0], 1e-12)
+    cc3 = corrcoef(m3)
+    _check_arr("corrcoef 2d", cc3, [1.0, 1.0, 1.0, 1.0], 1e-9)
+
+    # --- digitize ------------------------------------------------------------------
+    dz = digitize(NDArray([0.5, 1.5, 3.5, 9.5], [4]),
+                  NDArray([0.0, 1.0, 2.5, 4.0, 10.0], [5]))
+    # right=False: bins[i-1] <= x < bins[i]
+    # 0.5 -> i=1; 1.5 -> i=2; 3.5 -> i=3; 9.5 -> i=4
+    _check_arr("digitize", dz, [1.0, 2.0, 3.0, 4.0], 1e-12)
+    dzr = digitize(NDArray([1.0, 2.5], [2]),
+                   NDArray([0.0, 1.0, 2.5, 4.0, 10.0], [5]), true)
+    # right=True: bins[i-1] < x <= bins[i]: 1.0 -> i=1; 2.5 -> i=2
+    _check_arr("digitize right", dzr, [1.0, 2.0], 1e-12)
+    dzd = digitize(NDArray([9.5, 5.5, 0.5], [3]),
+                   NDArray([10.0, 4.0, 2.5, 1.0, 0.0], [5]))
+    # decreasing bins: 9.5 -> 1; 5.5 -> 1; 0.5 -> 4
+    _check_arr("digitize dec", dzd, [1.0, 1.0, 4.0], 1e-12)
+
+    # --- interp ----------------------------------------------------------------------
+    xp = NDArray([0.0, 1.0, 2.0, 3.0], [4])
+    fp = NDArray([0.0, 10.0, 20.0, 30.0], [4])
+    _check("interp_scalar mid", interp_scalar(1.5, xp, fp), 15.0)
+    _check("interp_scalar lo", interp_scalar(-5.0, xp, fp), 0.0)
+    _check("interp_scalar hi", interp_scalar(9.0, xp, fp), 30.0)
+    ia = interp(NDArray([0.5, 2.5], [2]), xp, fp)
+    _check_arr("interp arr", ia, [5.0, 25.0], 1e-12)
+
+    # --- gradient ----------------------------------------------------------------------
+    g1 = gradient(NDArray([0.0, 1.0, 3.0, 6.0], [4]))
+    # edges one-sided, interior central: [1, 1.5, 2.5, 3]
+    _check_arr("grad1", g1, [1.0, 1.5, 2.5, 3.0], 1e-12)
+    gm = gradient_axis(m2, 1)
+    _check_arr("grad2d rows", gm, [1.0, 1.0, 1.0, 1.0, 1.0, 1.0], 1e-12)
+    gm0 = gradient_axis(m2, 0)
+    # columns of [[0,1,2],[3,4,5]]: diffs [3,3,3] both edges & interior
+    _check_arr("grad2d cols", gm0, [3.0, 3.0, 3.0, 3.0, 3.0, 3.0], 1e-12)
+
+    # --- trapz ---------------------------------------------------------------------------
+    _check("trapz 1d", trapz(NDArray([1.0, 2.0, 3.0], [3])), 4.0)
+    _check("trapz x", trapz(NDArray([1.0, 2.0, 3.0], [3]),
+                             NDArray([4.0, 6.0, 8.0], [3])), 8.0)
+    _check("trapz dx", trapz(NDArray([1.0, 2.0, 3.0], [3]), None, 2.0), 8.0)
+    ta = trapz_axis(m2, 1)
+    _check_arr("trapz axis", ta, [2.0, 8.0], 1e-12)
+    ta0 = trapz_axis(m2, 0)
+    _check_arr("trapz axis0", ta0, [1.5, 2.5, 3.5], 1e-12)
+
+    # --- diff / ediff1d --------------------------------------------------------------------
+    d1 = diff(NDArray([1.0, 4.0, 9.0, 16.0], [4]))
+    _check_arr("diff1", d1, [3.0, 5.0, 7.0], 1e-12)
+    d2 = diff(NDArray([1.0, 4.0, 9.0, 16.0], [4]), 2)
+    _check_arr("diff2", d2, [2.0, 2.0], 1e-12)
+    d3 = diff(m2, 1, -1)
+    _check_arr("diff 2d last", d3, [1.0, 1.0, 1.0, 1.0], 1e-12)
+    d4 = diff(m2, 1, 0)
+    _check_shape("diff 2d first shape", d4, [1, 3])
+    _check_arr("diff 2d first", d4, [3.0, 3.0, 3.0], 1e-12)
+    e1 = ediff1d(NDArray([1.0, 2.0, 4.0, 7.0, 0.0], [5]))
+    _check_arr("ediff1d", e1, [1.0, 2.0, 3.0, -7.0], 1e-12)
+    e2 = ediff1d(NDArray([1.0, 3.0], [2]), [88.0, 99.0], [-99.0])
+    _check_arr("ediff1d ends", e2, [-99.0, 2.0, 88.0, 99.0], 1e-12)
+
+    # --- unwrap --------------------------------------------------------------------------------
+    # phase jumps by pi at index 3 -> unwrap gives continuous descent
+    ph = NDArray([0.0, 0.7853981633974483, 1.5707963267948966,
+                  5.497787143782138, 6.283185307179586], [5])
+    uw = unwrap(ph)
+    _check_arr("unwrap", uw, [0.0, 0.7853981633974483, 1.5707963267948966,
+                              -0.7853981633974483, 0.0], 1e-9)
+    uw4 = unwrap(NDArray([0.0, 1.0, 2.0, -1.0, 0.0], [5]), 0.0, 4.0)
+    _check_arr("unwrap p4", uw4, [0.0, 1.0, 2.0, 3.0, 4.0], 1e-9)
+
+    # --- windows -----------------------------------------------------------------------------------
+    bw = bartlett(5)
+    _check_arr("bartlett", bw, [0.0, 0.5, 1.0, 0.5, 0.0], 1e-12)
+    _check_arr("bartlett1", bartlett(1), [1.0], 1e-12)
+    _check_shape("bartlett0", bartlett(0), [0])
+    # hamming(3): 0.54-0.46cos(pi i/2): i=0:0.08, i=1:1.0, i=2:0.08
+    _check_arr("hamming", hamming(3), [0.08, 1.0, 0.08], 1e-12)
+    # hann(3): 0.5-0.5cos(pi i/2): 0,1,0
+    _check_arr("hann", hann(3), [0.0, 1.0, 0.0], 1e-12)
+    _check_arr("hanning alias", hanning(3), [0.0, 1.0, 0.0], 1e-12)
+    # blackman(3): i=1 -> 0.42+0.5+0.08 = 1.0
+    _check_arr("blackman", blackman(3), [0.0, 1.0, 0.0], 1e-12)
+    kw = kaiser(5, 4.0)
+    _check_shape("kaiser", kw, [5])
+    # kaiser symmetric, endpoints equal & < 1
+    _check("kaiser sym", kw.data[0], kw.data[4])
+    if kw.data[2] <= kw.data[0]:
+        print("FAIL kaiser peak")
+        panic("check failed")
+
+    # --- i0 -----------------------------------------------------------------------------------------
+    _check("i0(0)", i0(0.0), 1.0)
+    _check("i0(1)", i0(1.0), 1.2660658777520084)
+    _check("i0(2)", i0(2.0), 2.2795853023360673)
+    _check("i0(3)", i0(3.0), 4.880792585956119)
+    _check("i0(10)", i0(10.0), 2815.716628466254)
+    _check("i0(-1)", i0(-1.0), 1.2660658777520084)
+    i0a = i0_arr(NDArray([0.0, 1.0, 2.0], [3]))
+    _check_arr("i0_arr", i0a, [1.0, 1.2660658777520084, 2.2795853023360673], 1e-9)
+
+    # --- meshgrid --------------------------------------------------------------------------------------
+    mg = meshgrid_list([1.0, 2.0, 3.0], [10.0, 20.0])
+    X = mg[0]
+    Y = mg[1]
+    _check_shape("meshgrid X", X, [2, 3])
+    _check_arr("meshgrid X flat", X, [1.0, 2.0, 3.0, 1.0, 2.0, 3.0], 1e-12)
+    _check_arr("meshgrid Y flat", Y, [10.0, 10.0, 10.0, 20.0, 20.0, 20.0], 1e-12)
+    mgij = meshgrid_ij(NDArray([1.0, 2.0], [2]), NDArray([10.0, 20.0, 30.0], [3]))
+    _check_shape("meshgrid ij X", mgij[0], [2, 3])
+    _check_arr("meshgrid ij X flat", mgij[0], [1.0, 1.0, 1.0, 2.0, 2.0, 2.0], 1e-12)
+    _check_arr("meshgrid ij Y flat", mgij[1], [10.0, 20.0, 30.0, 10.0, 20.0, 30.0], 1e-12)
+
+    # --- index helpers ------------------------------------------------------------------------------------
+    di = diag_indices(3)
+    _check_shape("diag i", di[0], [3, 3])
+    _check_shape("diag j", di[1], [3, 3])
+    _check("diag i[4]", di[0].data[4], 1.0)
+    _check("diag j[1]", di[1].data[1], 1.0)
+    di3 = diag_indices(2, 3)
+    _check_shape("diag3", di3[0], [2, 2, 2])
+    _check("diag3 k2", di3[2].data[7], 1.0)
+
+    tl = tril_indices(3)
+    _check_arr("tril rows", tl[0], [0.0, 1.0, 1.0, 2.0, 2.0, 2.0], 1e-12)
+    _check_arr("tril cols", tl[1], [0.0, 0.0, 1.0, 0.0, 1.0, 2.0], 1e-12)
+    tlk = tril_indices(3, -1)
+    _check_arr("tril k-1 rows", tlk[0], [1.0, 2.0, 2.0], 1e-12)
+    _check_arr("tril k-1 cols", tlk[1], [0.0, 0.0, 1.0], 1e-12)
+    tu = triu_indices(3)
+    _check_arr("triu rows", tu[0], [0.0, 0.0, 0.0, 1.0, 1.0, 2.0], 1e-12)
+    _check_arr("triu cols", tu[1], [0.0, 1.0, 2.0, 1.0, 2.0, 2.0], 1e-12)
+    tum = triu_indices(2, 0, 4)
+    _check_shape("triu m", tum[0], [7])
+    _check_arr("triu m rows", tum[0], [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 1e-12)
+    _check_arr("triu m cols", tum[1], [0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0], 1e-12)
+
+    print("statslib self-check: all passed")

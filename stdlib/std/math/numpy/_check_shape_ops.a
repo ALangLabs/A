@@ -1,0 +1,415 @@
+#
+# Verification for shape_ops.a — expected values computed by hand
+# (cross-checked against NumPy semantics).
+#
+from "shape_ops.a" import expand_dims, squeeze, squeeze_axis, squeeze_all
+from "shape_ops.a" import broadcast_to, broadcast_shapes2, broadcast_shapes_list
+from "shape_ops.a" import stack_list, stack2, concatenate, concatenate2, append
+from "shape_ops.a" import split, split_n, array_split, array_split_n
+from "shape_ops.a" import hsplit, hsplit_idx, vsplit, vsplit_idx, dsplit, dsplit_idx
+from "shape_ops.a" import tile, repeat, repeat_list, roll
+from "shape_ops.a" import flip, fliplr, flipud, rot90
+from "shape_ops.a" import swapaxes, moveaxis, rollaxis, rollaxis0
+from "shape_ops.a" import atleast_1d, atleast_2d, atleast_3d
+from "shape_ops.a" import column_stack, column_stack2, row_stack, row_stack2
+from "shape_ops.a" import dstack, dstack2
+from "shape_ops.a" import tril, triu, fill_diagonal
+from "shape_ops.a" import delete, delete_slice, insert, unique_sorted
+from "ndarray.a" import NDArray, get, size_of, ndim, reshape
+
+fn check(name: str, got: f64, want: f64) -> bool:
+    if got == want:
+        print("ok   " + name)
+        return true
+    else:
+        print("FAIL " + name + " got=" + str(got) + " want=" + str(want))
+        return false
+
+fn check_shape(name: str, a: NDArray, want: [i64]) -> bool:
+    ok = true
+    if len(a.shape) != len(want):
+        print("FAIL " + name + " ndim got=" + str(len(a.shape)) + " want=" + str(len(want)))
+        return false
+    i = 0
+    while i < len(want):
+        if a.shape[i] != want[i]:
+            ok = check(name + " shape[" + str(i) + "]", a.shape[i], want[i]) and ok
+        i = i + 1
+    return ok
+
+entry main():
+    ok = true
+
+    v = NDArray([1.0, 2.0, 3.0, 4.0], [4])
+    m = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+    m2 = NDArray([7.0, 8.0, 9.0, 10.0, 11.0, 12.0], [2, 3])
+    t = NDArray([0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0, 21.0, 22.0, 23.0], [2, 3, 4])
+
+    # --- expand_dims ---
+    e0 = expand_dims(v, 0)
+    ok = check_shape("expand_dims v ax0", e0, [1, 4]) and ok
+    ok = check("expand_dims v ax0 val", get(e0, [0, 2]), 3.0) and ok
+    e1 = expand_dims(m, 1)
+    ok = check_shape("expand_dims m ax1", e1, [2, 1, 3]) and ok
+    ok = check("expand_dims m ax1 val", get(e1, [1, 0, 2]), 6.0) and ok
+    e2 = expand_dims(v, -1)
+    ok = check_shape("expand_dims v ax-1", e2, [4, 1]) and ok
+
+    # --- squeeze ---
+    s1 = squeeze_axis(e1, 1)
+    ok = check_shape("squeeze_axis", s1, [2, 3]) and ok
+    ok = check("squeeze_axis val", get(s1, [1, 2]), 6.0) and ok
+    e3 = expand_dims(expand_dims(m, 0), 2)  # [1,2,1,3]
+    s2 = squeeze_all(e3)
+    ok = check_shape("squeeze_all", s2, [2, 3]) and ok
+    ok = check("squeeze_all val", get(s2, [1, 0]), 4.0) and ok
+    s3 = squeeze(e3, -99)
+    ok = check_shape("squeeze -99", s3, [2, 3]) and ok
+
+    # --- broadcast ---
+    b1 = broadcast_to(NDArray([1.0, 2.0, 3.0], [3]), [2, 3])
+    ok = check_shape("broadcast_to row", b1, [2, 3]) and ok
+    ok = check("broadcast_to row val", get(b1, [1, 1]), 2.0) and ok
+    b2 = broadcast_to(NDArray([5.0], [1]), [2, 3])
+    ok = check("broadcast_to const", get(b2, [1, 2]), 5.0) and ok
+    b3 = broadcast_to(NDArray([7.0], []), [2, 2])
+    ok = check("broadcast_to scalar", get(b3, [1, 1]), 7.0) and ok
+    ok = check_shape("broadcast_to scalar shape", b3, [2, 2]) and ok
+    b4 = broadcast_to(v, [2, 3])  # incompatible: 4 vs 3
+    ok = check("broadcast_to mismatch empty", size_of(b4), 0) and ok
+    bs = broadcast_shapes_list([[1, 3], [3, 1], [1, 1]])
+    ok = check("broadcast_shapes_list len", len(bs), 2) and ok
+    ok = check("broadcast_shapes_list d0", bs[0], 3.0) and ok
+    ok = check("broadcast_shapes_list d1", bs[1], 3.0) and ok
+    bs2 = broadcast_shapes2([2, 3], [3, 1])
+    ok = check("broadcast_shapes2 empty", len(bs2), 0) and ok
+
+    # --- stack ---
+    a13 = NDArray([1.0, 2.0, 3.0], [3])
+    b13 = NDArray([4.0, 5.0, 6.0], [3])
+    st0 = stack_list([a13, b13], 0)
+    ok = check_shape("stack axis0", st0, [2, 3]) and ok
+    ok = check("stack axis0 val", get(st0, [1, 2]), 6.0) and ok
+    st1 = stack2(a13, b13, 1)
+    ok = check_shape("stack2 axis1", st1, [3, 2]) and ok
+    ok = check("stack2 axis1 v00", get(st1, [0, 0]), 1.0) and ok
+    ok = check("stack2 axis1 v02", get(st1, [0, 1]), 4.0) and ok
+    ok = check("stack2 axis1 v12", get(st1, [1, 1]), 5.0) and ok
+    stm = stack_list([m, m2], 0)  # np.stack -> new leading axis: [2,2,3]
+    ok = check_shape("stack m axis0", stm, [2, 2, 3]) and ok
+    ok = check("stack m axis0 val", get(stm, [1, 1, 2]), 12.0) and ok
+    ok = check("stack m axis0 v100", get(stm, [1, 0, 0]), 7.0) and ok
+    stm1 = stack2(m, m2, 1)  # np.stack axis=1 -> [2,2,3]
+    ok = check_shape("stack2 m axis1", stm1, [2, 2, 3]) and ok
+    ok = check("stack2 m axis1 v010", get(stm1, [0, 1, 0]), 7.0) and ok
+    ok = check("stack2 m axis1 v001", get(stm1, [0, 0, 1]), 2.0) and ok
+    ok = check("stack2 m axis1 v112", get(stm1, [1, 1, 2]), 12.0) and ok
+
+    # --- concatenate ---
+    c1 = concatenate([NDArray([1.0, 2.0], [2]), NDArray([3.0, 4.0, 5.0], [3])], 0)
+    ok = check_shape("concat 1d", c1, [5]) and ok
+    ok = check("concat 1d v4", c1.data[4], 5.0) and ok
+    c2 = concatenate2(m, m2, 0)
+    ok = check_shape("concat2 axis0", c2, [4, 3]) and ok
+    ok = check("concat2 axis0 v20", get(c2, [2, 0]), 7.0) and ok
+    c3 = concatenate([m, m2], 1)
+    ok = check_shape("concat axis1", c3, [2, 6]) and ok
+    ok = check("concat axis1 v04", get(c3, [0, 4]), 8.0) and ok
+    ok = check("concat axis1 v13", get(c3, [1, 3]), 10.0) and ok
+    c4 = concatenate([m, m2], -1)
+    ok = check("concat axis-1", get(c4, [1, 5]), 12.0) and ok
+
+    # --- append ---
+    ap1 = append(v, NDArray([9.0, 9.0], [2]), -99)
+    ok = check_shape("append flat", ap1, [6]) and ok
+    ok = check("append flat v4", ap1.data[4], 9.0) and ok
+    ok = check("append flat v5", ap1.data[5], 9.0) and ok
+    ap2 = append(m, NDArray([7.0, 8.0, 9.0], [1, 3]), 0)
+    ok = check_shape("append row", ap2, [3, 3]) and ok
+    ok = check("append row v20", get(ap2, [2, 0]), 7.0) and ok
+    ok = check("append row v22", get(ap2, [2, 2]), 9.0) and ok
+    ok = check("append row v12", get(ap2, [1, 2]), 6.0) and ok
+    ap3 = append(m, NDArray([9.0], []), 0)
+    ok = check("append scalar broadcast", get(ap3, [2, 2]), 9.0) and ok
+    ap4 = append(v, NDArray([9.0], []), -99)
+    ok = check_shape("append scalar flat", ap4, [5]) and ok
+    ok = check("append scalar flat v4", ap4.data[4], 9.0) and ok
+
+    # --- split ---
+    a6 = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6])
+    sp = split(a6, [2, 4], 0)
+    ok = check("split count", len(sp), 3) and ok
+    ok = check("split s0", sp[0].data[1], 2.0) and ok
+    ok = check("split s1", sp[1].data[0], 3.0) and ok
+    ok = check("split s2", sp[2].data[1], 6.0) and ok
+    spn = split_n(a6, 3, 0)
+    ok = check("split_n count", len(spn), 3) and ok
+    ok = check("split_n s1", spn[1].data[0], 3.0) and ok
+    a5 = NDArray([1.0, 2.0, 3.0, 4.0, 5.0], [5])
+    asp = array_split_n(a5, 2, 0)
+    ok = check("array_split_n count", len(asp), 2) and ok
+    ok = check_shape("array_split_n s0", asp[0], [3]) and ok
+    ok = check_shape("array_split_n s1", asp[1], [2]) and ok
+    ok = check("array_split_n s0v", asp[0].data[2], 3.0) and ok
+    ok = check("array_split_n s1v", asp[1].data[0], 4.0) and ok
+    aspi = array_split(a6, [4], 0)
+    ok = check("array_split idx count", len(aspi), 2) and ok
+    ok = check("array_split idx s1", aspi[1].data[0], 5.0) and ok
+    # 2-D axis=1
+    spm = split(m, [1], 1)
+    ok = check("split 2d count", len(spm), 2) and ok
+    ok = check_shape("split 2d s0", spm[0], [2, 1]) and ok
+    ok = check_shape("split 2d s1", spm[1], [2, 2]) and ok
+    ok = check("split 2d s0v", get(spm[0], [1, 0]), 4.0) and ok
+    ok = check("split 2d s1v", get(spm[1], [1, 0]), 5.0) and ok
+    ok = check("split 2d s1v2", get(spm[1], [0, 1]), 3.0) and ok
+
+    # --- hsplit / vsplit / dsplit ---
+    hs = hsplit(m, 2)  # axis 1, dim 3 -> sizes 2,1
+    ok = check("hsplit count", len(hs), 2) and ok
+    ok = check_shape("hsplit s0", hs[0], [2, 2]) and ok
+    ok = check_shape("hsplit s1", hs[1], [2, 1]) and ok
+    ok = check("hsplit s0v", get(hs[0], [1, 1]), 5.0) and ok
+    ok = check("hsplit s1v", get(hs[1], [1, 0]), 6.0) and ok
+    hsi = hsplit_idx(m, [2])
+    ok = check("hsplit_idx s1", get(hsi[1], [0, 0]), 3.0) and ok
+    vs = vsplit(m, 2)  # axis 0, dim 2 -> two rows
+    ok = check("vsplit count", len(vs), 2) and ok
+    ok = check_shape("vsplit s1", vs[1], [1, 3]) and ok
+    ok = check("vsplit s1v", get(vs[1], [0, 2]), 6.0) and ok
+    vsi = vsplit_idx(m, [1])
+    ok = check("vsplit_idx s1", get(vsi[1], [0, 0]), 4.0) and ok
+    tt = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 2, 2])
+    ds = dsplit(tt, 2)  # axis 2 -> two [2,2,1]
+    ok = check("dsplit count", len(ds), 2) and ok
+    ok = check_shape("dsplit s1", ds[1], [2, 2, 1]) and ok
+    ok = check("dsplit s1v", get(ds[1], [1, 1, 0]), 8.0) and ok
+    dsi = dsplit_idx(tt, [1])
+    ok = check("dsplit_idx s1", get(dsi[1], [0, 0, 0]), 2.0) and ok
+    # hsplit on 1-D uses axis 0
+    hs1 = hsplit(a6, 3)
+    ok = check("hsplit 1d", len(hs1), 3) and ok
+    ok = check("hsplit 1d v", hs1[2].data[0], 5.0) and ok
+
+    # --- tile ---
+    ti1 = tile(v, [2])
+    ok = check_shape("tile v x2", ti1, [8]) and ok
+    ok = check("tile v x2 v0", ti1.data[0], 1.0) and ok
+    ok = check("tile v x2 v4", ti1.data[4], 1.0) and ok
+    ok = check("tile v x2 v7", ti1.data[7], 4.0) and ok
+    ti2 = tile(m, [2, 1])
+    ok = check_shape("tile m [2,1]", ti2, [4, 3]) and ok
+    ok = check("tile m v20", get(ti2, [2, 0]), 1.0) and ok
+    ok = check("tile m v32", get(ti2, [3, 2]), 6.0) and ok
+    ti3 = tile(v, [2, 2])  # reps longer than ndim -> shape [2,8]
+    ok = check_shape("tile reps>ndim", ti3, [2, 8]) and ok
+    ok = check("tile reps>ndim v15", get(ti3, [1, 5]), 2.0) and ok
+    ti4 = tile(m, [1, 2])
+    ok = check_shape("tile [1,2]", ti4, [2, 6]) and ok
+    ok = check("tile [1,2] v04", get(ti4, [0, 4]), 2.0) and ok
+    ti5 = tile(m, [2])  # reps left-padded with 1 -> effective [1,2] -> [2,6]
+    ok = check_shape("tile reps<ndim", ti5, [2, 6]) and ok
+    ok = check("tile reps<ndim v04", get(ti5, [0, 4]), 2.0) and ok
+    ok = check("tile reps<ndim v15", get(ti5, [1, 5]), 6.0) and ok
+
+    # --- repeat ---
+    rp1 = repeat(v, 2, -99)
+    ok = check_shape("repeat flat", rp1, [8]) and ok
+    ok = check("repeat flat v0", rp1.data[0], 1.0) and ok
+    ok = check("repeat flat v2", rp1.data[2], 2.0) and ok
+    ok = check("repeat flat v7", rp1.data[7], 4.0) and ok
+    rp2 = repeat(m, 2, 0)
+    ok = check_shape("repeat axis0", rp2, [4, 3]) and ok
+    ok = check("repeat axis0 v20", get(rp2, [2, 0]), 4.0) and ok
+    ok = check("repeat axis0 v12", get(rp2, [1, 2]), 3.0) and ok
+    rp3 = repeat_list(v, [1, 3, 0, 2], 0)
+    ok = check_shape("repeat_list", rp3, [6]) and ok
+    ok = check("repeat_list v0", rp3.data[0], 1.0) and ok
+    ok = check("repeat_list v1", rp3.data[1], 2.0) and ok
+    ok = check("repeat_list v3", rp3.data[3], 2.0) and ok
+    ok = check("repeat_list v4", rp3.data[4], 4.0) and ok
+    ok = check("repeat_list v5", rp3.data[5], 4.0) and ok
+    rp4 = repeat(m, 2, 1)
+    ok = check_shape("repeat axis1", rp4, [2, 6]) and ok
+    ok = check("repeat axis1 v03", get(rp4, [0, 3]), 2.0) and ok
+    ok = check("repeat axis1 v15", get(rp4, [1, 5]), 6.0) and ok
+
+    # --- roll ---
+    ro1 = roll(v, 1, -99)
+    ok = check_shape("roll flat", ro1, [4]) and ok
+    ok = check("roll flat v0", ro1.data[0], 4.0) and ok
+    ok = check("roll flat v1", ro1.data[1], 1.0) and ok
+    ro2 = roll(v, -1, -99)
+    ok = check("roll flat neg v0", ro2.data[0], 2.0) and ok
+    ro3 = roll(m, 1, 0)
+    ok = check("roll axis0 v00", get(ro3, [0, 0]), 4.0) and ok
+    ok = check("roll axis0 v12", get(ro3, [1, 2]), 3.0) and ok
+    ro4 = roll(m, 1, 1)
+    ok = check("roll axis1 v00", get(ro4, [0, 0]), 3.0) and ok
+    ok = check("roll axis1 v12", get(ro4, [1, 2]), 5.0) and ok
+    ro5 = roll(m, -1, 1)
+    ok = check("roll axis1 neg v00", get(ro5, [0, 0]), 2.0) and ok
+
+    # --- flip / rot90 ---
+    f1 = flip(v, -99)
+    ok = check("flip flat v0", f1.data[0], 4.0) and ok
+    ok = check("flip flat v3", f1.data[3], 1.0) and ok
+    f2 = flipud(m)
+    ok = check("flipud v00", get(f2, [0, 0]), 4.0) and ok
+    ok = check("flipud v11", get(f2, [1, 1]), 2.0) and ok
+    f3 = fliplr(m)
+    ok = check("fliplr v00", get(f3, [0, 0]), 3.0) and ok
+    ok = check("fliplr v12", get(f3, [1, 2]), 4.0) and ok
+    f4 = flip(m, -99)
+    ok = check("flip all v00", get(f4, [0, 0]), 6.0) and ok
+    ok = check("flip all v11", get(f4, [1, 1]), 2.0) and ok
+    f5 = flip(m, 1)
+    ok = check("flip ax1", get(f5, [0, 0]), 3.0) and ok
+    r1 = rot90(m, 1)
+    ok = check_shape("rot90 shape", r1, [3, 2]) and ok
+    ok = check("rot90 v00", get(r1, [0, 0]), 3.0) and ok
+    ok = check("rot90 v01", get(r1, [0, 1]), 6.0) and ok
+    ok = check("rot90 v20", get(r1, [2, 0]), 1.0) and ok
+    ok = check("rot90 v21", get(r1, [2, 1]), 4.0) and ok
+    r2 = rot90(m, 2)
+    ok = check("rot90 k2 v00", get(r2, [0, 0]), 6.0) and ok
+    ok = check("rot90 k2 v02", get(r2, [0, 2]), 4.0) and ok
+    r3 = rot90(m, -1)
+    ok = check("rot90 k-1 v00", get(r3, [0, 0]), 4.0) and ok
+    ok = check("rot90 k-1 v21", get(r3, [2, 1]), 3.0) and ok
+    r4 = rot90(m, 4)
+    ok = check("rot90 k4 identity", get(r4, [1, 2]), 6.0) and ok
+
+    # --- swapaxes / moveaxis / rollaxis ---
+    sw = swapaxes(t, 0, 2)
+    ok = check_shape("swapaxes", sw, [4, 3, 2]) and ok
+    ok = check("swapaxes v321", get(sw, [3, 2, 1]), 23.0) and ok
+    ok = check("swapaxes v000", get(sw, [0, 0, 0]), 0.0) and ok
+    sw2 = swapaxes(t, 0, 0)
+    ok = check("swapaxes same", get(sw2, [1, 2, 3]), 23.0) and ok
+    mv = moveaxis(t, 0, 2)
+    ok = check_shape("moveaxis 0->2", mv, [3, 4, 2]) and ok
+    ok = check("moveaxis v231", get(mv, [2, 3, 1]), 23.0) and ok
+    mv2 = moveaxis(t, 2, 0)
+    ok = check_shape("moveaxis 2->0", mv2, [4, 2, 3]) and ok
+    ra = rollaxis(t, 0, 2)
+    ok = check("rollaxis 0->2", get(ra, [2, 3, 1]), 23.0) and ok
+    ra0 = rollaxis0(t, 2)
+    ok = check("rollaxis0 2->0", get(ra0, [3, 1, 2]), 23.0) and ok
+
+    # --- atleast_* ---
+    sc = NDArray([5.0], [])
+    a1 = atleast_1d(sc)
+    ok = check_shape("atleast_1d scalar", a1, [1]) and ok
+    ok = check("atleast_1d scalar v", a1.data[0], 5.0) and ok
+    a2 = atleast_2d(sc)
+    ok = check_shape("atleast_2d scalar", a2, [1, 1]) and ok
+    a3 = atleast_3d(sc)
+    ok = check_shape("atleast_3d scalar", a3, [1, 1, 1]) and ok
+    b2 = atleast_2d(v)
+    ok = check_shape("atleast_2d 1d", b2, [1, 4]) and ok
+    ok = check("atleast_2d 1d v", get(b2, [0, 3]), 4.0) and ok
+    b3 = atleast_3d(v)
+    ok = check_shape("atleast_3d 1d", b3, [1, 4, 1]) and ok
+    c3 = atleast_3d(m)
+    ok = check_shape("atleast_3d 2d", c3, [2, 3, 1]) and ok
+    ok = check("atleast_3d 2d v", get(c3, [1, 2, 0]), 6.0) and ok
+
+    # --- column_stack / row_stack / dstack ---
+    cs = column_stack([a13, b13])
+    ok = check_shape("column_stack", cs, [3, 2]) and ok
+    ok = check("column_stack v00", get(cs, [0, 0]), 1.0) and ok
+    ok = check("column_stack v21", get(cs, [2, 1]), 6.0) and ok
+    cs2 = column_stack2(a13, b13)
+    ok = check("column_stack2 v11", get(cs2, [1, 1]), 5.0) and ok
+    cs3 = column_stack([m, m2])
+    ok = check_shape("column_stack 2d", cs3, [2, 6]) and ok
+    ok = check("column_stack 2d v05", get(cs3, [0, 5]), 9.0) and ok
+    rs = row_stack([a13, b13])
+    ok = check_shape("row_stack", rs, [2, 3]) and ok
+    ok = check("row_stack v12", get(rs, [1, 2]), 6.0) and ok
+    rs2 = row_stack2(m, m2)
+    ok = check_shape("row_stack2", rs2, [4, 3]) and ok
+    ok = check("row_stack2 v32", get(rs2, [3, 2]), 12.0) and ok
+    ds = dstack([a13, b13])
+    ok = check_shape("dstack 1d", ds, [1, 3, 2]) and ok
+    ok = check("dstack 1d v021", get(ds, [0, 2, 1]), 6.0) and ok
+    ok = check("dstack 1d v000", get(ds, [0, 0, 0]), 1.0) and ok
+    ds2 = dstack([m, m2])
+    ok = check_shape("dstack 2d", ds2, [2, 3, 2]) and ok
+    ok = check("dstack 2d v001", get(ds2, [0, 0, 1]), 7.0) and ok
+    ok = check("dstack 2d v120", get(ds2, [1, 2, 0]), 6.0) and ok
+
+    # --- tril / triu / fill_diagonal ---
+    tl = tril(m, 0)
+    ok = check("tril v01", get(tl, [0, 1]), 0.0) and ok
+    ok = check("tril v10", get(tl, [1, 0]), 4.0) and ok
+    ok = check("tril v11", get(tl, [1, 1]), 5.0) and ok
+    tu = triu(m, 0)
+    ok = check("triu v10", get(tu, [1, 0]), 0.0) and ok
+    ok = check("triu v12", get(tu, [0, 2]), 3.0) and ok
+    tl1 = tril(m, 1)
+    ok = check("tril k1 v02", get(tl1, [0, 2]), 0.0) and ok
+    ok = check("tril k1 v12", get(tl1, [1, 2]), 6.0) and ok
+    tu1 = triu(m, -1)
+    ok = check("triu k-1 v00", get(tu1, [0, 0]), 0.0) and ok
+    ok = check("triu k-1 v12", get(tu1, [1, 2]), 6.0) and ok
+    ok = check("triu k-1 v11", get(tu1, [1, 1]), 0.0) and ok
+    fd = fill_diagonal(m, 9.0)
+    ok = check("fill_diag v00", get(fd, [0, 0]), 9.0) and ok
+    ok = check("fill_diag v11", get(fd, [1, 1]), 9.0) and ok
+    ok = check("fill_diag v01", get(fd, [0, 1]), 2.0) and ok
+    ok = check("fill_diag orig unchanged", get(m, [0, 0]), 1.0) and ok
+
+    # --- delete / insert ---
+    d1 = delete(v, [1, 3], 0)
+    ok = check_shape("delete 1d", d1, [2]) and ok
+    ok = check("delete 1d v0", d1.data[0], 1.0) and ok
+    ok = check("delete 1d v1", d1.data[1], 3.0) and ok
+    d2 = delete(m, [0], 0)
+    ok = check_shape("delete row", d2, [1, 3]) and ok
+    ok = check("delete row v02", get(d2, [0, 2]), 6.0) and ok
+    d3 = delete(m, [1], 1)
+    ok = check_shape("delete col", d3, [2, 2]) and ok
+    ok = check("delete col v01", get(d3, [0, 1]), 3.0) and ok
+    ok = check("delete col v11", get(d3, [1, 1]), 6.0) and ok
+    d4 = delete(v, [0], -99)
+    ok = check_shape("delete flat", d4, [3]) and ok
+    ok = check("delete flat v0", d4.data[0], 2.0) and ok
+    d5 = delete_slice(v, 1, 3, 0)
+    ok = check_shape("delete_slice", d5, [2]) and ok
+    ok = check("delete_slice v1", d5.data[1], 4.0) and ok
+    i1 = insert(v, 2, NDArray([9.0, 9.0], [2]), 0)
+    ok = check_shape("insert 1d", i1, [6]) and ok
+    ok = check("insert 1d v2", i1.data[2], 9.0) and ok
+    ok = check("insert 1d v4", i1.data[4], 3.0) and ok
+    ok = check("insert 1d v5", i1.data[5], 4.0) and ok
+    i2 = insert(m, 1, NDArray([7.0, 8.0, 9.0], [1, 3]), 0)
+    ok = check_shape("insert row", i2, [3, 3]) and ok
+    ok = check("insert row v10", get(i2, [1, 0]), 7.0) and ok
+    ok = check("insert row v22", get(i2, [2, 2]), 6.0) and ok
+    i3 = insert(v, 1, NDArray([9.0], []), -99)
+    ok = check_shape("insert flat", i3, [5]) and ok
+    ok = check("insert flat v1", i3.data[1], 9.0) and ok
+    ok = check("insert flat v2", i3.data[2], 2.0) and ok
+    i4 = insert(m, 1, NDArray([0.0], []), 1)
+    ok = check_shape("insert scalar col", i4, [2, 4]) and ok
+    ok = check("insert scalar col v01", get(i4, [0, 1]), 0.0) and ok
+    ok = check("insert scalar col v02", get(i4, [0, 2]), 2.0) and ok
+    ok = check("insert scalar col v13", get(i4, [1, 3]), 6.0) and ok
+
+    # --- unique_sorted ---
+    u1 = unique_sorted(NDArray([3.0, 1.0, 2.0, 1.0, 3.0, 2.0, 1.0], [7]))
+    ok = check_shape("unique_sorted", u1, [3]) and ok
+    ok = check("unique_sorted v0", u1.data[0], 1.0) and ok
+    ok = check("unique_sorted v1", u1.data[1], 2.0) and ok
+    ok = check("unique_sorted v2", u1.data[2], 3.0) and ok
+    u2 = unique_sorted(m)
+    ok = check("unique_sorted 2d size", size_of(u2), 6) and ok
+    ok = check("unique_sorted 2d v5", u2.data[5], 6.0) and ok
+
+    if ok:
+        print("ALL PASS")
+    else:
+        print("SOME FAILED")
+        assert(false)

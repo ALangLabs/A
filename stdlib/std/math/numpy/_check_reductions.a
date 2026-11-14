@@ -1,0 +1,138 @@
+# Check for reductions.a — hand-computed NumPy-equivalent values.
+# Run: ./build/a run stdlib/std/math/numpy/_check_reductions.a   (exit 0 = pass)
+from "ndarray.a" import NDArray, eye
+from "reductions.a" import sum, nansum, prod, mean, nanmean, var, nanvar, std, nanstd, min, nanmin, max, nanmax, sum_all, prod_all, mean_all, var_all, std_all, min_all, max_all, nansum_all, nanmean_all, nanvar_all, nanstd_all, nanmin_all, nanmax_all, argmin, argmax, argmin_all, argmax_all, ptp, ptp_all, cumsum, cumprod, cumsum_flat, cumprod_flat, trace, average, average_w, average_w_flat
+
+nan = pow(-1.0, 0.5)
+
+fn _approx(a: f64, b: f64, eps: f64) -> bool:
+    d = a - b
+    if d < 0:
+        d = -d
+    return d <= eps
+
+fn _assert_arr_eq(got: NDArray, want_data: [f64], want_shape: [i64], name: str):
+    assert(got.shape == want_shape, name + " shape got " + str(got.shape) + " want " + str(want_shape))
+    assert(len(got.data) == len(want_data), name + " len")
+    i = 0
+    while i < len(want_data):
+        assert(_approx(got.data[i], want_data[i], 1e-9), name + " data[" + str(i) + "] got " + str(got.data[i]) + " want " + str(want_data[i]))
+        i = i + 1
+
+fn _assert_scalar(v: f64, want: f64, name: str):
+    assert(_approx(v, want, 1e-9), name + " got " + str(v) + " want " + str(want))
+
+fn _assert_nan(v: f64, name: str):
+    assert(v != v, name + " expected NaN got " + str(v))
+
+# 1-D fixtures
+a1 = NDArray([1.0, 2.0, 3.0, 4.0], [4])
+# 2-D fixture
+m = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+
+# --- sum / prod ---------------------------------------------------------------
+_assert_arr_eq(sum(a1, 0), [10.0], [], "sum 1d axis0")
+_assert_arr_eq(sum(a1, -1), [10.0], [], "sum 1d axis-1")
+_assert_arr_eq(sum(m, -1), [6.0, 15.0], [2], "sum 2d axis-1")
+_assert_arr_eq(sum(m, 0), [5.0, 7.0, 9.0], [3], "sum 2d axis0")
+_assert_scalar(sum_all(m), 21.0, "sum_all")
+_assert_arr_eq(prod(a1, 0), [24.0], [], "prod 1d")
+_assert_arr_eq(prod(m, -1), [6.0, 120.0], [2], "prod 2d axis-1")
+_assert_scalar(prod_all(m), 720.0, "prod_all")
+
+# --- mean / var / std ------------------------------------------------------------
+_assert_arr_eq(mean(m, -1), [2.0, 5.0], [2], "mean 2d axis-1")
+_assert_arr_eq(mean(m, 0), [2.5, 3.5, 4.5], [3], "mean 2d axis0")
+_assert_scalar(mean_all(m), 3.5, "mean_all")
+_assert_scalar(mean_all(a1), 2.5, "mean_all 1d")
+_assert_arr_eq(var(m, 0), [2.25, 2.25, 2.25], [3], "var 2d axis0")
+_assert_scalar(var_all(a1), 1.25, "var_all 1d")
+_assert_scalar(var_all(m), 35.0 / 12.0, "var_all 2d")
+_assert_scalar(std_all(a1), sqrt(1.25), "std_all 1d")
+_assert_arr_eq(std(m, -1), [sqrt(2.0 / 3.0), sqrt(2.0 / 3.0)], [2], "std 2d axis-1")
+# std(m,-1): row [1,2,3] mean 2 -> var (1+0+1)/3 = 2/3
+
+# --- min / max --------------------------------------------------------------------
+_assert_arr_eq(min(m, -1), [1.0, 4.0], [2], "min 2d axis-1")
+_assert_arr_eq(max(m, 0), [4.0, 5.0, 6.0], [3], "max 2d axis0")
+_assert_scalar(min_all(m), 1.0, "min_all")
+_assert_scalar(max_all(m), 6.0, "max_all")
+_assert_scalar(min_all(a1), 1.0, "min_all 1d")
+_assert_scalar(max_all(a1), 4.0, "max_all 1d")
+
+# --- argmin / argmax ---------------------------------------------------------------
+_assert_arr_eq(argmin(m, -1), [0.0, 0.0], [2], "argmin 2d axis-1")
+_assert_arr_eq(argmax(m, 0), [1.0, 1.0, 1.0], [3], "argmax 2d axis0")
+assert(argmin_all(m) == 0, "argmin_all")
+assert(argmax_all(m) == 5, "argmax_all")
+# ties: first occurrence wins
+tie = NDArray([5.0, 1.0, 1.0, 2.0], [4])
+_assert_arr_eq(argmin(tie, 0), [1.0], [], "argmin tie first")
+_assert_arr_eq(argmax(tie, 0), [0.0], [], "argmax tie first")
+
+# --- ptp ---------------------------------------------------------------------------
+_assert_arr_eq(ptp(m, -1), [2.0, 2.0], [2], "ptp 2d axis-1")
+_assert_arr_eq(ptp(m, 0), [3.0, 3.0, 3.0], [3], "ptp 2d axis0")
+_assert_scalar(ptp_all(m), 5.0, "ptp_all")
+
+# --- cumsum / cumprod ---------------------------------------------------------------
+_assert_arr_eq(cumsum(a1, -1), [1.0, 3.0, 6.0, 10.0], [4], "cumsum 1d")
+_assert_arr_eq(cumprod(a1, -1), [1.0, 2.0, 6.0, 24.0], [4], "cumprod 1d")
+_assert_arr_eq(cumsum(m, -1), [1.0, 3.0, 6.0, 4.0, 9.0, 15.0], [2, 3], "cumsum 2d axis-1")
+_assert_arr_eq(cumsum(m, 0), [1.0, 2.0, 3.0, 5.0, 7.0, 9.0], [2, 3], "cumsum 2d axis0")
+_assert_arr_eq(cumprod(m, -1), [1.0, 2.0, 6.0, 4.0, 20.0, 120.0], [2, 3], "cumprod 2d axis-1")
+_assert_arr_eq(cumsum_flat(m), [1.0, 3.0, 6.0, 10.0, 15.0, 21.0], [6], "cumsum_flat")
+_assert_arr_eq(cumprod_flat(m), [1.0, 2.0, 6.0, 24.0, 120.0, 720.0], [6], "cumprod_flat")
+# input must not be mutated
+_assert_arr_eq(m, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3], "m unchanged")
+
+# --- trace ---------------------------------------------------------------------------
+_assert_scalar(trace(eye(3)), 3.0, "trace eye3")
+_assert_scalar(trace(NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])), 5.0, "trace 2x2")
+_assert_scalar(trace(NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])), 6.0, "trace 2x3")  # 1 + 5
+
+# --- average ---------------------------------------------------------------------------
+_assert_scalar(average(a1), 2.5, "average 1d")
+_assert_scalar(average(m), 3.5, "average 2d")
+w_m = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+_assert_scalar(average_w(m, w_m), (1.0 + 4.0 + 9.0 + 16.0 + 25.0 + 36.0) / 21.0, "average_w")
+_assert_scalar(average_w_flat(a1, [1.0, 0.0, 0.0, 0.0]), 1.0, "average_w_flat")
+_assert_nan(average_w_flat(a1, [0.0, 0.0, 0.0, 0.0]), "average_w zero weights")
+
+# --- NaN handling ---------------------------------------------------------------------
+an = NDArray([1.0, nan, 3.0], [3])
+_assert_arr_eq(nansum(an, 0), [4.0], [], "nansum")
+_assert_scalar(nansum_all(an), 4.0, "nansum_all")
+_assert_arr_eq(nanmean(an, 0), [2.0], [], "nanmean")
+_assert_scalar(nanmean_all(an), 2.0, "nanmean_all")
+_assert_arr_eq(nanvar(an, 0), [1.0], [], "nanvar")   # [1,3] -> mean 2, var 1
+_assert_arr_eq(nanstd(an, 0), [1.0], [], "nanstd")
+_assert_scalar(nanvar_all(an), 1.0, "nanvar_all")
+_assert_arr_eq(nanmin(an, 0), [1.0], [], "nanmin")
+_assert_scalar(nanmin_all(an), 1.0, "nanmin_all")
+_assert_arr_eq(nanmax(an, 0), [3.0], [], "nanmax")
+_assert_scalar(nanmax_all(an), 3.0, "nanmax_all")
+# nan axis version on 2-D
+mn = NDArray([1.0, nan, 3.0, 4.0, 5.0, 6.0], [2, 3])
+_assert_arr_eq(nansum(mn, -1), [4.0, 15.0], [2], "nansum 2d axis-1")
+_assert_arr_eq(nanmin(mn, -1), [1.0, 4.0], [2], "nanmin 2d axis-1")
+# plain reductions do NOT skip NaN; note A float arithmetic maps NaN
+# operands to +inf (NaN is only detectable via v != v), so the result is
+# non-finite rather than NaN — a documented deviation from NumPy.
+assert(sum_all(an) > 1e307, "sum_all with nan should be non-finite")
+assert(mean_all(an) > 1e307, "mean_all with nan should be non-finite")
+
+# --- 3-D axis reduction -----------------------------------------------------------------
+c = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 2, 2])
+# out[i,k] = in[i,0,k] + in[i,1,k] -> [[4,6],[12,14]] shape [2,2]
+_assert_arr_eq(sum(c, 1), [4.0, 6.0, 12.0, 14.0], [2, 2], "sum 3d axis1")
+# sum over last axis of [2,2,2] -> shape [2,2]: [[3,7],[11,15]]
+_assert_arr_eq(sum(c, -1), [3.0, 7.0, 11.0, 15.0], [2, 2], "sum 3d axis-1")
+
+# --- empty / edge cases -------------------------------------------------------------------
+e = NDArray([], [0])
+_assert_scalar(sum_all(e), 0.0, "sum_all empty")
+_assert_scalar(prod_all(e), 1.0, "prod_all empty")
+_assert_nan(min_all(e), "min_all empty")
+
+print("reductions check: all assertions passed")

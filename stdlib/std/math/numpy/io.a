@@ -1,0 +1,383 @@
+#
+# numpy.io — text/binary-adjacent IO for NDArray (NumPy `numpy.io` subset).
+#
+# Scope notes / deviations from NumPy:
+#   * dtype is f64 only; there are no object arrays, structured dtypes,
+#     Fortran order, or memmap.
+#   * `.npy`/`.npz` binary format is NOT implemented (it is a binary
+#     header+payload format and A has no f64 bitcast builtin). `save` /
+#     `load` below use a documented *text* container instead — they are
+#     NOT np.save/np.load compatible. Use savetxt/loadtxt for plain
+#     delimited text and tofile/fromfile for flat dumps.
+#   * `tobytes` returns a canonical *text* serialization (str), not raw
+#     C-order bytes — there is no way to extract f64 bits in pure A.
+#     `ndarray_to_bytes` wraps it in a `Bytes` value (UTF-8 of that text).
+#   * `fromregex` is not implemented (would need the regex engine wired
+#     to per-field converters); `genfromtxt` covers the common case.
+#   * `set_printoptions`/global print state is skipped by design.
+#   * `usecols`/`dtype`/`converters`/`encoding` parameters are not
+#     supported; `loadtxt_cols` covers the usecols case.
+#   * fmt strings are passed through the language's `%`-format operator
+#     (printf-style %[flags][width][.precision]conv for f/e/g etc.), so
+#     "%.18e", "%.6f", "%g", "%10.3e" all work like NumPy's fmt.
+#
+# Requires sibling `ndarray.a` (same directory).
+
+from "ndarray.a" import NDArray, array2string
+
+# --- small helpers ------------------------------------------------------------
+
+fn _shape_size(shape: [i64]) -> i64:
+    n = 1
+    for d in shape:
+        n = n * d
+    return n
+
+# rows x cols view of the flat buffer. ndim<=1 -> column vector (one value
+# per row); ndim>=2 -> (shape[0], size/shape[0]); ndim==0 -> 1x1.
+# Higher dims are flattened to 2-D (documented deviation).
+fn _rows_cols(a: NDArray) -> [i64]:
+    if len(a.shape) == 0:
+        return [1, 1]
+    if len(a.shape) == 1:
+        return [a.shape[0], 1]
+    rows = a.shape[0]
+    cols = a.size() // rows
+    return [rows, cols]
+
+fn _fmt_num(v: f64, fmt: str) -> str:
+    # NumPy fmt is a printf-style format string per column. A's `%`
+    # operator on strings implements the C subset incl. f/e/g precisions.
+    if fmt.contains("%"):
+        return fmt % v
+    return str(v)
+
+# --- savetxt ------------------------------------------------------------------
+
+fn savetxt(fname: str, a: NDArray, fmt: str = "%g", delimiter: str = " ") -> str:
+    """Write `a` to `fname` as delimited text (NumPy savetxt subset).
+    1-D arrays write one value per line; >=2-D write one row per line.
+    Returns the text written (NumPy returns None — deviation, useful for
+    tests)."""
+    rc = _rows_cols(a)
+    rows = rc[0]
+    cols = rc[1]
+    lines = []
+    for i in 0..rows:
+        parts = []
+        for j in 0..cols:
+            parts.append(_fmt_num(a.data[i * cols + j], fmt))
+        lines.append(delimiter.join(parts))
+    text = "\n".join(lines) + "\n"
+    write_file(fname, text)
+    return text
+
+# --- text table parsing ---------------------------------------------------------
+
+fn _tokens_of(line: str, delimiter: str) -> [str]:
+    # delimiter " " means "any whitespace run" (NumPy's default).
+    if delimiter == " " or delimiter == "":
+        return line.split()
+    raw = line.split(delimiter)
+    out = []
+    for t in raw:
+        tt = t.strip()
+        if len(tt) > 0:
+            out.append(tt)
+    return out
+
+# Charset for numeric tokens: digits, sign/exponent markers, and the
+# letters appearing in nan/inf/infinity. Hex floats (0x..) are treated
+# as non-numeric (float() wouldn't parse them portably anyway).
+_NUM_CHARS = "0123456789+-.eE" + "nNiIfFtTyY"
+_NUM_PREFIX = "+-.0123456789nNiI"
+
+fn _looks_numeric(t: str) -> bool:
+    # Cheap shape check before float(): must start like a number and use
+    # only numeric characters, so genfromtxt can map junk -> NaN without
+    # tripping float()'s panic.
+    if len(t) == 0:
+        return false
+    cs = t.chars()
+    if not _NUM_PREFIX.contains(str(cs[0])):
+        return false
+    ndot = 0
+    nexp = 0
+    for c in cs:
+        ch = str(c)
+        if not _NUM_CHARS.contains(ch):
+            return false
+        if ch == ".":
+            ndot = ndot + 1
+        if ch == "e" or ch == "E":
+            nexp = nexp + 1
+    # reject obvious malformations like "1.2.3" / "1e2e3" before float()
+    return ndot <= 1 and nexp <= 1
+
+fn _token_float(t: str, strict: bool) -> f64:
+    if _looks_numeric(t):
+        return float(t)
+    if strict:
+        panic("loadtxt: could not convert string to float: '" + t + "'")
+    return float("nan")
+
+# Read a delimited table into rows of [f64]. strict=true -> ragged rows and
+# bad tokens panic (loadtxt); strict=false -> pad with nan / nan for bad
+# tokens (genfromtxt).
+fn _read_table(fname: str, delimiter: str, skiprows: i64, comments: str, strict: bool) -> [[f64]]:
+    text = read_file(fname)
+    lines = text.split("\n")
+    rows = []
+    li = 0
+    for line in lines:
+        if li < skiprows:
+            li = li + 1
+            continue
+        li = li + 1
+        s = line.strip()
+        if len(s) == 0:
+            continue
+        if len(comments) > 0:
+            idx = s.find(comments)
+            if idx == 0:
+                continue
+            if idx > 0:
+                s = s[0..idx].strip()
+                if len(s) == 0:
+                    continue
+        toks = _tokens_of(s, delimiter)
+        if len(toks) == 0:
+            continue
+        row = []
+        for t in toks:
+            row.append(_token_float(t, strict))
+        rows.append(row)
+    # ragged handling
+    if len(rows) == 0:
+        return rows
+    maxcols = 0
+    for r in rows:
+        if len(r) > maxcols:
+            maxcols = len(r)
+    if strict:
+        want = len(rows[0])
+        for r in rows:
+            if len(r) != want:
+                panic("loadtxt: row has wrong number of columns")
+        return rows
+    # genfromtxt: pad short rows with nan
+    out = []
+    for r in rows:
+        while len(r) < maxcols:
+            r.append(float("nan"))
+        out.append(r)
+    return out
+
+fn _rows_to_ndarray(rows: [[f64]]) -> NDArray:
+    nrows = len(rows)
+    if nrows == 0:
+        return NDArray([], [0])
+    ncols = len(rows[0])
+    if nrows == 1 and ncols == 1:
+        return NDArray([rows[0][0]], [])
+    if ncols == 1:
+        data = []
+        for r in rows:
+            data.append(r[0])
+        return NDArray(data, [nrows])
+    if nrows == 1:
+        data = []
+        for v in rows[0]:
+            data.append(v)
+        return NDArray(data, [ncols])
+    data = []
+    for r in rows:
+        for v in r:
+            data.append(v)
+    return NDArray(data, [nrows, ncols])
+
+fn _load_table(fname: str, delimiter: str, skiprows: i64, comments: str, strict: bool) -> NDArray:
+    return _rows_to_ndarray(_read_table(fname, delimiter, skiprows, comments, strict))
+
+# --- loadtxt ------------------------------------------------------------------
+
+fn loadtxt(fname: str, delimiter: str = " ", skiprows: i64 = 0, comments: str = "#") -> NDArray:
+    """Read whitespace/delimiter-separated floats (NumPy loadtxt subset).
+    Skips blank lines and `#` comments (inline comments stripped too).
+    dtype is always f64; shape is squeezed like NumPy (single row/column
+    -> 1-D, single value -> 0-d)."""
+    return _load_table(fname, delimiter, skiprows, comments, true)
+
+fn loadtxt_delim(fname: str, delimiter: str) -> NDArray:
+    """loadtxt with an explicit delimiter (NumPy loadtxt(delimiter=...))."""
+    return loadtxt(fname, delimiter, 0, "#")
+
+fn loadtxt_cols(fname: str, delimiter: str, skiprows: i64, usecols: [i64]) -> NDArray:
+    """loadtxt restricted to `usecols` column indices (NumPy usecols=...).
+    Indices are 0-based (NumPy accepts 0-based ints too)."""
+    rows = _read_table(fname, delimiter, skiprows, "#", true)
+    out = []
+    for r in rows:
+        nr = []
+        for c in usecols:
+            nr.append(r[c])
+        out.append(nr)
+    return _rows_to_ndarray(out)
+
+# --- fromstring / fromfile -------------------------------------------------------
+
+fn fromstring(s: str, sep: str = " ") -> NDArray:
+    """Parse numbers separated by `sep` into a 1-D NDArray (NumPy
+    fromstring subset; sep="" binary mode unsupported)."""
+    if sep == "":
+        panic("fromstring: binary sep='' mode is not supported")
+    toks = _tokens_of(s.strip(), sep)
+    data = []
+    for t in toks:
+        data.append(_token_float(t, true))
+    return NDArray(data, [len(data)])
+
+fn frombuffer(buf: str) -> NDArray:
+    """Alias of fromstring — accepts the canonical text form produced by
+    tobytes (NOT raw binary buffers; see module header)."""
+    return fromstring(buf, " ")
+
+fn tofile(a: NDArray, fname: str) -> str:
+    """Write flattened C-order data, one '%.17g' value per line (text;
+    NumPy tofile writes raw bytes — deviation, see header)."""
+    parts = []
+    for v in a.data:
+        parts.append("%.17g" % v)
+    text = "\n".join(parts) + "\n"
+    write_file(fname, text)
+    return text
+
+fn fromfile(fname: str) -> NDArray:
+    """Read whitespace-separated floats into a 1-D NDArray (inverse of
+    tofile; NumPy fromfile preserves no shape for text either)."""
+    return fromstring(read_file(fname), " ")
+
+# --- genfromtxt ---------------------------------------------------------------
+
+fn genfromtxt(fname: str, delimiter: str = " ", skiprows: i64 = 0, comments: str = "#") -> NDArray:
+    """Like loadtxt but tolerant: unparseable/missing fields become NaN
+    and ragged rows are padded with NaN (NumPy genfromtxt subset with
+    missing_values='' / filling_values=nan defaults)."""
+    return _load_table(fname, delimiter, skiprows, comments, false)
+
+# --- repr / str -----------------------------------------------------------------
+
+# Bracketed body "[[..],\n [..]]" style shared by array_str/array_repr.
+fn _body_2d(a: NDArray) -> str:
+    rc = _rows_cols(a)
+    rows = rc[0]
+    cols = rc[1]
+    if len(a.shape) <= 1:
+        parts = []
+        for i in 0..rows:
+            parts.append(str(a.data[i]))
+        return "[" + ", ".join(parts) + "]"
+    lines = []
+    for i in 0..rows:
+        parts = []
+        for j in 0..cols:
+            parts.append(str(a.data[i * cols + j]))
+        lines.append("[" + ", ".join(parts) + "]")
+    return "[" + "\n ".join(lines) + "]"
+
+fn array_str(a: NDArray) -> str:
+    """NumPy str(a): bracketed, no 'array(...)' wrapper."""
+    return _body_2d(a)
+
+fn array_repr(a: NDArray) -> str:
+    """NumPy repr(a): 'array(...)' wrapper with aligned continuation
+    lines. >=3-D arrays are flattened to 2-D for display (documented
+    deviation)."""
+    if len(a.shape) <= 1:
+        return "array(" + _body_2d(a) + ")"
+    rc = _rows_cols(a)
+    rows = rc[0]
+    cols = rc[1]
+    rowstrs = []
+    for i in 0..rows:
+        parts = []
+        for j in 0..cols:
+            parts.append(str(a.data[i * cols + j]))
+        rowstrs.append("[" + ", ".join(parts) + "]")
+    out = "array(["
+    for i in 0..rows:
+        if i == 0:
+            out = out + rowstrs[i]
+        else:
+            out = out + "\n       " + rowstrs[i]
+        if i < rows - 1:
+            out = out + ","
+    out = out + "])"
+    return out
+
+# --- tobytes / save / load ------------------------------------------------------
+
+fn tobytes(a: NDArray) -> str:
+    """Canonical text serialization: flat C-order '%.17g' values separated
+    by single spaces (round-trips through frombuffer/fromstring). NOT raw
+    bytes — see module header."""
+    parts = []
+    for v in a.data:
+        parts.append("%.17g" % v)
+    return " ".join(parts)
+
+fn ndarray_to_bytes(a: NDArray) -> Bytes:
+    """Bytes value holding the UTF-8 text of tobytes(a)."""
+    return Bytes(tobytes(a))
+
+fn save(fname: str, a: NDArray) -> str:
+    """Save `a` in the documented *text* container (NOT .npy):
+    line 1 '# A-ndarray-text-v1', line 2 '# shape=d0,d1,...', then one
+    '%.17g' value per line in C order. Preserves ndim unlike savetxt."""
+    dims = []
+    for d in a.shape:
+        dims.append(str(d))
+    header = "# A-ndarray-text-v1\n# shape=" + ",".join(dims) + "\n"
+    parts = []
+    for v in a.data:
+        parts.append("%.17g" % v)
+    text = header + "\n".join(parts) + "\n"
+    write_file(fname, text)
+    return text
+
+fn _parse_i64_list(s: str, sep: str) -> [i64]:
+    toks = s.split(sep)
+    out = []
+    for t in toks:
+        tt = t.strip()
+        if len(tt) > 0:
+            out.append(int(tt))
+    return out
+
+fn load(fname: str) -> NDArray:
+    """Inverse of save() — reads the text container. Panics if the file
+    is not in '# A-ndarray-text-v1' format (real .npy files unsupported)."""
+    text = read_file(fname)
+    lines = text.split("\n")
+    if len(lines) < 2 or lines[0] != "# A-ndarray-text-v1":
+        panic("load: not an A-ndarray-text file (binary .npy unsupported)")
+    shapeline = lines[1]
+    if not shapeline.startswith("# shape="):
+        panic("load: missing shape header")
+    shape = _parse_i64_list(shapeline[8..], ",")
+    data = []
+    for i in 2..len(lines):
+        s = lines[i].strip()
+        if len(s) == 0:
+            continue
+        for t in _tokens_of(s, " "):
+            data.append(_token_float(t, true))
+    return NDArray(data, shape)
+
+fn save_text(fname: str, a: NDArray) -> str:
+    """Alias of savetxt with NumPy-ish defaults."""
+    return savetxt(fname, a, "%g", " ")
+
+fn load_text(fname: str) -> NDArray:
+    """Alias of loadtxt."""
+    return loadtxt(fname)

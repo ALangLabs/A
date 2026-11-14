@@ -1,0 +1,190 @@
+# Self-check for randomgen.a — run: ./build/a run stdlib/std/math/numpy/_check_randomgen.a
+# Exits 0 on success; panics (nonzero exit) on failure.
+
+from "randomgen.a" import seed, random, random_sample, rand, randn, standard_normal, randint, uniform, normal, exponential, standard_exponential, gamma, standard_gamma, beta, chisquare, f, standard_cauchy, standard_t, laplace, gumbel, logistic, rayleigh, weibull, pareto, power, lognormal, geometric, poisson, binomial, triangular, choice, shuffle, permutation
+from "ndarray.a" import NDArray
+
+fn _as_f64list(x: [f64]) -> [f64]:
+    return x
+
+fn expect(cond: bool, msg: str):
+    if not cond:
+        panic("CHECK FAILED: " + msg)
+
+entry main():
+    # --- reproducibility -------------------------------------------------------
+    seed(42)
+    a1 = random()
+    a2 = random()
+    seed(42)
+    b1 = random()
+    b2 = random()
+    expect(a1 == b1 and a2 == b2, "seed(42) not reproducible")
+    expect(a1 >= 0.0 and a1 < 1.0, "random() out of [0,1)")
+
+    # --- random_sample scalar + array ------------------------------------------
+    seed(7)
+    s = random_sample()
+    expect(s >= 0.0 and s < 1.0, "random_sample() range")
+    arr = random_sample([4, 5])
+    expect(arr.shape[0] == 4 and arr.shape[1] == 5, "random_sample shape")
+    expect(len(arr.data) == 20, "random_sample size")
+    for v in arr.data:
+        expect(v >= 0.0 and v < 1.0, "random_sample value range")
+
+    # --- rand / randn -----------------------------------------------------------
+    seed(1)
+    r = rand(3, 4)
+    expect(len(r.data) == 12, "rand(3,4) size")
+    rn = randn(100)
+    expect(len(rn.data) == 100, "randn(100) size")
+    sn = standard_normal([2, 3])
+    expect(len(sn.data) == 6, "standard_normal shape")
+
+    # --- randint bounds ----------------------------------------------------------
+    seed(2)
+    for i in 0..2000:
+        v = randint(3, 9)
+        expect(v >= 3 and v < 9, "randint scalar bounds")
+    ri = randint(0, 10, [50])
+    expect(len(ri.data) == 50, "randint array size")
+    for v in ri.data:
+        expect(v >= 0.0 and v < 10.0, "randint array bounds")
+
+    # --- uniform ------------------------------------------------------------------
+    seed(3)
+    for i in 0..500:
+        v = uniform(-2.0, 5.0)
+        expect(v >= -2.0 and v <= 5.0, "uniform bounds")
+    u = uniform(0.0, 1.0, [10])
+    expect(len(u.data) == 10, "uniform array size")
+
+    # --- normal moments (loose) ---------------------------------------------------
+    seed(11)
+    nrm = normal(0.0, 1.0, [10000])
+    sumv = 0.0
+    sumsq = 0.0
+    for v in nrm.data:
+        sumv = sumv + v
+        sumsq = sumsq + v * v
+    mean = sumv / 10000.0
+    var = sumsq / 10000.0 - mean * mean
+    expect(mean > -0.15 and mean < 0.15, "normal mean ~ 0 (got " + str(mean) + ")")
+    expect(var > 0.85 and var < 1.15, "normal var ~ 1 (got " + str(var) + ")")
+
+    # --- other distributions: range checks ---------------------------------------
+    seed(5)
+    ex = exponential(2.0, [500])
+    for v in ex.data:
+        expect(v >= 0.0, "exponential >= 0")
+    se = standard_exponential([10])
+    expect(len(se.data) == 10, "standard_exponential size")
+    g = gamma(2.0, 3.0, [200])
+    for v in g.data:
+        expect(v >= 0.0, "gamma >= 0")
+    sg = standard_gamma(1.5, [50])
+    expect(len(sg.data) == 50, "standard_gamma size")
+    bt = beta(2.0, 5.0, [200])
+    for v in bt.data:
+        expect(v >= 0.0 and v <= 1.0, "beta in [0,1]")
+    ch = chisquare(4.0, [100])
+    for v in ch.data:
+        expect(v >= 0.0, "chisquare >= 0")
+    fv = f(5.0, 10.0, [100])
+    for v in fv.data:
+        expect(v >= 0.0, "f >= 0")
+    st = standard_t(10.0, [100])
+    expect(len(st.data) == 100, "standard_t size")
+    cc = standard_cauchy([50])
+    expect(len(cc.data) == 50, "standard_cauchy size")
+    lp = laplace(1.0, 2.0, [100])
+    expect(len(lp.data) == 100, "laplace size")
+    gu = gumbel(0.0, 1.0, [100])
+    expect(len(gu.data) == 100, "gumbel size")
+    lo = logistic(0.0, 1.0, [100])
+    expect(len(lo.data) == 100, "logistic size")
+    ry = rayleigh(2.0, [100])
+    for v in ry.data:
+        expect(v >= 0.0, "rayleigh >= 0")
+    wb = weibull(1.5, 2.0, [100])
+    for v in wb.data:
+        expect(v >= 0.0, "weibull >= 0")
+    pa = pareto(3.0, [100])
+    for v in pa.data:
+        expect(v >= 0.0, "pareto >= 0")
+    pw = power(2.0, [100])
+    for v in pw.data:
+        expect(v >= 0.0 and v <= 1.0, "power in [0,1]")
+    ln = lognormal(0.0, 1.0, [100])
+    for v in ln.data:
+        expect(v > 0.0, "lognormal > 0")
+    tr = triangular(0.0, 0.5, 1.0, [100])
+    for v in tr.data:
+        expect(v >= 0.0 and v <= 1.0, "triangular in range")
+    po = poisson(4.0, [500])
+    for v in po.data:
+        expect(v >= 0.0, "poisson >= 0")
+    bi = binomial(10, 0.3, [500])
+    for v in bi.data:
+        expect(v >= 0.0 and v <= 10.0, "binomial in [0,n]")
+
+    # scalar versions smoke test
+    expect(poisson(2.0) >= 0.0, "poisson scalar")
+    expect(binomial(5, 0.5) >= 0.0 and binomial(5, 0.5) <= 5.0, "binomial scalar")
+    expect(geometric(0.5) >= 1.0, "geometric scalar")
+    ge = geometric(0.3, [200])
+    for v in ge.data:
+        expect(v >= 1.0, "geometric array >= 1")
+
+    # --- choice ---------------------------------------------------------------------
+    seed(9)
+    pop = [10.0, 20.0, 30.0, 40.0]
+    c = choice(pop)
+    expect(c == 10.0 or c == 20.0 or c == 30.0 or c == 40.0, "choice scalar")
+    cs = choice(pop, 8)
+    expect(len(cs.data) == 8, "choice size")
+    for v in cs.data:
+        expect(v == 10.0 or v == 20.0 or v == 30.0 or v == 40.0, "choice value")
+    cnd = choice(NDArray([1.0, 2.0, 3.0], [3]), 5)
+    expect(len(cnd.data) == 5, "choice NDArray pop")
+    # without replacement: all distinct
+    cnr = choice(pop, 4, false)
+    sc = sorted(cnr.data)
+    for i in 1..len(sc):
+        expect(sc[i] != sc[i - 1], "choice replace=false produced duplicate")
+    # weighted choice: p heavily favors first element
+    seed(13)
+    wp = [0.97, 0.01, 0.01, 0.01]
+    hits = 0
+    for i in 0..500:
+        if choice(pop, None, true, wp) == 10.0:
+            hits = hits + 1
+    expect(hits > 400, "weighted choice biased wrong (hits=" + str(hits) + ")")
+
+    # --- shuffle / permutation --------------------------------------------------------
+    seed(21)
+    xs = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+    orig = xs.copy()
+    shuffle(xs)
+    # same multiset
+    sx = sorted(xs)
+    so = sorted(orig)
+    for i in 0..len(sx):
+        expect(sx[i] == so[i], "shuffle lost elements")
+    perm = permutation(orig)
+    expect(len(_as_f64list(perm)) == 8, "permutation list size")
+    # NDArray shuffle in place
+    seed(22)
+    m = NDArray([1.0, 2.0, 3.0, 4.0, 5.0], [5])
+    before = m.data.copy()
+    shuffle(m)
+    # still a permutation of before
+    sb = sorted(m.data)
+    bb = sorted(before)
+    for i in 0..len(sb):
+        expect(sb[i] == bb[i], "NDArray shuffle lost elements")
+    pm = permutation(m)
+    expect(isinstance(pm, NDArray), "permutation NDArray type")
+    expect(len(pm.data) == 5, "permutation NDArray size")
+
+    print("randomgen self-check: OK")

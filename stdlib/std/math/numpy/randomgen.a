@@ -1,0 +1,566 @@
+#
+# numpy.random-compatible random sampling built on std:random.
+#
+# RNG strategy: all draws delegate to the seedable pure-A Park-Miller
+# generator in std:random (`import std:random as _rng`). `seed(s)` reseeds
+# that shared stream, so after `seed(k)` every sequence below is
+# reproducible. The native `random`/`random_int` builtins are NOT used:
+# they are seeded once from time() at startup and cannot be reseeded.
+#
+# Deviations from NumPy:
+#   * dtype is f64 only; integer arrays (randint/poisson/binomial/...) store
+#     values as floats.
+#   * No Generator/RandomState classes, no get_state/set_state, no
+#     bytes()/integers().
+#   * poisson uses the exact Knuth product method for lam < 30 and a
+#     normal approximation for lam >= 30 (NumPy uses PTRS).
+#   * binomial uses direct Bernoulli summation for n <= 1000, a geometric
+#     skipping loop for small n*p, and a normal approximation otherwise.
+#   * choice(..., p=..., replace=false) uses repeated weighted draws with
+#     exclusion (marginals differ slightly from NumPy's algorithm).
+#   * seed(s) shares state with the std:random module stream.
+#   * Park-Miller has period 2^31-2 — fine for simulation, weak for crypto.
+#
+# Sibling import: `from "randomgen.a" import ...`.
+
+import std:random as _rng
+from "ndarray.a" import NDArray, zeros, empty, _shape_size
+
+# --- shape helpers ------------------------------------------------------------
+
+fn _shape_list(d0) -> [i64]:
+    # d0 is a list of dims; copy into a fresh [i64]
+    out = []
+    for d in d0:
+        out.append(int(d))
+    return out
+
+# size may be: an i64 (1-D) or a [i64] shape. Callers guarantee != None.
+fn _shape_of_size(size) -> [i64]:
+    if isinstance(size, "list"):
+        return _shape_list(size)
+    return [int(size)]
+
+# rand/randn arg handling: rand(n), rand(n, m), rand([shape]).
+fn _rand_shape(d0, d1 = None) -> [i64]:
+    if d1 != None:
+        return [int(d0), int(d1 + 0)]
+    if isinstance(d0, "list"):
+        return _shape_list(d0)
+    return [int(d0)]
+
+fn _fill(shape: [i64], kind: i64, a: f64, b: f64, c: f64) -> NDArray:
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(_draw(kind, a, b, c))
+    return NDArray(data, shape)
+
+# Scalar draw dispatcher. kind codes:
+#   0 uniform(a,b)  1 normal(a=loc,b=scale)  2 exponential(scale=a)
+#   3 gamma(shape=a,scale=b)  4 beta(a,b)  5 lognormal(mu=a,sigma=b)
+#   6 weibull(a,scale=b)  7 pareto(a)  8 power(a)  9 geometric(p=a)
+#  10 poisson(lam=a)  11 binomial(n=int(a),p=b)  12 standard_cauchy
+#  13 standard_t(df=a)  14 f(dfnum=a,dfden=b)  15 laplace(loc=a,scale=b)
+#  16 gumbel(loc=a,scale=b)  17 logistic(loc=a,scale=b)  18 rayleigh(scale=a)
+#  19 chisquare(df=a)  20 standard_gamma(shape=a)  21 triangular(left=a,mode=b,right=c)
+fn _draw(kind: i64, a: f64, b: f64, c: f64) -> f64:
+    if kind == 0:
+        return _rng.uniform(a, b)
+    if kind == 1:
+        return _rng.gauss(a, b)
+    if kind == 2:
+        if a <= 0.0:
+            panic("exponential: scale must be > 0")
+        return _rng.expovariate(1.0 / a)
+    if kind == 3:
+        return _rng.gammavariate(a, b)
+    if kind == 4:
+        return _rng.betavariate(a, b)
+    if kind == 5:
+        return _rng.lognormvariate(a, b)
+    if kind == 6:
+        return _rng.weibullvariate(a, b)
+    if kind == 7:
+        return _rng.paretovariate(a)
+    if kind == 8:
+        if a <= 0.0:
+            panic("power: a must be > 0")
+        return pow(_rng.random(), 1.0 / a)
+    if kind == 9:
+        # geometric(p): number of trials up to and including first success.
+        if a <= 0.0 or a > 1.0:
+            panic("geometric: p must be in (0, 1]")
+        if a >= 1.0:
+            return 1.0
+        u = _rng.random()
+        return floor(log(1.0 - u) / log(1.0 - a)) + 1.0
+    if kind == 10:
+        return _poisson(a)
+    if kind == 11:
+        return _binomial(int(a + 0.5), b)
+    if kind == 12:
+        # standard Cauchy: tan(pi * (u - 0.5))
+        return tan(3.141592653589793 * (_rng.random() - 0.5))
+    if kind == 13:
+        return _student_t(a)
+    if kind == 14:
+        return _f_dist(a, b)
+    if kind == 15:
+        # laplace(loc, scale)
+        u = _rng.random()
+        if u < 0.5:
+            return a + b * log(2.0 * u)
+        return a - b * log(2.0 * (1.0 - u))
+    if kind == 16:
+        # gumbel(loc, scale)
+        u = _rng.random()
+        while u <= 0.0:
+            u = _rng.random()
+        return a - b * log(-log(u))
+    if kind == 17:
+        # logistic(loc, scale)
+        u = _rng.random()
+        while u <= 0.0 or u >= 1.0:
+            u = _rng.random()
+        return a + b * log(u / (1.0 - u))
+    if kind == 18:
+        # rayleigh(scale)
+        return a * sqrt(-2.0 * log(1.0 - _rng.random()))
+    if kind == 19:
+        # chisquare(df) = Gamma(df/2, scale=2)
+        return _rng.gammavariate(a / 2.0, 2.0)
+    if kind == 20:
+        # standard_gamma(shape) = Gamma(shape, scale=1)
+        return _rng.gammavariate(a, 1.0)
+    if kind == 21:
+        # triangular(left, mode, right); std:random order is (low, high, mode)
+        return _rng.triangular(a, c, b)
+    return 0.0
+
+# --- extra distributions not covered by std:random ----------------------------
+
+fn _poisson(lam: f64) -> f64:
+    if lam < 0.0:
+        panic("poisson: lam must be >= 0")
+    if lam == 0.0:
+        return 0.0
+    if lam < 30.0:
+        # Knuth product method (exact for small lambda).
+        limit = exp(-lam)
+        k = 0
+        p = 1.0
+        while true:
+            k = k + 1
+            p = p * _rng.random()
+            if p <= limit:
+                return k - 1.0
+        return 0.0
+    # Normal approximation for large lambda (documented deviation).
+    z = _rng.gauss(0.0, 1.0)
+    v = lam + sqrt(lam) * z
+    if v < 0.0:
+        return 0.0
+    return floor(v + 0.5)
+
+fn _binomial(n: i64, p: f64) -> f64:
+    if n <= 0 or p <= 0.0:
+        return 0.0
+    if p >= 1.0:
+        return n + 0.0
+    mean = n * p
+    if n <= 1000:
+        # Direct Bernoulli summation (cheap for small n).
+        cnt = 0
+        for i in 0..n:
+            if _rng.random() < p:
+                cnt = cnt + 1
+        return cnt + 0.0
+    if mean <= 30.0:
+        # Geometric skipping: iterate over successes only (~n*p draws).
+        cnt = 0
+        pos = 0
+        lp = log(1.0 - p)
+        while pos < n:
+            u = _rng.random()
+            while u <= 0.0:
+                u = _rng.random()
+            skip = floor(log(u) / lp)
+            pos = pos + 1 + skip
+            if pos <= n:
+                cnt = cnt + 1
+        return cnt + 0.0
+    # Normal approximation (documented deviation).
+    z = _rng.gauss(0.0, 1.0)
+    v = mean + sqrt(mean * (1.0 - p)) * z
+    if v < 0.0:
+        return 0.0
+    return floor(v + 0.5)
+
+fn _student_t(df: f64) -> f64:
+    if df <= 0.0:
+        panic("standard_t: df must be > 0")
+    z = _rng.gauss(0.0, 1.0)
+    chi2 = _rng.gammavariate(df / 2.0, 2.0)
+    if chi2 <= 0.0:
+        return z
+    return z / sqrt(chi2 / df)
+
+fn _f_dist(dfnum: f64, dfden: f64) -> f64:
+    if dfnum <= 0.0 or dfden <= 0.0:
+        panic("f: dfnum and dfden must be > 0")
+    c1 = _rng.gammavariate(dfnum / 2.0, 2.0) / dfnum
+    c2 = _rng.gammavariate(dfden / 2.0, 2.0) / dfden
+    if c2 <= 0.0:
+        return 0.0
+    return c1 / c2
+
+# --- uniform / core uniforms ----------------------------------------------------
+
+fn random() -> f64:
+    """Uniform float in [0.0, 1.0) from the global stream."""
+    return _rng.random()
+
+fn random_sample(size = None) -> any:
+    """random_sample() -> f64 in [0,1); random_sample(shape) -> NDArray."""
+    if size == None:
+        return _rng.random()
+    return _fill(_shape_of_size(size), 0, 0.0, 1.0, 0.0)
+
+fn rand(d0, d1 = None):
+    """rand(n) / rand(n, m) / rand([shape]) -> NDArray of uniform [0,1)."""
+    return _fill(_rand_shape(d0, d1), 0, 0.0, 1.0, 0.0)
+
+fn randn(d0, d1 = None):
+    """randn(n) / randn(n, m) / randn([shape]) -> NDArray standard normal."""
+    return _fill(_rand_shape(d0, d1), 1, 0.0, 1.0, 0.0)
+
+fn standard_normal(size = None) -> any:
+    """standard_normal() -> f64; standard_normal(shape) -> NDArray."""
+    if size == None:
+        return _rng.gauss(0.0, 1.0)
+    return _fill(_shape_of_size(size), 1, 0.0, 1.0, 0.0)
+
+fn seed(s = None):
+    """seed(s) -> reseed the global stream (s: int/float/str/None)."""
+    _rng.seed(s)
+
+# --- integer draws -------------------------------------------------------------
+
+fn randint(low: i64, high: i64, size = None) -> any:
+    """
+    randint(low, high) -> i64 in [low, high)  (NumPy: high exclusive).
+    randint(low, high, size) -> NDArray (f64 dtype).
+    """
+    if high <= low:
+        panic("randint: low >= high (high is exclusive)")
+    hi_incl = high - 1
+    if size == None:
+        return _rng.randint(low, hi_incl)
+    shape = _shape_of_size(size)
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(_rng.randint(low, hi_incl) + 0.0)
+    return NDArray(data, shape)
+
+# --- continuous distributions ---------------------------------------------------
+
+fn uniform(low, high, size = None) -> any:
+    """uniform(low, high) -> f64; uniform(low, high, size) -> NDArray."""
+    if size == None:
+        return _rng.uniform(low, high)
+    return _fill(_shape_of_size(size), 0, low + 0.0, high + 0.0, 0.0)
+
+fn normal(loc = 0.0, scale = 1.0, size = None) -> any:
+    """normal(loc, scale) -> f64; normal(loc, scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("normal: scale must be > 0")
+    if size == None:
+        return _rng.gauss(loc, scale)
+    return _fill(_shape_of_size(size), 1, loc + 0.0, scale + 0.0, 0.0)
+
+fn exponential(scale = 1.0, size = None) -> any:
+    """exponential(scale) -> f64; exponential(scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("exponential: scale must be > 0")
+    if size == None:
+        return _rng.expovariate(1.0 / scale)
+    return _fill(_shape_of_size(size), 2, scale + 0.0, 0.0, 0.0)
+
+fn standard_exponential(size = None) -> any:
+    """standard_exponential() -> f64; standard_exponential(size) -> NDArray."""
+    return exponential(1.0, size)
+
+fn gamma(shape, scale = 1.0, size = None) -> any:
+    """gamma(shape, scale) -> f64; gamma(shape, scale, size) -> NDArray."""
+    if shape <= 0.0 or scale <= 0.0:
+        panic("gamma: shape and scale must be > 0")
+    if size == None:
+        return _rng.gammavariate(shape, scale)
+    return _fill(_shape_of_size(size), 3, shape + 0.0, scale + 0.0, 0.0)
+
+fn standard_gamma(shape, size = None) -> any:
+    """standard_gamma(shape) -> f64; standard_gamma(shape, size) -> NDArray."""
+    if shape <= 0.0:
+        panic("standard_gamma: shape must be > 0")
+    if size == None:
+        return _rng.gammavariate(shape, 1.0)
+    return _fill(_shape_of_size(size), 20, shape + 0.0, 0.0, 0.0)
+
+fn beta(a, b, size = None) -> any:
+    """beta(a, b) -> f64 in [0,1]; beta(a, b, size) -> NDArray."""
+    if a <= 0.0 or b <= 0.0:
+        panic("beta: a and b must be > 0")
+    if size == None:
+        return _rng.betavariate(a, b)
+    return _fill(_shape_of_size(size), 4, a + 0.0, b + 0.0, 0.0)
+
+fn chisquare(df, size = None) -> any:
+    """chisquare(df) -> f64; chisquare(df, size) -> NDArray."""
+    if df <= 0.0:
+        panic("chisquare: df must be > 0")
+    if size == None:
+        return _rng.gammavariate(df / 2.0, 2.0)
+    return _fill(_shape_of_size(size), 19, df + 0.0, 0.0, 0.0)
+
+fn f(dfnum, dfden, size = None) -> any:
+    """f(dfnum, dfden) -> f64; f(dfnum, dfden, size) -> NDArray."""
+    if dfnum <= 0.0 or dfden <= 0.0:
+        panic("f: dfnum and dfden must be > 0")
+    if size == None:
+        return _f_dist(dfnum, dfden)
+    return _fill(_shape_of_size(size), 14, dfnum + 0.0, dfden + 0.0, 0.0)
+
+fn standard_cauchy(size = None) -> any:
+    """standard_cauchy() -> f64; standard_cauchy(size) -> NDArray."""
+    if size == None:
+        return tan(3.141592653589793 * (_rng.random() - 0.5))
+    return _fill(_shape_of_size(size), 12, 0.0, 0.0, 0.0)
+
+fn standard_t(df, size = None) -> any:
+    """standard_t(df) -> f64; standard_t(df, size) -> NDArray."""
+    if df <= 0.0:
+        panic("standard_t: df must be > 0")
+    if size == None:
+        return _student_t(df)
+    return _fill(_shape_of_size(size), 13, df + 0.0, 0.0, 0.0)
+
+fn laplace(loc = 0.0, scale = 1.0, size = None) -> any:
+    """laplace(loc, scale) -> f64; laplace(loc, scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("laplace: scale must be > 0")
+    if size == None:
+        u = _rng.random()
+        if u < 0.5:
+            return loc + scale * log(2.0 * u)
+        return loc - scale * log(2.0 * (1.0 - u))
+    return _fill(_shape_of_size(size), 15, loc + 0.0, scale + 0.0, 0.0)
+
+fn gumbel(loc = 0.0, scale = 1.0, size = None) -> any:
+    """gumbel(loc, scale) -> f64; gumbel(loc, scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("gumbel: scale must be > 0")
+    if size == None:
+        u = _rng.random()
+        while u <= 0.0:
+            u = _rng.random()
+        return loc - scale * log(-log(u))
+    return _fill(_shape_of_size(size), 16, loc + 0.0, scale + 0.0, 0.0)
+
+fn logistic(loc = 0.0, scale = 1.0, size = None) -> any:
+    """logistic(loc, scale) -> f64; logistic(loc, scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("logistic: scale must be > 0")
+    if size == None:
+        u = _rng.random()
+        while u <= 0.0 or u >= 1.0:
+            u = _rng.random()
+        return loc + scale * log(u / (1.0 - u))
+    return _fill(_shape_of_size(size), 17, loc + 0.0, scale + 0.0, 0.0)
+
+fn rayleigh(scale = 1.0, size = None) -> any:
+    """rayleigh(scale) -> f64 >= 0; rayleigh(scale, size) -> NDArray."""
+    if scale <= 0.0:
+        panic("rayleigh: scale must be > 0")
+    if size == None:
+        return scale * sqrt(-2.0 * log(1.0 - _rng.random()))
+    return _fill(_shape_of_size(size), 18, scale + 0.0, 0.0, 0.0)
+
+fn weibull(a, scale = 1.0, size = None) -> any:
+    """weibull(a, scale) -> f64 >= 0; weibull(a, scale, size) -> NDArray."""
+    if a <= 0.0 or scale <= 0.0:
+        panic("weibull: a and scale must be > 0")
+    if size == None:
+        return _rng.weibullvariate(a, scale)
+    return _fill(_shape_of_size(size), 6, a + 0.0, scale + 0.0, 0.0)
+
+fn pareto(a, size = None) -> any:
+    """pareto(a) -> Lomax/Pareto-II f64 >= 0; pareto(a, size) -> NDArray."""
+    if a <= 0.0:
+        panic("pareto: a must be > 0")
+    if size == None:
+        return _rng.paretovariate(a)
+    return _fill(_shape_of_size(size), 7, a + 0.0, 0.0, 0.0)
+
+fn power(a, size = None) -> any:
+    """power(a) -> f64 in [0,1]; power(a, size) -> NDArray."""
+    if a <= 0.0:
+        panic("power: a must be > 0")
+    if size == None:
+        return pow(_rng.random(), 1.0 / a)
+    return _fill(_shape_of_size(size), 8, a + 0.0, 0.0, 0.0)
+
+fn lognormal(mean = 0.0, sigma = 1.0, size = None) -> any:
+    """lognormal(mean, sigma) -> f64 > 0; lognormal(mean, sigma, size) -> NDArray."""
+    if sigma < 0.0:
+        panic("lognormal: sigma must be >= 0")
+    if size == None:
+        return _rng.lognormvariate(mean, sigma)
+    return _fill(_shape_of_size(size), 5, mean + 0.0, sigma + 0.0, 0.0)
+
+fn geometric(p, size = None) -> any:
+    """geometric(p) -> f64 >= 1 (trials to first success)."""
+    if size == None:
+        return _draw(9, p + 0.0, 0.0, 0.0)
+    return _fill(_shape_of_size(size), 9, p + 0.0, 0.0, 0.0)
+
+fn poisson(lam = 1.0, size = None) -> any:
+    """poisson(lam) -> f64 count >= 0; poisson(lam, size) -> NDArray."""
+    if size == None:
+        return _poisson(lam + 0.0)
+    return _fill(_shape_of_size(size), 10, lam + 0.0, 0.0, 0.0)
+
+fn binomial(n: i64, p: f64, size = None) -> any:
+    """binomial(n, p) -> f64 count in [0, n]; binomial(n, p, size) -> NDArray."""
+    if n < 0:
+        panic("binomial: n must be >= 0")
+    if size == None:
+        return _binomial(n, p)
+    return _fill(_shape_of_size(size), 11, n + 0.0, p + 0.0, 0.0)
+
+fn triangular(left, mode, right, size = None) -> any:
+    """triangular(left, mode, right) -> f64; ...size -> NDArray."""
+    if size == None:
+        return _rng.triangular(left, right, mode)
+    return _fill(_shape_of_size(size), 21, left + 0.0, mode + 0.0, right + 0.0)
+
+# --- choice / permutation / shuffle ---------------------------------------------
+
+fn _rng_randbelow(n: i64) -> i64:
+    # uniform int in [0, n); n >= 1
+    return _rng.randint(0, n - 1)
+
+fn _weighted_pick(xs, n: i64, p: [f64]) -> f64:
+    # linear-scan weighted choice over the full population
+    if len(p) != n:
+        panic("choice: p must have same length as population")
+    total = 0.0
+    for w in p:
+        total = total + w
+    if total <= 0.0:
+        panic("choice: probabilities must sum to > 0")
+    u = _rng.random() * total
+    acc = 0.0
+    i = 0
+    while i < n - 1:
+        acc = acc + p[i]
+        if u < acc:
+            return xs[i] + 0.0
+        i = i + 1
+    return xs[n - 1] + 0.0
+
+fn _weighted_index(pool: [i64], p: [f64], offset: i64) -> i64:
+    # pick a position j in [offset, len(pool)) weighted by p[pool[j]]
+    total = 0.0
+    i = offset
+    while i < len(pool):
+        total = total + p[pool[i]]
+        i = i + 1
+    if total <= 0.0:
+        # fall back to uniform over remaining
+        return offset + _rng_randbelow(len(pool) - offset)
+    u = _rng.random() * total
+    acc = 0.0
+    i = offset
+    while i < len(pool) - 1:
+        acc = acc + p[pool[i]]
+        if u < acc:
+            return i
+        i = i + 1
+    return len(pool) - 1
+
+fn choice(a, size = None, replace = true, p = None) -> any:
+    """
+    choice(a) -> one random element of a ([f64] list or NDArray).
+    choice(a, size) -> NDArray of `size` picks.
+    replace=false samples without replacement (size <= len(a)).
+    p: optional [f64] probabilities (must sum > 0).
+    """
+    xs = a
+    if isinstance(a, NDArray):
+        xs = a.data
+    n = len(xs)
+    if n == 0:
+        panic("choice: empty population")
+    if size == None:
+        if p == None:
+            return xs[_rng_randbelow(n)]
+        return _weighted_pick(xs, n, p)
+    shape = _shape_of_size(size)
+    total = _shape_size(shape)
+    data = []
+    if replace:
+        if p == None:
+            for i in 0..total:
+                data.append(xs[_rng_randbelow(n)] + 0.0)
+        else:
+            for i in 0..total:
+                data.append(_weighted_pick(xs, n, p))
+    else:
+        # without replacement: partial Fisher-Yates on an index pool
+        if total > n:
+            panic("choice: cannot take more samples than population")
+        pool = []
+        for i in 0..n:
+            pool.append(i)
+        picked = []
+        i = 0
+        while i < total:
+            j = 0
+            if p == None:
+                j = i + _rng_randbelow(n - i)
+            else:
+                # weighted pick among remaining pool entries
+                j = _weighted_index(pool, p, i)
+            tmp = pool[i]
+            pool[i] = pool[j]
+            pool[j] = tmp
+            picked.append(pool[i])
+            i = i + 1
+        for idx in picked:
+            data.append(xs[idx] + 0.0)
+    return NDArray(data, shape)
+
+fn shuffle(x) -> any:
+    """
+    shuffle(x) -> x shuffled in place (Fisher-Yates via std:random).
+    Accepts a [f64] list or an NDArray (shuffles .data in place).
+    """
+    if isinstance(x, NDArray):
+        _rng.shuffle(x.data)
+        return x
+    _rng.shuffle(x)
+    return x
+
+fn permutation(x) -> any:
+    """
+    permutation(x) -> shuffled copy. NDArray -> NDArray; list -> list.
+    """
+    if isinstance(x, NDArray):
+        data = x.data.copy()
+        _rng.shuffle(data)
+        return NDArray(data, x.shape)
+    out = x.copy()
+    _rng.shuffle(out)
+    return out

@@ -1,0 +1,1005 @@
+#
+# numpy shape ops: expand_dims, squeeze, broadcast_to/broadcast_shapes,
+# stack/concatenate/append/split family, tile/repeat/roll/flip/rot90,
+# axis permutation (swapaxes/moveaxis/rollaxis), atleast_*, *_stack,
+# tril/triu/fill_diagonal, delete/insert, unique_sorted.
+#
+# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.a).
+#
+# Conventions / deviations from NumPy:
+#  - axis=None cases use sentinel axis = -99:
+#      append/insert/delete/repeat/roll -> operate on the flattened array;
+#      flip -> reverse every axis (np.flip axis=None).
+#  - squeeze(a, axis): axis=-99 squeezes ALL size-1 axes; otherwise removes
+#    the single axis at `axis` (NumPy raises if it is not size 1; we remove
+#    it regardless when in range — caller's responsibility).
+#  - split_n/array_split_n with a section count that does not divide the
+#    axis length use array_split-style distribution (NumPy's split raises
+#    ValueError; A has no exceptions).
+#  - moveaxis/rollaxis take a single axis each (NumPy also accepts lists).
+#  - broadcast_to validates compatibility and returns an empty NDArray on
+#    mismatch (NumPy raises).
+#  - fill_diagonal returns a NEW array (np.fill_diagonal is in-place).
+#  - delete takes an [i64] index list (NumPy also accepts slices/arrays);
+#    delete_slice covers the range case. Negative indices wrap by +dim.
+#  - insert takes a single insertion position plus an NDArray of values
+#    whose flat data fills whole slices along `axis` (NumPy broadcasts
+#    values more generally; scalar values broadcast across the slice).
+#  - unique_sorted flattens the input and returns sorted unique values as
+#    a 1-D array (no return_index/return_counts/inverse).
+#
+from "ndarray.a" import NDArray, _shape_size, _row_major_index
+from "ndarray.a" import reshape, ravel, flatten, transpose, get, set
+from "ndarray.a" import zeros, ones, empty, full, ndarray
+from "ndarray.a" import _broadcast_shape
+
+# --- small helpers ------------------------------------------------------------
+
+fn _so_norm(axis: i64, nd: i64) -> i64:
+    a = axis
+    if a < 0:
+        a = a + nd
+    return a
+
+fn _so_mod(x: i64, n: i64) -> i64:
+    if n <= 0:
+        return 0
+    r = x % n
+    if r < 0:
+        r = r + n
+    return r
+
+fn _so_coords(shape: [i64], i: i64) -> [i64]:
+    # C-order multi-index for flat position i
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]
+        k = k - 1
+    return coords
+
+fn _so_copy_list(xs: [i64]) -> [i64]:
+    out = []
+    for v in xs:
+        out.append(v)
+    return out
+
+fn _so_shape_with(shape: [i64], axis: i64, dim: i64) -> [i64]:
+    out = _so_copy_list(shape)
+    out[axis] = dim
+    return out
+
+fn _so_insert_axis(shape: [i64], axis: i64, val: i64) -> [i64]:
+    # insert a new axis of size `val` at position `axis` (0..ndim)
+    out = []
+    nd = len(shape)
+    i = 0
+    while i <= nd:
+        if i == axis:
+            out.append(val)
+        if i < nd:
+            out.append(shape[i])
+        i = i + 1
+    return out
+
+# --- expand_dims / squeeze ------------------------------------------------------
+
+fn expand_dims(a: NDArray, axis: i64) -> NDArray:
+    # insert a size-1 axis; axis in [-(ndim+1), ndim], negative wraps
+    nd = len(a.shape)
+    ax = axis
+    if ax < 0:
+        ax = ax + nd + 1
+    if ax < 0:
+        ax = 0
+    if ax > nd:
+        ax = nd
+    data = []
+    for v in a.data:
+        data.append(v)
+    return NDArray(data, _so_insert_axis(a.shape, ax, 1))
+
+fn squeeze_axis(a: NDArray, axis: i64) -> NDArray:
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    shape = []
+    for i in 0..nd:
+        if i != ax:
+            shape.append(a.shape[i])
+    return reshape(a, shape)
+
+fn squeeze_all(a: NDArray) -> NDArray:
+    shape = []
+    for d in a.shape:
+        if d != 1:
+            shape.append(d)
+    return reshape(a, shape)
+
+fn squeeze(a: NDArray, axis: i64) -> NDArray:
+    if axis == -99:
+        return squeeze_all(a)
+    return squeeze_axis(a, axis)
+
+# --- broadcast -------------------------------------------------------------------
+
+fn broadcast_shapes2(a: [i64], b: [i64]) -> [i64]:
+    return _broadcast_shape(a, b)
+
+fn broadcast_shapes_list(shapes: [[i64]]) -> [i64]:
+    if len(shapes) == 0:
+        return []
+    out = shapes[0]
+    i = 1
+    while i < len(shapes):
+        out = _broadcast_shape(out, shapes[i])
+        i = i + 1
+    return out
+
+fn _so_can_broadcast(shape: [i64], target: [i64]) -> bool:
+    # right-aligned: each source dim must be 1 or equal the target dim
+    nd = len(shape)
+    nt = len(target)
+    if nd > nt:
+        return false
+    i = 0
+    while i < nd:
+        sd = shape[nd - 1 - i]
+        td = target[nt - 1 - i]
+        if sd != td and sd != 1:
+            return false
+        i = i + 1
+    return true
+
+fn _so_bcast_strides(shape: [i64], target: [i64]) -> [i64]:
+    # per-target-axis flat strides into the source buffer; 0 where the
+    # source axis is broadcast (size 1) or absent (left padding).
+    # NOTE: ndarray._broadcast_strides does NOT zero size-1 source dims,
+    # which reads out of bounds for broadcast_to-style materialization —
+    # this is a corrected local copy.
+    nd = len(shape)
+    nt = len(target)
+    strides = []
+    for i in 0..nt:
+        strides.append(0)
+    sstride = []
+    st = 1
+    i = nd - 1
+    while i >= 0:
+        sstride.insert(0, st)
+        st = st * shape[i]
+        i = i - 1
+    offset = nt - nd
+    i = 0
+    while i < nd:
+        j = offset + i
+        if j >= 0 and j < nt and shape[i] > 1:
+            strides[j] = sstride[i]
+        i = i + 1
+    return strides
+
+fn broadcast_to(a: NDArray, shape: [i64]) -> NDArray:
+    if not _so_can_broadcast(a.shape, shape):
+        # [0] marks failure: [] would be a valid scalar shape (size 1)
+        return NDArray([], [0])
+    strides = _so_bcast_strides(a.shape, shape)
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        coords = _so_coords(shape, i)
+        off = 0
+        k = 0
+        while k < len(shape):
+            off = off + coords[k] * strides[k]
+            k = k + 1
+        data.append(a.data[off])
+    return NDArray(data, shape)
+
+# --- stack / concatenate ---------------------------------------------------------
+
+fn stack_list(arrays: [NDArray], axis: i64) -> NDArray:
+    # join arrays along a NEW axis (all inputs must share one shape)
+    n = len(arrays)
+    if n == 0:
+        return NDArray([], [])
+    nd = len(arrays[0].shape)
+    ax = axis
+    if ax < 0:
+        ax = ax + nd + 1
+    if ax < 0:
+        ax = 0
+    if ax > nd:
+        ax = nd
+    shape = _so_insert_axis(arrays[0].shape, ax, n)
+    total = _shape_size(shape)
+    data = []
+    for i in 0..total:
+        data.append(0.0)
+    for ai in 0..n:
+        arr = arrays[ai]
+        m = arr.size()
+        for e in 0..m:
+            coords = _so_coords(arr.shape, e)
+            # output coords: ai inserted at position ax among source coords
+            oc = []
+            j = 0
+            while j < nd:
+                if j == ax:
+                    oc.append(ai)
+                oc.append(coords[j])
+                j = j + 1
+            if ax == nd:
+                oc.append(ai)
+            data[_row_major_index(shape, oc)] = arr.data[e]
+    return NDArray(data, shape)
+
+fn stack2(a: NDArray, b: NDArray, axis: i64) -> NDArray:
+    return stack_list([a, b], axis)
+
+fn concatenate(arrays: [NDArray], axis: i64) -> NDArray:
+    # join arrays along an EXISTING axis (all dims except `axis` must match)
+    n = len(arrays)
+    if n == 0:
+        return NDArray([], [])
+    nd = len(arrays[0].shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        ax = 0
+    shape = []
+    for i in 0..nd:
+        if i == ax:
+            total = 0
+            for arr in arrays:
+                total = total + arr.shape[ax]
+            shape.append(total)
+        else:
+            shape.append(arrays[0].shape[i])
+    total = _shape_size(shape)
+    data = []
+    for i in 0..total:
+        data.append(0.0)
+    # cumulative start offsets along the join axis
+    starts = []
+    acc = 0
+    for arr in arrays:
+        starts.append(acc)
+        acc = acc + arr.shape[ax]
+    for ai in 0..n:
+        arr = arrays[ai]
+        m = arr.size()
+        base = starts[ai]
+        for e in 0..m:
+            coords = _so_coords(arr.shape, e)
+            oc = []
+            for j in 0..nd:
+                c = coords[j]
+                if j == ax:
+                    c = c + base
+                oc.append(c)
+            data[_row_major_index(shape, oc)] = arr.data[e]
+    return NDArray(data, shape)
+
+fn concatenate2(a: NDArray, b: NDArray, axis: i64) -> NDArray:
+    return concatenate([a, b], axis)
+
+fn _so_reshape_for_axis(a: NDArray, values: NDArray, ax: i64) -> NDArray:
+    # reshape `values` so its shape equals a.shape except along `ax`,
+    # where it holds values.size()/slice_size entries (np.append style).
+    # A scalar value broadcasts across the whole inserted slice.
+    slice_size = a.size() // a.shape[ax]
+    if slice_size <= 0:
+        return values
+    if values.size() == 1:
+        shape = _so_shape_with(a.shape, ax, 1)
+        return full(shape, values.data[0])
+    if values.size() % slice_size != 0:
+        return values
+    m = values.size() // slice_size
+    shape = _so_shape_with(a.shape, ax, m)
+    if _shape_size(shape) != values.size():
+        return values
+    return reshape(values, shape)
+
+fn append(arr: NDArray, values: NDArray, axis: i64) -> NDArray:
+    # np.append: axis=-99 flattens both operands first
+    if axis == -99:
+        return concatenate([flatten(arr), flatten(values)], 0)
+    nd = len(arr.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return arr
+    v = _so_reshape_for_axis(arr, values, ax)
+    return concatenate([arr, v], ax)
+
+# --- split family -----------------------------------------------------------------
+
+fn _so_slice_axis(a: NDArray, axis: i64, start: i64, end: i64) -> NDArray:
+    # contiguous slice [start, end) along `axis` (other axes kept whole)
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    dim = a.shape[ax]
+    if start < 0:
+        start = 0
+    if end > dim:
+        end = dim
+    if start > end:
+        start = end
+    shape = _so_shape_with(a.shape, ax, end - start)
+    total = _shape_size(shape)
+    data = []
+    for p in 0..total:
+        oc = _so_coords(shape, p)
+        sc = []
+        for j in 0..nd:
+            c = oc[j]
+            if j == ax:
+                c = c + start
+            sc.append(c)
+        data.append(a.data[_row_major_index(a.shape, sc)])
+    return NDArray(data, shape)
+
+fn _so_split_bounds(a: NDArray, bounds: [i64], axis: i64) -> [NDArray]:
+    # cut the axis at each bound -> len(bounds)+1 sections
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    dim = 0
+    if ax >= 0 and ax < nd:
+        dim = a.shape[ax]
+    out = []
+    prev = 0
+    for b in bounds:
+        bb = b
+        if bb < prev:
+            bb = prev
+        if bb > dim:
+            bb = dim
+        out.append(_so_slice_axis(a, ax, prev, bb))
+        prev = bb
+    out.append(_so_slice_axis(a, ax, prev, dim))
+    return out
+
+fn _so_equal_bounds(dim: i64, n: i64) -> [i64]:
+    # array_split section boundaries: first `rem` sections get one extra
+    q = dim // n
+    r = dim % n
+    bounds = []
+    acc = 0
+    i = 0
+    while i < n - 1:
+        if i < r:
+            acc = acc + q + 1
+        else:
+            acc = acc + q
+        bounds.append(acc)
+        i = i + 1
+    return bounds
+
+fn _so_split_n(a: NDArray, n: i64, axis: i64) -> [NDArray]:
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd or n <= 1:
+        return [a]
+    return _so_split_bounds(a, _so_equal_bounds(a.shape[ax], n), ax)
+
+fn split(a: NDArray, indices: [i64], axis: i64) -> [NDArray]:
+    # np.split with a 1-D array of section start indices
+    return _so_split_bounds(a, indices, axis)
+
+fn split_n(a: NDArray, n: i64, axis: i64) -> [NDArray]:
+    # np.split with an integer section count (uneven -> array_split sizes)
+    return _so_split_n(a, n, axis)
+
+fn array_split(a: NDArray, indices: [i64], axis: i64) -> [NDArray]:
+    return _so_split_bounds(a, indices, axis)
+
+fn array_split_n(a: NDArray, n: i64, axis: i64) -> [NDArray]:
+    return _so_split_n(a, n, axis)
+
+fn _so_hvds_axis(a: NDArray, which: i64) -> i64:
+    # which: 0 = vsplit (axis 0), 1 = hsplit (axis 1, or 0 for 1-D),
+    #        2 = dsplit (axis 2, clamped to last axis for ndim < 3)
+    nd = len(a.shape)
+    if which == 0:
+        return 0
+    if which == 1:
+        if nd > 1:
+            return 1
+        return 0
+    ax = 2
+    if ax >= nd:
+        ax = nd - 1
+    if ax < 0:
+        ax = 0
+    return ax
+
+fn hsplit(a: NDArray, n: i64) -> [NDArray]:
+    return _so_split_n(a, n, _so_hvds_axis(a, 1))
+
+fn hsplit_idx(a: NDArray, indices: [i64]) -> [NDArray]:
+    return _so_split_bounds(a, indices, _so_hvds_axis(a, 1))
+
+fn vsplit(a: NDArray, n: i64) -> [NDArray]:
+    return _so_split_n(a, n, 0)
+
+fn vsplit_idx(a: NDArray, indices: [i64]) -> [NDArray]:
+    return _so_split_bounds(a, indices, 0)
+
+fn dsplit(a: NDArray, n: i64) -> [NDArray]:
+    return _so_split_n(a, n, _so_hvds_axis(a, 2))
+
+fn dsplit_idx(a: NDArray, indices: [i64]) -> [NDArray]:
+    return _so_split_bounds(a, indices, _so_hvds_axis(a, 2))
+
+# --- tile / repeat / roll ------------------------------------------------------------
+
+fn tile(a: NDArray, reps: [i64]) -> NDArray:
+    # np.tile: reps shorter than ndim is left-padded with 1s; result ndim is
+    # max(ndim, len(reps)).
+    nd = len(a.shape)
+    nr = len(reps)
+    n = nd
+    if nr > n:
+        n = nr
+    rp = []
+    for i in 0..n:
+        rp.append(1)
+    i = 0
+    while i < nr:
+        rp[n - nr + i] = reps[i]
+        i = i + 1
+    outshape = []
+    for i in 0..n:
+        ps = 1
+        if i >= n - nd:
+            ps = a.shape[i - (n - nd)]
+        outshape.append(ps * rp[i])
+    total = _shape_size(outshape)
+    data = []
+    for p in 0..total:
+        oc = _so_coords(outshape, p)
+        # source flat offset: last nd coords of oc, mod a.shape
+        acc = 0
+        st = 1
+        si = nd - 1
+        while si >= 0:
+            c = oc[n - nd + si] % a.shape[si]
+            acc = acc + c * st
+            st = st * a.shape[si]
+            si = si - 1
+        data.append(a.data[acc])
+    return NDArray(data, outshape)
+
+fn _so_repeat_axis(a: NDArray, counts: [i64], axis: i64) -> NDArray:
+    # counts[i] = how many times axis-position i is repeated
+    nd = len(a.shape)
+    ax = axis
+    dim = a.shape[ax]
+    prefix = []
+    acc = 0
+    for i in 0..dim:
+        c = 0
+        if i < len(counts):
+            c = counts[i]
+        prefix.append(acc)
+        acc = acc + c
+    shape = _so_shape_with(a.shape, ax, acc)
+    total = _shape_size(shape)
+    data = []
+    for i in 0..total:
+        data.append(0.0)
+    m = a.size()
+    for e in 0..m:
+        coords = _so_coords(a.shape, e)
+        c = coords[ax]
+        rep = 0
+        if c < len(counts):
+            rep = counts[c]
+        base = prefix[c]
+        k = 0
+        while k < rep:
+            oc = []
+            for j in 0..nd:
+                cc = coords[j]
+                if j == ax:
+                    cc = base + k
+                oc.append(cc)
+            data[_row_major_index(shape, oc)] = a.data[e]
+            k = k + 1
+    return NDArray(data, shape)
+
+fn _so_counts_scalar(dim: i64, repeats: i64) -> [i64]:
+    counts = []
+    for i in 0..dim:
+        counts.append(repeats)
+    return counts
+
+fn repeat(a: NDArray, repeats: i64, axis: i64) -> NDArray:
+    # axis=-99 flattens first (np.repeat axis=None)
+    if axis == -99:
+        f = flatten(a)
+        counts = _so_counts_scalar(len(f.data), repeats)
+        return _so_repeat_axis(f, counts, 0)
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        ax = 0
+    return _so_repeat_axis(a, _so_counts_scalar(a.shape[ax], repeats), ax)
+
+fn repeat_list(a: NDArray, repeats: [i64], axis: i64) -> NDArray:
+    # per-position repeat counts along `axis` (np.repeat with array repeats)
+    if axis == -99:
+        f = flatten(a)
+        counts = []
+        for i in 0..len(f.data):
+            c = 0
+            if i < len(repeats):
+                c = repeats[i]
+            counts.append(c)
+        return _so_repeat_axis(f, counts, 0)
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        ax = 0
+    dim = a.shape[ax]
+    counts = []
+    for i in 0..dim:
+        c = 0
+        if i < len(repeats):
+            c = repeats[i]
+        counts.append(c)
+    return _so_repeat_axis(a, counts, ax)
+
+fn roll(a: NDArray, shift: i64, axis: i64) -> NDArray:
+    # axis=-99 rolls the flattened array (np.roll axis=None)
+    if axis == -99:
+        f = flatten(a)
+        n = len(f.data)
+        s = _so_mod(shift, n)
+        data = []
+        for i in 0..n:
+            data.append(f.data[_so_mod(i - s, n)])
+        return NDArray(data, [n])
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    dim = a.shape[ax]
+    s = _so_mod(shift, dim)
+    data = []
+    for p in 0..a.size():
+        oc = _so_coords(a.shape, p)
+        oc[ax] = _so_mod(oc[ax] - s, dim)
+        data.append(a.data[_row_major_index(a.shape, oc)])
+    return NDArray(data, a.shape)
+
+# --- flip / rot90 ---------------------------------------------------------------------
+
+fn _so_flip_axis(a: NDArray, ax: i64) -> NDArray:
+    dim = a.shape[ax]
+    data = []
+    for p in 0..a.size():
+        oc = _so_coords(a.shape, p)
+        oc[ax] = dim - 1 - oc[ax]
+        data.append(a.data[_row_major_index(a.shape, oc)])
+    return NDArray(data, a.shape)
+
+fn _so_flip_all(a: NDArray) -> NDArray:
+    nd = len(a.shape)
+    data = []
+    for p in 0..a.size():
+        oc = _so_coords(a.shape, p)
+        for i in 0..nd:
+            oc[i] = a.shape[i] - 1 - oc[i]
+        data.append(a.data[_row_major_index(a.shape, oc)])
+    return NDArray(data, a.shape)
+
+fn flip(a: NDArray, axis: i64) -> NDArray:
+    if axis == -99:
+        return _so_flip_all(a)
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    return _so_flip_axis(a, ax)
+
+fn fliplr(a: NDArray) -> NDArray:
+    # second axis for ndim > 1, first axis for 1-D (np.fliplr)
+    if len(a.shape) == 0:
+        return a
+    ax = 1
+    if len(a.shape) <= 1:
+        ax = 0
+    return _so_flip_axis(a, ax)
+
+fn flipud(a: NDArray) -> NDArray:
+    if len(a.shape) == 0:
+        return a
+    return _so_flip_axis(a, 0)
+
+fn _so_rot90_once(a: NDArray) -> NDArray:
+    # counter-clockwise 90 deg on a 2-D array: out[i,j] = a[j, n-1-i]
+    m = a.shape[0]
+    n = a.shape[1]
+    data = []
+    for i in 0..n:
+        for j in 0..m:
+            data.append(a.data[j * n + (n - 1 - i)])
+    return NDArray(data, [n, m])
+
+fn rot90(a: NDArray, k: i64) -> NDArray:
+    kk = _so_mod(k, 4)
+    r = a
+    i = 0
+    while i < kk:
+        r = _so_rot90_once(r)
+        i = i + 1
+    return r
+
+# --- axis permutation ----------------------------------------------------------------------
+
+fn _so_permute(a: NDArray, perm: [i64]) -> NDArray:
+    # perm[i] = source axis that becomes output axis i
+    nd = len(a.shape)
+    shape = []
+    for i in 0..nd:
+        shape.append(a.shape[perm[i]])
+    data = []
+    for p in 0.._shape_size(shape):
+        oc = _so_coords(shape, p)
+        sc = []
+        for i in 0..nd:
+            sc.append(0)
+        for i in 0..nd:
+            sc[perm[i]] = oc[i]
+        data.append(a.data[_row_major_index(a.shape, sc)])
+    return NDArray(data, shape)
+
+fn swapaxes(a: NDArray, a1: i64, a2: i64) -> NDArray:
+    nd = len(a.shape)
+    i1 = _so_norm(a1, nd)
+    i2 = _so_norm(a2, nd)
+    perm = []
+    for i in 0..nd:
+        perm.append(i)
+    if i1 >= 0 and i1 < nd and i2 >= 0 and i2 < nd:
+        perm[i1] = i2
+        perm[i2] = i1
+    return _so_permute(a, perm)
+
+fn moveaxis(a: NDArray, src: i64, dst: i64) -> NDArray:
+    # move source axis to destination position (single axes only)
+    nd = len(a.shape)
+    s = _so_norm(src, nd)
+    d = _so_norm(dst, nd)
+    if s < 0 or s >= nd or d < 0 or d >= nd:
+        return a
+    order = []
+    for i in 0..nd:
+        if i != s:
+            order.append(i)
+    perm = []
+    i = 0
+    while i <= len(order):
+        if i == d:
+            perm.append(s)
+        if i < len(order):
+            perm.append(order[i])
+        i = i + 1
+    return _so_permute(a, perm)
+
+fn rollaxis(a: NDArray, axis: i64, start: i64) -> NDArray:
+    # equivalent to moveaxis(axis -> start); start wraps into [0, ndim)
+    nd = len(a.shape)
+    st = start
+    if st < 0:
+        st = st + nd
+    if st < 0:
+        st = 0
+    if st >= nd:
+        st = nd - 1
+    return moveaxis(a, axis, st)
+
+fn rollaxis0(a: NDArray, axis: i64) -> NDArray:
+    # np.rollaxis(a, axis) with default start=0
+    return rollaxis(a, axis, 0)
+
+# --- atleast_* -----------------------------------------------------------------------------
+
+fn atleast_1d(a: NDArray) -> NDArray:
+    if len(a.shape) == 0:
+        return reshape(a, [1])
+    return a
+
+fn atleast_2d(a: NDArray) -> NDArray:
+    nd = len(a.shape)
+    if nd == 0:
+        return reshape(a, [1, 1])
+    if nd == 1:
+        return reshape(a, [1, a.shape[0]])
+    return a
+
+fn atleast_3d(a: NDArray) -> NDArray:
+    nd = len(a.shape)
+    if nd == 0:
+        return reshape(a, [1, 1, 1])
+    if nd == 1:
+        return reshape(a, [1, a.shape[0], 1])
+    if nd == 2:
+        return reshape(a, [a.shape[0], a.shape[1], 1])
+    return a
+
+# --- column_stack / row_stack / dstack ---------------------------------------------------------
+
+fn _so_col_prep(a: NDArray) -> NDArray:
+    # np.column_stack promotion for ndim < 2: (array(ndmin=2)).T
+    if len(a.shape) == 0:
+        v = 0.0
+        if a.size() > 0:
+            v = a.data[0]
+        return NDArray([v], [1, 1])
+    if len(a.shape) == 1:
+        return reshape(a, [a.shape[0], 1])
+    return a
+
+fn column_stack(arrays: [NDArray]) -> NDArray:
+    arrs = []
+    for a in arrays:
+        arrs.append(_so_col_prep(a))
+    return concatenate(arrs, 1)
+
+fn column_stack2(a: NDArray, b: NDArray) -> NDArray:
+    return column_stack([a, b])
+
+fn row_stack(arrays: [NDArray]) -> NDArray:
+    arrs = []
+    for a in arrays:
+        arrs.append(atleast_2d(a))
+    return concatenate(arrs, 0)
+
+fn row_stack2(a: NDArray, b: NDArray) -> NDArray:
+    return row_stack([a, b])
+
+fn dstack(arrays: [NDArray]) -> NDArray:
+    # np.dstack: atleast_3d each input, then concatenate along axis 2
+    arrs = []
+    for a in arrays:
+        arrs.append(atleast_3d(a))
+    return concatenate(arrs, 2)
+
+fn dstack2(a: NDArray, b: NDArray) -> NDArray:
+    return dstack([a, b])
+
+# --- tril / triu / fill_diagonal -----------------------------------------------------------------
+
+fn _so_tri(a: NDArray, k: i64, lower: bool) -> NDArray:
+    # mask over the LAST two axes; tril keeps j <= i + k, triu keeps j >= i - k
+    nd = len(a.shape)
+    if nd < 2:
+        data = []
+        for v in a.data:
+            data.append(v)
+        return NDArray(data, a.shape)
+    data = []
+    for p in 0..a.size():
+        oc = _so_coords(a.shape, p)
+        i = oc[nd - 2]
+        j = oc[nd - 1]
+        keep = false
+        if lower:
+            keep = j <= i + k
+        else:
+            keep = j >= i - k
+        if keep:
+            data.append(a.data[p])
+        else:
+            data.append(0.0)
+    return NDArray(data, a.shape)
+
+fn tril(a: NDArray, k: i64) -> NDArray:
+    return _so_tri(a, k, true)
+
+fn triu(a: NDArray, k: i64) -> NDArray:
+    return _so_tri(a, k, false)
+
+fn fill_diagonal(a: NDArray, val: f64) -> NDArray:
+    # returns a NEW array with the main diagonal (last two axes) set to val
+    nd = len(a.shape)
+    if nd < 2:
+        data = []
+        for v in a.data:
+            data.append(v)
+        return NDArray(data, a.shape)
+    data = []
+    for p in 0..a.size():
+        oc = _so_coords(a.shape, p)
+        if oc[nd - 2] == oc[nd - 1]:
+            data.append(val)
+        else:
+            data.append(a.data[p])
+    return NDArray(data, a.shape)
+
+# --- delete / insert --------------------------------------------------------------------------------
+
+fn _so_del_mask(dim: i64, indices: [i64]) -> [bool]:
+    mask = []
+    for i in 0..dim:
+        mask.append(false)
+    for idx in indices:
+        j = idx
+        if j < 0:
+            j = j + dim
+        if j >= 0 and j < dim:
+            mask[j] = true
+    return mask
+
+fn delete(a: NDArray, indices: [i64], axis: i64) -> NDArray:
+    # remove elements at `indices` along `axis`; axis=-99 flattens first
+    if axis == -99:
+        f = flatten(a)
+        n = len(f.data)
+        mask = _so_del_mask(n, indices)
+        data = []
+        for i in 0..n:
+            if not mask[i]:
+                data.append(f.data[i])
+        return NDArray(data, [len(data)])
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    dim = a.shape[ax]
+    mask = _so_del_mask(dim, indices)
+    kept = []
+    for i in 0..dim:
+        if not mask[i]:
+            kept.append(i)
+    shape = _so_shape_with(a.shape, ax, len(kept))
+    data = []
+    for p in 0.._shape_size(shape):
+        oc = _so_coords(shape, p)
+        sc = []
+        for j in 0..nd:
+            c = oc[j]
+            if j == ax:
+                c = kept[c]
+            sc.append(c)
+        data.append(a.data[_row_major_index(a.shape, sc)])
+    return NDArray(data, shape)
+
+fn delete_slice(a: NDArray, start: i64, end: i64, axis: i64) -> NDArray:
+    # delete the half-open range [start, end) along `axis`
+    indices = []
+    i = start
+    while i < end:
+        indices.append(i)
+        i = i + 1
+    return delete(a, indices, axis)
+
+fn _so_insert_values(a: NDArray, values: NDArray, ax: i64, m: i64) -> [f64]:
+    # produce flat source data for m slices along axis ax, shaped like a
+    # with axis dim = m. Handles: exact reshape, scalar broadcast, and
+    # single-slice values.
+    slice_size = a.size() // a.shape[ax]
+    vshape = _so_shape_with(a.shape, ax, m)
+    need = _shape_size(vshape)
+    if values.size() == need:
+        return values.data
+    if values.size() == 1:
+        v = values.data[0]
+        data = []
+        for i in 0..need:
+            data.append(v)
+        return data
+    if slice_size > 0 and m == 1 and values.size() == slice_size:
+        data = []
+        for v in values.data:
+            data.append(v)
+        return data
+    # fallback: tile/pad values.data to `need`
+    data = []
+    for i in 0..need:
+        data.append(values.data[i % values.size()])
+    return data
+
+fn insert(a: NDArray, pos: i64, values: NDArray, axis: i64) -> NDArray:
+    # np.insert: insert `values` as whole slices at position `pos` along
+    # `axis`. axis=-99 flattens both operands (np.insert axis=None).
+    if axis == -99:
+        fa = flatten(a)
+        fv = flatten(values)
+        n = len(fa.data)
+        p = pos
+        if p < 0:
+            p = p + n
+        if p < 0:
+            p = 0
+        if p > n:
+            p = n
+        data = []
+        for i in 0..p:
+            data.append(fa.data[i])
+        for v in fv.data:
+            data.append(v)
+        for i in p..n:
+            data.append(fa.data[i])
+        return NDArray(data, [len(data)])
+    nd = len(a.shape)
+    ax = _so_norm(axis, nd)
+    if ax < 0 or ax >= nd:
+        return a
+    dim = a.shape[ax]
+    p = pos
+    if p < 0:
+        p = p + dim + 1
+    if p < 0:
+        p = 0
+    if p > dim:
+        p = dim
+    if values.size() == 0:
+        return a
+    slice_size = a.size() // dim
+    # determine how many slices `values` contributes
+    m = 1
+    if slice_size > 0 and values.size() > 0:
+        if values.size() == 1:
+            m = 1
+        elif values.size() % slice_size == 0:
+            m = values.size() // slice_size
+        else:
+            m = 1
+    if m < 1:
+        m = 1
+    vshape = _so_shape_with(a.shape, ax, m)
+    vdata = _so_insert_values(a, values, ax, m)
+    shape = _so_shape_with(a.shape, ax, dim + m)
+    data = []
+    for q in 0.._shape_size(shape):
+        oc = _so_coords(shape, q)
+        c = oc[ax]
+        v = 0.0
+        if c < p:
+            sc = []
+            for j in 0..nd:
+                sc.append(oc[j])
+            v = a.data[_row_major_index(a.shape, sc)]
+        elif c < p + m:
+            sc = []
+            for j in 0..nd:
+                cc = oc[j]
+                if j == ax:
+                    cc = c - p
+                sc.append(cc)
+            v = vdata[_row_major_index(vshape, sc)]
+        else:
+            sc = []
+            for j in 0..nd:
+                cc = oc[j]
+                if j == ax:
+                    cc = cc - m
+                sc.append(cc)
+            v = a.data[_row_major_index(a.shape, sc)]
+        data.append(v)
+    return NDArray(data, shape)
+
+# --- unique ----------------------------------------------------------------------------------------
+
+fn unique_sorted(a: NDArray) -> NDArray:
+    # flattened, sorted, deduplicated 1-D array (np.unique core)
+    xs = []
+    for v in a.data:
+        xs.append(v)
+    ys = sorted(xs)
+    data = []
+    have_prev = false
+    prev = 0.0
+    for v in ys:
+        if not have_prev or v != prev:
+            data.append(v)
+            prev = v
+            have_prev = true
+    return NDArray(data, [len(data)])

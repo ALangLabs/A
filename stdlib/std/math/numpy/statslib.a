@@ -1,0 +1,1147 @@
+#
+# numpy statistics / linear-algebra helpers: histograms, binning, percentiles,
+# covariance/correlation, digitize/interp, gradient/trapezoid/diff, unwrap,
+# window functions, meshgrid, index helpers, and the i0 Bessel function.
+#
+# dtype is f64 only (NDArray.data is [f64]); integer-valued results (counts,
+# bin indices) are stored as f64. Functions that conceptually return tuples
+# return A tuples of NDArray; scalar-vs-array NumPy returns are split into
+# separate functions (documented per function).
+#
+# Requires: ndarray.a (NDArray core). No other numpy modules needed.
+
+from "ndarray.a" import NDArray, zeros, ones, empty, full, arange, arange1, linspace, eye, identity, array_from_list, ndarray, reshape, ravel, flatten, transpose, get, set, tolist, array2string, str_arr, shape_of, ndim, size_of, is_scalar_shape
+from "ndarray.a" import _shape_size, _row_major_index, _shape_prod, _broadcast_shape, _broadcast_strides, _asarray_scalar, _ew_bin, _ew_un, _scalar_or_arr, _with_scalar
+
+# --- small helpers -------------------------------------------------------------
+
+fn _copy_nd(a: NDArray) -> NDArray:
+    data = []
+    for v in a.data:
+        data.append(v)
+    shape = []
+    for d in a.shape:
+        shape.append(d)
+    return NDArray(data, shape)
+
+fn _minmax(xs: [f64]) -> (f64, f64):
+    # flattened min/max; panics on empty input
+    if len(xs) == 0:
+        panic("minmax of empty array")
+    lo = xs[0]
+    hi = xs[0]
+    for v in xs:
+        if v < lo:
+            lo = v
+        if v > hi:
+            hi = v
+    return (lo, hi)
+
+fn _sorted(xs: [f64]) -> [f64]:
+    return sorted(xs)
+
+fn _linspace_list(lo: f64, hi: f64, n: i64) -> [f64]:
+    # n points inclusive of both endpoints (like np.linspace)
+    out = []
+    if n <= 0:
+        return out
+    if n == 1:
+        out.append(lo)
+        return out
+    step = (hi - lo) / (n - 1.0)
+    for i in 0..n:
+        out.append(lo + i * step)
+    return out
+
+fn _linspace_nd(lo: f64, hi: f64, n: i64) -> NDArray:
+    return NDArray(_linspace_list(lo, hi, n), [n])
+
+fn _searchsorted_left(xs: [f64], v: f64) -> i64:
+    # first index i with xs[i] >= v (binary search; xs sorted ascending)
+    lo = 0
+    hi = len(xs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if xs[mid] < v:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+fn _searchsorted_right(xs: [f64], v: f64) -> i64:
+    # first index i with xs[i] > v
+    lo = 0
+    hi = len(xs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if xs[mid] <= v:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+# --- histogram -----------------------------------------------------------------
+
+fn _outer_edges(xs: [f64], has_range: bool, lo: f64, hi: f64) -> (f64, f64):
+    # NumPy _get_outer_edges: explicit range, else data min/max; equal -> +-0.5
+    if has_range:
+        if lo > hi:
+            panic("histogram: range min > range max")
+        return (lo, hi)
+    mm = _minmax(xs)
+    lo = mm[0]
+    hi = mm[1]
+    if lo == hi:
+        lo = lo - 0.5
+        hi = hi + 0.5
+    return (lo, hi)
+
+fn _bin_index(edges: [f64], v: f64, nbins: i64) -> i64:
+    # largest i in [0, nbins-1] with edges[i] <= v < edges[i+1];
+    # v == edges[nbins] (rightmost edge) -> nbins-1; v outside -> -1
+    if v < edges[0] or v > edges[nbins]:
+        return -1
+    b = -1
+    i = 0
+    while i <= nbins:
+        if v >= edges[i]:
+            b = i
+        i = i + 1
+    if b >= nbins:
+        b = nbins - 1
+    return b
+
+fn _hist_counts(xs: [f64], edges: [f64]) -> [f64]:
+    nbins = len(edges) - 1
+    n = []
+    for i in 0..nbins:
+        n.append(0.0)
+    for v in xs:
+        b = _bin_index(edges, v, nbins)
+        if b >= 0:
+            n[b] = n[b] + 1.0
+    return n
+
+fn _hist_edges_1d(xs: [f64], bins, has_range: bool,
+                  lo: f64, hi: f64) -> [f64]:
+    # returns bin edges (len nbins+1); bins is i64 (untyped -> dynamic)
+    # or a [f64] edge list
+    if isinstance(bins, "list"):
+        edges = []
+        for e in bins:
+            edges.append(e)
+        if len(edges) < 2:
+            panic("histogram: bins array needs >= 2 edges")
+        i = 1
+        while i < len(edges):
+            if edges[i] < edges[i - 1]:
+                panic("histogram: bins must increase monotonically")
+            i = i + 1
+        return edges
+    nb = int(bins)
+    if nb < 1:
+        panic("histogram: bins must be positive")
+    ee = _outer_edges(xs, has_range, lo, hi)
+    return _linspace_list(ee[0], ee[1], nb + 1)
+
+fn histogram(a: NDArray, bins,
+             range: [f64]? = None) -> (NDArray, NDArray):
+    # np.histogram: counts per bin. `bins` is an int (equal-width over
+    # [min,max] or `range`) or a [f64] of explicit edges (dynamic param,
+    # dispatched via isinstance — A unions are not narrowable).
+    # `range` is a 2-element [f64] (lo, hi).
+    xs = a.data
+    has_range = false
+    rlo = 0.0
+    rhi = 0.0
+    if range != None:
+        r = range
+        if len(r) >= 2:
+            has_range = true
+            rlo = r[0]
+            rhi = r[1]
+    edges_l = _hist_edges_1d(xs, bins, has_range, rlo, rhi)
+    counts = _hist_counts(xs, edges_l)
+    edges_nd = NDArray(edges_l, [len(edges_l)])
+    hist_nd = NDArray(counts, [len(counts)])
+    return (hist_nd, edges_nd)
+
+fn histogram2d_edges(x: NDArray, y: NDArray,
+                     xedges: [f64], yedges: [f64]) -> (NDArray, NDArray, NDArray):
+    # np.histogram2d with explicit edges. Returns (H, xedges, yedges);
+    # H has shape [nx, ny], H[i,j] counts points with x in bin i, y in bin j.
+    nx = len(xedges) - 1
+    ny = len(yedges) - 1
+    if nx < 1 or ny < 1:
+        panic("histogram2d: need >= 2 edges per axis")
+    h = []
+    for i in 0..(nx * ny):
+        h.append(0.0)
+    n = len(x.data)
+    i = 0
+    while i < n:
+        xb = _bin_index(xedges, x.data[i], nx)
+        yb = _bin_index(yedges, y.data[i], ny)
+        if xb >= 0 and yb >= 0:
+            h[xb * ny + yb] = h[xb * ny + yb] + 1.0
+        i = i + 1
+    H = NDArray(h, [nx, ny])
+    xe = NDArray(xedges, [len(xedges)])
+    ye = NDArray(yedges, [len(yedges)])
+    return (H, xe, ye)
+
+fn histogram2d(x: NDArray, y: NDArray, bins,
+               range: [f64]? = None) -> (NDArray, NDArray, NDArray):
+    # np.histogram2d. `bins` is an int (same count both axes) or [nx, ny]
+    # (dynamic param, dispatched via isinstance).
+    # `range` is [xmin, xmax, ymin, ymax].
+    if len(x.data) != len(y.data):
+        panic("histogram2d: x and y must have the same length")
+    nx = 10
+    ny = 10
+    if isinstance(bins, "list"):
+        bl = []
+        for b in bins:
+            bl.append(int(b))
+        if len(bl) >= 2:
+            nx = bl[0]
+            ny = bl[1]
+        elif len(bl) == 1:
+            nx = bl[0]
+            ny = bl[0]
+    else:
+        nx = int(bins)
+        ny = int(bins)
+    if nx < 1 or ny < 1:
+        panic("histogram2d: bins must be positive")
+    has_range = false
+    xlo = 0.0
+    xhi = 0.0
+    ylo = 0.0
+    yhi = 0.0
+    if range != None:
+        r = range
+        if len(r) >= 4:
+            has_range = true
+            xlo = r[0]
+            xhi = r[1]
+            ylo = r[2]
+            yhi = r[3]
+    xe_l = []
+    ye_l = []
+    if has_range:
+        xe_l = _hist_edges_1d(x.data, nx, true, xlo, xhi)
+        ye_l = _hist_edges_1d(y.data, ny, true, ylo, yhi)
+    else:
+        xe_l = _hist_edges_1d(x.data, nx, false, 0.0, 0.0)
+        ye_l = _hist_edges_1d(y.data, ny, false, 0.0, 0.0)
+    return histogram2d_edges(x, y, xe_l, ye_l)
+
+# --- bincount ------------------------------------------------------------------
+
+fn bincount(x: NDArray, weights: NDArray? = None,
+            minlength: i64 = 0) -> NDArray:
+    # np.bincount: counts of non-negative integer values in flattened x.
+    # weights (optional, same length) are summed instead of counted.
+    # Returns 1-D NDArray of length max(max(x)+1, minlength).
+    xs = x.data
+    n = len(xs)
+    maxv = -1
+    i = 0
+    while i < n:
+        v = xs[i]
+        if v < 0:
+            panic("bincount: negative value")
+        iv = int(v)
+        if v != float(iv):
+            panic("bincount: input must be integer-valued")
+        if iv > maxv:
+            maxv = iv
+        i = i + 1
+    size = maxv + 1
+    if minlength > size:
+        size = minlength
+    if size < 0:
+        size = 0
+    out = []
+    for i in 0..size:
+        out.append(0.0)
+    i = 0
+    while i < n:
+        iv = int(xs[i])
+        if weights == None:
+            out[iv] = out[iv] + 1.0
+        else:
+            w = weights.data[i]
+            out[iv] = out[iv] + w
+        i = i + 1
+    return NDArray(out, [size])
+
+# --- percentiles / quantiles / median ------------------------------------------
+
+fn _percentile_sorted(sx: [f64], q: f64) -> f64:
+    # linear-interpolation percentile; sx sorted ascending; q in [0,1]
+    n = len(sx)
+    if n == 0:
+        panic("percentile of empty array")
+    if n == 1:
+        return sx[0]
+    if q <= 0.0:
+        return sx[0]
+    if q >= 1.0:
+        return sx[n - 1]
+    h = q * (n - 1.0)
+    i = int(floor(h))
+    frac = h - i
+    lo = sx[i]
+    hi = sx[i + 1]
+    return lo + frac * (hi - lo)
+
+fn _flatten_sorted(a: NDArray) -> [f64]:
+    return _sorted(a.data)
+
+fn percentile(a: NDArray, q: f64) -> f64:
+    # np.percentile scalar-q, flattened ('linear' method).
+    # q is in [0, 100].
+    sx = _flatten_sorted(a)
+    return _percentile_sorted(sx, q / 100.0)
+
+fn percentile_list(a: NDArray, q: [f64]) -> NDArray:
+    # np.percentile with array q, flattened. Returns shape [len(q)].
+    sx = _flatten_sorted(a)
+    out = []
+    for qi in q:
+        out.append(_percentile_sorted(sx, qi / 100.0))
+    return NDArray(out, [len(out)])
+
+fn quantile(a: NDArray, q: f64) -> f64:
+    # np.quantile scalar-q, flattened; q in [0, 1].
+    sx = _flatten_sorted(a)
+    return _percentile_sorted(sx, q)
+
+fn quantile_list(a: NDArray, q: [f64]) -> NDArray:
+    sx = _flatten_sorted(a)
+    out = []
+    for qi in q:
+        out.append(_percentile_sorted(sx, qi))
+    return NDArray(out, [len(out)])
+
+fn _norm_axis(axis: i64, nd: i64) -> i64:
+    a = axis
+    if a < 0:
+        a = a + nd
+    return a
+
+fn percentile_axis(a: NDArray, q: f64, axis: i64) -> NDArray:
+    # percentile along `axis` for 1-D or 2-D input; q in [0, 100].
+    # Returns 1-D NDArray (one value per slice) for 2-D, 0-d for 1-D.
+    return _percentile_axis_q(a, q / 100.0, axis)
+
+fn quantile_axis(a: NDArray, q: f64, axis: i64) -> NDArray:
+    # quantile along `axis`; q in [0, 1].
+    return _percentile_axis_q(a, q, axis)
+
+fn _percentile_axis_q(a: NDArray, q: f64, axis: i64) -> NDArray:
+    nd = len(a.shape)
+    if nd == 1:
+        if _norm_axis(axis, 1) != 0:
+            panic("percentile_axis: bad axis")
+        sx = _flatten_sorted(a)
+        v = _percentile_sorted(sx, q)
+        return NDArray([v], [])
+    if nd == 2:
+        ax = _norm_axis(axis, 2)
+        if ax != 0 and ax != 1:
+            panic("percentile_axis: bad axis")
+        rows = a.shape[0]
+        cols = a.shape[1]
+        out = []
+        if ax == 1:
+            # one percentile per row
+            for i in 0..rows:
+                xs = []
+                for j in 0..cols:
+                    xs.append(a.data[i * cols + j])
+                sx = _sorted(xs)
+                out.append(_percentile_sorted(sx, q))
+            return NDArray(out, [rows])
+        else:
+            for j in 0..cols:
+                xs = []
+                for i in 0..rows:
+                    xs.append(a.data[i * cols + j])
+                sx = _sorted(xs)
+                out.append(_percentile_sorted(sx, q))
+            return NDArray(out, [cols])
+    panic("percentile_axis: only 1-D/2-D supported")
+    return NDArray([], [0])
+
+fn percentile_axis_list(a: NDArray, q: [f64], axis: i64) -> NDArray:
+    # percentile along axis for a list of q values (q in [0, 100]).
+    # Returns shape [len(q), nres] (q axis first, like NumPy).
+    nd = len(a.shape)
+    nres = 1
+    if nd == 1:
+        nres = 1
+    elif nd == 2:
+        ax = _norm_axis(axis, 2)
+        if ax == 1:
+            nres = a.shape[0]
+        elif ax == 0:
+            nres = a.shape[1]
+        else:
+            panic("percentile_axis_list: bad axis")
+    else:
+        panic("percentile_axis_list: only 1-D/2-D supported")
+    out = []
+    for qi in q:
+        r = _percentile_axis_q(a, qi / 100.0, axis)
+        for v in r.data:
+            out.append(v)
+    return NDArray(out, [len(q), nres])
+
+fn median(a: NDArray) -> f64:
+    # np.median flattened ('linear'): mean of two middle values for even n.
+    sx = _flatten_sorted(a)
+    n = len(sx)
+    if n == 0:
+        panic("median of empty array")
+    if n % 2 == 1:
+        return sx[n // 2]
+    return (sx[n // 2 - 1] + sx[n // 2]) / 2.0
+
+fn median_axis(a: NDArray, axis: i64) -> NDArray:
+    # np.median along `axis` (1-D or 2-D). 1-D -> 0-d NDArray.
+    return _percentile_axis_q(a, 0.5, axis)
+
+# --- covariance / correlation ---------------------------------------------------
+
+fn _cov_rows(rows: [[f64]], ddof: i64) -> NDArray:
+    # rows: list of equal-length variable vectors; C[i,j] = cov(ri, rj).
+    k = len(rows)
+    if k == 0:
+        return NDArray([], [0, 0])
+    nobs = len(rows[0])
+    means = []
+    for r in rows:
+        s = 0.0
+        for v in r:
+            s = s + v
+        means.append(s / nobs)
+    fact = nobs - ddof
+    if fact <= 0:
+        fact = 0.0
+    data = []
+    for i in 0..k:
+        for j in 0..k:
+            s = 0.0
+            ri = rows[i]
+            rj = rows[j]
+            mi = means[i]
+            mj = means[j]
+            for t in 0..nobs:
+                s = s + (ri[t] - mi) * (rj[t] - mj)
+            if fact == 0.0:
+                data.append(0.0 / 0.0)
+            else:
+                data.append(s / fact)
+    if k == 1:
+        return NDArray([data[0]], [])
+    return NDArray(data, [k, k])
+
+fn _rows_of(a: NDArray) -> [[f64]]:
+    # split a 1-D or 2-D array into row vectors (variables, rowvar=True)
+    rows = []
+    if len(a.shape) == 1:
+        r = []
+        for v in a.data:
+            r.append(v)
+        rows.append(r)
+    elif len(a.shape) == 2:
+        n = a.shape[0]
+        m = a.shape[1]
+        for i in 0..n:
+            r = []
+            for j in 0..m:
+                r.append(a.data[i * m + j])
+            rows.append(r)
+    else:
+        panic("cov/corrcoef: only 1-D/2-D supported")
+    return rows
+
+fn cov(a: NDArray, y: NDArray? = None, ddof: i64 = 1) -> NDArray:
+    # np.cov with rowvar=True, no weights. ddof defaults to 1 (unbiased).
+    # 1-D a alone -> 0-d NDArray (use .data[0] for the scalar).
+    rows = _rows_of(a)
+    if y != None:
+        yv = y
+        yrows = _rows_of(yv)
+        for r in yrows:
+            rows.append(r)
+    # every row must have the same observation count
+    if len(rows) > 1:
+        nobs = len(rows[0])
+        for r in rows:
+            if len(r) != nobs:
+                panic("cov: inconsistent observation counts")
+    return _cov_rows(rows, ddof)
+
+fn corrcoef(x: NDArray, y: NDArray? = None) -> NDArray:
+    # np.corrcoef with rowvar=True. Returns correlation matrix NDArray;
+    # scalar covariance (single variable) -> 0-d NDArray.
+    c = cov(x, y, 1)
+    k = len(c.shape)
+    if k == 0 or c.size() == 1:
+        v = c.data[0]
+        return NDArray([v / v], [])
+    n = c.shape[0]
+    d = []
+    for i in 0..n:
+        d.append(c.data[i * n + i])
+    out = []
+    for i in 0..n:
+        for j in 0..n:
+            denom = sqrt(d[i] * d[j])
+            r = c.data[i * n + j] / denom
+            if r > 1.0:
+                r = 1.0
+            if r < -1.0:
+                r = -1.0
+            out.append(r)
+    return NDArray(out, [n, n])
+
+# --- digitize / interp -----------------------------------------------------------
+
+fn digitize(x: NDArray, bins: NDArray, right: bool = false) -> NDArray:
+    # np.digitize: indices i such that (increasing bins)
+    #   right=False: bins[i-1] <= x < bins[i]
+    #   right=True:  bins[i-1] <  x <= bins[i]
+    # Decreasing bins are handled by reversal (NumPy semantics).
+    # Returns NDArray same shape as x (indices stored as f64).
+    bl = bins.data
+    m = len(bl)
+    if m < 2:
+        panic("digitize: bins must have >= 2 edges")
+    increasing = true
+    i = 1
+    while i < m:
+        if bl[i] < bl[i - 1]:
+            increasing = false
+        i = i + 1
+    # check monotonic one way or the other
+    mono = true
+    i = 1
+    while i < m:
+        if increasing:
+            if bl[i] < bl[i - 1]:
+                mono = false
+        else:
+            if bl[i] > bl[i - 1]:
+                mono = false
+        i = i + 1
+    if not mono:
+        panic("digitize: bins must be monotonic")
+    if not increasing:
+        # reverse bins
+        rb = []
+        i = m - 1
+        while i >= 0:
+            rb.append(bl[i])
+            i = i - 1
+        bl = rb
+    out = []
+    for v in x.data:
+        idx = 0
+        if right:
+            idx = _searchsorted_left(bl, v)
+        else:
+            idx = _searchsorted_right(bl, v)
+        if not increasing:
+            idx = m - idx
+        out.append(float(idx))
+    return NDArray(out, x.shape)
+
+fn _interp_scalar(xv: f64, xp: [f64], fp: [f64]) -> f64:
+    n = len(xp)
+    if n == 0:
+        panic("interp: empty xp")
+    if n == 1:
+        return fp[0]
+    if xv <= xp[0]:
+        return fp[0]
+    if xv >= xp[n - 1]:
+        return fp[n - 1]
+    # find i with xp[i] <= xv <= xp[i+1]
+    i = _searchsorted_right(xp, xv) - 1
+    if i < 0:
+        i = 0
+    if i >= n - 1:
+        i = n - 2
+    x0 = xp[i]
+    x1 = xp[i + 1]
+    if x1 == x0:
+        return fp[i]
+    t = (xv - x0) / (x1 - x0)
+    return fp[i] + t * (fp[i + 1] - fp[i])
+
+fn interp_scalar(x: f64, xp: NDArray, fp: NDArray) -> f64:
+    # np.interp for a scalar x; xp/fp must be 1-D, xp increasing.
+    # Out-of-range clamps to fp[0]/fp[-1] (NumPy default left/right).
+    if len(xp.data) != len(fp.data):
+        panic("interp: xp and fp must have the same length")
+    return _interp_scalar(x, xp.data, fp.data)
+
+fn interp(x: NDArray, xp: NDArray, fp: NDArray) -> NDArray:
+    # np.interp elementwise over flattened-then-reshaped x.
+    if len(xp.data) != len(fp.data):
+        panic("interp: xp and fp must have the same length")
+    out = []
+    for v in x.data:
+        out.append(_interp_scalar(v, xp.data, fp.data))
+    return NDArray(out, x.shape)
+
+# --- gradient / trapz / diff / ediff1d ---------------------------------------------
+
+fn gradient_axis(a: NDArray, axis: i64, dx: f64 = 1.0) -> NDArray:
+    # np.gradient edge_order=1 along `axis` with uniform spacing dx.
+    # Supports 1-D and 2-D.
+    nd = len(a.shape)
+    if nd == 1:
+        ax = _norm_axis(axis, 1)
+        if ax != 0:
+            panic("gradient: bad axis")
+        n = a.shape[0]
+        out = []
+        if n == 0:
+            return NDArray([], [0])
+        if n == 1:
+            out.append(0.0)
+            return NDArray(out, [1])
+        out.append((a.data[1] - a.data[0]) / dx)
+        i = 1
+        while i < n - 1:
+            out.append((a.data[i + 1] - a.data[i - 1]) / (2.0 * dx))
+            i = i + 1
+        out.append((a.data[n - 1] - a.data[n - 2]) / dx)
+        return NDArray(out, [n])
+    if nd == 2:
+        ax = _norm_axis(axis, 2)
+        rows = a.shape[0]
+        cols = a.shape[1]
+        out = []
+        for i in 0..(rows * cols):
+            out.append(0.0)
+        if ax == 1:
+            for i in 0..rows:
+                base = i * cols
+                if cols == 1:
+                    out[base] = 0.0
+                else:
+                    out[base] = (a.data[base + 1] - a.data[base]) / dx
+                    j = 1
+                    while j < cols - 1:
+                        out[base + j] = (a.data[base + j + 1] - a.data[base + j - 1]) / (2.0 * dx)
+                        j = j + 1
+                    out[base + cols - 1] = (a.data[base + cols - 1] - a.data[base + cols - 2]) / dx
+        elif ax == 0:
+            for j in 0..cols:
+                if rows == 1:
+                    out[j] = 0.0
+                else:
+                    out[j] = (a.data[cols + j] - a.data[j]) / dx
+                    i = 1
+                    while i < rows - 1:
+                        out[i * cols + j] = (a.data[(i + 1) * cols + j] - a.data[(i - 1) * cols + j]) / (2.0 * dx)
+                        i = i + 1
+                    out[(rows - 1) * cols + j] = (a.data[(rows - 1) * cols + j] - a.data[(rows - 2) * cols + j]) / dx
+        else:
+            panic("gradient: bad axis")
+        return NDArray(out, [rows, cols])
+    panic("gradient: only 1-D/2-D supported")
+    return NDArray([], [0])
+
+fn gradient(f: NDArray) -> NDArray:
+    # np.gradient(f) along the last axis, edge_order=1, unit spacing.
+    return gradient_axis(f, -1, 1.0)
+
+fn _trapz_1d(y: [f64], x: [f64]?, dx: f64) -> f64:
+    n = len(y)
+    if n < 2:
+        return 0.0
+    has_x = x != None
+    xl = x ?? []
+    total = 0.0
+    i = 0
+    while i < n - 1:
+        if has_x:
+            total = total + (y[i] + y[i + 1]) * 0.5 * (xl[i + 1] - xl[i])
+        else:
+            total = total + (y[i] + y[i + 1]) * 0.5 * dx
+        i = i + 1
+    return total
+
+fn trapz(y: NDArray, x: NDArray? = None, dx: f64 = 1.0) -> f64:
+    # np.trapezoid for 1-D y -> scalar. x optional 1-D sample points.
+    if len(y.shape) != 1:
+        panic("trapz: use trapz_axis for n-d input")
+    xl = None
+    if x != None:
+        xv = x
+        if len(xv.data) != len(y.data):
+            panic("trapz: x length must match y")
+        xl = xv.data
+    return _trapz_1d(y.data, xl, dx)
+
+fn trapz_axis(y: NDArray, axis: i64 = -1,
+              x: NDArray? = None, dx: f64 = 1.0) -> NDArray:
+    # np.trapezoid along `axis` for 1-D/2-D -> NDArray.
+    # x may be a 1-D NDArray of sample points along the axis (same length
+    # as the axis extent); omitted -> uniform spacing dx.
+    nd = len(y.shape)
+    ax = _norm_axis(axis, nd)
+    xl = None
+    if x != None:
+        xv = x
+        xl = xv.data
+    if nd == 1:
+        if ax != 0:
+            panic("trapz_axis: bad axis")
+        v = _trapz_1d(y.data, xl, dx)
+        return NDArray([v], [1])
+    if nd == 2:
+        rows = y.shape[0]
+        cols = y.shape[1]
+        out = []
+        if ax == 1:
+            for i in 0..rows:
+                ys = []
+                for j in 0..cols:
+                    ys.append(y.data[i * cols + j])
+                # x 1-D shared across rows
+                out.append(_trapz_1d(ys, xl, dx))
+            return NDArray(out, [rows])
+        elif ax == 0:
+            for j in 0..cols:
+                ys = []
+                for i in 0..rows:
+                    ys.append(y.data[i * cols + j])
+                out.append(_trapz_1d(ys, xl, dx))
+            return NDArray(out, [cols])
+        else:
+            panic("trapz_axis: bad axis")
+    panic("trapz_axis: only 1-D/2-D supported")
+    return NDArray([], [0])
+
+fn _diff_1d(xs: [f64]) -> [f64]:
+    out = []
+    i = 0
+    while i < len(xs) - 1:
+        out.append(xs[i + 1] - xs[i])
+        i = i + 1
+    return out
+
+fn diff(a: NDArray, n: i64 = 1, axis: i64 = -1) -> NDArray:
+    # np.diff: n-th finite difference along `axis`. 1-D and 2-D supported.
+    # axis=-1 -> last axis (rows for 2-D), axis=-2/0 -> first axis.
+    cur = _copy_nd(a)
+    rep = 0
+    while rep < n:
+        cur = _diff_once(cur, axis)
+        rep = rep + 1
+    return cur
+
+fn _diff_once(a: NDArray, axis: i64) -> NDArray:
+    if len(a.shape) == 1:
+        ax = _norm_axis(axis, 1)
+        if ax != 0:
+            panic("diff: bad axis")
+        return NDArray(_diff_1d(a.data), [a.shape[0] - 1])
+    if len(a.shape) == 2:
+        ax = _norm_axis(axis, 2)
+        rows = a.shape[0]
+        cols = a.shape[1]
+        out = []
+        if ax == 1:
+            for i in 0..rows:
+                xs = []
+                for j in 0..cols:
+                    xs.append(a.data[i * cols + j])
+                d = _diff_1d(xs)
+                for v in d:
+                    out.append(v)
+            return NDArray(out, [rows, cols - 1])
+        elif ax == 0:
+            for j in 0..cols:
+                xs = []
+                for i in 0..rows:
+                    xs.append(a.data[i * cols + j])
+                d = _diff_1d(xs)
+                for v in d:
+                    out.append(v)
+            # column-major output: result shape [rows-1, cols]; we built it
+            # column by column, so transpose the flat buffer
+            t = []
+            nr = rows - 1
+            for i in 0..nr:
+                for j in 0..cols:
+                    # out was appended per column j: index j*nr + i
+                    t.append(out[j * nr + i])
+            return NDArray(t, [nr, cols])
+        else:
+            panic("diff: bad axis")
+    panic("diff: only 1-D/2-D supported")
+    return NDArray([], [0])
+
+fn ediff1d(ary: NDArray, to_end: [f64]? = None,
+           to_begin: [f64]? = None) -> NDArray:
+    # np.ediff1d: 1-D differences of flattened input, with optional
+    # prepended/appended values (each a [f64] list).
+    xs = ary.data
+    d = _diff_1d(xs)
+    pre = []
+    if to_begin != None:
+        tb = to_begin
+        for v in tb:
+            pre.append(v)
+    post = []
+    if to_end != None:
+        te = to_end
+        for v in te:
+            post.append(v)
+    out = []
+    for v in pre:
+        out.append(v)
+    for v in d:
+        out.append(v)
+    for v in post:
+        out.append(v)
+    return NDArray(out, [len(out)])
+
+fn unwrap(p: NDArray, discont: f64 = 0.0,
+          period: f64 = 6.283185307179586, axis: i64 = -1) -> NDArray:
+    # np.unwrap: unwrap phase along `axis` (1-D/2-D). period default 2*pi.
+    # discont <= period/2 behaves like period/2 (NumPy rule).
+    nd = len(p.shape)
+    thresh = discont
+    half = period / 2.0
+    if thresh < half:
+        thresh = half
+    if nd == 1:
+        return NDArray(_unwrap_1d(p.data, thresh, period), p.shape)
+    if nd == 2:
+        ax = _norm_axis(axis, 2)
+        rows = p.shape[0]
+        cols = p.shape[1]
+        out = []
+        for i in 0..(rows * cols):
+            out.append(0.0)
+        if ax == 1:
+            for i in 0..rows:
+                xs = []
+                for j in 0..cols:
+                    xs.append(p.data[i * cols + j])
+                u = _unwrap_1d(xs, thresh, period)
+                for j in 0..len(u):
+                    out[i * cols + j] = u[j]
+        elif ax == 0:
+            for j in 0..cols:
+                xs = []
+                for i in 0..rows:
+                    xs.append(p.data[i * cols + j])
+                u = _unwrap_1d(xs, thresh, period)
+                for i in 0..len(u):
+                    out[i * cols + j] = u[i]
+        else:
+            panic("unwrap: bad axis")
+        return NDArray(out, [rows, cols])
+    panic("unwrap: only 1-D/2-D supported")
+    return NDArray([], [0])
+
+fn _unwrap_1d(xs: [f64], thresh: f64, period: f64) -> [f64]:
+    n = len(xs)
+    out = []
+    if n == 0:
+        return out
+    out.append(xs[0])
+    corr = 0.0
+    i = 1
+    while i < n:
+        dd = xs[i] - xs[i - 1]
+        # ddmod = mod(dd + period/2, period) - period/2  -> [-P/2, P/2)
+        ddmod = (dd + period / 2.0) % period - period / 2.0
+        c = 0.0
+        ad = abs(dd)
+        if ad >= thresh:
+            c = ddmod - dd
+        corr = corr + c
+        out.append(xs[i] + corr)
+        i = i + 1
+    return out
+
+# --- window functions -------------------------------------------------------------
+
+fn bartlett(M: i64) -> NDArray:
+    # np.bartlett (triangular/Bartlett window), denominator M-1.
+    if M <= 0:
+        return NDArray([], [0])
+    if M == 1:
+        return NDArray([1.0], [1])
+    n = []
+    for i in 0..M:
+        # w = 2/(M-1) * ((M-1)/2 - |i - (M-1)/2|)
+        c = (M - 1) / 2.0
+        w = 2.0 / (M - 1) * (c - abs(i - c))
+        n.append(w)
+    return NDArray(n, [M])
+
+fn blackman(M: i64) -> NDArray:
+    # np.blackman
+    if M <= 0:
+        return NDArray([], [0])
+    if M == 1:
+        return NDArray([1.0], [1])
+    n = []
+    for i in 0..M:
+        c1 = cos(2.0 * 3.141592653589793 * i / (M - 1))
+        c2 = cos(4.0 * 3.141592653589793 * i / (M - 1))
+        w = 0.42 - 0.5 * c1 + 0.08 * c2
+        n.append(w)
+    return NDArray(n, [M])
+
+fn hamming(M: i64) -> NDArray:
+    # np.hamming
+    if M <= 0:
+        return NDArray([], [0])
+    if M == 1:
+        return NDArray([1.0], [1])
+    n = []
+    for i in 0..M:
+        w = 0.54 - 0.46 * cos(2.0 * 3.141592653589793 * i / (M - 1))
+        n.append(w)
+    return NDArray(n, [M])
+
+fn hann(M: i64) -> NDArray:
+    # np.hanning (Hann window)
+    if M <= 0:
+        return NDArray([], [0])
+    if M == 1:
+        return NDArray([1.0], [1])
+    n = []
+    for i in 0..M:
+        w = 0.5 - 0.5 * cos(2.0 * 3.141592653589793 * i / (M - 1))
+        n.append(w)
+    return NDArray(n, [M])
+
+fn hanning(M: i64) -> NDArray:
+    # alias of hann (NumPy spells it hanning)
+    return hann(M)
+
+fn _chbevl(x: f64, vals: [f64]) -> f64:
+    # Clenshaw evaluation of Chebyshev series (NumPy cephes helper)
+    b0 = vals[0]
+    b1 = 0.0
+    b2 = 0.0
+    i = 1
+    while i < len(vals):
+        b2 = b1
+        b1 = b0
+        b0 = x * b1 - b2 + vals[i]
+        i = i + 1
+    return 0.5 * (b0 - b2)
+
+# cephes i0 coefficient tables (A for |x|<=8, B for |x|>8)
+fn _i0A() -> [f64]:
+    return [
+        -4.41534164647933937950E-18,
+        3.33079451882223809783E-17,
+        -2.43127984654795469359E-16,
+        1.71539128555513303061E-15,
+        -1.16853328779934516808E-14,
+        7.67618549860493561688E-14,
+        -4.85644678311192946090E-13,
+        2.95505266312963983461E-12,
+        -1.72682629144155570723E-11,
+        9.67580903537323691224E-11,
+        -5.18979560163526290666E-10,
+        2.65982372468238665035E-9,
+        -1.30002500998624804212E-8,
+        6.04699502254191894932E-8,
+        -2.67079385394061173391E-7,
+        1.11738753912010371815E-6,
+        -4.41673835845875056359E-6,
+        1.64484480707288970893E-5,
+        -5.75419501008210370398E-5,
+        1.88502885095841655729E-4,
+        -5.76375574538582365885E-4,
+        1.63947561694133579842E-3,
+        -4.32430999505057594430E-3,
+        1.05464603945949983183E-2,
+        -2.37374148058994688156E-2,
+        4.93052842396707084878E-2,
+        -9.49010970480476444210E-2,
+        1.71620901522208775349E-1,
+        -3.04682672343198398683E-1,
+        6.76795274409476084995E-1
+    ]
+
+fn _i0B() -> [f64]:
+    return [
+        -7.23318048787475395456E-18,
+        -4.83050448594418207126E-18,
+        4.46562142029675999901E-17,
+        3.46122286769746109310E-17,
+        -2.82762398051658348494E-16,
+        -3.42548561967721913462E-16,
+        1.77256013305652638360E-15,
+        3.81168066935262242075E-15,
+        -9.55484669882830764870E-15,
+        -4.15056934728722208663E-14,
+        1.54008621752140982691E-14,
+        3.85277838274214270114E-13,
+        7.18012445138366623367E-13,
+        -1.79417853150680611778E-12,
+        -1.32158118404477131188E-11,
+        -3.14991652796324136454E-11,
+        1.18891471078464383424E-11,
+        4.94060238822496958910E-10,
+        3.39623202570838634515E-9,
+        2.26666899049817806459E-8,
+        2.04891858946906374183E-7,
+        2.89137052083475648297E-6,
+        6.88975834691682398426E-5,
+        3.36911647825569408990E-3,
+        8.04490411014108831608E-1
+    ]
+
+fn i0(x: f64) -> f64:
+    # np.i0: modified Bessel function of the first kind, order 0.
+    # Cephes algorithm: Chebyshev expansions on |x|<=8 and |x|>8.
+    ax = abs(x)
+    if ax <= 8.0:
+        return exp(ax) * _chbevl(ax / 2.0 - 2.0, _i0A())
+    if ax > 1e300:
+        # +inf input -> +inf output (NumPy special-cases isinf)
+        return ax
+    he = exp(ax / 2.0)
+    return he * (_chbevl(32.0 / ax - 2.0, _i0B()) / sqrt(ax)) * he
+
+fn i0_arr(a: NDArray) -> NDArray:
+    # elementwise i0 over an NDArray
+    out = []
+    for v in a.data:
+        out.append(i0(v))
+    return NDArray(out, a.shape)
+
+fn kaiser(M: i64, beta: f64) -> NDArray:
+    # np.kaiser: I0(beta*sqrt(1-x^2)) / I0(beta), x = 2n/(M-1) - 1
+    if M <= 0:
+        return NDArray([], [0])
+    if M == 1:
+        return NDArray([1.0], [1])
+    denom = i0(beta)
+    n = []
+    for i in 0..M:
+        x = 2.0 * i / (M - 1) - 1.0
+        arg = 1.0 - x * x
+        if arg < 0.0:
+            arg = 0.0
+        w = i0(beta * sqrt(arg)) / denom
+        n.append(w)
+    return NDArray(n, [M])
+
+# --- meshgrid -----------------------------------------------------------------------
+
+fn meshgrid(x: NDArray, y: NDArray) -> [NDArray]:
+    # np.meshgrid default indexing='xy': X varies along columns.
+    # x, y must be 1-D. X[i,j] = x[j], Y[i,j] = y[i]; shape [len(y), len(x)].
+    nx = len(x.data)
+    ny = len(y.data)
+    xd = []
+    yd = []
+    for i in 0..(nx * ny):
+        xd.append(0.0)
+        yd.append(0.0)
+    for i in 0..ny:
+        for j in 0..nx:
+            xd[i * nx + j] = x.data[j]
+            yd[i * nx + j] = y.data[i]
+    return [NDArray(xd, [ny, nx]), NDArray(yd, [ny, nx])]
+
+fn meshgrid_ij(x: NDArray, y: NDArray) -> [NDArray]:
+    # np.meshgrid indexing='ij': X varies along rows. shape [len(x), len(y)].
+    nx = len(x.data)
+    ny = len(y.data)
+    xd = []
+    yd = []
+    for i in 0..(nx * ny):
+        xd.append(0.0)
+        yd.append(0.0)
+    for i in 0..nx:
+        for j in 0..ny:
+            xd[i * ny + j] = x.data[i]
+            yd[i * ny + j] = y.data[j]
+    return [NDArray(xd, [nx, ny]), NDArray(yd, [nx, ny])]
+
+fn meshgrid_list(xs: [f64], ys: [f64]) -> [NDArray]:
+    # convenience: meshgrid over plain lists (xy indexing)
+    return meshgrid(NDArray(xs, [len(xs)]), NDArray(ys, [len(ys)]))
+
+# --- index helpers -----------------------------------------------------------------
+
+fn diag_indices(n: i64, ndim: i64 = 2) -> [NDArray]:
+    # np.diag_indices: tuple of `ndim` arrays, each of shape [n]*ndim,
+    # where array k holds the k-th coordinate of the diagonal.
+    if ndim < 1:
+        return []
+    shape = []
+    for i in 0..ndim:
+        shape.append(n)
+    total = _shape_size(shape)
+    outs = []
+    for k in 0..ndim:
+        outs.append([])
+    for t in 0..total:
+        # decompose t into ndim coords (row-major over [n]*ndim)
+        rem = t
+        coords = []
+        ax = ndim - 1
+        while ax >= 0:
+            coords.insert(0, rem % n)
+            rem = rem // n
+            ax = ax - 1
+        for k in 0..ndim:
+            outs[k].append(float(coords[k]))
+    res = []
+    for k in 0..ndim:
+        res.append(NDArray(outs[k], shape))
+    return res
+
+fn tril_indices(n: i64, k: i64 = 0, m: i64? = None) -> (NDArray, NDArray):
+    # np.tril_indices: (row, col) index arrays for lower triangle of n x m.
+    # Keeps j - i <= k. m defaults to n. Row-major order.
+    mm = n
+    if m != None:
+        mm = m
+    rows = []
+    cols = []
+    for i in 0..n:
+        for j in 0..mm:
+            if j - i <= k:
+                rows.append(float(i))
+                cols.append(float(j))
+    return (NDArray(rows, [len(rows)]), NDArray(cols, [len(cols)]))
+
+fn triu_indices(n: i64, k: i64 = 0, m: i64? = None) -> (NDArray, NDArray):
+    # np.triu_indices: (row, col) index arrays for upper triangle of n x m.
+    # Keeps j - i >= k. m defaults to n. Row-major order.
+    mm = n
+    if m != None:
+        mm = m
+    rows = []
+    cols = []
+    for i in 0..n:
+        for j in 0..mm:
+            if j - i >= k:
+                rows.append(float(i))
+                cols.append(float(j))
+    return (NDArray(rows, [len(rows)]), NDArray(cols, [len(cols)]))

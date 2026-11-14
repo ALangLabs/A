@@ -1,0 +1,527 @@
+#
+# numpy reductions: sum/prod/mean/var/std/min/max, argmin/argmax, ptp,
+# cumsum/cumprod, trace, average, plus NaN-aware variants.
+#
+# Axis convention: axis=-1 selects the last axis; axis=0 selects the first.
+# Reductions remove the reduced axis (NumPy keepdims=False). Scalar (all-axis)
+# reductions are exposed as the *_all functions. Indices are returned as f64
+# because NDArray.data is [f64] (NumPy would use an int dtype).
+#
+# NaN helpers treat NaN as missing (v != v detects it). min/max/mean/var/std
+# over an empty or all-NaN slice yield NaN (NumPy raises/warns instead);
+# sum yields 0.0 and prod yields 1.0, matching NumPy.
+#
+#
+# WORKAROUND: every local below is _r-prefixed because function-local
+# variables in the current A backend share a flat name->slot namespace with
+# caller variables — a local named e.g. `data` or `m` silently overwrites a
+# same-named variable in the calling scope. Keep the prefix.
+#
+from "ndarray.a" import NDArray, _shape_size, _row_major_index, _ew_bin, ravel
+
+fn _nan() -> f64:
+    # IEEE NaN via pow domain edge (0.0/0.0 is a compile-time error in A)
+    return pow(-1.0, 0.5)
+
+fn _norm_axis(axis: i64, nd: i64) -> i64:
+    if axis < 0:
+        return axis + nd
+    return axis
+
+# Generic single-axis reduction.
+# op: "sum" | "prod" | "min" | "max" | "mean" | "var" | "std"
+# skip_nan: when true, NaN elements are excluded (and excluded from counts).
+fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
+    _rnd = len(a.shape)
+    _rax = _norm_axis(axis, _rnd)
+    if _rax < 0 or _rax >= _rnd:
+        return NDArray([], [])
+    _rdim = a.shape[_rax]
+    _rout_shape = []
+    _ri = 0
+    while _ri < _rnd:
+        if _ri != _rax:
+            _rout_shape.append(a.shape[_ri])
+        _ri = _ri + 1
+    # stride (in elements) of the reduced axis in the flat buffer
+    _raxstride = 1
+    _ri = _rax + 1
+    while _ri < _rnd:
+        _raxstride = _raxstride * a.shape[_ri]
+        _ri = _ri + 1
+    _rnout = _shape_size(_rout_shape)
+    _rnoutdims = len(_rout_shape)
+    _rdata = []
+    _roi = 0
+    while _roi < _rnout:
+        # decompose _roi into coordinates over _rout_shape
+        _rcoords = []
+        _rrem = _roi
+        _rk = _rnoutdims - 1
+        while _rk >= 0:
+            _rcoords.insert(0, _rrem % _rout_shape[_rk])
+            _rrem = _rrem // _rout_shape[_rk]
+            _rk = _rk - 1
+        # rebuild a full input index with the axis slot zeroed
+        _ridx = []
+        _rci = 0
+        _rj = 0
+        while _rj < _rnd:
+            if _rj == _rax:
+                _ridx.append(0)
+            else:
+                _ridx.append(_rcoords[_rci])
+                _rci = _rci + 1
+            _rj = _rj + 1
+        _rbase = _row_major_index(a.shape, _ridx)
+        # pass 1: accumulate
+        _rs = 0.0
+        _racc = 0.0
+        _rcnt = 0
+        _rk = 0
+        while _rk < _rdim:
+            _rv = a.data[_rbase + _rk * _raxstride]
+            # All locals in this file are _r-prefixed: the A backend lets a
+            # function-local variable clobber a same-named variable in the
+            # caller (flat name->slot namespace). Do not rename them back.
+            if skip_nan and _rv != _rv:
+                pass
+            else:
+                _rcnt = _rcnt + 1
+                if op == "prod":
+                    if _rcnt == 1:
+                        _racc = _rv
+                    else:
+                        _racc = _racc * _rv
+                elif op == "min":
+                    if _rcnt == 1 or _rv < _racc:
+                        _racc = _rv
+                elif op == "max":
+                    if _rcnt == 1 or _rv > _racc:
+                        _racc = _rv
+                else:
+                    _rs = _rs + _rv
+            _rk = _rk + 1
+        # finalize this output slot
+        if op == "prod":
+            if _rcnt == 0:
+                _rdata.append(1.0)
+            else:
+                _rdata.append(_racc)
+        elif op == "min" or op == "max":
+            if _rcnt == 0:
+                _rdata.append(_nan())
+            else:
+                _rdata.append(_racc)
+        elif op == "mean":
+            if _rcnt == 0:
+                _rdata.append(_nan())
+            else:
+                _rdata.append(_rs / _rcnt)
+        elif op == "var" or op == "std":
+            if _rcnt == 0:
+                _rdata.append(_nan())
+            else:
+                _rm = _rs / _rcnt
+                _rss = 0.0
+                _rk = 0
+                while _rk < _rdim:
+                    _rv = a.data[_rbase + _rk * _raxstride]
+                    if skip_nan and _rv != _rv:
+                        pass
+                    else:
+                        _rd = _rv - _rm
+                        _rss = _rss + _rd * _rd
+                    _rk = _rk + 1
+                _rvvar = _rss / _rcnt
+                if op == "var":
+                    _rdata.append(_rvvar)
+                else:
+                    _rdata.append(sqrt(_rvvar))
+        else:
+            # sum family: empty/all-NaN -> 0.0 (NumPy sum/nansum semantics)
+            _rdata.append(_rs)
+        _roi = _roi + 1
+    return NDArray(_rdata, _rout_shape)
+
+# Generic all-axis (flat) reduction -> scalar f64.
+fn _reduce_flat(a: NDArray, op: str, skip_nan: bool) -> f64:
+    _rs = 0.0
+    _racc = 0.0
+    _rcnt = 0
+    _ri = 0
+    _rn = len(a.data)
+    while _ri < _rn:
+        _rv = a.data[_ri]
+        if skip_nan and _rv != _rv:
+            pass
+        else:
+            _rcnt = _rcnt + 1
+            if op == "prod":
+                if _rcnt == 1:
+                    _racc = _rv
+                else:
+                    _racc = _racc * _rv
+            elif op == "min":
+                if _rcnt == 1 or _rv < _racc:
+                    _racc = _rv
+            elif op == "max":
+                if _rcnt == 1 or _rv > _racc:
+                    _racc = _rv
+            else:
+                _rs = _rs + _rv
+        _ri = _ri + 1
+    if op == "prod":
+        if _rcnt == 0:
+            return 1.0
+        return _racc
+    if op == "min" or op == "max":
+        if _rcnt == 0:
+            return _nan()
+        return _racc
+    if op == "mean":
+        if _rcnt == 0:
+            return _nan()
+        return _rs / _rcnt
+    if op == "var" or op == "std":
+        if _rcnt == 0:
+            return _nan()
+        _rm = _rs / _rcnt
+        _rss = 0.0
+        _ri = 0
+        while _ri < _rn:
+            _rv = a.data[_ri]
+            if skip_nan and _rv != _rv:
+                pass
+            else:
+                _rd = _rv - _rm
+                _rss = _rss + _rd * _rd
+            _ri = _ri + 1
+        _rvvar = _rss / _rcnt
+        if op == "var":
+            return _rvvar
+        return sqrt(_rvvar)
+    return _rs
+
+# --- axis reductions -----------------------------------------------------------
+
+fn sum(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "sum", false)
+
+fn nansum(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "sum", true)
+
+fn prod(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "prod", false)
+
+fn mean(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "mean", false)
+
+fn nanmean(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "mean", true)
+
+fn var(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "var", false)
+
+fn nanvar(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "var", true)
+
+fn std(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "std", false)
+
+fn nanstd(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "std", true)
+
+fn min(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "min", false)
+
+fn nanmin(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "min", true)
+
+fn max(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "max", false)
+
+fn nanmax(a: NDArray, axis: i64) -> NDArray:
+    return _reduce_axis(a, axis, "max", true)
+
+# --- all-axis (scalar) reductions ----------------------------------------------
+
+fn sum_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "sum", false)
+
+fn nansum_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "sum", true)
+
+fn prod_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "prod", false)
+
+fn mean_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "mean", false)
+
+fn nanmean_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "mean", true)
+
+fn var_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "var", false)
+
+fn nanvar_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "var", true)
+
+fn std_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "std", false)
+
+fn nanstd_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "std", true)
+
+fn min_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "min", false)
+
+fn nanmin_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "min", true)
+
+fn max_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "max", false)
+
+fn nanmax_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "max", true)
+
+# --- argmin / argmax ------------------------------------------------------------
+# Indices of extrema along an axis; first occurrence wins on ties.
+# Result dtype is f64 (NDArray.data is [f64]).
+
+fn _arg_axis(a: NDArray, axis: i64, find_min: bool) -> NDArray:
+    _rnd = len(a.shape)
+    _rax = _norm_axis(axis, _rnd)
+    if _rax < 0 or _rax >= _rnd:
+        return NDArray([], [])
+    _rdim = a.shape[_rax]
+    _rout_shape = []
+    _ri = 0
+    while _ri < _rnd:
+        if _ri != _rax:
+            _rout_shape.append(a.shape[_ri])
+        _ri = _ri + 1
+    _raxstride = 1
+    _ri = _rax + 1
+    while _ri < _rnd:
+        _raxstride = _raxstride * a.shape[_ri]
+        _ri = _ri + 1
+    _rnout = _shape_size(_rout_shape)
+    _rnoutdims = len(_rout_shape)
+    _rdata = []
+    _roi = 0
+    while _roi < _rnout:
+        _rcoords = []
+        _rrem = _roi
+        _rk = _rnoutdims - 1
+        while _rk >= 0:
+            _rcoords.insert(0, _rrem % _rout_shape[_rk])
+            _rrem = _rrem // _rout_shape[_rk]
+            _rk = _rk - 1
+        _ridx = []
+        _rci = 0
+        _rj = 0
+        while _rj < _rnd:
+            if _rj == _rax:
+                _ridx.append(0)
+            else:
+                _ridx.append(_rcoords[_rci])
+                _rci = _rci + 1
+            _rj = _rj + 1
+        _rbase = _row_major_index(a.shape, _ridx)
+        _rbest_k = 0
+        _rbest_v = 0.0
+        _rseen = false
+        _rk = 0
+        while _rk < _rdim:
+            _rv = a.data[_rbase + _rk * _raxstride]
+            if not _rseen:
+                _rbest_v = _rv
+                _rbest_k = _rk
+                _rseen = true
+            elif find_min and _rv < _rbest_v:
+                _rbest_v = _rv
+                _rbest_k = _rk
+            elif not find_min and _rv > _rbest_v:
+                _rbest_v = _rv
+                _rbest_k = _rk
+            _rk = _rk + 1
+        if _rseen:
+            _rdata.append(float(_rbest_k))
+        else:
+            _rdata.append(_nan())
+        _roi = _roi + 1
+    return NDArray(_rdata, _rout_shape)
+
+fn argmin(a: NDArray, axis: i64) -> NDArray:
+    return _arg_axis(a, axis, true)
+
+fn argmax(a: NDArray, axis: i64) -> NDArray:
+    return _arg_axis(a, axis, false)
+
+fn argmin_all(a: NDArray) -> i64:
+    if len(a.data) == 0:
+        return -1
+    _rbest = 0
+    _ri = 1
+    while _ri < len(a.data):
+        if a.data[_ri] < a.data[_rbest]:
+            _rbest = _ri
+        _ri = _ri + 1
+    return _rbest
+
+fn argmax_all(a: NDArray) -> i64:
+    if len(a.data) == 0:
+        return -1
+    _rbest = 0
+    _ri = 1
+    while _ri < len(a.data):
+        if a.data[_ri] > a.data[_rbest]:
+            _rbest = _ri
+        _ri = _ri + 1
+    return _rbest
+
+# --- ptp (peak-to-peak = max - min) ----------------------------------------------
+
+fn ptp(a: NDArray, axis: i64) -> NDArray:
+    _rmx = _reduce_axis(a, axis, "max", false)
+    _rmn = _reduce_axis(a, axis, "min", false)
+    return _ew_bin("sub", _rmx, _rmn)
+
+fn ptp_all(a: NDArray) -> f64:
+    return _reduce_flat(a, "max", false) - _reduce_flat(a, "min", false)
+
+# --- cumsum / cumprod ------------------------------------------------------------
+
+fn _cum_axis(a: NDArray, axis: i64, is_prod: bool) -> NDArray:
+    _rnd = len(a.shape)
+    _rax = _norm_axis(axis, _rnd)
+    if _rax < 0 or _rax >= _rnd:
+        return NDArray([], [])
+    _rdim = a.shape[_rax]
+    _raxstride = 1
+    _ri = _rax + 1
+    while _ri < _rnd:
+        _raxstride = _raxstride * a.shape[_ri]
+        _ri = _ri + 1
+    _router_shape = []
+    _ri = 0
+    while _ri < _rnd:
+        if _ri != _rax:
+            _router_shape.append(a.shape[_ri])
+        _ri = _ri + 1
+    _router_n = _shape_size(_router_shape)
+    _routdims = len(_router_shape)
+    _rn = a.size()
+    _rout_data = []
+    _ri = 0
+    while _ri < _rn:
+        _rout_data.append(0.0)
+        _ri = _ri + 1
+    _roi = 0
+    while _roi < _router_n:
+        _rcoords = []
+        _rrem = _roi
+        _rk = _routdims - 1
+        while _rk >= 0:
+            _rcoords.insert(0, _rrem % _router_shape[_rk])
+            _rrem = _rrem // _router_shape[_rk]
+            _rk = _rk - 1
+        _ridx = []
+        _rci = 0
+        _rj = 0
+        while _rj < _rnd:
+            if _rj == _rax:
+                _ridx.append(0)
+            else:
+                _ridx.append(_rcoords[_rci])
+                _rci = _rci + 1
+            _rj = _rj + 1
+        _rbase = _row_major_index(a.shape, _ridx)
+        _racc = 0.0
+        if is_prod:
+            _racc = 1.0
+        _rk = 0
+        while _rk < _rdim:
+            _roff = _rbase + _rk * _raxstride
+            _rv = a.data[_roff]
+            if is_prod:
+                _racc = _racc * _rv
+            else:
+                _racc = _racc + _rv
+            _rout_data[_roff] = _racc
+            _rk = _rk + 1
+        _roi = _roi + 1
+    return NDArray(_rout_data, a.shape)
+
+fn cumsum(a: NDArray, axis: i64) -> NDArray:
+    return _cum_axis(a, axis, false)
+
+fn cumprod(a: NDArray, axis: i64) -> NDArray:
+    return _cum_axis(a, axis, true)
+
+fn cumsum_flat(a: NDArray) -> NDArray:
+    return _cum_axis(ravel(a), 0, false)
+
+fn cumprod_flat(a: NDArray) -> NDArray:
+    return _cum_axis(ravel(a), 0, true)
+
+# --- trace ------------------------------------------------------------------------
+
+fn trace(a: NDArray) -> f64:
+    # NumPy trace over the main diagonal; only 2-D supported (returns NaN
+    # for other ranks, where NumPy would raise).
+    if len(a.shape) != 2:
+        return _nan()
+    _rrows = a.shape[0]
+    _rcols = a.shape[1]
+    _rn = _rrows
+    if _rcols < _rrows:
+        _rn = _rcols
+    _rs = 0.0
+    _ri = 0
+    while _ri < _rn:
+        _rs = _rs + a.data[_ri * _rcols + _ri]
+        _ri = _ri + 1
+    return _rs
+
+# --- average -----------------------------------------------------------------------
+
+fn average(a: NDArray) -> f64:
+    # unweighted mean over all elements (NumPy average == mean when w=None)
+    return _reduce_flat(a, "mean", false)
+
+fn average_w(a: NDArray, w: NDArray) -> f64:
+    # weighted average over flattened arrays; weights broadcast is NOT
+    # supported (NumPy allows it along an axis) — sizes must match.
+    if a.size() != w.size():
+        return _nan()
+    _rnum = 0.0
+    _rden = 0.0
+    _ri = 0
+    _rn = a.size()
+    while _ri < _rn:
+        _rwv = w.data[_ri]
+        _rnum = _rnum + a.data[_ri] * _rwv
+        _rden = _rden + _rwv
+        _ri = _ri + 1
+    if _rden == 0.0:
+        return _nan()
+    return _rnum / _rden
+
+fn average_w_flat(a: NDArray, w: [f64]) -> f64:
+    # same as average_w but weights given as a plain [f64] list
+    if len(w) != a.size():
+        return _nan()
+    _rnum = 0.0
+    _rden = 0.0
+    _ri = 0
+    _rn = a.size()
+    while _ri < _rn:
+        _rwv = w[_ri]
+        _rnum = _rnum + a.data[_ri] * _rwv
+        _rden = _rden + _rwv
+        _ri = _ri + 1
+    if _rden == 0.0:
+        return _nan()
+    return _rnum / _rden

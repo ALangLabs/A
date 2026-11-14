@@ -1,0 +1,404 @@
+#
+# numpy core: NDArray is a flat row-major (C-order) [f64] buffer plus a shape.
+# All higher-level ops are built on these primitives. dtype is f64 only.
+#
+# Public API mirrors NumPy naming where A allows: array, zeros, ones, ...
+# Math functions (sqrt, sin, pow, ...) are native builtins — no import needed.
+
+class NDArray:
+    data: [f64]
+    shape: [i64]
+
+    fn ndim(self) -> i64:
+        return len(self.shape)
+
+    fn size(self) -> i64:
+        n = 1
+        for d in self.shape:
+            n = n * d
+        return n
+
+# --- shape helpers -----------------------------------------------------------
+
+fn shape_of(a: NDArray) -> [i64]:
+    return a.shape
+
+fn ndim(a: NDArray) -> i64:
+    return len(a.shape)
+
+fn size_of(a: NDArray) -> i64:
+    return a.size()
+
+fn is_scalar_shape(shape: [i64]) -> bool:
+    return len(shape) == 0
+
+fn _shape_size(shape: [i64]) -> i64:
+    n = 1
+    for d in shape:
+        n = n * d
+    return n
+
+# --- creation -----------------------------------------------------------------
+
+fn ndarray(data: [f64], shape: [i64]) -> NDArray:
+    if _shape_size(shape) != len(data):
+        # mismatch: still construct; callers must pass matching sizes
+        pass
+    return NDArray(data, shape)
+
+fn array_from_list(xs: [[f64]]) -> NDArray:
+    # nested list -> NDArray (rectangular assumed)
+    shape = [len(xs)]
+    if len(xs) > 0:
+        shape.append(len(xs[0]))
+        flat = []
+        for row in xs:
+            for v in row:
+                flat.append(v)
+        return NDArray(flat, shape)
+    return NDArray([], shape)
+
+fn _full(shape: [i64], v: f64) -> NDArray:
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(v)
+    return NDArray(data, shape)
+
+fn zeros(shape: [i64]) -> NDArray:
+    return _full(shape, 0.0)
+
+fn ones(shape: [i64]) -> NDArray:
+    return _full(shape, 1.0)
+
+fn empty(shape: [i64]) -> NDArray:
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(0.0)
+    return NDArray(data, shape)
+
+fn full(shape: [i64], v: f64) -> NDArray:
+    return _full(shape, v)
+
+fn arange(start: f64, stop: f64, step: f64) -> NDArray:
+    data = []
+    x = start
+    if step > 0:
+        while x < stop:
+            data.append(x)
+            x = x + step
+    else:
+        while x > stop:
+            data.append(x)
+            x = x + step
+    return NDArray(data, [len(data)])
+
+fn arange1(stop: f64) -> NDArray:
+    return arange(0.0, stop, 1.0)
+
+fn linspace(start: f64, stop: f64, num: i64) -> NDArray:
+    if num <= 0:
+        return NDArray([], [0])
+    if num == 1:
+        return NDArray([start], [1])
+    step = (stop - start) / (num - 1.0)
+    data = []
+    for i in 0..num:
+        data.append(start + i * step)
+    return NDArray(data, [num])
+
+fn eye(n: i64) -> NDArray:
+    data = []
+    for i in 0..n:
+        for j in 0..n:
+            if i == j:
+                data.append(1.0)
+            else:
+                data.append(0.0)
+    return NDArray(data, [n, n])
+
+fn identity(n: i64) -> NDArray:
+    return eye(n)
+
+# --- shape manipulation --------------------------------------------------------
+
+fn _shape_prod(shape: [i64]) -> i64:
+    return _shape_size(shape)
+
+fn _row_major_index(shape: [i64], idx: [i64]) -> i64:
+    # C-order flat offset for a full index tuple
+    off = 0
+    stride = 1
+    i = len(shape) - 1
+    while i >= 0:
+        off = off + idx[i] * stride
+        stride = stride * shape[i]
+        i = i - 1
+    return off
+
+fn reshape(a: NDArray, newshape: [i64]) -> NDArray:
+    return NDArray(a.data, newshape)
+
+fn ravel(a: NDArray) -> NDArray:
+    return NDArray(a.data, [a.size()])
+
+fn flatten(a: NDArray) -> NDArray:
+    data = []
+    for v in a.data:
+        data.append(v)
+    return NDArray(data, [a.size()])
+
+fn transpose(a: NDArray) -> NDArray:
+    if len(a.shape) != 2:
+        # generic: reverse axes
+        newshape = []
+        i = len(a.shape) - 1
+        while i >= 0:
+            newshape.append(a.shape[i])
+            i = i - 1
+        data = []
+        total = _shape_size(newshape)
+        for i in 0..total:
+            # target multi-index
+            tidx = []
+            rem = i
+            k = len(newshape) - 1
+            while k >= 0:
+                tidx.insert(0, rem % newshape[k])
+                rem = rem // newshape[k]
+                k = k - 1
+            # source index = reversed target
+            sidx = []
+            k = len(tidx) - 1
+            while k >= 0:
+                sidx.append(tidx[k])
+                k = k - 1
+            off = _row_major_index(a.shape, sidx)
+            data.append(a.data[off])
+        return NDArray(data, newshape)
+    # 2-D fast path
+    rows = a.shape[0]
+    cols = a.shape[1]
+    data = []
+    for j in 0..cols:
+        for i in 0..rows:
+            data.append(a.data[i * cols + j])
+    return NDArray(data, [cols, rows])
+
+# --- indexing ------------------------------------------------------------------
+
+fn get(a: NDArray, idx: [i64]) -> f64:
+    return a.data[_row_major_index(a.shape, idx)]
+
+fn set(a: NDArray, idx: [i64], v: f64) -> NDArray:
+    a.data[_row_major_index(a.shape, idx)] = v
+    return a
+
+fn _broadcast_strides(shape: [i64], target: [i64]) -> [i64]:
+    # returns per-axis stride multiplier into `shape` for broadcasting to `target`
+    # (right-aligned). stride[i] is 0 for broadcast axes.
+    nd = len(shape)
+    nt = len(target)
+    strides = []
+    for i in 0..nt:
+        strides.append(0)
+    # compute strides of source in C order
+    sstride = []
+    st = 1
+    i = nd - 1
+    while i >= 0:
+        sstride.insert(0, st)
+        st = st * shape[i]
+        i = i - 1
+    offset = nt - nd
+    i = 0
+    while i < nd:
+        if offset + i < nt:
+            # stride is 0 on axes where the source dim is 1 but target is not
+            # (true broadcast); otherwise the C-order stride applies.
+            if shape[i] == 1 and target[offset + i] != 1:
+                strides[offset + i] = 0
+            else:
+                strides[offset + i] = sstride[i]
+        i = i + 1
+    return strides
+
+fn _broadcast_shape(a: [i64], b: [i64]) -> [i64]:
+    # returns broadcasted shape of two shapes, or [] on mismatch
+    na = len(a)
+    nb = len(b)
+    nt = na
+    if nb > na:
+        nt = nb
+    out = []
+    for i in 0..nt:
+        out.append(1)
+    i = 0
+    while i < nt:
+        av = 1
+        bv = 1
+        ai = i - (nt - na)
+        bi = i - (nt - nb)
+        if ai >= 0:
+            av = a[ai]
+        if bi >= 0:
+            bv = b[bi]
+        if av == bv:
+            out[i] = av
+        elif av == 1:
+            out[i] = bv
+        elif bv == 1:
+            out[i] = av
+        else:
+            return []
+        i = i + 1
+    return out
+
+fn _asarray_scalar(v: f64) -> NDArray:
+    return NDArray([v], [])
+
+# elementwise binary op on broadcasted NDArrays; op is "add"|"sub"|"mul"|"div"|"pow"|"min"|"max"
+fn _ew_bin(op: str, a: NDArray, b: NDArray) -> NDArray:
+    shape = _broadcast_shape(a.shape, b.shape)
+    if len(shape) == 0:
+        return NDArray([], [])
+    n = _shape_size(shape)
+    sa = _broadcast_strides(a.shape, shape)
+    sb = _broadcast_strides(b.shape, shape)
+    data = []
+    for i in 0..n:
+        # decompose i into target multi-index
+        rem = i
+        coords = []
+        k = len(shape) - 1
+        while k >= 0:
+            coords.insert(0, rem % shape[k])
+            rem = rem // shape[k]
+            k = k - 1
+        oa = 0
+        ob = 0
+        k = 0
+        while k < len(shape):
+            oa = oa + coords[k] * sa[k]
+            ob = ob + coords[k] * sb[k]
+            k = k + 1
+        va = a.data[oa]
+        vb = b.data[ob]
+        if op == "add":
+            data.append(va + vb)
+        elif op == "sub":
+            data.append(va - vb)
+        elif op == "mul":
+            data.append(va * vb)
+        elif op == "div":
+            data.append(va / vb)
+        elif op == "pow":
+            data.append(pow(va, vb))
+        elif op == "min":
+            if va < vb:
+                data.append(va)
+            else:
+                data.append(vb)
+        else:
+            if va > vb:
+                data.append(va)
+            else:
+                data.append(vb)
+    return NDArray(data, shape)
+
+fn _ew_un(op: str, a: NDArray) -> NDArray:
+    n = a.size()
+    data = []
+    for i in 0..n:
+        v = a.data[i]
+        if op == "neg":
+            data.append(-v)
+        elif op == "abs":
+            if v < 0:
+                data.append(-v)
+            else:
+                data.append(v)
+        elif op == "sqrt":
+            data.append(sqrt(v))
+        elif op == "sin":
+            data.append(sin(v))
+        elif op == "cos":
+            data.append(cos(v))
+        elif op == "exp":
+            data.append(exp(v))
+        elif op == "log":
+            data.append(log(v))
+        elif op == "floor":
+            data.append(floor(v))
+        elif op == "ceil":
+            data.append(ceil(v))
+        else:
+            data.append(v)
+    return NDArray(data, a.shape)
+
+fn _scalar_or_arr(v: f64, shape: [i64]) -> NDArray:
+    if len(shape) == 0:
+        return NDArray([v], [])
+    n = _shape_size(shape)
+    data = []
+    for i in 0..n:
+        data.append(v)
+    return NDArray(data, shape)
+
+# broadcast a scalar against an NDArray
+fn _with_scalar(op: str, a: NDArray, scalar: f64, scalar_left: bool) -> NDArray:
+    s = _scalar_or_arr(scalar, a.shape)
+    if scalar_left:
+        return _ew_bin(op, s, a)
+    return _ew_bin(op, a, s)
+
+# --- conversion / printing -----------------------------------------------------
+
+fn tolist(a: NDArray) -> [[f64]]:
+    # only supports 1-D and 2-D for now (nested deeper -> flattened rows)
+    if len(a.shape) == 1:
+        out = []
+        for v in a.data:
+            out.append([v])
+        return out
+    rows = a.shape[0]
+    if rows == 0:
+        return []
+    cols = a.size() // rows
+    out = []
+    for i in 0..rows:
+        row = []
+        for j in 0..cols:
+            row.append(a.data[i * cols + j])
+        out.append(row)
+    return out
+
+fn _fmt_num(v: f64) -> str:
+    return str(v)
+
+fn array2string(a: NDArray) -> str:
+    if len(a.shape) == 0:
+        if len(a.data) == 0:
+            return "[]"
+        return _fmt_num(a.data[0])
+    if len(a.shape) == 1:
+        parts = []
+        for v in a.data:
+            parts.append(_fmt_num(v))
+        return "[" + ", ".join(parts) + "]"
+    # 2-D
+    rows = a.shape[0]
+    if rows == 0:
+        return "[]"
+    cols = a.size() // rows
+    lines = []
+    for i in 0..rows:
+        parts = []
+        for j in 0..cols:
+            parts.append(_fmt_num(a.data[i * cols + j]))
+        lines.append("[" + ", ".join(parts) + "]")
+    return "\n".join(lines)
+
+fn str_arr(a: NDArray) -> str:
+    return array2string(a)

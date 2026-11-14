@@ -1,0 +1,119 @@
+#
+# Verification for creation.a — expected values computed by hand.
+#
+from "creation.a" import copy, ascontiguousarray, require, copyto
+from "creation.a" import asarray_ndarray, asarray_flat, asarray_list
+from "creation.a" import asarray_nested3, from_flat, indices, ogrid, mgrid
+from "ndarray.a" import NDArray, zeros, ones, array2string, get, size_of
+from "ndarray.a" import ndim, reshape
+
+fn check(name: str, got: f64, want: f64) -> bool:
+    if got == want:
+        print("ok   " + name)
+        return true
+    else:
+        print("FAIL " + name + " got=" + str(got) + " want=" + str(want))
+        return false
+
+entry main():
+    ok = true
+
+    # --- copy ---
+    a = NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])
+    b = copy(a)
+    ok = check("copy elem", get(b, [1, 0]), 3.0) and ok
+    b.data[0] = 99.0
+    ok = check("copy is deep", a.data[0], 1.0) and ok
+
+    # --- ascontiguousarray / require ---
+    c = ascontiguousarray(a)
+    ok = check("ascontiguousarray", get(c, [0, 1]), 2.0) and ok
+    c.data[0] = 55.0
+    ok = check("ascontiguousarray deep", a.data[0], 1.0) and ok
+    d = require(a)
+    ok = check("require same", d.data[1], 2.0) and ok
+
+    # --- copyto ---
+    dst = zeros([4])
+    src = NDArray([7.0, 8.0, 9.0, 10.0, 11.0], [5])
+    copyto(dst, src)
+    ok = check("copyto min-size", dst.data[3], 10.0) and ok
+    ok = check("copyto size kept", size_of(dst), 4) and ok
+    # dst larger than src
+    dst2 = zeros([3])
+    src2 = NDArray([4.0, 5.0], [2])
+    copyto(dst2, src2)
+    ok = check("copyto src smaller", dst2.data[1], 5.0) and ok
+    ok = check("copyto src smaller untouched", dst2.data[2], 0.0) and ok
+
+    # --- asarray variants ---
+    flat = asarray_flat([1.0, 2.0, 3.0])
+    ok = check("asarray_flat shape", size_of(flat), 3) and ok
+    ok = check("asarray_flat val", flat.data[2], 3.0) and ok
+
+    rows = asarray_list([[1.0, 2.0], [3.0, 4.0]])
+    ok = check("asarray_list shape", size_of(rows), 4) and ok
+    ok = check("asarray_list ndim", ndim(rows), 2) and ok
+    ok = check("asarray_list val", get(rows, [1, 0]), 3.0) and ok
+
+    cube = asarray_nested3([[[1.0, 2.0], [3.0, 4.0]], [[5.0, 6.0], [7.0, 8.0]]])
+    ok = check("asarray_nested3 shape", size_of(cube), 8) and ok
+    ok = check("asarray_nested3 ndim", ndim(cube), 3) and ok
+    ok = check("asarray_nested3 val", get(cube, [1, 1, 0]), 7.0) and ok
+
+    same = NDArray([9.0], [1])
+    ok = check("asarray_ndarray", asarray_ndarray(same).data[0], 9.0) and ok
+
+    # --- from_flat ---
+    f = from_flat([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+    ok = check("from_flat ok", get(f, [1, 2]), 6.0) and ok
+    bad = from_flat([1.0, 2.0], [2, 3])
+    ok = check("from_flat mismatch empty", size_of(bad), 0) and ok
+
+    # --- indices ---
+    # np.indices((2,3)) -> shape (2,2,3)
+    # [0] = rows: [[0,0,0],[1,1,1]] ; [1] = cols: [[0,1,2],[0,1,2]]
+    ind = indices([2, 3])
+    ok = check("indices shape", size_of(ind), 12) and ok
+    ok = check("indices ndim", ndim(ind), 3) and ok
+    ok = check("indices [0,1,2]", get(ind, [0, 1, 2]), 1.0) and ok
+    ok = check("indices [1,0,2]", get(ind, [1, 0, 2]), 2.0) and ok
+    ok = check("indices [1,1,0]", get(ind, [1, 1, 0]), 0.0) and ok
+    # 1-D: indices((3,)) -> shape (1,3); [0]=[0,1,2]
+    ind1 = indices([3])
+    ok = check("indices 1d shape", size_of(ind1), 3) and ok
+    ok = check("indices 1d val", get(ind1, [0, 2]), 2.0) and ok
+    # 3-D spot check: indices((2,2,2)) shape (3,2,2,2)
+    ind3 = indices([2, 2, 2])
+    ok = check("indices 3d shape", size_of(ind3), 24) and ok
+    # [2, 1, 1, 0] should be coord along axis 2 at (1,1,0) = 0
+    ok = check("indices 3d axis2", get(ind3, [2, 1, 1, 0]), 0.0) and ok
+    # [2, 1, 1, 1] = 1
+    ok = check("indices 3d axis2b", get(ind3, [2, 1, 1, 1]), 1.0) and ok
+
+    # --- ogrid ---
+    # ogrid([2,3]) -> [ shape (2,1): [[0],[1]], shape (1,3): [[0,1,2]] ]
+    og = ogrid([2, 3])
+    ok = check("ogrid count", len(og), 2) and ok
+    ok = check("ogrid axis0 size", size_of(og[0]), 2) and ok
+    ok = check("ogrid axis1 size", size_of(og[1]), 3) and ok
+    ok = check("ogrid axis0 ndim", ndim(og[0]), 2) and ok
+    ok = check("ogrid axis0 [1,0]", get(og[0], [1, 0]), 1.0) and ok
+    ok = check("ogrid axis1 [0,2]", get(og[1], [0, 2]), 2.0) and ok
+
+    # --- mgrid ---
+    # np.mgrid[0:2, 0:3] -> shape (2,2,3)
+    # [0] = [[0,0,0],[1,1,1]], [1] = [[0,1,2],[0,1,2]]
+    mg = mgrid([2, 3])
+    ok = check("mgrid shape size", size_of(mg), 12) and ok
+    ok = check("mgrid ndim", ndim(mg), 3) and ok
+    ok = check("mgrid [0,1,2]", get(mg, [0, 1, 2]), 1.0) and ok
+    ok = check("mgrid [1,0,2]", get(mg, [1, 0, 2]), 2.0) and ok
+    ok = check("mgrid [1,1,0]", get(mg, [1, 1, 0]), 0.0) and ok
+
+    print(array2string(mg))
+    if ok:
+        print("ALL PASS")
+    else:
+        print("SOME FAILED")
+        assert(false)

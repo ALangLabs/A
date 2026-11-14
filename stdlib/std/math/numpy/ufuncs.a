@@ -1,0 +1,990 @@
+#
+# numpy ufuncs: elementwise universal functions over NDArray (f64 dtype only).
+#
+# A has no first-class functions / operator overloading, so every ufunc is a
+# named function. Binary ufuncs come in three entry points because A has no
+# overloading:
+#
+#   add(a: NDArray, b: NDArray)   array OP array (broadcasting)
+#   add_scalar(a: NDArray, s: f64)        array OP scalar
+#   radd_scalar(s: f64, a: NDArray)       scalar OP array  ("r" = reflected)
+#
+# DEVIATIONS FROM NUMPY (dtype is f64-only, runtime is checked):
+#  * Boolean ufuncs (isnan/isinf/isfinite/signbit) return NDArray of 0.0/1.0
+#    floats, not a bool dtype (there is none).
+#  * `where` is an A keyword, so the selector is named `where_`.
+#  * Domain errors that C would return NaN for (sqrt(-1), log(-1), asin(2),
+#    sin(inf), ...) are guarded elementwise and return NaN where cheap; a few
+#    exotic edges (e.g. fmod with quotient overflow) may still produce NaN.
+#    Division by zero never panics: divide/floor_divide/remainder/fmod return
+#    +/-inf or NaN per IEEE instead of raising.
+#  * np.mod == np.remainder (sign of divisor); np.fmod keeps sign of dividend.
+#  * copysign cannot observe the sign bit of +/-0.0 or NaN operands exactly
+#    (detected via atan2); documented per-function.
+#
+import std:math
+from "ndarray.a" import NDArray, _broadcast_shape, _shape_size, _scalar_or_arr
+
+# --- scalar helpers -----------------------------------------------------------
+
+fn _pinf() -> f64:
+    # +inf without a literal: overflow is not checked, produces IEEE inf.
+    return 1e308 * 10.0
+
+fn _nan() -> f64:
+    # NaN without 0.0/0.0 (division by zero panics in A). A's runtime float
+    # ops are non-IEEE in corners: 0.0*inf -> inf, inf-var - inf-var -> 0/inf.
+    # math.pow(-1, 0.5) reliably yields NaN (verified).
+    return math.pow(-1.0, 0.5)
+
+fn _sign_neg(y: f64) -> bool:
+    # true when y carries a negative sign, including -0.0.
+    # atan2 preserves the sign of zero: atan2(-0.0, -1.0) = -pi.
+    if y < 0.0:
+        return true
+    if y == 0.0:
+        if math.atan2(y, -1.0) < 0.0:
+            return true
+        return false
+    return false
+
+fn _cs(x: f64, y: f64) -> f64:
+    # copysign without the intrinsic (the ufunc `copysign` shadows it here).
+    if x != x or y != y:
+        return _nan()
+    if _sign_neg(y):
+        return -fabs(x)
+    return fabs(x)
+
+fn _div(x: f64, y: f64) -> f64:
+    # IEEE division: no panic on zero divisor.
+    if y == 0.0:
+        if x == 0.0 or x != x:
+            return _nan()
+        return _cs(1.0, x) * _cs(1.0, y) * _pinf()
+    # x/y can still be NaN from non-NaN inputs (inf/inf); a helper-local check
+    # keeps the NaN "fresh" (see _bin_scalar note on the param-NaN bug).
+    r = x / y
+    if r != r:
+        return _nan()
+    return r
+
+fn _fmod(x: f64, y: f64) -> f64:
+    # C fmod: result has the sign of x. x - trunc(x/y)*y.
+    if y == 0.0 or x != x or y != y or fabs(x) == _pinf():
+        return _nan()
+    if fabs(y) == _pinf():
+        return x
+    q = x / y
+    if q != q or fabs(q) == _pinf():
+        # quotient overflow: true fmod needs exact arithmetic; give up -> NaN
+        return _nan()
+    r = x - math.trunc(q) * y
+    if r != r:
+        return _nan()
+    return r
+
+fn _rem(x: f64, y: f64) -> f64:
+    # numpy remainder/mod: sign of the divisor. x - floor(x/y)*y.
+    if y == 0.0 or x != x or y != y or fabs(x) == _pinf():
+        return _nan()
+    if fabs(y) == _pinf():
+        return x
+    q = x / y
+    if q != q or fabs(q) == _pinf():
+        return _nan()
+    r = x - math.floor(q) * y
+    if r != r:
+        return _nan()
+    return r
+
+fn _floordiv(x: f64, y: f64) -> f64:
+    # floor(x / y); non-finite handled explicitly.
+    if y == 0.0 or x != x or y != y:
+        return _nan()
+    xinf = fabs(x) == _pinf()
+    yinf = fabs(y) == _pinf()
+    if xinf and yinf:
+        return _nan()
+    if xinf:
+        return _cs(_pinf(), x) * _cs(1.0, y)
+    if yinf:
+        return math.floor(x / y)   # x/y = +-0 -> +-0
+    q = x / y
+    if q != q or fabs(q) == _pinf():
+        return _cs(_pinf(), x) * _cs(1.0, y)
+    return math.floor(q)
+
+fn _hypot(x: f64, y: f64) -> f64:
+    # overflow-safe sqrt(x*x + y*y).
+    if x != x or y != y:
+        return _nan()
+    ax = fabs(x)
+    ay = fabs(y)
+    m = ax
+    if ay > m:
+        m = ay
+    if m == 0.0:
+        return 0.0
+    if m == _pinf():
+        return _pinf()
+    rx = ax / m
+    ry = ay / m
+    return m * math.sqrt(rx * rx + ry * ry)
+
+fn _maximum(x: f64, y: f64) -> f64:
+    # numpy maximum: NaN propagates.
+    if x != x or y != y:
+        return _nan()
+    if x > y:
+        return x
+    return y
+
+fn _minimum(x: f64, y: f64) -> f64:
+    if x != x or y != y:
+        return _nan()
+    if x < y:
+        return x
+    return y
+
+fn _fmax(x: f64, y: f64) -> f64:
+    # numpy fmax: NaN is ignored.
+    if x != x:
+        if y != y:
+            return _nan()
+        return y
+    if y != y:
+        return x
+    if x > y:
+        return x
+    return y
+
+fn _fmin(x: f64, y: f64) -> f64:
+    if x != x:
+        if y != y:
+            return _nan()
+        return y
+    if y != y:
+        return x
+    if x < y:
+        return x
+    return y
+
+fn _rint(x: f64) -> f64:
+    # round half to even (banker's), numpy rint/np.round.
+    f = math.floor(x)
+    d = x - f
+    if d < 0.5:
+        return f
+    if d > 0.5:
+        return f + 1.0
+    # exactly 0.5: keep f when f is even
+    h = math.floor(f / 2.0)
+    if f == h * 2.0:
+        return f
+    return f + 1.0
+
+fn _expm1(x: f64) -> f64:
+    # e^x - 1, series for small |x| (same scheme as std/math/functions.a).
+    ax = fabs(x)
+    if ax < 0.001:
+        x2 = x * x
+        return x + x2 / 2.0 + x2 * x / 6.0
+    return math.exp(x) - 1.0
+
+fn _log1p(x: f64) -> f64:
+    # log(1 + x), series for small |x|.
+    ax = fabs(x)
+    if ax < 0.001:
+        x2 = x * x
+        return x - x2 / 2.0 + x2 * x / 3.0 - x2 * x2 / 4.0
+    return math.log(1.0 + x)
+
+fn _sinh(x: f64) -> f64:
+    if fabs(x) == _pinf():
+        return _cs(_pinf(), x)
+    return (math.exp(x) - math.exp(-x)) / 2.0
+
+fn _cosh(x: f64) -> f64:
+    if fabs(x) == _pinf():
+        return _pinf()
+    return (math.exp(x) + math.exp(-x)) / 2.0
+
+fn _tanh(x: f64) -> f64:
+    if fabs(x) == _pinf():
+        return _cs(1.0, x)
+    e = math.exp(-2.0 * fabs(x))
+    t = (1.0 - e) / (1.0 + e)
+    if x < 0.0:
+        return -t
+    return t
+
+fn _asinh(x: f64) -> f64:
+    ax = fabs(x)
+    if ax == _pinf():
+        return _cs(_pinf(), x)
+    if ax > 1e150:
+        # asinh(x) ~ log(2|x|) = log|x| + ln2 for huge x (avoids ax*ax overflow)
+        return _cs(math.log(ax) + 0.6931471805599453, x)
+    r = math.log(ax + math.sqrt(ax * ax + 1.0))
+    if x < 0.0:
+        return -r
+    return r
+
+fn _acosh(x: f64) -> f64:
+    if x < 1.0:
+        if x != x:
+            return x
+        return _nan()
+    if x == 1.0:
+        return 0.0
+    if x == _pinf():
+        return _pinf()
+    return math.log(x + math.sqrt(x - 1.0) * math.sqrt(x + 1.0))
+
+fn _atanh(x: f64) -> f64:
+    ax = fabs(x)
+    if ax > 1.0:
+        return _nan()
+    if ax == 1.0:
+        return _cs(_pinf(), x)
+    return 0.5 * math.log((1.0 + x) / (1.0 - x))
+
+fn _log_guarded(x: f64, base2: bool, base10: bool) -> f64:
+    # log/log2/log10 with IEEE domain handling (no panic on x <= 0).
+    if x == 0.0:
+        return -_pinf()
+    if x < 0.0:
+        return _nan()
+    if base2:
+        return math.log2(x)
+    if base10:
+        return math.log10(x)
+    return math.log(x)
+
+fn _sinc(x: f64) -> f64:
+    # sin(pi x) / (pi x), value 1 at x == 0.
+    if fabs(x) == _pinf():
+        return _nan()
+    t = x * 3.141592653589793
+    if t == 0.0:
+        return 1.0
+    if fabs(t) == _pinf():
+        return _nan()
+    return math.sin(t) / t
+
+# --- unary elementwise ----------------------------------------------------------
+
+fn _un_scalar(op: str, v: f64) -> f64:
+    nan = (v != v)
+    if op == "isnan":
+        if nan:
+            return 1.0
+        return 0.0
+    if op == "isinf":
+        if nan:
+            return 0.0
+        if fabs(v) == _pinf():
+            return 1.0
+        return 0.0
+    if op == "isfinite":
+        if nan:
+            return 0.0
+        if fabs(v) == _pinf():
+            return 0.0
+        return 1.0
+    if op == "signbit":
+        if nan:
+            return 0.0
+        if v < 0.0:
+            return 1.0
+        if v == 0.0:
+            if math.atan2(v, -1.0) < 0.0:
+                return 1.0
+        return 0.0
+    if nan:
+        return _nan()
+    inf = (fabs(v) == _pinf())
+    if op == "neg":
+        return -v
+    if op == "pos":
+        return v
+    if op == "abs":
+        return fabs(v)
+    if op == "sqrt":
+        if v < 0.0:
+            return _nan()
+        return math.sqrt(v)
+    if op == "square":
+        return v * v
+    if op == "sin":
+        if inf:
+            return _nan()
+        return math.sin(v)
+    if op == "cos":
+        if inf:
+            return _nan()
+        return math.cos(v)
+    if op == "tan":
+        if inf:
+            return _nan()
+        return math.tan(v)
+    if op == "asin":
+        if inf or fabs(v) > 1.0:
+            return _nan()
+        return math.asin(v)
+    if op == "acos":
+        if inf or fabs(v) > 1.0:
+            return _nan()
+        return math.acos(v)
+    if op == "atan":
+        return math.atan(v)
+    if op == "sinh":
+        return _sinh(v)
+    if op == "cosh":
+        return _cosh(v)
+    if op == "tanh":
+        return _tanh(v)
+    if op == "asinh":
+        return _asinh(v)
+    if op == "acosh":
+        return _acosh(v)
+    if op == "atanh":
+        return _atanh(v)
+    if op == "exp":
+        return math.exp(v)
+    if op == "exp2":
+        return math.pow(2.0, v)
+    if op == "expm1":
+        return _expm1(v)
+    if op == "log":
+        return _log_guarded(v, false, false)
+    if op == "log2":
+        return _log_guarded(v, true, false)
+    if op == "log10":
+        return _log_guarded(v, false, true)
+    if op == "log1p":
+        if v <= -1.0:
+            if v == -1.0:
+                return -_pinf()
+            return _nan()
+        return _log1p(v)
+    if op == "floor":
+        if inf:
+            return v
+        return math.floor(v)
+    if op == "ceil":
+        if inf:
+            return v
+        return math.ceil(v)
+    if op == "trunc" or op == "fix":
+        if inf:
+            return v
+        return math.trunc(v)
+    if op == "rint":
+        if inf:
+            return v
+        return _rint(v)
+    if op == "sign":
+        if v > 0.0:
+            return 1.0
+        if v < 0.0:
+            return -1.0
+        return v
+    if op == "reciprocal":
+        if v == 0.0:
+            return _cs(_pinf(), v)
+        return 1.0 / v
+    if op == "sinc":
+        return _sinc(v)
+    if op == "deg2rad":
+        return v * 0.017453292519943295
+    if op == "rad2deg":
+        return v * 57.29577951308232
+    return v
+
+fn _uf_un(op: str, a: NDArray) -> NDArray:
+    n = a.size()
+    data = []
+    for i in 0..n:
+        data.append(_un_scalar(op, a.data[i]))
+    return NDArray(data, a.shape)
+
+# --- binary elementwise ---------------------------------------------------------
+
+fn _pow(x: f64, y: f64) -> f64:
+    if x != x or y != y:
+        return _nan()
+    return math.pow(x, y)
+
+fn _bin_scalar(op: str, x: f64, y: f64) -> f64:
+    # WORKAROUND for an A runtime bug: an f64 NaN that is bound to a function
+    # parameter is corrupted to +inf when it crosses the NEXT call boundary
+    # (forwarded as an argument or returned). Params can be *read* fine, so
+    # all NaN handling must happen in THIS frame before delegating to helpers
+    # (a second hop would hand them +inf instead of NaN).
+    if x != x or y != y:
+        if op == "fmax" or op == "fmin":
+            # NaN-tolerant ops return the non-NaN operand.
+            if x != x:
+                if y != y:
+                    return _nan()
+                return y
+            return x
+        # every other ufunc propagates NaN
+        return _nan()
+    if op == "add":
+        r = x + y
+        if r != r:
+            return _nan()
+        return r
+    if op == "sub":
+        r = x - y
+        if r != r:
+            return _nan()
+        return r
+    if op == "mul":
+        r = x * y
+        if r != r:
+            return _nan()
+        return r
+    if op == "div":
+        return _div(x, y)
+    if op == "pow":
+        return _pow(x, y)
+    if op == "rem" or op == "mod":
+        return _rem(x, y)
+    if op == "fmod":
+        return _fmod(x, y)
+    if op == "floordiv":
+        return _floordiv(x, y)
+    if op == "hypot":
+        return _hypot(x, y)
+    if op == "maximum":
+        return _maximum(x, y)
+    if op == "minimum":
+        return _minimum(x, y)
+    if op == "fmax":
+        return _fmax(x, y)
+    if op == "fmin":
+        return _fmin(x, y)
+    if op == "cs":
+        return _cs(x, y)
+    if op == "atan2":
+        # builtin call result: a NaN produced here is "fresh" and survives
+        return math.atan2(x, y)
+    return x
+
+fn _bcompat(a: [i64], b: [i64]) -> bool:
+    # true when shapes a and b are broadcast-compatible (incl. both 0-d).
+    na = len(a)
+    nb = len(b)
+    nt = na
+    if nb > na:
+        nt = nb
+    i = 0
+    while i < nt:
+        av = 1
+        bv = 1
+        ai = i - (nt - na)
+        bi = i - (nt - nb)
+        if ai >= 0:
+            av = a[ai]
+        if bi >= 0:
+            bv = b[bi]
+        if av == bv or av == 1 or bv == 1:
+            i = i + 1
+        else:
+            return false
+    return true
+
+fn _bshape3(sa: [i64], sb: [i64], sc: [i64]) -> [i64]:
+    # broadcast three shapes; [] means mismatch OR all-0-d (caller distinguishes).
+    if not _bcompat(sa, sb):
+        return []
+    s = _broadcast_shape(sa, sb)
+    if not _bcompat(s, sc):
+        return []
+    return _broadcast_shape(s, sc)
+
+fn _bstride(shape: [i64], target: [i64]) -> [i64]:
+    # Broadcast strides into `target` (right-aligned, C order).
+    # WORKAROUND: ndarray.a's _broadcast_strides forgets to zero the stride on
+    # size-1 axes that are actually broadcast (target dim > 1), which reads
+    # out of bounds. This version zeroes those strides.
+    nd = len(shape)
+    nt = len(target)
+    strides = []
+    for i in 0..nt:
+        strides.append(0)
+    sstride = []
+    st = 1
+    i = nd - 1
+    while i >= 0:
+        sstride.insert(0, st)
+        st = st * shape[i]
+        i = i - 1
+    offset = nt - nd
+    i = 0
+    while i < nd:
+        if offset + i < nt:
+            if shape[i] == 1 and target[offset + i] > 1:
+                strides[offset + i] = 0
+            else:
+                strides[offset + i] = sstride[i]
+        i = i + 1
+    return strides
+
+fn _coords_at(shape: [i64], i: i64) -> [i64]:
+    # C-order multi-index of flat position i.
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]
+        k = k - 1
+    return coords
+
+fn _uf_bin(op: str, a: NDArray, b: NDArray) -> NDArray:
+    shape = _broadcast_shape(a.shape, b.shape)
+    if len(shape) == 0 and not _bcompat(a.shape, b.shape):
+        return NDArray([], [])
+    n = _shape_size(shape)
+    sa = _bstride(a.shape, shape)
+    sb = _bstride(b.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords_at(shape, i)
+        oa = 0
+        ob = 0
+        k = 0
+        while k < len(shape):
+            oa = oa + coords[k] * sa[k]
+            ob = ob + coords[k] * sb[k]
+            k = k + 1
+        data.append(_bin_scalar(op, a.data[oa], b.data[ob]))
+    return NDArray(data, shape)
+
+fn _with_scalar2(op: str, a: NDArray, s: f64, scalar_left: bool) -> NDArray:
+    sa = _scalar_or_arr(s, a.shape)
+    if scalar_left:
+        return _uf_bin(op, sa, a)
+    return _uf_bin(op, a, sa)
+
+# --- binary ufuncs: array OP array ----------------------------------------------
+
+fn add(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("add", a, b)
+
+fn subtract(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("sub", a, b)
+
+fn multiply(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("mul", a, b)
+
+fn divide(a: NDArray, b: NDArray) -> NDArray:
+    # IEEE division: x/0 -> +-inf (or NaN for 0/0), never panics.
+    return _uf_bin("div", a, b)
+
+fn power(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("pow", a, b)
+
+fn float_power(a: NDArray, b: NDArray) -> NDArray:
+    # For real f64 operands float_power == power (numpy only differs for
+    # complex dtypes, which this library does not have).
+    return _uf_bin("pow", a, b)
+
+fn remainder(a: NDArray, b: NDArray) -> NDArray:
+    # numpy remainder/mod: x - floor(x/y)*y, sign follows the divisor.
+    return _uf_bin("rem", a, b)
+
+fn mod(a: NDArray, b: NDArray) -> NDArray:
+    # alias of remainder (numpy np.mod).
+    return _uf_bin("rem", a, b)
+
+fn fmod(a: NDArray, b: NDArray) -> NDArray:
+    # C fmod: x - trunc(x/y)*y, sign follows the dividend.
+    return _uf_bin("fmod", a, b)
+
+fn floor_divide(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("floordiv", a, b)
+
+fn hypot(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("hypot", a, b)
+
+fn maximum(a: NDArray, b: NDArray) -> NDArray:
+    # elementwise max; NaN propagates (numpy semantics, unlike fmax).
+    return _uf_bin("maximum", a, b)
+
+fn minimum(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("minimum", a, b)
+
+fn fmax(a: NDArray, b: NDArray) -> NDArray:
+    # max ignoring NaN operands.
+    return _uf_bin("fmax", a, b)
+
+fn fmin(a: NDArray, b: NDArray) -> NDArray:
+    return _uf_bin("fmin", a, b)
+
+fn copysign(a: NDArray, b: NDArray) -> NDArray:
+    # magnitude of a with sign of b. Limitation: the sign bit of +/-0.0 and
+    # NaN operands is approximated (see _cs).
+    return _uf_bin("cs", a, b)
+
+fn arctan2(y: NDArray, x: NDArray) -> NDArray:
+    # np.arctan2(y, x): elementwise atan2 of first arg over second.
+    return _uf_bin("atan2", y, x)
+
+# --- binary ufuncs: array OP scalar ----------------------------------------------
+
+fn add_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("add", a, s, false)
+
+fn subtract_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("sub", a, s, false)
+
+fn multiply_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("mul", a, s, false)
+
+fn divide_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("div", a, s, false)
+
+fn power_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("pow", a, s, false)
+
+fn float_power_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("pow", a, s, false)
+
+fn remainder_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("rem", a, s, false)
+
+fn mod_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("rem", a, s, false)
+
+fn fmod_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("fmod", a, s, false)
+
+fn floor_divide_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("floordiv", a, s, false)
+
+fn hypot_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("hypot", a, s, false)
+
+fn maximum_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("maximum", a, s, false)
+
+fn minimum_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("minimum", a, s, false)
+
+fn fmax_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("fmax", a, s, false)
+
+fn fmin_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("fmin", a, s, false)
+
+fn copysign_scalar(a: NDArray, s: f64) -> NDArray:
+    return _with_scalar2("cs", a, s, false)
+
+fn arctan2_scalar(y: NDArray, x: f64) -> NDArray:
+    return _with_scalar2("atan2", y, x, false)
+
+# --- binary ufuncs: scalar OP array ("r" = reflected) ----------------------------
+
+fn radd_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("add", a, s, true)
+
+fn rsubtract_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("sub", a, s, true)
+
+fn rmultiply_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("mul", a, s, true)
+
+fn rdivide_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("div", a, s, true)
+
+fn rpower_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("pow", a, s, true)
+
+fn rfloat_power_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("pow", a, s, true)
+
+fn rremainder_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("rem", a, s, true)
+
+fn rmod_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("rem", a, s, true)
+
+fn rfmod_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("fmod", a, s, true)
+
+fn rfloor_divide_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("floordiv", a, s, true)
+
+fn rhypot_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("hypot", a, s, true)
+
+fn rmaximum_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("maximum", a, s, true)
+
+fn rminimum_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("minimum", a, s, true)
+
+fn rfmax_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("fmax", a, s, true)
+
+fn rfmin_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("fmin", a, s, true)
+
+fn rcopysign_scalar(s: f64, a: NDArray) -> NDArray:
+    return _with_scalar2("cs", a, s, true)
+
+fn rarctan2_scalar(y: f64, x: NDArray) -> NDArray:
+    # scalar y over array x: atan2(s, x[i])
+    return _with_scalar2("atan2", x, y, true)
+
+# --- unary ufuncs (array -> array, shape preserved) -------------------------------
+
+fn negative(a: NDArray) -> NDArray:
+    return _uf_un("neg", a)
+
+fn positive(a: NDArray) -> NDArray:
+    return _uf_un("pos", a)
+
+fn absolute(a: NDArray) -> NDArray:
+    return _uf_un("abs", a)
+
+fn rint(a: NDArray) -> NDArray:
+    # round half to even (np.rint).
+    return _uf_un("rint", a)
+
+fn round(a: NDArray) -> NDArray:
+    # np.round == rint for integer decimals (half to even).
+    return _uf_un("rint", a)
+
+fn sign(a: NDArray) -> NDArray:
+    return _uf_un("sign", a)
+
+fn reciprocal(a: NDArray) -> NDArray:
+    # 1/x; x == 0 -> +-inf (never panics).
+    return _uf_un("reciprocal", a)
+
+fn sqrt(a: NDArray) -> NDArray:
+    return _uf_un("sqrt", a)
+
+fn square(a: NDArray) -> NDArray:
+    return _uf_un("square", a)
+
+fn exp(a: NDArray) -> NDArray:
+    return _uf_un("exp", a)
+
+fn exp2(a: NDArray) -> NDArray:
+    return _uf_un("exp2", a)
+
+fn expm1(a: NDArray) -> NDArray:
+    return _uf_un("expm1", a)
+
+fn log(a: NDArray) -> NDArray:
+    # x == 0 -> -inf; x < 0 -> NaN (no panic).
+    return _uf_un("log", a)
+
+fn log2(a: NDArray) -> NDArray:
+    return _uf_un("log2", a)
+
+fn log10(a: NDArray) -> NDArray:
+    return _uf_un("log10", a)
+
+fn log1p(a: NDArray) -> NDArray:
+    # log(1+x); x <= -1 -> -inf (x == -1) or NaN (x < -1).
+    return _uf_un("log1p", a)
+
+fn sin(a: NDArray) -> NDArray:
+    return _uf_un("sin", a)
+
+fn cos(a: NDArray) -> NDArray:
+    return _uf_un("cos", a)
+
+fn tan(a: NDArray) -> NDArray:
+    return _uf_un("tan", a)
+
+fn arcsin(a: NDArray) -> NDArray:
+    return _uf_un("asin", a)
+
+fn arccos(a: NDArray) -> NDArray:
+    return _uf_un("acos", a)
+
+fn arctan(a: NDArray) -> NDArray:
+    return _uf_un("atan", a)
+
+fn sinh(a: NDArray) -> NDArray:
+    return _uf_un("sinh", a)
+
+fn cosh(a: NDArray) -> NDArray:
+    return _uf_un("cosh", a)
+
+fn tanh(a: NDArray) -> NDArray:
+    return _uf_un("tanh", a)
+
+fn arcsinh(a: NDArray) -> NDArray:
+    return _uf_un("asinh", a)
+
+fn arccosh(a: NDArray) -> NDArray:
+    return _uf_un("acosh", a)
+
+fn arctanh(a: NDArray) -> NDArray:
+    return _uf_un("atanh", a)
+
+fn deg2rad(a: NDArray) -> NDArray:
+    return _uf_un("deg2rad", a)
+
+fn rad2deg(a: NDArray) -> NDArray:
+    return _uf_un("rad2deg", a)
+
+fn floor(a: NDArray) -> NDArray:
+    return _uf_un("floor", a)
+
+fn ceil(a: NDArray) -> NDArray:
+    return _uf_un("ceil", a)
+
+fn trunc(a: NDArray) -> NDArray:
+    return _uf_un("trunc", a)
+
+fn fix(a: NDArray) -> NDArray:
+    # np.fix == trunc (round toward zero).
+    return _uf_un("fix", a)
+
+fn isnan(a: NDArray) -> NDArray:
+    # returns 0.0/1.0 floats (no bool dtype in this library).
+    return _uf_un("isnan", a)
+
+fn isinf(a: NDArray) -> NDArray:
+    return _uf_un("isinf", a)
+
+fn isfinite(a: NDArray) -> NDArray:
+    return _uf_un("isfinite", a)
+
+fn signbit(a: NDArray) -> NDArray:
+    # 1.0 where the sign bit is set (incl. -0.0), else 0.0.
+    return _uf_un("signbit", a)
+
+fn sinc(a: NDArray) -> NDArray:
+    # sin(pi x)/(pi x), 1.0 at x == 0.
+    return _uf_un("sinc", a)
+
+# --- selectors / clamps / nan repair ----------------------------------------------
+
+fn where_(cond: NDArray, x: NDArray, y: NDArray) -> NDArray:
+    # np.where(cond, x, y): cond != 0 picks x, else y. All three broadcast.
+    # (`where` is an A keyword, hence the underscore.)
+    shape = _bshape3(cond.shape, x.shape, y.shape)
+    if len(shape) == 0:
+        if not (len(cond.shape) == 0 and len(x.shape) == 0 and len(y.shape) == 0):
+            return NDArray([], [])
+    n = _shape_size(shape)
+    sc = _bstride(cond.shape, shape)
+    sx = _bstride(x.shape, shape)
+    sy = _bstride(y.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords_at(shape, i)
+        oc = 0
+        ox = 0
+        oy = 0
+        k = 0
+        while k < len(shape):
+            oc = oc + coords[k] * sc[k]
+            ox = ox + coords[k] * sx[k]
+            oy = oy + coords[k] * sy[k]
+            k = k + 1
+        cv = cond.data[oc]
+        if cv != 0.0:
+            data.append(x.data[ox])
+        else:
+            data.append(y.data[oy])
+    return NDArray(data, shape)
+
+fn where_scalar(cond: NDArray, xs: f64, ys: f64) -> NDArray:
+    # np.where(cond, scalar_x, scalar_y): scalar branches broadcast to cond.
+    return where_(cond, _scalar_or_arr(xs, cond.shape), _scalar_or_arr(ys, cond.shape))
+
+fn _clipv(v: f64, lo: f64, hi: f64) -> f64:
+    # minimum(maximum(v, lo), hi); NaN v passes through (comparisons false).
+    if v != v or lo != lo or hi != hi:
+        return _nan()
+    if v < lo:
+        v = lo
+    if v > hi:
+        v = hi
+    return v
+
+fn clip(a: NDArray, lo: f64, hi: f64) -> NDArray:
+    # elementwise clamp to [lo, hi] scalars.
+    n = a.size()
+    data = []
+    for i in 0..n:
+        data.append(_clipv(a.data[i], lo, hi))
+    return NDArray(data, a.shape)
+
+fn clip_min(a: NDArray, lo: f64) -> NDArray:
+    return clip(a, lo, _pinf())
+
+fn clip_max(a: NDArray, hi: f64) -> NDArray:
+    return clip(a, -_pinf(), hi)
+
+fn clip_arr(a: NDArray, lo: NDArray, hi: NDArray) -> NDArray:
+    # elementwise clamp with array bounds; a, lo, hi all broadcast together.
+    shape = _bshape3(a.shape, lo.shape, hi.shape)
+    if len(shape) == 0:
+        if not (len(a.shape) == 0 and len(lo.shape) == 0 and len(hi.shape) == 0):
+            return NDArray([], [])
+    n = _shape_size(shape)
+    sa = _bstride(a.shape, shape)
+    sl = _bstride(lo.shape, shape)
+    sh = _bstride(hi.shape, shape)
+    data = []
+    for i in 0..n:
+        coords = _coords_at(shape, i)
+        oa = 0
+        ol = 0
+        oh = 0
+        k = 0
+        while k < len(shape):
+            oa = oa + coords[k] * sa[k]
+            ol = ol + coords[k] * sl[k]
+            oh = oh + coords[k] * sh[k]
+            k = k + 1
+        lv = lo.data[ol]
+        hv = hi.data[oh]
+        v = a.data[oa]
+        if lv != lv or hv != hv:
+            # NaN bound propagates like np.minimum/np.maximum would
+            data.append(_nan())
+        else:
+            data.append(_clipv(v, lv, hv))
+    return NDArray(data, shape)
+
+fn _nan_to_num_map(data: [f64], nanv: f64, posinf: f64, neginf: f64) -> [f64]:
+    out = []
+    pinf = _pinf()
+    ninf = -_pinf()
+    for v in data:
+        if v != v:
+            out.append(nanv)
+        elif v == pinf:
+            out.append(posinf)
+        elif v == ninf:
+            out.append(neginf)
+        else:
+            out.append(v)
+    return out
+
+fn nan_to_num(a: NDArray) -> NDArray:
+    # replace NaN -> 0.0, +inf -> DBL_MAX, -inf -> -DBL_MAX
+    # (numpy defaults: nan=0.0, posinf/neginf = finfo.max).
+    d = _nan_to_num_map(a.data, 0.0, 1.7976931348623157e308, -1.7976931348623157e308)
+    return NDArray(d, a.shape)
+
+fn nan_to_num_full(a: NDArray, nanv: f64, posinf: f64, neginf: f64) -> NDArray:
+    # np.nan_to_num with explicit replacement values.
+    d = _nan_to_num_map(a.data, nanv, posinf, neginf)
+    return NDArray(d, a.shape)

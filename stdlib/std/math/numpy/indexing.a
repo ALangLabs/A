@@ -1,0 +1,547 @@
+#
+# numpy indexing module: take/put/diagonal/diag/compress/extract/place/
+# argwhere/nonzero/slice_nd/select/choose/trim_zeros/flatnonzero.
+#
+# dtype is f64 only; all inputs/outputs are NDArray (flat row-major).
+# Index-valued results (argwhere, nonzero, flatnonzero) are returned as f64
+# NDArrays because NDArray only supports [f64] data — convert with int().
+#
+# Conventions / deviations from NumPy:
+#  - Axis arguments accept negative values (normalized by +ndim). An axis
+#    outside [0, ndim) selects the flattened array (like np.take axis=None).
+#  - take:  axis=-1 selects the LAST axis (NumPy's axis=None flattening is
+#    reached by passing an out-of-range axis or calling on a flattened view).
+#  - put_flat: np.put flattens the array; indices wrap ("wrap"), clip, or
+#    panic ("raise", the default). `values` cycles if shorter than indices.
+#  - compress/extract/place come in [bool] and [i64] mask variants because A
+#    has no union types: compress/compress_mask (0/1 mask), compress_idx
+#    (integer indices), extract/extract_mask, place/place_mask.
+#  - select: condlist/choicelist are lists of equal-length flat lists;
+#    first nonzero condition wins; `default` fills the rest.
+#  - choose_idx: flat [i64] index list into a list of equal-length [f64]
+#    choice rows (NumPy's (N, ...) choice arrays are out of scope).
+#  - slice_nd: per-axis start/stop/step, stop EXCLUSIVE (Python semantics),
+#    negative start/stop wrap by +dim (Python semantics). For step<0, an
+#    end that wraps below 0 (e.g. end=-dim-1) is the sentinel meaning
+#    "down to and including index 0", matching a[s::-1] in Python.
+#  - diagonal: N-D support takes the diagonal over axes 0 and 1 (NumPy's
+#    axis1=0, axis2=1 defaults); remaining axes trail, diagonal axis last.
+#  - trim_zeros: trims zero rows (axis 0) for ndim>=2, elements for 1-D.
+
+from "ndarray.a" import NDArray, _shape_size, _row_major_index
+
+# --- small helpers ------------------------------------------------------------
+
+fn _norm_axis(axis: i64, nd: i64) -> i64:
+    ax = axis
+    if ax < 0:
+        ax = ax + nd
+    return ax
+
+fn _coords_of(shape: [i64], i: i64) -> [i64]:
+    # C-order multi-index for flat position i
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]
+        k = k - 1
+    return coords
+
+fn _wrap_index(idx: i64, dim: i64) -> i64:
+    # NumPy-style negative/wrap indexing into [0, dim)
+    if dim <= 0:
+        return 0
+    i = idx % dim
+    if i < 0:
+        i = i + dim
+    return i
+
+# --- take ---------------------------------------------------------------------
+
+fn _take_axis(a: NDArray, indices: [i64], ax: i64) -> NDArray:
+    # gather along a single (normalized, in-range) axis; result keeps axis
+    # position with length len(indices). Negative indices wrap by dim.
+    nd = len(a.shape)
+    dim = a.shape[ax]
+    ni = len(indices)
+    newshape = []
+    for i in 0..nd:
+        if i == ax:
+            newshape.append(ni)
+        else:
+            newshape.append(a.shape[i])
+    data = []
+    total = _shape_size(newshape)
+    for p in 0..total:
+        coords = _coords_of(newshape, p)
+        src = []
+        for i in 0..nd:
+            if i == ax:
+                src.append(_wrap_index(indices[coords[i]], dim))
+            else:
+                src.append(coords[i])
+        data.append(a.data[_row_major_index(a.shape, src)])
+    return NDArray(data, newshape)
+
+fn take(a: NDArray, indices: [i64], axis: i64) -> NDArray:
+    # np.take: gather `indices` along `axis`. Out-of-range axis -> flattened
+    # take (np.take axis=None). axis=-1 means the last axis.
+    nd = len(a.shape)
+    ax = _norm_axis(axis, nd)
+    if nd == 0 or ax < 0 or ax >= nd:
+        # flattened take
+        n = a.size()
+        data = []
+        for idx in indices:
+            data.append(a.data[_wrap_index(idx, n)])
+        return NDArray(data, [len(indices)])
+    return _take_axis(a, indices, ax)
+
+# --- put ----------------------------------------------------------------------
+
+fn put_flat(a: NDArray, indices: [i64], values: [f64], mode: str) -> NDArray:
+    # np.put on the flattened array. mode: "raise" (default, panics on
+    # out-of-range), "wrap" (mod size), "clip" (clamp to [0, size-1]).
+    # `values` cycles when shorter than `indices`; extra values ignored.
+    n = a.size()
+    if n == 0:
+        return a
+    nv = len(values)
+    for k in 0..len(indices):
+        idx = indices[k]
+        if mode == "wrap":
+            idx = _wrap_index(idx, n)
+        elif mode == "clip":
+            if idx < 0:
+                idx = 0
+            if idx >= n:
+                idx = n - 1
+        else:
+            # "raise" (and default)
+            if idx < 0 or idx >= n:
+                panic("put_flat: index " + str(idx) + " out of bounds for size " + str(n))
+        if nv == 0:
+            continue
+        a.data[idx] = values[k % nv]
+    return a
+
+# --- diagonal / diag ----------------------------------------------------------
+
+fn diagonal(a: NDArray, offset: i64) -> NDArray:
+    # np.diagonal over axes 0 and 1 (defaults axis1=0, axis2=1). For ndim>=3
+    # the remaining axes trail and the diagonal axis is appended LAST.
+    nd = len(a.shape)
+    if nd < 2:
+        return a
+    lead = a.shape[0]
+    sec = a.shape[1]
+    # elements a[i, j] with j - i == offset
+    lo = 0 - offset
+    if lo < 0:
+        lo = 0
+    hi = lead
+    if sec - offset < hi:
+        hi = sec - offset
+    diag_len = hi - lo
+    if diag_len < 0:
+        diag_len = 0
+    rest = []
+    for i in 2..nd:
+        rest.append(a.shape[i])
+    nrest = _shape_size(rest)
+    outshape = []
+    for d in rest:
+        outshape.append(d)
+    outshape.append(diag_len)
+    data = []
+    for r in 0..nrest:
+        rcoords = _coords_of(rest, r)
+        for d in 0..diag_len:
+            i = lo + d
+            j = i + offset
+            idx = [i, j]
+            for c in rcoords:
+                idx.append(c)
+            data.append(a.data[_row_major_index(a.shape, idx)])
+    return NDArray(data, outshape)
+
+fn diag(v: NDArray) -> NDArray:
+    # np.diag dual behavior: 1-D -> square diagonal matrix; 2-D -> 1-D
+    # diagonal. Other ranks are rejected.
+    nd = len(v.shape)
+    if nd == 1:
+        n = v.shape[0]
+        data = []
+        for i in 0..n:
+            for j in 0..n:
+                if i == j:
+                    data.append(v.data[i])
+                else:
+                    data.append(0.0)
+        return NDArray(data, [n, n])
+    if nd == 2:
+        d = diagonal(v, 0)
+        return NDArray(d.data, [d.size()])
+    panic("diag: only 1-D or 2-D input supported")
+    return v
+
+# --- compress / extract -------------------------------------------------------
+
+fn _select_axis(a: NDArray, sel: [i64], ax: i64) -> NDArray:
+    # gather positions sel[0..] along axis ax (like take but preserves order
+    # of sel and keeps the axis). sel entries must be in [0, dim).
+    nd = len(a.shape)
+    newshape = []
+    for i in 0..nd:
+        if i == ax:
+            newshape.append(len(sel))
+        else:
+            newshape.append(a.shape[i])
+    data = []
+    total = _shape_size(newshape)
+    for p in 0..total:
+        coords = _coords_of(newshape, p)
+        src = []
+        for i in 0..nd:
+            if i == ax:
+                src.append(sel[coords[i]])
+            else:
+                src.append(coords[i])
+        data.append(a.data[_row_major_index(a.shape, src)])
+    return NDArray(data, newshape)
+
+fn _sel_from_bool(cond: [bool]) -> [i64]:
+    sel = []
+    for i in 0..len(cond):
+        if cond[i]:
+            sel.append(i)
+    return sel
+
+fn _sel_from_mask(mask: [i64]) -> [i64]:
+    sel = []
+    for i in 0..len(mask):
+        if mask[i] != 0:
+            sel.append(i)
+    return sel
+
+fn _compress_sel(a: NDArray, sel: [i64], axis: i64) -> NDArray:
+    nd = len(a.shape)
+    ax = _norm_axis(axis, nd)
+    if nd == 0 or ax < 0 or ax >= nd:
+        # flattened select (np.compress axis=None)
+        n = a.size()
+        data = []
+        for s in sel:
+            if s >= 0 and s < n:
+                data.append(a.data[s])
+        return NDArray(data, [len(data)])
+    return _select_axis(a, sel, ax)
+
+fn compress(cond: [bool], a: NDArray, axis: i64) -> NDArray:
+    # np.compress with a boolean condition along `axis`.
+    return _compress_sel(a, _sel_from_bool(cond), axis)
+
+fn compress_mask(mask: [i64], a: NDArray, axis: i64) -> NDArray:
+    # np.compress with an int mask: nonzero entries are True.
+    return _compress_sel(a, _sel_from_mask(mask), axis)
+
+fn compress_idx(idx: [i64], a: NDArray, axis: i64) -> NDArray:
+    # gather explicit (possibly negative) indices along `axis`.
+    nd = len(a.shape)
+    ax = _norm_axis(axis, nd)
+    if nd == 0 or ax < 0 or ax >= nd:
+        return take(a, idx, axis)
+    dim = a.shape[ax]
+    sel = []
+    for i in idx:
+        sel.append(_wrap_index(i, dim))
+    return _select_axis(a, sel, ax)
+
+fn extract(cond: [bool], a: NDArray) -> NDArray:
+    # np.extract: flattened 1-D of elements where the (flattened) boolean
+    # condition is true. cond length must equal a.size().
+    data = []
+    n = a.size()
+    for i in 0..n:
+        if i < len(cond) and cond[i]:
+            data.append(a.data[i])
+    return NDArray(data, [len(data)])
+
+fn extract_mask(mask: [i64], a: NDArray) -> NDArray:
+    # extract with an int mask (nonzero = True).
+    data = []
+    n = a.size()
+    for i in 0..n:
+        if i < len(mask) and mask[i] != 0:
+            data.append(a.data[i])
+    return NDArray(data, [len(data)])
+
+# --- place --------------------------------------------------------------------
+
+fn _place_vals(a: NDArray, mask: [bool], vals: [f64], use_bool: bool, imask: [i64]) -> NDArray:
+    n = a.size()
+    nv = len(vals)
+    if nv == 0:
+        return a
+    k = 0
+    for i in 0..n:
+        m = false
+        if use_bool:
+            if i < len(mask):
+                m = mask[i]
+        else:
+            if i < len(imask) and imask[i] != 0:
+                m = true
+        if m:
+            a.data[i] = vals[k % nv]
+            k = k + 1
+    return a
+
+fn place(a: NDArray, mask: [bool], vals: [f64]) -> NDArray:
+    # np.place: set flat elements where mask is true, cycling `vals`.
+    return _place_vals(a, mask, vals, true, [])
+
+fn place_mask(a: NDArray, mask: [i64], vals: [f64]) -> NDArray:
+    # place with an int mask (nonzero = True).
+    return _place_vals(a, [], vals, false, mask)
+
+# --- argwhere / nonzero / flatnonzero ----------------------------------------
+
+fn argwhere(a: NDArray) -> NDArray:
+    # indices of nonzero elements as an (N, ndim) array (f64 dtype).
+    nd = len(a.shape)
+    coords_list = []
+    total = a.size()
+    for p in 0..total:
+        if a.data[p] != 0.0:
+            coords_list.append(_coords_of(a.shape, p))
+    n = len(coords_list)
+    data = []
+    for c in coords_list:
+        for v in c:
+            data.append(f64(v))
+    return NDArray(data, [n, nd])
+
+fn nonzero(a: NDArray) -> [NDArray]:
+    # np.nonzero: per-axis 1-D index arrays (as f64) of nonzero elements,
+    # in C order. Returns a list of ndim NDArrays.
+    nd = len(a.shape)
+    cols = []
+    for i in 0..nd:
+        cols.append([])
+    total = a.size()
+    for p in 0..total:
+        if a.data[p] != 0.0:
+            c = _coords_of(a.shape, p)
+            for k in 0..nd:
+                cols[k].append(c[k])
+    out = []
+    for k in 0..nd:
+        f = []
+        for v in cols[k]:
+            f.append(f64(v))
+        out.append(NDArray(f, [len(f)]))
+    return out
+
+fn flatnonzero(a: NDArray) -> NDArray:
+    # C-order flat indices of nonzero elements (1-D, f64 dtype).
+    data = []
+    total = a.size()
+    for i in 0..total:
+        if a.data[i] != 0.0:
+            data.append(f64(i))
+    return NDArray(data, [len(data)])
+
+# --- slice_nd -----------------------------------------------------------------
+
+fn _axis_coords(dim: i64, start: i64, end: i64, step: i64) -> [i64]:
+    # Python-slice coordinate list for one axis. `end` is EXCLUSIVE.
+    coords = []
+    if step == 0:
+        panic("slice_nd: step cannot be 0")
+    s = start
+    e = end
+    st = step
+    if s < 0:
+        s = s + dim
+    if e < 0:
+        e = e + dim
+    if st > 0:
+        if s < 0:
+            s = 0
+        if e > dim:
+            e = dim
+        if e < 0:
+            e = 0
+        c = s
+        while c < e:
+            coords.append(c)
+            c = c + st
+    else:
+        # negative step: stop=-1 (after wrap) means "down to and including 0"
+        if s >= dim:
+            s = dim - 1
+        if s < 0:
+            return coords
+        if e < 0:
+            e = -1  # sentinel: include index 0
+        elif e >= dim:
+            e = dim - 1
+        c = s
+        while c > e:
+            coords.append(c)
+            c = c + st
+    return coords
+
+fn slice_nd(a: NDArray, starts: [i64], ends: [i64], steps: [i64]) -> NDArray:
+    # per-axis Python-style slicing: a[s0:e0:st0, s1:e1:st1, ...].
+    # ends are exclusive; negative values wrap by +dim. Lists must have
+    # length == ndim(a).
+    nd = len(a.shape)
+    if len(starts) != nd or len(ends) != nd or len(steps) != nd:
+        panic("slice_nd: starts/ends/steps must have length ndim")
+    axis_coords = []
+    newshape = []
+    for i in 0..nd:
+        cs = _axis_coords(a.shape[i], starts[i], ends[i], steps[i])
+        axis_coords.append(cs)
+        newshape.append(len(cs))
+    data = []
+    total = _shape_size(newshape)
+    for p in 0..total:
+        oc = _coords_of(newshape, p)
+        src = []
+        for i in 0..nd:
+            src.append(axis_coords[i][oc[i]])
+        data.append(a.data[_row_major_index(a.shape, src)])
+    return NDArray(data, newshape)
+
+fn slice_axis(a: NDArray, axis: i64, start: i64, end: i64, step: i64) -> NDArray:
+    # convenience: single-axis slice_nd.
+    nd = len(a.shape)
+    starts = []
+    ends = []
+    steps = []
+    for i in 0..nd:
+        starts.append(0)
+        ends.append(a.shape[i])
+        steps.append(1)
+    ax = _norm_axis(axis, nd)
+    if ax < 0 or ax >= nd:
+        ax = 0
+    starts[ax] = start
+    ends[ax] = end
+    steps[ax] = step
+    return slice_nd(a, starts, ends, steps)
+
+# --- select / choose ----------------------------------------------------------
+
+fn select(condlist: [[i64]], choicelist: [[f64]], default: f64) -> [f64]:
+    # np.select on flat equal-length lists: first condition with nonzero
+    # entry wins; `default` fills positions where none match.
+    n = 0
+    if len(choicelist) > 0:
+        n = len(choicelist[0])
+    out = []
+    for j in 0..n:
+        val = default
+        for k in 0..len(condlist):
+            if j < len(condlist[k]) and condlist[k][j] != 0:
+                if k < len(choicelist) and j < len(choicelist[k]):
+                    val = choicelist[k][j]
+                break
+        out.append(val)
+    return out
+
+fn select_bool(condlist: [[bool]], choicelist: [[f64]], default: f64) -> [f64]:
+    # select with boolean condition lists.
+    n = 0
+    if len(choicelist) > 0:
+        n = len(choicelist[0])
+    out = []
+    for j in 0..n:
+        val = default
+        for k in 0..len(condlist):
+            if j < len(condlist[k]) and condlist[k][j]:
+                if k < len(choicelist) and j < len(choicelist[k]):
+                    val = choicelist[k][j]
+                break
+        out.append(val)
+    return out
+
+fn choose_idx(idx: [i64], choices: [[f64]]) -> [f64]:
+    # np.choose flattened: idx[j] picks the column j of choices[c].
+    # All choice rows must have length >= len(idx); out-of-range index
+    # panics (NumPy would raise).
+    nch = len(choices)
+    out = []
+    for j in 0..len(idx):
+        c = idx[j]
+        if c < 0 or c >= nch:
+            panic("choose_idx: index " + str(c) + " out of range [0, " + str(nch) + ")")
+        row = choices[c]
+        if j >= len(row):
+            panic("choose_idx: choice row shorter than idx")
+        out.append(row[j])
+    return out
+
+# --- trim_zeros ---------------------------------------------------------------
+
+fn trim_zeros(a: NDArray) -> NDArray:
+    # np.trim_zeros (axis=0 semantics): strip leading/trailing zero rows for
+    # ndim>=2 (a "row" is one block of shape[1:] elements), strip zero
+    # elements for 1-D. Returns a new NDArray sharing no extra structure.
+    nd = len(a.shape)
+    if a.size() == 0:
+        return a
+    if nd <= 1:
+        data = a.data
+        lo = 0
+        hi = len(data)
+        while lo < hi and data[lo] == 0.0:
+            lo = lo + 1
+        while hi > lo and data[hi - 1] == 0.0:
+            hi = hi - 1
+        out = []
+        for i in lo..hi:
+            out.append(data[i])
+        return NDArray(out, [hi - lo])
+    # ndim >= 2: trim along axis 0 by blocks
+    block = a.size() // a.shape[0]
+    rows = a.shape[0]
+    lo = 0
+    hi = rows
+    while lo < hi:
+        nz = false
+        base = lo * block
+        for i in 0..block:
+            if a.data[base + i] != 0.0:
+                nz = true
+                break
+        if nz:
+            break
+        lo = lo + 1
+    while hi > lo:
+        nz = false
+        base = (hi - 1) * block
+        for i in 0..block:
+            if a.data[base + i] != 0.0:
+                nz = true
+                break
+        if nz:
+            break
+        hi = hi - 1
+    if lo == 0 and hi == rows:
+        return a
+    newshape = []
+    newshape.append(hi - lo)
+    for i in 1..nd:
+        newshape.append(a.shape[i])
+    data = []
+    for r in lo..hi:
+        base = r * block
+        for i in 0..block:
+            data.append(a.data[base + i])
+    return NDArray(data, newshape)
