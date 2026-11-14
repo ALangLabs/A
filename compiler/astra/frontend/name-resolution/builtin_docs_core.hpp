@@ -20,7 +20,7 @@ inline void addCoreDocs(StringMap<BuiltinDoc>& docs) {
                 "Compile-time-only type annotation (Python typing.cast parity); the value passes through unchanged."}},
       {"ic", {"ic", "ic(*values) -> value | [values] | void",
               "Debug-inspects values to stderr with file/function context and source labels (litprinter-style), and returns the inspected value(s) unchanged.",
-              ">>> x = 42\n>>> ic(x)\nic| x: 42\n>>> ic(x + 1)\nic| [app.a:2 in main()] >>> x + 1: 43"}},
+              ">>> x = 42\n>>> ic(x)\nic| x: 42\n>>> ic(x + 1)\nic| [app.astra:2 in main()] >>> x + 1: 43"}},
 
       // time
       {"now", {"now", "now() -> i64", "Current time as Unix epoch milliseconds."}},

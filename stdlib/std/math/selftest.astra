@@ -1,5 +1,5 @@
 # std.math.numpy selftest — smoke coverage across all submodules.
-# Run: ./build/a test stdlib/std/math/selftest.a
+# Run: ./build/a test stdlib/std/math/selftest.astra
 import std:math
 
 fn assert_eq(a, b):

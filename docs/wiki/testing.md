@@ -9,7 +9,7 @@ directory it scans recursively; with a `.astra` file it runs that file only.
 ```sh
 a test                      # discover and run tests under .
 a test stdlib/std/math      # scan a directory
-a test path/to/file.a       # run one file
+a test path/to/file.astra     # run one file
 a test --filter json        # run matching test_* names across discovered files
 ```
 

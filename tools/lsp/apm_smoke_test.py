@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Goto-definition into apm-installed packages (regression test).
 
-Builds a throwaway apm project (.apm/packages/hello_lib/hello_lib.a,
-apm.json), opens main.a in a-lsp, and checks textDocument/definition on
+Builds a throwaway apm project (.apm/packages/hello_lib/hello_lib.astra,
+apm.json), opens main.astra in a-lsp, and checks textDocument/definition on
 `import hello_lib` and on `hello_lib.greet` resolves into .apm/packages.
 
 Usage:

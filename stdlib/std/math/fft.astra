@@ -1,7 +1,7 @@
 #
 # std.math.fft — NumPy-compatible FFT subset on NDArray (f64 dtype only).
 #
-# A has no complex dtype (see complex.a work in progress), so every function
+# A has no complex dtype (see complex.astra work in progress), so every function
 # that NumPy would return a complex array for instead returns TWO NDArrays:
 # the real and imaginary parts as separate 1-D (or 2-D) arrays. Functions are
 # named after np.fft but return tuples `(re, im)` — index [0]/[1] or

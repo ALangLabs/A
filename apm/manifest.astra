@@ -35,7 +35,7 @@ fn default_project_manifest(name: String):
     s += "  \"name\": \"" + json_esc(name) + "\",\n"
     s += "  \"version\": \"0.1.0\",\n"
     s += "  \"description\": \"\",\n"
-    s += "  \"main\": \"main.a\",\n"
+    s += "  \"main\": \"main.astra\",\n"
     s += "  \"license\": \"\",\n"
     s += "  \"dependencies\": " + ob() + cb() + ",\n"
     s += "  \"devDependencies\": " + ob() + cb() + "\n"

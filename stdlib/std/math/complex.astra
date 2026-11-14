@@ -169,7 +169,7 @@ fn c_sqrt(c: Complex) -> Complex:
         v = -v
     return Complex(w, v)
 
-# math module has no sinh/cosh; compute via exp like ufuncs.a does.
+# math module has no sinh/cosh; compute via exp like ufuncs.astra does.
 fn _csinh(x: f64) -> f64:
     return (math.exp(x) - math.exp(-x)) / 2.0
 

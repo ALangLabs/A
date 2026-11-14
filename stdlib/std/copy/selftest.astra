@@ -1,5 +1,5 @@
 # std.copy selftest — shallow vs deep copy semantics.
-# Run: ./build/a test stdlib/std/copy/selftest.a
+# Run: ./build/a test stdlib/std/copy/selftest.astra
 #
 # copy()/deepcopy() take and return dynamic Json values, so results are
 # inspected through the json.* accessors rather than typed indexing.

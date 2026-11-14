@@ -1,7 +1,7 @@
 #
 # numpy.linalg subset — dense linear algebra on NDArray (f64, C-order).
 #
-# Built on ndarray.a primitives plus the native linalg kernels where their
+# Built on ndarray.astra primitives plus the native linalg kernels where their
 # flat-list ABI matches:
 #   linalg_dot(a, b)            -> f64        (1-D · 1-D)
 #   linalg_matmul(a, b, m,k,n)  -> [f64]      (m×k)·(k×n), row-major

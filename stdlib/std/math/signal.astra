@@ -4,7 +4,7 @@
 # (scipy.signal.convolve2d / correlate2d style — NumPy has no 2-D convolve),
 # and sliding_window_view (np.lib.stride_tricks.sliding_window_view).
 #
-# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.a).
+# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.astra).
 #
 # Conventions / deviations from NumPy:
 #  - correlate/convolve require 1-D inputs; non-1-D (and non-scalar) inputs

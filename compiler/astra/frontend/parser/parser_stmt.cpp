@@ -270,7 +270,7 @@ StmtPtr Parser::parseImport() {
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'import'.",
-         "Write import \"lib/util.a\", import math, import std:<package>, or import python:<package>.");
+         "Write import \"lib/util.astra\", import math, import std:<package>, or import python:<package>.");
   }
 
   if (match(Tok::KwAs)) {
@@ -327,7 +327,7 @@ StmtPtr Parser::parseFromImport() {
     stmt->targetSpan = nameTok.span;
   } else {
     fail(cur().span, "Expected a module path or name after 'from'.",
-         "Write from \"lib/util.a\" import add, from math import sqrt, from std:<pkg> import name, or from python:<pkg> import name.");
+         "Write from \"lib/util.astra\" import add, from math import sqrt, from std:<pkg> import name, or from python:<pkg> import name.");
   }
 
   expect(Tok::KwImport, "'import' after the module path");

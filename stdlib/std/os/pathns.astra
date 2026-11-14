@@ -2,7 +2,7 @@
 #
 # Python exposes path helpers as `os.path.*`. A has no module-as-value, so this
 # file provides a small class whose methods forward to std:path and to the
-# stat helpers introduced in stat.a.
+# stat helpers introduced in stat.astra.
 
 import std:path as _path
 import "stat.astra" as osstat

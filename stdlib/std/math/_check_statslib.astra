@@ -1,4 +1,4 @@
-# Self-check for statslib.a — run: ./build/a run _check_statslib.a
+# Self-check for statslib.astra — run: ./build/a run _check_statslib.astra
 # Exercises histogram, bincount, percentiles, median, cov/corrcoef,
 # digitize, interp, gradient, trapz, diff, ediff1d, unwrap, windows,
 # meshgrid, diag/tril/triu indices, i0.

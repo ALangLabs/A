@@ -1,4 +1,4 @@
-# std.operator selftest — run: ./build/a test stdlib/std/operator/selftest.a
+# std.operator selftest — run: ./build/a test stdlib/std/operator/selftest.astra
 import std:operator
 
 fn assert_eq(a, b):

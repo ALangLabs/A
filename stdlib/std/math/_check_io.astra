@@ -1,4 +1,4 @@
-# Self-check for numpy/io.a — run: ./build/a run stdlib/std/math/numpy/_check_io.a
+# Self-check for numpy/io.astra — run: ./build/a run stdlib/std/math/numpy/_check_io.astra
 # Exercises savetxt/loadtxt round-trip, fromstring, fromfile, genfromtxt,
 # repr/str, tobytes/save/load. Uses temp files under /tmp and panics on
 # any failure (non-zero exit).

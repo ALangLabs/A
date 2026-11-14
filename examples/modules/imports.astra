@@ -1,4 +1,4 @@
-# Module imports (run from repo root: ./build/a run examples/modules/imports.a)
+# Module imports (run from repo root: ./build/a run examples/modules/imports.astra)
 import "lib/mathx.astra"
 import "lib/mathx.astra" as mx
 from "lib/mathx.astra" import add, Point

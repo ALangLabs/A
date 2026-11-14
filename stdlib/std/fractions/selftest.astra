@@ -1,4 +1,4 @@
-# std.fractions selftest — run: ./build/a test stdlib/std/fractions/selftest.a
+# std.fractions selftest — run: ./build/a test stdlib/std/fractions/selftest.astra
 import std:fractions
 
 fn assert_eq(a, b):

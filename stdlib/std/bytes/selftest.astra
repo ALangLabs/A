@@ -1,5 +1,5 @@
 # std.bytes selftest — codepoint helpers and the native UTF-8 conversions.
-# Run: ./build/a test stdlib/std/bytes/selftest.a
+# Run: ./build/a test stdlib/std/bytes/selftest.astra
 import std:core
 from "bytes.astra" import utf8_decode, utf8_encode, b2s, s2b, s2b_fast, chr, ord
 

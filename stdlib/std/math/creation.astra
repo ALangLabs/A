@@ -1,6 +1,6 @@
 #
 # numpy creation/copy routines: deep copies, asarray variants, from_flat,
-# indices, ogrid, copyto. Creation ops already in ndarray.a (zeros, ones,
+# indices, ogrid, copyto. Creation ops already in ndarray.astra (zeros, ones,
 # empty, full, arange, linspace, eye, identity, array_from_list) are NOT
 # re-defined here.
 #

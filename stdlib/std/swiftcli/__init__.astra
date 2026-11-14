@@ -1264,7 +1264,7 @@ fn split_args(text: String):
 `a run` does not forward command-line arguments to the program, so real
 CLIs read their argv from an environment variable:
 
-    A_ARGS='-n api --port 8080 "my file.txt"' ./build/a run cli.a
+    A_ARGS='-n api --port 8080 "my file.txt"' ./build/a run cli.astra
 """
 fn args_from_env(var: String = "A_ARGS"):
     return split_args(env.get(var))

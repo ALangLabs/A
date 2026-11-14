@@ -82,13 +82,13 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
 
 # Compile and run a program
-./build/a run examples/basics/hello.a
+./build/a run examples/basics/hello.astra
 
 # Type-check without running
-./build/a check path/to/file.a
+./build/a check path/to/file.astra
 
 # Produce a native binary
-./build/a build path/to/file.a -o myapp
+./build/a build path/to/file.astra -o myapp
 ```
 
 `cmake --build build -j` builds everything in `all`, including `a-lsp`
@@ -102,12 +102,12 @@ Or use the helper script: `tooling/build/build.sh`.
 
 | Command | Description |
 | --- | --- |
-| `a run <file.a>` | Compile and execute (`-c 'code'` for inline source) |
-| `a build <file.a> -o <bin>` | Compile to a native executable |
-| `a check <file.a>` | Type-check only (`--json` for machine-readable diagnostics) |
+| `a run <file.astra>` | Compile and execute (`-c 'code'` for inline source) |
+| `a build <file.astra> -o <bin>` | Compile to a native executable |
+| `a check <file.astra>` | Type-check only (`--json` for machine-readable diagnostics) |
 | `a test [file|dir]` | Discover and run `fn test_*()` in a file, or recursively in a directory/codebase (default: `.`); `--filter <substr>` selects by name |
-| `a fmt <file.a>` | Format source (`-w` in place, `--check` for CI) |
-| `a doc <file.a>` | Generate documentation (`--json` supported) |
+| `a fmt <file.astra>` | Format source (`-w` in place, `--check` for CI) |
+| `a doc <file.astra>` | Generate documentation (`--json` supported) |
 | `a repl` | Interactive REPL (self-hosted shell on a TTY) |
 
 Common flags: `-I <dir>` module search path, `--stdlib <dir>`, `-j/--jobs`,

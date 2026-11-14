@@ -11,7 +11,7 @@
 #   apm info <pkg>                      show package details
 #   apm search <query>                  search the registry
 #   apm update [pkg...]                 update packages to latest
-#   apm run <file.a>                    run a program with packages on -I
+#   apm run <file.astra>                    run a program with packages on -I
 #   apm exec <cmd...>                   run a command with A_PATH set
 #   apm publish                         publish this package to the registry
 #   apm doctor                          check the environment
@@ -20,7 +20,7 @@
 #
 # The A runtime exposes no argv to programs, so this entry point reads its
 # CLI from APM_ARGS (the `apm` launcher script sets it from real argv):
-#   APM_ARGS="install hello-lib" a run apm/apm.a
+#   APM_ARGS="install hello-lib" a run apm/apm.astra
 # See apm/README.md for full documentation.
 
 import fs
@@ -50,7 +50,7 @@ fn print_help():
     print("  info <pkg>              show package details (registry + local)")
     print("  search <query>          search the registry by name/description")
     print("  update [pkg...]         update packages to the latest matching")
-    print("  run <file.a>            run a program with .apm/packages on -I")
+    print("  run <file.astra>            run a program with .apm/packages on -I")
     print("  exec <cmd...>           run a command with A_PATH pointing at packages")
     print("  publish                 publish this package to the registry")
     print("  doctor                  check toolchain, registry and project")
@@ -415,7 +415,7 @@ fn cmd_search(rest, opts):
 
 fn cmd_run(rest, opts):
     if len(rest) == 0:
-        fail("run needs a file (e.g. apm run main.a)")
+        fail("run needs a file (e.g. apm run main.astra)")
     root = root_of(opts)
     file = rest[0]
     pkgs = packages_dir(root)
@@ -430,7 +430,7 @@ fn cmd_run(rest, opts):
 
 fn cmd_exec(rest, opts):
     if len(rest) == 0:
-        fail("exec needs a command (e.g. apm exec a run app.a)")
+        fail("exec needs a command (e.g. apm exec a run app.astra)")
     root = root_of(opts)
     pkgs = packages_dir(root)
     if is_dir(pkgs):

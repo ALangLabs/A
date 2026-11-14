@@ -4,7 +4,7 @@
 # axis permutation (swapaxes/moveaxis/rollaxis), atleast_*, *_stack,
 # tril/triu/fill_diagonal, delete/insert, unique_sorted.
 #
-# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.a).
+# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.astra).
 #
 # Conventions / deviations from NumPy:
 #  - axis=None cases use sentinel axis = -99:

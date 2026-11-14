@@ -1,4 +1,4 @@
-# std.shlex selftest — run: ./build/a test stdlib/std/shlex/selftest.a
+# std.shlex selftest — run: ./build/a test stdlib/std/shlex/selftest.astra
 from "std/shlex/__init__.astra" import Shlex, Shlex_new, split, quote, join
 
 fn assert_eq(a, b):

@@ -17,7 +17,7 @@ entry main():
 
 Top-level statements run first; `entry name():` marks the function the
 compiler invokes once after imports initialize. Save as `hello.astra` and run
-`./build/a run hello.a`.
+`./build/a run hello.astra`.
 
 ## Headline features
 
@@ -42,7 +42,7 @@ compiler invokes once after imports initialize. Save as `hello.astra` and run
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON
 cmake --build build -j
-./build/a run examples/basics/hello.a
+./build/a run examples/basics/hello.astra
 ```
 
 See [cli.md](cli.md) for all commands and [examples.md](examples.md) for

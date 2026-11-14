@@ -1,5 +1,5 @@
-# Check for NDArray NumPy-style methods added in ndarray.a.
-# Run: ./build/a run stdlib/std/math/_check_methods.a   (exit 0 = pass)
+# Check for NDArray NumPy-style methods added in ndarray.astra.
+# Run: ./build/a run stdlib/std/math/_check_methods.astra   (exit 0 = pass)
 from "ndarray.astra" import NDArray
 
 fn _approx(a: f64, b: f64, eps: f64) -> bool:

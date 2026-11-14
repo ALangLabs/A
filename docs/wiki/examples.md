@@ -25,9 +25,9 @@ organization.
 ## Running
 
 ```sh
-./build/a run examples/basics/hello.a
-./build/a check examples/classes/point.a
-./build/a test examples/advanced/testing.a
+./build/a run examples/basics/hello.astra
+./build/a check examples/classes/point.astra
+./build/a test examples/advanced/testing.astra
 ```
 
 Python-interop examples require a Python installation with the relevant

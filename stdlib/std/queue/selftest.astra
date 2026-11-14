@@ -1,4 +1,4 @@
-# std.queue selftest — run: ./build/a test stdlib/std/queue/selftest.a
+# std.queue selftest — run: ./build/a test stdlib/std/queue/selftest.astra
 #
 # NOTE: the typechecker instantiates each generic class once per module,
 # so every Queue<T> use in this file shares T = i64 (LifoQueue and

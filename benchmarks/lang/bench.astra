@@ -1,4 +1,4 @@
-# Cross-language benchmark, A side. Run: ./build/a run benchmarks/lang/bench.a
+# Cross-language benchmark, A side. Run: ./build/a run benchmarks/lang/bench.astra
 import std:time
 
 fn fib(n: i64) -> i64:

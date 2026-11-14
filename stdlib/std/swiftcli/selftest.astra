@@ -1,5 +1,5 @@
 # std.swiftcli selftest — parser behavior, coercion, help, errors, subcommands.
-# Run: ./build/a test stdlib/std/swiftcli/selftest.a
+# Run: ./build/a test stdlib/std/swiftcli/selftest.astra
 import swiftcli
 
 fn _p():

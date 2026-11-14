@@ -826,7 +826,7 @@ def main() -> int:
                 bad_diags = note["params"]["diagnostics"]
         codes = {d.get("code") for d in (bad_diags or [])}
         if not {"W0001", "W0002"}.issubset(codes):
-            fail(f"bad.a diagnostics missing W0001/W0002: {bad_diags}")
+            fail(f"bad.astra diagnostics missing W0001/W0002: {bad_diags}")
 
         dead_line = 3  # 0-based line of `let dead_local = 3`
         actions = client.request(
@@ -936,10 +936,10 @@ def main() -> int:
         imp_uri = imp_path.as_uri()
         imp_source = (
             "import std:json\n"
-            "import \"b.a\"\n"
+            "import \"b.astra\"\n"
             "import std:core\n"
-            "from \"a.a\" import ax\n"
-            "import \"a.a\"\n"
+            "from \"a.astra\" import ax\n"
+            "import \"a.astra\"\n"
             "import std:json\n"
         )
         imp_path.write_text(imp_source, encoding="utf-8")
@@ -973,9 +973,9 @@ def main() -> int:
         if not organize:
             fail(f"codeAction missing organizeImports: {actions}")
         expected_imports = (
-            "from \"a.a\" import ax\n"
-            "import \"a.a\"\n"
-            "import \"b.a\"\n"
+            "from \"a.astra\" import ax\n"
+            "import \"a.astra\"\n"
+            "import \"b.astra\"\n"
             "import std:core\n"
             "import std:json\n"
         )
@@ -1004,7 +1004,7 @@ def main() -> int:
         client.request(
             "textDocument/documentSymbol", {"textDocument": {"uri": uri}}
         )
-        # Filter to the main document: pending diagnostics for imp.a
+        # Filter to the main document: pending diagnostics for imp.astra
         # (intentional duplicate `std:json` import) may be delivered first.
         async_diag = None
         for _ in range(8):

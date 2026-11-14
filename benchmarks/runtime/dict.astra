@@ -1,5 +1,5 @@
 # Runtime benchmarks: dict/set/string/view/json/GC-churn hot paths.
-# Each prints "name ms" (best of 3). Run: ./build/a run benchmarks/runtime/dict.a
+# Each prints "name ms" (best of 3). Run: ./build/a run benchmarks/runtime/dict.astra
 import std:time
 import json
 

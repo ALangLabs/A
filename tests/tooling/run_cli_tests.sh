@@ -160,7 +160,7 @@ EOF
 grep -q "^5$" "$WORK_DIR/multi.out"
 
 # Directory / codebase scan: `a test <dir>` and `a test` (no args) discover
-# `*.a` files containing `fn test_*()` and aggregate results.
+# `*.astra` files containing `fn test_*()` and aggregate results.
 SCAN="$WORK_DIR/scan"
 mkdir -p "$SCAN/sub"
 cat >"$SCAN/one_test.astra" <<'EOF'

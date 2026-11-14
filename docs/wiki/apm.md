@@ -6,7 +6,7 @@ A packages, **written in A itself** (see [`apm/`](../../apm/README.md)).
 ```sh
 ./apm/apm init myapp                 # scaffold a project (writes apm.json)
 ./apm/apm install string-utils       # add packages (resolves deps, locks)
-./apm/apm run main.a                 # run a program with packages on -I
+./apm/apm run main.astra              # run a program with packages on -I
 ```
 
 ## Model

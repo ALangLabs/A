@@ -20,7 +20,7 @@ class NDArray:
 
     # --- NumPy-style methods ---------------------------------------------------
     # NOTE: locals below are _m-prefixed — A function locals share a flat
-    # name->slot namespace with caller variables (see reductions.a note), so
+    # name->slot namespace with caller variables (see reductions.astra note), so
     # unprefixed locals could clobber same-named caller variables.
 
     # reshape/ravel/flatten/transpose mirror the module-level fns of the same
@@ -89,7 +89,7 @@ class NDArray:
         return array2string(self)
 
     # --- flat reductions (population statistics, ddof=0) ----------------------
-    # NaN elements are NOT skipped (unlike reductions.a nan* variants); empty
+    # NaN elements are NOT skipped (unlike reductions.astra nan* variants); empty
     # arrays give sum/prod = 0/1-ish and min/max/mean/var/std = NaN.
 
     fn sum(self) -> f64:

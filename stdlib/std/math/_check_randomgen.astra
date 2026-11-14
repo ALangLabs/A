@@ -1,4 +1,4 @@
-# Self-check for randomgen.a — run: ./build/a run stdlib/std/math/numpy/_check_randomgen.a
+# Self-check for randomgen.astra — run: ./build/a run stdlib/std/math/numpy/_check_randomgen.astra
 # Exits 0 on success; panics (nonzero exit) on failure.
 
 from "randomgen.astra" import seed, random, random_sample, rand, randn, standard_normal, randint, uniform, normal, exponential, standard_exponential, gamma, standard_gamma, beta, chisquare, f, standard_cauchy, standard_t, laplace, gumbel, logistic, rayleigh, weibull, pareto, power, lognormal, geometric, poisson, binomial, triangular, choice, shuffle, permutation

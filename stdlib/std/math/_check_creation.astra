@@ -1,5 +1,5 @@
 #
-# Verification for creation.a — expected values computed by hand.
+# Verification for creation.astra — expected values computed by hand.
 #
 from "creation.astra" import copy, ascontiguousarray, require, copyto
 from "creation.astra" import asarray_ndarray, asarray_flat, asarray_list

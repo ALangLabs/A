@@ -1,4 +1,4 @@
-# std.textwrap selftest — run: ./build/a test stdlib/std/textwrap/selftest.a
+# std.textwrap selftest — run: ./build/a test stdlib/std/textwrap/selftest.astra
 import std:textwrap
 
 fn assert_eq(a, b):

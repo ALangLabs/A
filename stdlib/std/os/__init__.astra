@@ -4,16 +4,16 @@
 # modules plus small pure-A helpers. It is split into focused modules so each
 # part can be extended on its own:
 #
-#   constants.a    platform constants (name, sep, F_OK, SEEK_*, ...)
-#   environment.a  getenv/environ/putenv
-#   process.a      pid/uid/gid, cwd, uname, cpu_count, system
-#   stat.a         StatResult, stat/lstat, exists/isfile/isdir, chmod/utime
-#   dirs.a         listdir/scandir, mkdir/makedirs/rmdir, walk
-#   files.a        remove/rename/truncate, symlink/link/readlink
-#   pathns.a       the os.path namespace object
-#   randbytes.a    urandom/getrandom
-#   termsize.a     get_terminal_size
-#   syscalls.a     loadavg/hostname/umask/pagesize/popen/kill (C parity)
+#   constants.astra    platform constants (name, sep, F_OK, SEEK_*, ...)
+#   environment.astra  getenv/environ/putenv
+#   process.astra      pid/uid/gid, cwd, uname, cpu_count, system
+#   stat.astra         StatResult, stat/lstat, exists/isfile/isdir, chmod/utime
+#   dirs.astra         listdir/scandir, mkdir/makedirs/rmdir, walk
+#   files.astra        remove/rename/truncate, symlink/link/readlink
+#   pathns.astra       the os.path namespace object
+#   randbytes.astra    urandom/getrandom
+#   termsize.astra     get_terminal_size
+#   syscalls.astra     loadavg/hostname/umask/pagesize/popen/kill (C parity)
 #
 # Differences from CPython that are inherent to the A runtime:
 #   * Paths are UTF-8 strings; there is no separate bytes path type.

@@ -1,6 +1,6 @@
 # apm selftest — unit tests for the A Package Manager.
 #
-# Run: ./build/a test apm/selftest.a
+# Run: ./build/a test apm/selftest.astra
 # (compiles fast against already-built apm modules; no network needed)
 
 import "semver.astra" as semver

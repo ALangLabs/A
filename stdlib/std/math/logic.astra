@@ -1,5 +1,5 @@
 #
-# numpy logic/comparison ufuncs — f64-only, built on ndarray.a.
+# numpy logic/comparison ufuncs — f64-only, built on ndarray.astra.
 #
 # Boolean arrays are represented as NDArrays of 0.0/1.0 (there is no bool
 # dtype). Every comparison/logical ufunc returns such an NDArray.
@@ -33,7 +33,7 @@ fn _coords(shape: [i64], i: i64) -> [i64]:
     k = len(shape) - 1
     while k >= 0:
         coords.insert(0, rem % shape[k])
-        rem = rem // shape[k]  # NOTE: ndarray.a uses `/` here — float div
+        rem = rem // shape[k]  # NOTE: ndarray.astra uses `/` here — float div
                               # corrupts coords for ndim >= 2 (bug, not fixed
                               # per constraints; worked around locally).
         k = k - 1
@@ -85,7 +85,7 @@ fn _cmp_val(op: str, va: f64, vb: f64) -> f64:
         return 0.0
 
 fn _cmp(op: str, a: NDArray, b: NDArray) -> NDArray:
-    # mirrors ndarray.a _ew_bin broadcast logic; comparisons produce 0/1.
+    # mirrors ndarray.astra _ew_bin broadcast logic; comparisons produce 0/1.
     shape = _broadcast_shape(a.shape, b.shape)
     sa = a.size()
     sb = b.size()

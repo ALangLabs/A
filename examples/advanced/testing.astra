@@ -1,4 +1,4 @@
-# Run with: ./build/a test examples/advanced/testing.a
+# Run with: ./build/a test examples/advanced/testing.astra
 
 fn test_assertions():
     assert(true)

@@ -1,8 +1,8 @@
 #
 # std.math decompositions — eigen / SVD / QR / Cholesky / rank / condition.
 #
-# Dense f64 linear algebra on NDArray (C-order), built on ndarray.a and the
-# public linalg.a helpers (matmul, inv, matrix_norm, transpose).
+# Dense f64 linear algebra on NDArray (C-order), built on ndarray.astra and the
+# public linalg.astra helpers (matmul, inv, matrix_norm, transpose).
 #
 # Algorithms:
 #   * eigh/eigvalsh — cyclic Jacobi eigenvalue algorithm for SYMMETRIC
@@ -160,7 +160,7 @@ fn _jacobi(a: NDArray) -> (NDArray, NDArray):
     return (NDArray(sev, [n]), NDArray(vdata, [n, n]))
 
 fn eigvalsh(a: NDArray) -> NDArray:
-    # Eigenvalues of a symmetric matrix, ascending. (Distinct from linalg.a's
+    # Eigenvalues of a symmetric matrix, ascending. (Distinct from linalg.astra's
     # eigvalsh_2x2 which is closed-form 2x2 only.)
     _check(_is_square2(a), "eigvalsh: input must be square 2-D")
     _check(_is_sym(a, 1e-9), "eigvalsh: matrix must be symmetric")

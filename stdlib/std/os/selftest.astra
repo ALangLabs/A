@@ -2,7 +2,7 @@
 # native fs/env/terminal modules. Filesystem tests use a fixed temp directory
 # under the current directory and remove it before and after each run.
 #
-# Run: ./build/a test stdlib/std/os/selftest.a
+# Run: ./build/a test stdlib/std/os/selftest.astra
 import std:os
 
 fn assert_eq(a, b):

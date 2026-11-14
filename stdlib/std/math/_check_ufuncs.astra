@@ -1,6 +1,6 @@
 #
-# Self-check for ufuncs.a: exercises every public function on small arrays
-# with known results. Run: ./build/a run stdlib/std/math/numpy/_check_ufuncs.a
+# Self-check for ufuncs.astra: exercises every public function on small arrays
+# with known results. Run: ./build/a run stdlib/std/math/numpy/_check_ufuncs.astra
 # Exits non-zero (assert panic) on any mismatch.
 #
 import math

@@ -1,6 +1,6 @@
 #
-# Scratch verification for indexing.a — exercises every function with
-# hand-computed expected values. Run: ./build/a run _check_indexing.a
+# Scratch verification for indexing.astra — exercises every function with
+# hand-computed expected values. Run: ./build/a run _check_indexing.astra
 #
 # NOTE: all top-level variables use a CK_ prefix because of a compiler bug:
 # function-local variable names collide with top-level script bindings of
@@ -26,7 +26,7 @@ fn expect(CK_name: str, CK_got: NDArray, CK_want_data: [f64], CK_want_shape: [i6
                 ok = false
     if not ok:
         CK_fails = CK_fails + 1
-        # avoid array2string: it divides by zero on 0-row arrays (ndarray.a bug)
+        # avoid array2string: it divides by zero on 0-row arrays (ndarray.astra bug)
         print("FAIL " + CK_name + ": got shape=" + str(CK_got.shape) + " data=" + str(CK_got.data))
         print("  want data=" + str(CK_want_data) + " shape=" + str(CK_want_shape))
     else:

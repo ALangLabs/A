@@ -1,5 +1,5 @@
 # std.iter selftest — itertools-style helpers (eager array versions).
-# Run: ./build/a test stdlib/std/iter/selftest.a
+# Run: ./build/a test stdlib/std/iter/selftest.astra
 import std:iter
 
 fn assert_eq(a, b):

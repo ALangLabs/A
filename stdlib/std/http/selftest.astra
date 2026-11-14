@@ -1,5 +1,5 @@
-# std.http selftest — urls.a / client.a helpers plus the net socket layer.
-# Run: ./build/a test stdlib/std/http/selftest.a
+# std.http selftest — urls.astra / client.astra helpers plus the net socket layer.
+# Run: ./build/a test stdlib/std/http/selftest.astra
 from "urls.astra" import UrlParts, urlsplit, urlunsplit, quote, urlencode
 from "client.astra" import Response, _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport, _pool_key, get
 import std:net

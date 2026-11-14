@@ -185,7 +185,7 @@ fn _rint(x: f64) -> f64:
     return f + 1.0
 
 fn _expm1(x: f64) -> f64:
-    # e^x - 1, series for small |x| (same scheme as std/math/functions.a).
+    # e^x - 1, series for small |x| (same scheme as std/math/functions.astra).
     ax = fabs(x)
     if ax < 0.001:
         x2 = x * x
@@ -509,7 +509,7 @@ fn _bshape3(sa: [i64], sb: [i64], sc: [i64]) -> [i64]:
 
 fn _bstride(shape: [i64], target: [i64]) -> [i64]:
     # Broadcast strides into `target` (right-aligned, C order).
-    # WORKAROUND: ndarray.a's _broadcast_strides forgets to zero the stride on
+    # WORKAROUND: ndarray.astra's _broadcast_strides forgets to zero the stride on
     # size-1 axes that are actually broadcast (target dim > 1), which reads
     # out of bounds. This version zeroes those strides.
     nd = len(shape)

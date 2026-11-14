@@ -1,7 +1,7 @@
 # std.random selftest — deterministic PRNG behavior.
 # Covers both Random instances and the module-level API (which now works
 # under `a test` too: state round-trips through the float `_gstate`).
-# Run: ./build/a test stdlib/std/random/selftest.a
+# Run: ./build/a test stdlib/std/random/selftest.astra
 import std:random
 
 fn assert_eq(a, b):

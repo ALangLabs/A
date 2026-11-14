@@ -1,6 +1,6 @@
 # std.re selftest — regex engine coverage (search/match/classes/quantifiers/
 # groups/alternation/anchors/sub/split/escape).
-# Run: ./build/a test stdlib/std/re/selftest.a
+# Run: ./build/a test stdlib/std/re/selftest.astra
 import std:re
 
 fn assert_eq(a, b):

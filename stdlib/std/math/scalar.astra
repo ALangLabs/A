@@ -5,7 +5,7 @@
 #
 # Dual dispatch: names that collide with numpy ufuncs accept EITHER a
 # scalar number OR an NDArray. NDArray inputs are delegated to the ufunc
-# implementations in ufuncs.a / reductions.a / randomgen.a; scalar inputs
+# implementations in ufuncs.astra / reductions.astra / randomgen.astra; scalar inputs
 # go through the native `math` module (bare `import math` inside package
 # files resolves to the NATIVE scalar module — see module_loader.cpp).
 #
@@ -15,12 +15,12 @@
 # Deviations vs the old std.math API:
 #  * PI / E are module-level f64 constants (native math.PI semantics), not
 #    PI()/E() functions — every in-repo consumer uses them as values.
-#  * random() is provided by randomgen.a (seeded _rng stream, [0,1)) —
+#  * random() is provided by randomgen.astra (seeded _rng stream, [0,1)) —
 #    signature-compatible with the old math.random().
 #  * gamma(x) with ONE argument is the Gamma function (old API); with
 #    (shape, scale[, size]) it is the randomgen distribution sampler.
 #  * min/max/prod accept (scalar...), (NDArray), or (NDArray, axis).
-#  * erf/erfc are re-exported from special.a (A&S 7.1.26 approximation).
+#  * erf/erfc are re-exported from special.astra (A&S 7.1.26 approximation).
 #
 from math import PI, E, sqrt as _nsqrt, sin as _nsin, cos as _ncos, tan as _ntan, asin as _nasin, acos as _nacos, atan as _natan, atan2 as _natan2, exp as _nexp, log as _nlog, log2 as _nlog2, log10 as _nlog10, floor as _nfloor, ceil as _nceil, round as _nround, trunc as _ntrunc, abs as _nabs, min as _nmin, max as _nmax, pow as _npow, random_int as _nrandom_int
 from "ndarray.astra" import NDArray
@@ -32,7 +32,7 @@ from "randomgen.astra" import gamma as _rgamma
 # --- constants ---------------------------------------------------------------------
 # PI / E are re-exported native constants (math.PI / math.E values) — A
 # reserves them as builtin constants, so they cannot be assigned here; the
-# from-import binds the native values and re-exports them through numpy.a.
+# from-import binds the native values and re-exports them through numpy.astra.
 
 # --- dispatch helpers ------------------------------------------------------------
 

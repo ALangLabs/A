@@ -1,4 +1,4 @@
-# Check for decomp.a — run: ./build/a run _check_decomp.a  (from this dir)
+# Check for decomp.astra — run: ./build/a run _check_decomp.astra  (from this dir)
 import std:core
 
 from "ndarray.astra" import NDArray, ndarray, zeros, eye, transpose

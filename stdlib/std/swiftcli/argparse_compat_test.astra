@@ -1,5 +1,5 @@
 # Argparse-compatibility tests for std.swiftcli
-# Run: ./build/a test stdlib/std/swiftcli/argparse_compat_test.a
+# Run: ./build/a test stdlib/std/swiftcli/argparse_compat_test.astra
 import swiftcli
 
 fn test_argument_parser_alias():

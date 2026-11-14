@@ -1,6 +1,6 @@
 #
-# Verification for complex.a — hand-computed expected values.
-# Run: ./build/a run _check_complex.a   (must exit 0)
+# Verification for complex.astra — hand-computed expected values.
+# Run: ./build/a run _check_complex.astra   (must exit 0)
 #
 from "complex.astra" import Complex, c_new, c_real, c_imag, c_zero, c_one, c_i
 from "complex.astra" import c_from_polar, c_from_real, c_neg, c_conj, c_abs, c_arg

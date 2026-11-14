@@ -1,4 +1,4 @@
-# check for polynomial.a + set ops — run: ./build/a run stdlib/std/math/numpy/_check_polynomial.a
+# check for polynomial.astra + set ops — run: ./build/a run stdlib/std/math/numpy/_check_polynomial.astra
 from "ndarray.astra" import NDArray
 from "polynomial.astra" import polyval, polyval_arr, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, roots, piecewise_const, isin, in1d, intersect1d, union1d, setdiff1d, setxor1d, finfo_f64
 

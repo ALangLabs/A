@@ -1,4 +1,4 @@
-# std.format selftest — run: ./build/a test stdlib/std/format/selftest.a
+# std.format selftest — run: ./build/a test stdlib/std/format/selftest.astra
 import std:format
 
 fn assert_eq(a, b):

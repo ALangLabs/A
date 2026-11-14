@@ -1,5 +1,5 @@
-# Check for reductions.a — hand-computed NumPy-equivalent values.
-# Run: ./build/a run stdlib/std/math/numpy/_check_reductions.a   (exit 0 = pass)
+# Check for reductions.astra — hand-computed NumPy-equivalent values.
+# Run: ./build/a run stdlib/std/math/numpy/_check_reductions.astra   (exit 0 = pass)
 from "ndarray.astra" import NDArray, eye
 from "reductions.astra" import sum, nansum, prod, mean, nanmean, var, nanvar, std, nanstd, min, nanmin, max, nanmax, sum_all, prod_all, mean_all, var_all, std_all, min_all, max_all, nansum_all, nanmean_all, nanvar_all, nanstd_all, nanmin_all, nanmax_all, argmin, argmax, argmin_all, argmax_all, ptp, ptp_all, cumsum, cumprod, cumsum_flat, cumprod_flat, trace, average, average_w, average_w_flat
 

@@ -1,9 +1,9 @@
 #
-# Verification for signal.a — expected values hand-computed and cross-checked
+# Verification for signal.astra — expected values hand-computed and cross-checked
 # against NumPy semantics (np.convolve/np.correlate doc examples and the
 # TestCorrelate vectors in numpy/_core/tests/test_numeric.py).
 #
-# Run: ./build/a run _check_signal.a   (from this directory)
+# Run: ./build/a run _check_signal.astra   (from this directory)
 #
 from "signal.astra" import convolve, correlate, convolve2d, correlate2d
 from "signal.astra" import sliding_window_view

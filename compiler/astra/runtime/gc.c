@@ -1677,7 +1677,7 @@ int a_gc_registered_obj(void *p) {
 /* Release every live T_PYOBJ/T_PYBUF wrapper's owned reference at
    interpreter shutdown. Top-level globals stay reachable via
    __a_gc_roots at exit, so no collection would free them; without this
-   the owned PyObject* (e.g. a 280 KiB array.array in opaque_objects.a)
+   the owned PyObject* (e.g. a 280 KiB array.array in opaque_objects.astra)
    prevents Py_Finalize from reclaiming it and LSan reports a direct
    leak. Only the Python reference is dropped; the A wrapper memory
    itself is left for the OS to reclaim (process exit). */

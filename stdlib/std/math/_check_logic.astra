@@ -1,5 +1,5 @@
-# Exercise stdlib/std/math/numpy/logic.a
-# Run: ./build/a run stdlib/std/math/numpy/_check_logic.a
+# Exercise stdlib/std/math/numpy/logic.astra
+# Run: ./build/a run stdlib/std/math/numpy/_check_logic.astra
 #
 # Boolean arrays are NDArrays of 0.0/1.0 (f64-only dtype — documented
 # deviation from NumPy's bool dtype).

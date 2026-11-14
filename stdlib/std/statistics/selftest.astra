@@ -1,4 +1,4 @@
-# std.statistics selftest — run: ./build/a test stdlib/std/statistics/selftest.a
+# std.statistics selftest — run: ./build/a test stdlib/std/statistics/selftest.astra
 import std:statistics
 import std:random
 

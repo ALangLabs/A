@@ -1,5 +1,5 @@
 #
-# Verification for shape_ops.a — expected values computed by hand
+# Verification for shape_ops.astra — expected values computed by hand
 # (cross-checked against NumPy semantics).
 #
 from "shape_ops.astra" import expand_dims, squeeze, squeeze_axis, squeeze_all

@@ -3,7 +3,7 @@
 # From the repo root:
 #   apm/apm init demo  (or reuse the apm.json next to this file)
 #   apm/apm install string-utils
-#   apm/apm run examples/apm/app.a
+#   apm/apm run examples/apm/app.astra
 #
 # This file has its own apm.json in the same directory; pass -p examples/apm.
 import hello_lib

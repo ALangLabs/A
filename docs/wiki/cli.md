@@ -11,12 +11,12 @@ faster dev builds).
 
 | Command | Description |
 | --- | --- |
-| `a run <file.a>` | Compile and execute. `-c 'code'` runs inline source. |
-| `a build <file.a> -o <bin>` | Compile to a native executable (default `a.out`). |
-| `a check <file.a>` | Type-check only; `--json` for machine-readable diagnostics. |
+| `a run <file.astra>` | Compile and execute. `-c 'code'` runs inline source. |
+| `a build <file.astra> -o <bin>` | Compile to a native executable (default `a.out`). |
+| `a check <file.astra>` | Type-check only; `--json` for machine-readable diagnostics. |
 | `a test [file\|dir]` | Run `fn test_*()` in a file, or recursively discover test files in a directory/codebase (default: `.`). `--filter <substr>` selects matching test names (in scan mode, files with no matches are skipped). |
-| `a fmt <file.a>` | Format to stdout; `-w` writes in place, `--check` exits nonzero if unformatted, `--indent <n>`. |
-| `a doc <file.a>` | Generate docs (markdown; `--json`, `-o <file>`). |
+| `a fmt <file.astra>` | Format to stdout; `-w` writes in place, `--check` exits nonzero if unformatted, `--indent <n>`. |
+| `a doc <file.astra>` | Generate docs (markdown; `--json`, `-o <file>`). |
 | `a repl` | Interactive REPL — self-hosted A shell on a TTY, line REPL when piped. |
 | `a version` / `a help` | Version and usage. |
 
@@ -32,7 +32,7 @@ faster dev builds).
   `run`/`test`/`repl`. Native is the only backend: A lowers to LLVM IR and
   compiles with `opt`/`llc`/`clang` (no interpreter).
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
-  name contains the substring (e.g. `a test foo.a --filter dict`, or
+  name contains the substring (e.g. `a test foo.astra --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single
   file, a filter that matches no tests is an error; in directory scan mode,
   files with no matching tests are skipped and an error is reported only if
@@ -88,7 +88,7 @@ boot image instead of an executable — no libc, no sysroot, no `a test`;
   `qemu-system-i386`, not only by compiling them.
 - Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
   wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
-  `tests/integration/i8086_image.sh <path-to-a> <source.a> [expected.out]`
+  `tests/integration/i8086_image.sh <path-to-a> <source.astra> [expected.out]`
   builds an image and diffs the serial output against `expected.out`. Manual run:
   `qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
 - The `astra-i8086` driver is built on Linux hosts only. The astra i8086

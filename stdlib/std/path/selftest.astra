@@ -1,5 +1,5 @@
 # std.path selftest — POSIX path manipulation.
-# Run: ./build/a test stdlib/std/path/selftest.a
+# Run: ./build/a test stdlib/std/path/selftest.astra
 from std:path import join, split, splitext, normpath, relpath, commonpath, dirname, basename, isabs, abspath, expanduser, commonprefix
 
 fn assert_eq(a, b):

@@ -1,5 +1,5 @@
 # std.heapq selftest — port of Python heapq behaviours.
-# Run: ./build/a test stdlib/std/heapq/selftest.a
+# Run: ./build/a test stdlib/std/heapq/selftest.astra
 from "heapq.astra" import heappush, heappop, heapify, heapreplace, heappushpop
 from "heapq.astra" import heappush_max, heappop_max, heapify_max, heapreplace_max, heappushpop_max
 from "heapq.astra" import nlargest, nsmallest, merge

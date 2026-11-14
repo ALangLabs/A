@@ -1,5 +1,5 @@
 # std.datetime selftest — civil calendar conversions and formatting.
-# Run: ./build/a test stdlib/std/datetime/selftest.a
+# Run: ./build/a test stdlib/std/datetime/selftest.astra
 import std:datetime
 from std:datetime import DateTime, from_timestamp, timestamp, date, now, add_seconds, diff_ms, weekday, isoweekday, days_in_month, is_leap_year, strptime
 

@@ -1,5 +1,5 @@
 # std.enum selftest — functional Enum/IntEnum/StrEnum/Flag/IntFlag specs.
-# Run: ./build/a test stdlib/std/enum/selftest.a
+# Run: ./build/a test stdlib/std/enum/selftest.astra
 import std:enum
 from std:enum import Enum, IntEnum, StrEnum, Flag, IntFlag, auto
 
