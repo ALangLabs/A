@@ -157,7 +157,7 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 
 ```mermaid
 flowchart LR
-    src[".a source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
+    src[".astra source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
     fe --> s["x86-64 / per-arch asm"]
     s --> astra["Astra backend<br/>(TinyCC fork)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra

@@ -1368,8 +1368,8 @@ static void gc_collect(void) {
     if (g_hash_stale) ht_rebuild();
     /* Collect again once we've allocated ~8x the live heap (min 8 MiB) —
        a tighter threshold re-collects far too often on allocation-heavy
-       programs (each collection is O(heap)), which is what made graph.a
-       pathologically slow; a looser one lets churn.a retain too much
+       programs (each collection is O(heap)), which is what made graph.astra
+       pathologically slow; a looser one lets churn.astra retain too much
        floating garbage between sweeps. */
     uint64_t next = g_live_bytes * 8;
     if (next < (2u << 20)) next = 2u << 20;

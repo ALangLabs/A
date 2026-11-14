@@ -89,7 +89,7 @@ launcher also finds `../build/a` automatically).
 
 ## Writing a package
 
-A package is a directory with an `apm.json` plus your `.a` module(s):
+A package is a directory with an `apm.json` plus your `.astra` module(s):
 
 ```
 my-pkg/

@@ -706,7 +706,7 @@ inline void scanImports(const std::string& text, std::vector<PreImport>& out) {
 // each resolved module contributes its content to the key, and every
 // candidate checked before it contributes an "absent" marker, so creating a
 // file that would shadow a resolved module changes the key. Depth is the
-// real dependency graph, so a directory full of unrelated `.a` files (or a
+// real dependency graph, so a directory full of unrelated `.astra` files (or a
 // temp dir) costs nothing and can never disable the cache.
 struct PreScan {
   const PipelineConfig& config;
@@ -1823,8 +1823,8 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
                        config.backend);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
-  // Guard `a build x.a -o x.a`: the linker would overwrite the source file with
-  // the ELF. Compare canonical paths so `./x.a`, `sub/../x.a` and symlinks
+  // Guard `a build x.astra -o x.astra`: the linker would overwrite the source file with
+  // the ELF. Compare canonical paths so `./x.astra`, `sub/../x.astra` and symlinks
   // are caught too.
   {
     std::error_code eci, eco;

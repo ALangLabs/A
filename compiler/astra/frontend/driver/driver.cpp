@@ -78,7 +78,7 @@ bool replInputComplete(const std::string& text){
 }
 }
 #if defined(__unix__) || defined(__APPLE__)
-// Locates the self-hosted A REPL (stdlib/std/repl/main.a): $A_STDLIB, then
+// Locates the self-hosted A REPL (stdlib/std/repl/main.astra): $A_STDLIB, then
 // paths relative to this executable (build/a -> ../stdlib), then cwd.
 std::string findReplMain(const DriverConfig& c){
   std::vector<std::string> roots;
@@ -108,11 +108,11 @@ std::string findReplMain(const DriverConfig& c){
 int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e){
 #if defined(__unix__) || defined(__APPLE__)
   // On a TTY, `a repl` runs the self-hosted interactive shell written in A
-  // (stdlib/std/repl/main.a). Piped stdin keeps the simple line REPL below.
+  // (stdlib/std/repl/main.astra). Piped stdin keeps the simple line REPL below.
   if(isatty(STDIN_FILENO)){
     std::string main=findReplMain(c);
     if(!main.empty()) return runFile(main,c,in,o,e);
-    e<<"warning: could not locate stdlib/std/repl/main.a; using line REPL\n";
+    e<<"warning: could not locate stdlib/std/repl/main.astra; using line REPL\n";
   }
 #endif
   // Line-based REPL: each complete input is compiled and run by the LLVM

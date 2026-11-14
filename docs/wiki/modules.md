@@ -6,10 +6,10 @@ Verified against `compiler/astra/frontend/parser` (ImportStmt/FromImportStmt),
 ## Import forms
 
 ```python
-import "lib/mathx.a"                  # quoted path, relative to importer
-import "lib/mathx.a" as mx            # with alias
-from "lib/mathx.a" import add, Point  # selected names (as-aliases allowed)
-from "lib/mathx.a" import Vec as V
+import "lib/mathx.astra"                  # quoted path, relative to importer
+import "lib/mathx.astra" as mx            # with alias
+from "lib/mathx.astra" import add, Point  # selected names (as-aliases allowed)
+from "lib/mathx.astra" import Vec as V
 
 import math                           # bare native module
 import std:math                       # stdlib package — but see note below
@@ -32,21 +32,21 @@ from python:json import loads
   `match`, …), so keyword-named packages like `std/enum/` are importable:
   `from std:enum import Enum`. Plain `import std:enum` binds a keyword name
   — prefer `as` aliasing or the `from` form.
-- Modules are namespaced; `import "lib/mathx.a"` binds `mathx.*` members.
+- Modules are namespaced; `import "lib/mathx.astra"` binds `mathx.*` members.
 - Package `__init__.astra` re-exports resolve on every backend: a package can
-  forward names with `from "impl.a" import name`, and attribute access
+  forward names with `from "impl.astra" import name`, and attribute access
   through the package binding follows the re-export to the module that
   actually declares it (`a::resolveModuleMember` lives in
   `frontend/codegen/codegen_calls.cpp` and `codegen_expr.cpp` for the
   x86-64 asm emitter, and in `codegen_native.cpp` for the per-arch native
   emitter). Example:
-  `import "lib/pkg/__init__.a" as pkg` then `pkg.greet()` calls the
+  `import "lib/pkg/__init__.astra" as pkg` then `pkg.greet()` calls the
   function re-exported by `pkg/__init__.astra`.
 - Import cycles and missing modules are compile errors.
 
 ## Module files
 
-Any `.a` file is a module; `examples/modules/lib/mathx.astra` shows a typical
+Any `.astra` file is a module; `examples/modules/lib/mathx.astra` shows a typical
 fixture. Top-level statements run once at import.
 
 ## Entry point: `entry name()`

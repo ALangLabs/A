@@ -336,7 +336,7 @@
         "a.tasks.autoGenerate": {
           "type": "boolean",
           "default": true,
-          "description": "When a workspace folder contains .a files but no .vscode/tasks.json, generate one with A: Run/Build/Test/Check/Format tasks (the contributed 'a' task type)."
+          "description": "When a workspace folder contains .astra files but no .vscode/tasks.json, generate one with A: Run/Build/Test/Check/Format tasks (the contributed 'a' task type)."
         }
       }
     },
@@ -364,7 +364,7 @@
           },
           "output": {
             "type": "string",
-            "description": "Executable path for build; defaults to the source path without the .a extension."
+            "description": "Executable path for build; defaults to the source path without the .astra extension."
           }
         }
       }

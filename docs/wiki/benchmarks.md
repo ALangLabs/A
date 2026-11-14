@@ -20,7 +20,7 @@ other languages.
 
 ## Running
 
-`tools/benchmark-runner/bench_4way.py --a-only` times each `benchmarks/*/*.a`
+`tools/benchmark-runner/bench_4way.py --a-only` times each `benchmarks/*/*.astra`
 with `a run` (no other languages needed);
 `tools/benchmark-runner/bench_4way.py` compares all four (A run vs
 native vs C vs C++ vs Python) and writes `--json` results.

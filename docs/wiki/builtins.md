@@ -7,7 +7,7 @@ Core builtin functions are available without imports (verified against
 
 | Category | Functions |
 | --- | --- |
-| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.a" import read_line`), which returns `""` at end-of-file |
+| I/O | `print(...)`, `eprint(...)` (stderr), `input()`, `flush()`; `input()` reads one line (optional prompt arg) and **panics on EOF** — for EOF-tolerant line input use `read_line()` from the `std/io` package (`from "std/io/__init__.astra" import read_line`), which returns `""` at end-of-file |
 | Values | `len(x)`, `str(x)`, `int(x)`, `float(x)`, `bool(x)`, `repr(x)`, `type(x)`, `isinstance(x, T)` — `T` is a runtime type-name string (`isinstance(xs, "list")`) or a bare type name (`isinstance(xs, list)`, `isinstance(x, int)`, or a `class` name); sized values (str, list, tuple, set, map) also accept the method form `x.len()` |
 
 Boolean literals are the lowercase keywords `true` and `false` (not Python's

@@ -1,7 +1,7 @@
 # apm.install — fetch package sources into <project>/.apm/packages/.
 #
 # Source strings (pip-like):
-#   "<path>" or "local:<path>"     local directory or .a file (copied)
+#   "<path>" or "local:<path>"     local directory or .astra file (copied)
 #   "git+<url>[#<ref>]"            git clone + checkout <ref> (via git)
 #   "http(s)://...tar.gz|.tgz|.tar" / ".zip" archive (download + extract)
 #   "http(s)://..."                any other URL: downloaded as-is

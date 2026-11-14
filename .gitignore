@@ -5,12 +5,12 @@ build-*/
 cmake-build-*/
 *.o
 
-!examples/*.a
-!examples/**/*.a
-!tests/**/*.a
-!stdlib/**/*.a
-!benchmarks/*.a
-!benchmarks/**/*.a
+!examples/*.astra
+!examples/**/*.astra
+!tests/**/*.astra
+!stdlib/**/*.astra
+!benchmarks/*.astra
+!benchmarks/**/*.astra
 *.so
 *.dylib
 *.exe
@@ -28,12 +28,12 @@ dist/
 .vtx/
 .venv/
 demo/
-# test output residue (written by tests/integration/cases/file_io.a)
+# test output residue (written by tests/integration/cases/file_io.astra)
 data.txt
 # runtime archive built by the astra_runtime target
 compiler/astra/runtime/libaruntime.a
-websearchcli.a
+websearchcli.astra
 # A compiler cache (like Python's __pycache__)
 _acache_/
 **/_acache_/
-lol.a
+lol.astra

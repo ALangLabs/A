@@ -14,7 +14,7 @@ body:
     attributes:
       label: Minimal reproducer
       description: |
-        The smallest `.a` program that shows the problem. Please paste source
+        The smallest `.astra` program that shows the problem. Please paste source
         directly, not a screenshot.
       render: text
     validations:

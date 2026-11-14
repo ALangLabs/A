@@ -82,10 +82,10 @@ Python-style traceback of the live A frames:
 
 ```text
 error: index out of range
-  --> app.a:1
+  --> app.astra:1
 Traceback (most recent call last):
-  File "app.a", line 7, in main
-  File "app.a", line 1, in last
+  File "app.astra", line 7, in main
+  File "app.astra", line 1, in last
 ```
 
 `<module>` frames show the line of the statement being executed (the
