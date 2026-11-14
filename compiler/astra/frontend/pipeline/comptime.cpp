@@ -70,6 +70,17 @@ TypeExprPtr cloneTypeExpr(const TypeExpr& e) {
     if (n->returnType) out->returnType = cloneTypeExpr(*n->returnType);
     return out;
   }
+  if (auto* n = dynamic_cast<const UnionTypeExpr*>(&e)) {
+    auto out = std::make_unique<UnionTypeExpr>();
+    out->span = n->span;
+    for (const auto& el : n->elements) out->elements.push_back(cloneTypeExpr(*el));
+    return out;
+  }
+  if (auto* n = dynamic_cast<const EllipsisTypeExpr*>(&e)) {
+    auto out = std::make_unique<EllipsisTypeExpr>();
+    out->span = n->span;
+    return out;
+  }
   if (auto* n = dynamic_cast<const ConstTypeExpr*>(&e)) {
     auto out = std::make_unique<ConstTypeExpr>();
     out->span = n->span;
@@ -201,6 +212,9 @@ ExprPtr cloneExpr(const Expr& e) {
       out->builtinId = src.builtinId;
       out->calleeIsBuiltin = src.calleeIsBuiltin;
       out->calleeBuiltin = src.calleeBuiltin;
+      for (const auto& ta : src.typeArgs) {
+        out->typeArgs.push_back(cloneTypeExpr(*ta));
+      }
       return out;
     }
     case ExprKind::Index: {

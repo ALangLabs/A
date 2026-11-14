@@ -41,7 +41,8 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
     }
     auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return t;
   }
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   if (object->kind == TypeKind::Set) {
@@ -84,7 +85,8 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
     }
     auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return typeArray(t);
   }
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
   sink_.error(expr.object->span,
@@ -200,7 +202,8 @@ TypePtr Sema::inferField(FieldExpr& expr) {
     return typeError();
   }
 
-  if (object->kind == TypeKind::Var) {
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }
 

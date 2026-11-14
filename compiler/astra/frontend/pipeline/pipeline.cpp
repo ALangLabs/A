@@ -33,7 +33,6 @@
 #include "name-resolution/module_loader.hpp"
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
-#include "vm/vm.hpp"
 #include "llvm/llvm_emit.hpp"
 namespace a {
 namespace {
@@ -1704,9 +1703,6 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  // The VM interprets host-arch semantics only; a runnable-but-different
-  // arch (e.g. i386 on x86_64) is still not the host target.
-  if(config.vm && td.arch!=hostArch()){ err<<"error: --vm runs on the host target only ('"<<td.arch<<"' != '"<<hostArch()<<"')\n"; return kCErr; }
   if(config.checkOnly){
     DiagnosticSink sink; auto m=runFrontendPipeline(path,source,config,sink,out,err); if(!m.ok) return kCErr; return kOk;
   }
@@ -1715,7 +1711,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
   // Compile-time diagnostics (warnings) are observable behaviour, so they
   // are recorded alongside the binary on a miss and replayed on a hit.
   std::string preBin;
-  if(td.native && !config.vm){
+  if(td.native){
     preBin = run_cache::precheckKey(path, source, config, td, config.optimizationLevel);
     if(!preBin.empty()){
       std::error_code ec;
@@ -1748,12 +1744,6 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
     // sidecar can replay them on precheck hits.
     diagCapture = diagStream.str();
     err << diagCapture;
-    // --vm: skip all native caching/emit; the interpreter runs the checked
-    // module graph in-process and its return value is the process exit code.
-    if(config.vm) {
-      int rc = vm::runProgram(*m.graph,*m.sema,false,config.testFilter);
-      if (rc != vm::kVmFallbackToNative) return rc;
-    }
     if(!preBin.empty()){
       std::error_code ec;
       std::ofstream sidecar(preBin + ".diag", std::ios::binary | std::ios::trunc);
@@ -1772,7 +1762,6 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return kCErr;
   if(!td.native){ err<<"error: cannot execute target '"<<td.arch<<"' on this host ('"<<hostArch()<<"'); use 'a build' to cross-compile\n"; return kCErr; }
-  if(config.vm && td.arch!=hostArch()){ err<<"error: --vm runs on the host target only ('"<<td.arch<<"' != '"<<hostArch()<<"')\n"; return kCErr; }
   // --filter with no matching test_* function: report and exit nonzero
   // instead of compiling a binary that would run zero tests — a typo'd
   // filter must not pass CI silently. Mirrors the emitter's discovery
@@ -1820,19 +1809,11 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     }
     if(sink.hasErrors()){ sink.flush(err,config.useColor); return kCErr; }
   }
-  // --vm: the interpreter runs test_* functions in-process; skip emit/link.
-  if(config.vm) {
-      int rc = vm::runProgram(*m.graph,*m.sema,true,config.testFilter);
-      if (rc != vm::kVmFallbackToNative) return rc;
-    }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
                        config.testFilter.empty()?nullptr:&config.testFilter, config.jobs,
                        config.backend);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
-  // Defensive: the CLI rejects `build --vm`; a build always emits a native
-  // binary, so the VM flag must never reach codegen here.
-  if(config.vm){ err<<"error: --vm cannot be used with 'build'\n"; return kCErr; }
   // Guard `a build x.a -o x.a`: the linker would overwrite the source file with
   // the ELF. Compare canonical paths so `./x.a`, `sub/../x.a` and symlinks
   // are caught too.
@@ -1896,12 +1877,6 @@ ReplSession::~ReplSession() = default;
 int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   (void)session;
   DiagnosticSink sink; auto m=runFrontendPipeline("<repl>",source,config,sink,out,err); if(!m.ok) return 1;
-  // --vm repl: run each eval in the interpreter; no target resolution or
-  // native emit is needed (VM is host-only by construction).
-  if(config.vm) {
-    int rc = vm::runProgram(*m.graph,*m.sema,false,"");
-    if (rc != vm::kVmFallbackToNative) return rc;
-  }
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }

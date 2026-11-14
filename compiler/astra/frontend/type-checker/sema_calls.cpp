@@ -15,8 +15,9 @@ TypePtr Sema::checkMethodCall(const TypePtr& objectType, FieldExpr& field, CallE
     return false;
   };
 
-  if (object->kind == TypeKind::Var) {
-    /* dynamic: inferred at runtime */
+  if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
+      object->kind == TypeKind::Any) {
+    /* dynamic (untyped, union, or any): inferred at runtime */
     for (auto& arg : call.args) inferExpr(*arg.value);
     auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }

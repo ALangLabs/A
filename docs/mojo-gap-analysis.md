@@ -82,10 +82,9 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 - **Priority: P0** — this is Mojo's single biggest differentiator and A's
   largest known hole. Implementation path: specialize at the module-graph
   level — clone `FnDecl`/AST per comptime binding before `Sema::analyze`
-  (in `pipeline.cpp` `runFrontendPipeline`), so all emitters and the
-  VM get specialization for free; then add `comptime if/for` as sugar that
-  evaluates a pure-A interpreter subset at parse/sema time (the VM in
-  `frontend/vm/` can be reused as the comptime evaluator).
+  (in `pipeline.cpp` `runFrontendPipeline`), so the emitter gets
+  specialization for free; then add `comptime if/for` as sugar that
+  evaluates a pure-A interpreter subset at parse/sema time.
 
 ### 2.3 SIMD / vectorization
 
@@ -164,9 +163,9 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 - **Mojo**: MLIR pipeline, parallel elaboration, fast incremental compile.
 - **A**: single-pass C++ frontend; `Sema::analyzeParallel`; LLVM backend via
   opt→llc→clang; per-module object cache planned
-  (`docs/plans/per-module-object-cache.md`); `--vm` interpreter. No
+  (`docs/plans/per-module-object-cache.md`). No
   incremental compilation.
-- **Priority: P2** — finish object cache + VM bytecode cache.
+- **Priority: P2** — finish object cache.
 
 ### 2.10 Errors / exceptions
 
@@ -190,7 +189,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 
 ### P0 — correctness/interop foundations
 1. **Comptime specialization** (2.2): AST-clone specialization in
-   `pipeline.cpp` before sema; `comptime if/for` via `vm/` evaluator.
+   `pipeline.cpp` before sema; `comptime if/for` via a parse-time evaluator.
 2. **`try`/`except` on `Result`** (2.10): parser + sema + emitters.
 3. **LLVM-emit typed arithmetic fast path** (2.3 prerequisite): emit real
    LLVM `add`/`fadd`/`load`/`store` for provably-unboxed `i64`/`f64` locals
@@ -205,8 +204,8 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 8. **Witness/constraint elaboration** for `where` (Mojo `arcana` parity).
 
 ### P2 — ecosystem
-9. Finish **per-module object cache** + **VM bytecode cache**.
-10. **Jupyter kernel** over `--vm`; richer `match` patterns; property-testing
+9. Finish **per-module object cache**.
+10. **Jupyter kernel**; richer `match` patterns; property-testing
     stdlib module.
 
 ### P3 — explicitly out of near-term scope
@@ -217,7 +216,8 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 
 A already matches or exceeds Mojo on: Python-syntax ergonomics, module
 system, package manager (`apm`), LSP/tooling, runtime breadth, Python
-interop direction, and has a *working* borrow checker plus LLVM+VM backends.
+interop direction, and has a *working* borrow checker plus a native LLVM
+backend.
 A is decisively behind on: **comptime metaprogramming** (parsed but dead —
 highest-leverage fix), **typed SIMD/vector IR**, **deterministic memory
 management** (GC vs ownership), **general C FFI**, and **structured error

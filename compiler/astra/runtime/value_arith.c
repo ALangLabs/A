@@ -95,9 +95,14 @@ static aval arith_int_int(aval l, aval r, char op) {
             if (b == 0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
             return mkdouble((double)a / (double)b);
         case '%':
+            /* Python parity: result takes the sign of the divisor. */
             if (b == 0) panicf("Remainder by zero.\n  = help: Check the divisor before dividing.");
             if (b == -1) return mkint_full(0);
-            return mkint_full(a % b);
+            {
+                int64_t r = a % b;
+                if (r != 0 && ((r < 0) != (b < 0))) r += b;
+                return mkint_full(r);
+            }
         case '^':
             if (b < 0) return mkdouble(pow((double)a, (double)b));
             if (a == 0 && b == 0) return mkint_full(1);

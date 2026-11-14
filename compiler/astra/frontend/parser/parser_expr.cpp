@@ -280,6 +280,26 @@ ExprPtr Parser::parseExpression(int minPrec) {
       continue;
     }
 
+    if (cur().kind == Tok::KwAs) {
+      // `expr as T` — Python typing.cast parity. Desugars to the builtin
+      // `cast<T>(expr)` call; the type argument carries the target type and
+      // the runtime value passes through unchanged.
+      Span asSpan = advance().span;
+      TypeExprPtr target = parseTypeExpr();
+      std::vector<CallArg> castArgs;
+      CallArg castArg;
+      castArg.value = std::move(left);
+      castArgs.push_back(std::move(castArg));
+      auto ident = std::make_unique<IdentExpr>();
+      ident->span = asSpan;
+      ident->name = "cast";
+      std::vector<TypeExprPtr> castTypes;
+      castTypes.push_back(std::move(target));
+      left = buildCallExpr(std::move(ident), std::move(castArgs),
+                           std::move(castTypes), previousSpan());
+      continue;
+    }
+
     Tok kind = cur().kind;
     int prec = binaryPrecedence(kind);
     if (prec < minPrec || prec < 0) break;
@@ -506,7 +526,19 @@ struct TypeScan {
 
 bool scanTypeArgListTokens(TypeScan& s);
 
+bool scanTypeExprTokens(TypeScan& s);
+bool scanTypeExprAtomTokens(TypeScan& s);
+
+// `T | U | ...` union types: members are atoms separated by '|'.
 bool scanTypeExprTokens(TypeScan& s) {
+  if (!scanTypeExprAtomTokens(s)) return false;
+  while (s.eat(Tok::Bar)) {
+    if (!scanTypeExprAtomTokens(s)) return false;
+  }
+  return true;
+}
+
+bool scanTypeExprAtomTokens(TypeScan& s) {
   const Tok k = s.kind();
   if (k == Tok::LBracket) {
     s.eat(Tok::LBracket);
@@ -553,11 +585,24 @@ bool scanTypeExprTokens(TypeScan& s) {
   if (s.kind() == Tok::Lt) {
     if (!scanTypeArgListTokens(s)) return false;
   }
-  // Fixed-size suffixes: `i32[2][3]`.
+  // Suffixes: fixed-size dims `i32[2][3]` (integer literal) or
+  // square-bracket generic application `list[int]` / `vector[float, 4]`.
   while (s.kind() == Tok::LBracket) {
     s.eat(Tok::LBracket);
-    if (s.kind() != Tok::Int) return false;
-    s.eat(Tok::Int);
+    if (s.kind() == Tok::Int) {
+      s.eat(Tok::Int);
+    } else {
+      // Square-bracket type arguments; integer literals are comptime
+      // arguments (e.g. the lane count in `vector[float, 4]`).
+      while (true) {
+        if (s.kind() == Tok::Int || s.kind() == Tok::DotDot) {
+          s.eat(s.kind());
+        } else if (!scanTypeExprTokens(s)) {
+          return false;
+        }
+        if (!s.eat(Tok::Comma)) break;
+      }
+    }
     if (!s.eat(Tok::RBracket)) return false;
   }
   while (s.eat(Tok::Question)) {
@@ -570,8 +615,8 @@ bool scanTypeExprTokens(TypeScan& s) {
 bool scanTypeArgListTokens(TypeScan& s) {
   if (!s.eat(Tok::Lt)) return false;
   while (s.kind() != Tok::Gt && s.rawKind() != Tok::Shr && !s.atEnd()) {
-    if (s.kind() == Tok::Int) {
-      s.eat(Tok::Int);
+    if (s.kind() == Tok::Int || s.kind() == Tok::DotDot) {
+      s.eat(s.kind());
     } else if (!scanTypeExprTokens(s)) {
       return false;
     }

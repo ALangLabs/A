@@ -20,12 +20,10 @@ compiles A straight to native machine code.
 ## ✨ Features
 
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
-  and links a real executable through the bundled **Astra** backend (a TinyCC
-  fork). `a run` does the same and executes it. x86-64 SysV (Linux, macOS)
-  lowers to LLVM IR (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang`
-  (host targets; cross-compile is not yet supported)
-  emitter first (a declined construct is a hard error — there is no C
-  fallback).
+  and links a real executable. x86-64 SysV (Linux, macOS) lowers to LLVM IR
+  (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang` (host targets;
+  cross-compile is not yet supported). A declined construct is a hard error
+  — there is no fallback.
 - **Multi-target builds** — `a build --target <arch>` cross-compiles for
   i386, ARM (ARMv7), AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS,
   given a matching target sysroot (see *Cross-compilation* below), plus the

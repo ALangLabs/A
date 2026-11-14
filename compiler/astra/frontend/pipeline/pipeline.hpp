@@ -25,14 +25,8 @@ struct PipelineConfig {
   // `a test --filter <substr>`: only run test_* functions whose name
   // contains this substring. Empty means run every test.
   std::string testFilter;
-  // `a run/test --vm`: interpret the checked module graph in the VM
-  // backend (compiler/astra/frontend/vm/) instead of emitting LLVM IR
-  // and linking a native binary. Host-only; `--native` selects the
-  // default codegen path explicitly.
-  bool vm = false;
   // Native codegen backend: "llvm" is the only native backend
-  // (AST -> LLVM IR -> opt/llc/clang). "vm" is accepted for compatibility
-  // but execution is governed by `vm` above.
+  // (AST -> LLVM IR -> opt/llc/clang).
   std::string backend = "llvm";
   // Internal: scan mode (`a test` over a directory/codebase) treats a
   // per-file filter that matches no tests as "skip this file" instead of an

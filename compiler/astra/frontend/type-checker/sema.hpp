@@ -310,6 +310,7 @@ class Sema {
   TypePtr checkBuiltinCall(const std::string& name, CallExpr& call);
   TypePtr checkPrintCall(const std::string& name, CallExpr& call);
   TypePtr checkIcCall(CallExpr& call);
+  TypePtr checkCastCall(CallExpr& call);
   std::string icContextString(Span span) const;
   // Builtin domains: each returns nullptr when `name` is not handled so the
   // dispatcher can try the next domain.

@@ -251,6 +251,10 @@ TypePtr Sema::inferUnary(UnaryExpr& expr) {
   if (expr.op == "-") {
     // Element-wise negation on fixed-width vectors.
     if (resolved->kind == TypeKind::Vector) return operand;
+    // Union/any operands are decided at runtime.
+    if (resolved->kind == TypeKind::Union || resolved->kind == TypeKind::Any) {
+      return operand;
+    }
   }
   if (expr.op == "~") {
     if (resolved->kind == TypeKind::Int) return operand;
@@ -311,6 +315,11 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
   if (op == "??") {
     TypePtr leftResolved = resolveType(lhs);
     if (leftResolved->kind == TypeKind::Error) return rhs;
+    if (leftResolved->kind == TypeKind::Union ||
+        leftResolved->kind == TypeKind::Any) {
+      // Not statically known to be optional; pass the value through.
+      return lhs;
+    }
     if (leftResolved->kind != TypeKind::Optional) {
       sink_.error(expr.opSpan,
                   "The left side of '\?\?' must be optional, found " + typePhrase(lhs) + ".",
@@ -364,6 +373,8 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
         requireInteger(lhs, expr.lhs->span, "The left operand of '" + op + "'");
         break;
       case TypeKind::Var:
+      case TypeKind::Union:
+      case TypeKind::Any:
       case TypeKind::Error:
         break;
       case TypeKind::Optional:
@@ -521,7 +532,8 @@ TypePtr Sema::numericBinaryResult(const std::string& op, TypePtr lhs, TypePtr rh
     // unresolved (Constraint::None) variable or Json may still become any
     // of them, so those stay dynamic.
     auto plusShape = [](const TypePtr& t) -> int {
-      if (!t || t->kind == TypeKind::Error || t->kind == TypeKind::Json) return 0;
+      if (!t || t->kind == TypeKind::Error || t->kind == TypeKind::Json ||
+          t->kind == TypeKind::Any || t->kind == TypeKind::Union) return 0;
       if (t->kind == TypeKind::Optional) {
         // `T?` is only a static fiction: at runtime the value is either the
         // payload or None. When the payload is still an unresolved variable
@@ -746,8 +758,9 @@ TypePtr Sema::inferCall(CallExpr& expr) {
   if (resolved->kind == TypeKind::Function) {
     return checkFunctionValueCall("this expression", calleeType, expr);
   }
-  if (resolved->kind == TypeKind::Var) {
-    // Dynamic value: callability is decided at runtime.
+  if (resolved->kind == TypeKind::Var || resolved->kind == TypeKind::Union ||
+      resolved->kind == TypeKind::Any) {
+    // Dynamic value (untyped, union, or any): callability is decided at runtime.
     for (auto& arg : expr.args) inferExpr(*arg.value);
     auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
   }

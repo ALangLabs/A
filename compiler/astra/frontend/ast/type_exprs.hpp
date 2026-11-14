@@ -42,6 +42,16 @@ struct FunctionTypeExpr : TypeExpr {
   TypeExprPtr returnType;
 };
 
+// Union type written with `|`: `int | str`, `int | str | None`. Members are
+// stored flat in source order; `None` members are folded into an Optional by
+// sema (so `int | None` means `int?`).
+struct UnionTypeExpr : TypeExpr {
+  std::vector<TypeExprPtr> elements;
+};
+
+// `...` in type-argument position: the variadic marker in `tuple[T, ...]`.
+struct EllipsisTypeExpr : TypeExpr {};
+
 // Integer literal in type-argument position: the `4` in `vector[float, 4]`.
 // Only meaningful to types that take a comptime lane count; other consumers
 // treat it as an error.

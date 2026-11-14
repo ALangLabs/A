@@ -44,6 +44,14 @@ enum class TypeKind {
   // N lanes of numeric element type T, lowered to a native LLVM `<N x ty>`
   // vector inside expressions and boxed as a list of N avals at boundaries.
   Vector,
+  // Python-typing `any`/`Any`: the dynamic top type. Unifies with (and is
+  // unified by) every type without binding anything; use sites treat values
+  // of this type like untyped (Var) values.
+  Any,
+  // Python-typing union `T | U | ...` (also `Union[T, U]`). Members live in
+  // `params`. `None` members are folded into Optional at resolution time, so
+  // a Union never directly contains a None member.
+  Union,
   Var,
 };
 
@@ -176,6 +184,14 @@ inline TypePtr typeTuple(std::vector<TypePtr> elements) {
   type->params = std::move(elements);
   return type;
 }
+
+inline TypePtr typeUnion(std::vector<TypePtr> members) {
+  auto type = makeType(TypeKind::Union);
+  type->params = std::move(members);
+  return type;
+}
+
+inline TypePtr typeAny() { return makeType(TypeKind::Any); }
 
 inline TypePtr typeStruct(const std::string& name) {
   auto type = makeType(TypeKind::Struct);
@@ -320,6 +336,15 @@ inline std::string typeName(const TypePtr& type) {
       s += ") -> " + typeName(t->ret);
       return s;
     }
+    case TypeKind::Union: {
+      std::string s;
+      for (std::size_t i = 0; i < t->params.size(); ++i) {
+        if (i) s += " | ";
+        s += typeName(t->params[i]);
+      }
+      return s.empty() ? "any" : s;
+    }
+    case TypeKind::Any: return "any";
     case TypeKind::Var:
       switch (t->constraint) {
         case Constraint::Integer: return "an integer type";

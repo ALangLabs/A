@@ -29,7 +29,7 @@
 #endif
 namespace a {
 namespace {
-PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.vm=c.vm; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; p.backend=c.backend; return p; }
+PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; p.backend=c.backend; return p; }
 bool readAll(const std::string& path,std::string& t,std::ostream& e){
   std::error_code ec;
   if(std::filesystem::is_directory(path,ec)){ e<<"error: '"<<path<<"' is a directory, not a source file\n"; return false; }

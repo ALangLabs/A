@@ -2,6 +2,21 @@
 
 namespace a {
 TypeExprPtr Parser::parseTypeExpr() {
+  TypeExprPtr first = parseTypeExprAtom();
+  if (!check(Tok::Bar)) return first;
+  auto unionExpr = std::make_unique<UnionTypeExpr>();
+  unionExpr->span = first->span;
+  unionExpr->elements.push_back(std::move(first));
+  while (match(Tok::Bar)) {
+    TypeExprPtr member = parseTypeExprAtom();
+    unionExpr->span = Span::join(unionExpr->span, member->span);
+    unionExpr->elements.push_back(std::move(member));
+  }
+  unionExpr->span = Span::join(unionExpr->span, previousSpan());
+  return unionExpr;
+}
+
+TypeExprPtr Parser::parseTypeExprAtom() {
   TypeExprPtr type;
   if (check(Tok::LBracket)) {
     Span start = cur().span;
@@ -66,6 +81,15 @@ TypeExprPtr Parser::parseTypeExpr() {
     fn->returnType = parseTypeExpr();
     fn->span = Span::join(start, previousSpan());
     type = std::move(fn);
+  } else if (check(Tok::KwNone)) {
+    // `None` in type position (e.g. `int | None`, `x: None`). Carried as a
+    // named type so qualified/module paths keep working; sema maps it to the
+    // optional payload marker.
+    const Token& noneTok = advance();
+    auto named = std::make_unique<NamedTypeExpr>();
+    named->span = noneTok.span;
+    named->name = "None";
+    type = std::move(named);
   } else {
     const Token& nameTok = expect(Tok::Ident, "a type name");
     auto named = std::make_unique<NamedTypeExpr>();
@@ -82,13 +106,19 @@ TypeExprPtr Parser::parseTypeExpr() {
       // stops on it and matchTypeArgGt splits it into two '>' tokens.
       while (!check(Tok::Gt) && !check(Tok::Shr) && !check(Tok::Eof)) {
         // Integer literals are allowed as type arguments for comptime
-        // parameters such as the lane count in `vector[float, 4]`.
+        // parameters such as the lane count in `vector[float, 4]`; `...` is
+        // the variadic marker in `tuple[T, ...]`.
         if (check(Tok::Int)) {
           const Token& lit = advance();
           auto konst = std::make_unique<ConstTypeExpr>();
           konst->span = lit.span;
           konst->value = lit.intValue;
           named->typeArgs.push_back(std::move(konst));
+        } else if (check(Tok::DotDot)) {
+          const Token& dots = advance();
+          auto ellipsis = std::make_unique<EllipsisTypeExpr>();
+          ellipsis->span = dots.span;
+          named->typeArgs.push_back(std::move(ellipsis));
         } else {
           named->typeArgs.push_back(parseTypeExpr());
         }
@@ -103,13 +133,47 @@ TypeExprPtr Parser::parseTypeExpr() {
     type = std::move(named);
   }
 
-  // Fixed-size suffixes are C-like: `i32[2][3]` is two rows of three. Collect
-  // the dimensions in source order and wrap the element type from the inside
-  // out, so the first suffix becomes the outermost array.
+  // Suffixes: `T[...]` is either a fixed-size array dimension (`i32[2][3]`,
+  // integer literal) or a square-bracket generic application (`list[int]`,
+  // `dict[str, int]`, `vector[float, 4]`) on a named type.
   std::vector<std::pair<std::int64_t, Span>> dimensions;
   while (check(Tok::LBracket)) {
     Span start = cur().span;
     advance();
+    if (!check(Tok::Int)) {
+      // `Name[T1, T2, ...]` — Python-typing style subscription. Only named
+      // types can take type arguments; anything else keeps the C-like fixed
+      // array interpretation and reports the same error as before.
+      auto* namedType = dynamic_cast<NamedTypeExpr*>(type.get());
+      if (!namedType) {
+        fail(cur().span, "Expected a fixed array length, found " +
+                             describeToken(cur()) + ".");
+      }
+      if (!namedType->typeArgs.empty()) {
+        fail(start, "Type arguments were already given with '<...>'; "
+                    "do not mix '<T>' and '[T]' on the same type.");
+      }
+      while (!check(Tok::RBracket) && !check(Tok::Eof)) {
+        if (check(Tok::Int)) {
+          const Token& lit = advance();
+          auto konst = std::make_unique<ConstTypeExpr>();
+          konst->span = lit.span;
+          konst->value = lit.intValue;
+          namedType->typeArgs.push_back(std::move(konst));
+        } else if (check(Tok::DotDot)) {
+          const Token& dots = advance();
+          auto ellipsis = std::make_unique<EllipsisTypeExpr>();
+          ellipsis->span = dots.span;
+          namedType->typeArgs.push_back(std::move(ellipsis));
+        } else {
+          namedType->typeArgs.push_back(parseTypeExpr());
+        }
+        if (!match(Tok::Comma)) break;
+      }
+      expect(Tok::RBracket, "']' after the type arguments");
+      namedType->span = Span::join(namedType->span, previousSpan());
+      continue;
+    }
     const Token& size = expect(Tok::Int, "a fixed array length");
     if (size.intValue <= 0) {
       fail(size.span, "A fixed array length must be a positive integer.");

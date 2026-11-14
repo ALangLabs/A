@@ -1496,7 +1496,14 @@ chk:
   %bz = icmp eq i64 %b, 0
   br i1 %bz, label %slow, label %go
 go:
-  %res = srem i64 %a, %b
+  %res0 = srem i64 %a, %b
+  %rnz0 = icmp ne i64 %res0, 0
+  %rs = icmp slt i64 %res0, 0
+  %bs = icmp slt i64 %b, 0
+  %sd = icmp ne i1 %rs, %bs
+  %cond0 = and i1 %rnz0, %sd
+  %adj0 = add i64 %res0, %b
+  %res = select i1 %cond0, i64 %adj0, i64 %res0
   %ok = call i1 @a.inrange(i64 %res)
   br i1 %ok, label %mint, label %slow
 mint:
@@ -1515,8 +1522,8 @@ gom:
   %dif = icmp ne i1 %mg, %bg
   %cond = and i1 %mz, %dif
   %sum = fadd double %fm, %db
-  %rs = select i1 %cond, double %sum, double %fm
-  %bx = call i64 @a.mdouble(double %rs)
+  %frs = select i1 %cond, double %sum, double %fm
+  %bx = call i64 @a.mdouble(double %frs)
   ret i64 %bx
 )LLVM" << tail("a_mod_slow");
     // Ordering comparisons: int-int -> icmp, mixed/numeric -> fcmp on the
@@ -4593,9 +4600,19 @@ oth:
       emit("  " + q1 + " = sub i64 " + q + ", 1");
       emit("  " + res + " = select i1 " + adj + ", i64 " + q1 + ", i64 " + q);
       numPhiStore(ph, res, "0");
-    } else {  // Mod
+    } else {  // Mod — Python floored mod: result takes divisor's sign.
+      std::string res0 = T(), rnz = T(), rs = T(), bs = T(), sd = T(),
+              cond = T(), adj = T();
+      emit("  " + res0 + " = srem i64 " + lp + ", " + rp);
+      emit("  " + rnz + " = icmp ne i64 " + res0 + ", 0");
+      emit("  " + rs + " = icmp slt i64 " + res0 + ", 0");
+      emit("  " + bs + " = icmp slt i64 " + rp + ", 0");
+      emit("  " + sd + " = icmp ne i1 " + rs + ", " + bs);
+      emit("  " + cond + " = and i1 " + rnz + ", " + sd);
+      emit("  " + adj + " = add i64 " + res0 + ", " + rp);
       std::string res = T();
-      emit("  " + res + " = srem i64 " + lp + ", " + rp);
+      emit("  " + res + " = select i1 " + cond + ", i64 " + adj +
+           ", i64 " + res0);
       numPhiStore(ph, res, "0");
     }
     emit("  br label %" + lEnd);
@@ -5893,6 +5910,15 @@ oth:
   std::string callResult_;
 
   std::string evalCall(const CallExpr& call) {
+    // `cast<T>(x)` / `x as T` is a compile-time-only annotation (Python
+    // typing.cast parity): emit the operand unchanged.
+    if (call.calleeIsBuiltin && call.calleeBuiltin == "cast") {
+      if (call.args.size() != 1) {
+        fail("cast expects exactly 1 argument");
+        return kNone;
+      }
+      return eval(call.args[0].value.get());
+    }
     // Sema-resolved builtin.
     if (call.builtinId != BuiltinId::None) {
       int id = builtinIdForBuiltin(call.builtinId);

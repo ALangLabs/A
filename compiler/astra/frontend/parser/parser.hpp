@@ -73,7 +73,10 @@ class Parser {
   void expectNewline();
 
   ParamDecl parseParam(bool allowDefault = false);
+  // `T | U | ...` union types sit at the top level; everything else (arrays,
+  // tuples, maps, sets, fn types, named types, `?` suffixes) is an atom.
   TypeExprPtr parseTypeExpr();
+  TypeExprPtr parseTypeExprAtom();
   // Parses a `<...>` generic parameter list (current token is '<'). Each
   // parameter is `Name` or `Name: Bound` / `Name: BoundA + BoundB`; bound
   // trait names are appended to `bounds` (parallel spans in `boundSpans`) so
