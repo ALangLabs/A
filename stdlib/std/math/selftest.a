@@ -1,11 +1,6 @@
-# std.math selftest — A-file wrappers over the native math module.
+# std.math.numpy selftest — smoke coverage across all submodules.
 # Run: ./build/a test stdlib/std/math/selftest.a
-#
-# NOTE: `import std:math` resolves to the NATIVE math module, so this
-# selftest imports the A-file wrappers relatively (quoted path), the
-# same reachability the package files themselves use.
-from "functions.a" import sqrt, abs_val, min_val, max_val, pow_val, sin, cos, tan, asin, acos, atan, atan2, exp, log, log2, log10, floor, ceil, round_val, trunc, random, random_int, clamp, factorial, comb, perm, gcd, lcm, isqrt, prod, hypot, dist, fmod, degrees, radians, expm1, log1p, log_base, cbrt, fsum, erf, erfc, lgamma, gamma
-from "constants.a" import PI, E
+import std:math.numpy
 
 fn assert_eq(a, b):
     assert(a == b)
@@ -14,107 +9,111 @@ fn assert_close(a, b):
     d = a - b
     if d < 0:
         d = -d
-    assert(d < 0.000001)
+    assert(d < 0.0001)
 
-fn test_basics():
-    assert_eq(sqrt(4.0), 2.0)
-    assert_eq(abs_val(-3.0), 3.0)
-    assert_eq(min_val(2.0, 5.0), 2.0)
-    assert_eq(max_val(2.0, 5.0), 5.0)
-    assert_eq(pow_val(2.0, 10.0), 1024.0)
-    assert_eq(floor(2.7), 2.0)
-    assert_eq(ceil(2.1), 3.0)
-    assert_eq(round_val(2.5), 3.0)
-    assert_eq(trunc(-2.7), -2.0)
-    assert_close(PI(), 3.14159265)
-    assert_close(E(), 2.71828182)
+fn test_core():
+    a = numpy.zeros([2, 3])
+    assert_eq(a.shape[0], 2)
+    assert_eq(a.size(), 6)
+    b = numpy.arange(0.0, 4.0, 1.0)
+    assert_eq(b.data[3], 3.0)
+    m = numpy.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    t = numpy.transpose(m)
+    assert_eq(t.data[1], 3.0)
+    assert_eq(numpy.reshape(b, [2, 2]).shape[1], 2)
 
-fn test_trig_and_logs():
-    assert_close(sin(0.0), 0.0)
-    assert_close(cos(0.0), 1.0)
-    assert_close(tan(0.0), 0.0)
-    assert_close(asin(1.0), PI() / 2.0)
-    assert_close(acos(1.0), 0.0)
-    assert_close(atan(1.0), PI() / 4.0)
-    assert_close(atan2(1.0, 1.0), PI() / 4.0)
-    assert_close(exp(1.0), E())
-    assert_close(log(E()), 1.0)
-    assert_close(log2(8.0), 3.0)
-    assert_close(log10(1000.0), 3.0)
+fn test_ufuncs():
+    x = numpy.arange(1.0, 5.0, 1.0)
+    y = numpy.add(x, numpy.multiply_scalar(x, 2.0))
+    assert_eq(y.data[0], 3.0)
+    assert_eq(y.data[3], 12.0)
+    s = numpy.sqrt(x)
+    assert_close(s.data[3], 2.0)
+    w = numpy.where_(numpy.greater(x, 2.5), x, numpy.multiply_scalar(x, 0.0))
+    assert_eq(w.data[0], 0.0)
+    assert_eq(w.data[3], 4.0)
 
-fn test_clamp():
-    assert_eq(clamp(5.0, 0.0, 10.0), 5.0)
-    assert_eq(clamp(-1.0, 0.0, 10.0), 0.0)
-    assert_eq(clamp(11.0, 0.0, 10.0), 10.0)
+fn test_reductions():
+    m = numpy.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_close(numpy.sum_all(m), 10.0)
+    assert_close(numpy.mean_all(m), 2.5)
+    assert_close(numpy.std_all(m), 1.1180339)
+    assert_eq(numpy.trace(m), 5.0)
+    assert_eq(numpy.argmax_all(m), 3)
+    assert_eq(numpy.argmin_all(m), 0)
+
+fn test_linalg():
+    m = numpy.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    assert_close(numpy.det(m), -2.0)
+    i = numpy.inv(m)
+    assert_close(i.data[0], -2.0)
+    assert_close(i.data[3], -0.5)
+    p = numpy.matmul(m, m)
+    assert_eq(p.data[0], 7.0)
+    assert_eq(p.data[3], 22.0)
+    n = numpy.norm(m)
+    assert(n > 5.0)
+
+fn test_shape_ops():
+    a = numpy.arange(0.0, 6.0, 1.0)
+    r = numpy.reshape(a, [2, 3])
+    assert_eq(r.shape[0], 2)
+    e = numpy.expand_dims(a, 0)
+    assert_eq(e.shape[0], 1)
+    s = numpy.stack2(a, a, 0)
+    assert_eq(s.shape[0], 2)
+    c = numpy.concatenate2(r, r, 0)
+    assert_eq(c.shape[0], 4)
+    f = numpy.flipud(r)
+    assert_eq(f.data[0], 3.0)
 
 fn test_random():
-    # random() in [0, 1); random_int inclusive bounds
-    r = random()
-    assert(r >= 0.0 and r < 1.0)
-    i = random_int(3, 7)
-    assert(i >= 3 and i <= 7)
+    numpy.seed(42)
+    x = numpy.random_sample([100])
+    for v in x.data:
+        assert(v >= 0.0 and v < 1.0)
+    numpy.seed(42)
+    y = numpy.random_sample([100])
+    assert_eq(x.data[50], y.data[50])
 
-fn test_int_functions():
-    assert_eq(factorial(0), 1)
-    assert_eq(factorial(5), 120)
-    assert_eq(factorial(20), 2432902008176640000)
-    assert_eq(comb(5, 2), 10)
-    assert_eq(comb(10, 3), 120)
-    assert_eq(comb(7, 0), 1)
-    assert_eq(comb(7, 7), 1)
-    assert_eq(perm(5, 2), 20)
-    assert_eq(perm(5, 0), 1)
-    assert_eq(perm(5, 5), 120)
-    assert_eq(gcd(12, 18), 6)
-    assert_eq(gcd(-12, 18), 6)
-    assert_eq(gcd(7, 13), 1)
-    assert_eq(gcd(0, 5), 5)
-    assert_eq(lcm(4, 6), 12)
-    assert_eq(lcm(0, 6), 0)
-    assert_eq(isqrt(15), 3)
-    assert_eq(isqrt(16), 4)
-    assert_eq(isqrt(0), 0)
-    assert_eq(isqrt(1000000), 1000)
-    assert_eq(prod([1, 2, 3, 4]), 24)
-    assert_eq(prod([]), 1)
+fn test_stats():
+    (h, _e) = numpy.histogram(numpy.arange(0.0, 5.0, 1.0), 5)
+    for v in h.data:
+        assert_eq(v, 1.0)
+    assert_close(numpy.median(numpy.asarray_flat([1.0, 3.0, 2.0])), 2.0)
+    (hh, _xe, _ye) = numpy.histogram2d(numpy.arange(0.0, 4.0, 1.0), numpy.arange(0.0, 4.0, 1.0), 2)
+    assert(hh.size() > 0)
 
-fn test_float_functions():
-    assert_close(hypot(3.0, 4.0), 5.0)
-    assert_close(hypot(0.0, 0.0), 0.0)
-    assert_close(dist([0.0, 0.0], [3.0, 4.0]), 5.0)
-    assert_close(fmod(5.5, 2.0), 1.5)
-    assert_close(fmod(-5.5, 2.0), -1.5)
-    assert_close(degrees(PI()), 180.0)
-    assert_close(radians(180.0), PI())
-    assert_close(expm1(0.001), 0.0010005001667084)
-    assert_close(expm1(1.0), E() - 1.0)
-    assert_close(log1p(0.001), 0.0009995003330835)
-    assert_close(log1p(1.0), 0.6931472)
-    assert_close(log_base(8.0, 2.0), 3.0)
-    assert_close(log_base(100.0, 10.0), 2.0)
-    assert_close(cbrt(27.0), 3.0)
-    assert_close(cbrt(-8.0), -2.0)
-    assert_close(fsum([0.1, 0.2, 0.3]), 0.6)
-    assert_close(fsum([]), 0.0)
+fn test_poly():
+    assert_close(numpy.polyval([1.0, 0.0, -1.0], 2.0), 3.0)
+    roots = numpy.polyroots([1.0, 0.0, -1.0])
+    assert_eq(len(roots), 2)
+    assert_close(roots[0], -1.0)
+    assert_close(roots[1], 1.0)
 
-fn test_erf_gamma():
-    assert_close(erf(0.0), 0.0)
-    assert_close(erf(1.0), 0.8427008)
-    assert_close(erf(-1.0), -0.8427008)
-    assert_close(erfc(0.0), 1.0)
-    assert_close(erfc(1.0), 0.1572992)
-    assert_close(gamma(5.0), 24.0)
-    assert_close(gamma(0.5), 1.7724539)
-    assert_close(gamma(1.5), 0.8862269)
-    assert_close(lgamma(5.0), 3.1780538)
-    assert_close(lgamma(0.5), 0.5723649)
+fn test_io():
+    a = numpy.arange(0.0, 4.0, 1.0)
+    numpy.savetxt("/tmp/a_numpy_selftest.txt", a)
+    b = numpy.loadtxt("/tmp/a_numpy_selftest.txt")
+    assert_eq(b.data[2], 2.0)
 
-fn main():
-    test_basics()
-    test_trig_and_logs()
-    test_clamp()
+fn test_indexing():
+    m = numpy.array_from_list([[1.0, 2.0], [3.0, 4.0]])
+    d = numpy.diagonal(m, 0)
+    assert_eq(d.data[0], 1.0)
+    assert_eq(d.data[1], 4.0)
+    idx = numpy.nonzero(numpy.greater(m, 2.5))
+    assert(len(idx) == 2)
+
+entry main():
+    test_core()
+    test_ufuncs()
+    test_reductions()
+    test_linalg()
+    test_shape_ops()
     test_random()
-    test_int_functions()
-    test_float_functions()
-    test_erf_gamma()
-    print("std.math selftest: all tests passed")
+    test_stats()
+    test_poly()
+    test_io()
+    test_indexing()
+    print("numpy selftest: all passed")

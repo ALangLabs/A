@@ -1,0 +1,36 @@
+# Special functions kept for stdlib consumers (statistics NormalDist).
+# Scalar helpers over the native math module.
+import std:math
+
+"""
+_erf_pos(x) -> erf(x) for x >= 0 via Abramowitz & Stegun 7.1.26
+(|error| < 1.5e-7).
+"""
+fn _erf_pos(x):
+    t = 1.0 / (1.0 + 0.3275911 * x)
+    # Horner form of a1*t + a2*t^2 + ... + a5*t^5 (a5 innermost)
+    poly = 1.061405429
+    poly = poly * t - 1.453152027
+    poly = poly * t + 1.421413741
+    poly = poly * t - 0.284496736
+    poly = poly * t + 0.254829592
+    return 1.0 - poly * t * math.exp(-x * x)
+
+"""
+erf(x) -> error function (Python math.erf; A&S approximation,
+|error| < 1.5e-7 — less precise than CPython's erf).
+"""
+fn erf(x):
+    xf = x + 0.0
+    if xf < 0.0:
+        return -_erf_pos(-xf)
+    return _erf_pos(xf)
+
+"""
+erfc(x) -> complementary error function 1 - erf(x) (Python math.erfc).
+"""
+fn erfc(x):
+    xf = x + 0.0
+    if xf < 0.0:
+        return 1.0 + _erf_pos(-xf)
+    return 1.0 - _erf_pos(xf)
