@@ -1,0 +1,129 @@
+# Check for fft.a — run: ./build/a run _check_fft.a  (from this dir)
+import std:core
+
+from "ndarray.a" import NDArray, ndarray, zeros
+from "fft.a" import fft, ifft, fft2, ifft2, rfft, irfft
+from "fft.a" import fftfreq, rfftfreq, fftshift, ifftshift, next_pow2, fft_auto
+
+fn close(a: f64, b: f64, tol: f64) -> bool:
+    d = a - b
+    if d < 0:
+        d = -d
+    return d < tol
+
+fn arr_close(x: NDArray, want: [f64], tol: f64) -> bool:
+    if x.size() != len(want):
+        return false
+    for i in 0..len(want):
+        if close(x.data[i], want[i], tol) == false:
+            return false
+    return true
+
+fn pair_close(re: NDArray, im: NDArray, wr: [f64], wi: [f64], tol: f64) -> bool:
+    return arr_close(re, wr, tol) and arr_close(im, wi, tol)
+
+entry main():
+    tol = 0.000000001
+
+    # --- fft of impulse at 0: X[k] = 1 for all k ---
+    z4 = zeros([4])
+    d0 = ndarray([1.0, 0.0, 0.0, 0.0], [4])
+    (r0, i0) = fft(d0, z4)
+    core.assert(r0.shape[0] == 4 and i0.shape[0] == 4)
+    core.assert(arr_close(r0, [1.0, 1.0, 1.0, 1.0], tol))
+    core.assert(arr_close(i0, [0.0, 0.0, 0.0, 0.0], tol))
+
+    # --- fft of delta at pos 1, n=4: X[k] = exp(-2pi i k/4) ---
+    # k=0: 1 ; k=1: -i ; k=2: -1 ; k=3: +i
+    d1 = ndarray([0.0, 1.0, 0.0, 0.0], [4])
+    (r1, i1) = fft(d1, z4)
+    core.assert(arr_close(r1, [1.0, 0.0, -1.0, 0.0], tol))
+    core.assert(arr_close(i1, [0.0, -1.0, 0.0, 1.0], tol))
+
+    # --- ifft(fft(x)) == x ---
+    x = ndarray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [8])
+    z8 = zeros([8])
+    (fx, fy) = fft(x, z8)
+    (bx, by) = ifft(fx, fy)
+    core.assert(arr_close(bx, [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], tol))
+    core.assert(arr_close(by, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 0.0000001))
+
+    # --- complex roundtrip: ifft(fft(re,im)) restores both parts ---
+    cx = ndarray([0.5, -1.0, 2.0, 0.25], [4])
+    cy = ndarray([1.5, 0.0, -0.75, 3.0], [4])
+    (cr, ci) = fft(cx, cy)
+    (xr, xi) = ifft(cr, ci)
+    core.assert(arr_close(xr, [0.5, -1.0, 2.0, 0.25], tol))
+    core.assert(arr_close(xi, [1.5, 0.0, -0.75, 3.0], tol))
+
+    # --- fftfreq / rfftfreq ---
+    f4 = fftfreq(4, 1.0)
+    core.assert(arr_close(f4, [0.0, 0.25, -0.5, -0.25], tol))
+    f5 = fftfreq(5, 1.0)
+    core.assert(arr_close(f5, [0.0, 0.2, 0.4, -0.4, -0.2], 0.0000001))
+    rf4 = rfftfreq(4, 1.0)
+    core.assert(arr_close(rf4, [0.0, 0.25, 0.5], tol))
+    rf5 = rfftfreq(5, 2.0)
+    core.assert(arr_close(rf5, [0.0, 0.1, 0.2], 0.0000001))
+
+    # --- fftshift / ifftshift on last axis ---
+    v = ndarray([0.0, 1.0, 2.0, 3.0], [4])
+    sv = fftshift(v)
+    core.assert(arr_close(sv, [2.0, 3.0, 0.0, 1.0], tol))
+    iv = ifftshift(sv)
+    core.assert(arr_close(iv, [0.0, 1.0, 2.0, 3.0], tol))
+    # odd length
+    v5 = ndarray([0.0, 1.0, 2.0, 3.0, 4.0], [5])
+    sv5 = fftshift(v5)
+    core.assert(arr_close(sv5, [3.0, 4.0, 0.0, 1.0, 2.0], tol))
+    iv5 = ifftshift(sv5)
+    core.assert(arr_close(iv5, [0.0, 1.0, 2.0, 3.0, 4.0], tol))
+    # 2-D: shift applies to last axis only
+    m2 = ndarray([0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0], [2, 4])
+    sm2 = fftshift(m2)
+    core.assert(sm2.shape[0] == 2 and sm2.shape[1] == 4)
+    core.assert(arr_close(sm2, [2.0, 3.0, 0.0, 1.0, 12.0, 13.0, 10.0, 11.0], tol))
+
+    # --- rfft / irfft ---
+    (rr, ri) = rfft(d0)
+    core.assert(rr.shape[0] == 3 and ri.shape[0] == 3)
+    core.assert(arr_close(rr, [1.0, 1.0, 1.0], tol))
+    core.assert(arr_close(ri, [0.0, 0.0, 0.0], tol))
+    # rfft of delta at pos1 n=4 -> exp(-2pi i k/4), k=0..2
+    (rr1, ri1) = rfft(d1)
+    core.assert(arr_close(rr1, [1.0, 0.0, -1.0], tol))
+    core.assert(arr_close(ri1, [0.0, -1.0, 0.0], tol))
+    # irfft reconstructs real signal
+    back = irfft(rr1, ri1)
+    core.assert(back.shape[0] == 4)
+    core.assert(arr_close(back, [0.0, 1.0, 0.0, 0.0], tol))
+
+    # --- fft2 / ifft2 roundtrip on 4x4 ---
+    g = ndarray([1.0, 2.0, 3.0, 4.0,
+                 5.0, 6.0, 7.0, 8.0,
+                 9.0, 10.0, 11.0, 12.0,
+                 13.0, 14.0, 15.0, 16.0], [4, 4])
+    z44 = zeros([4, 4])
+    (g2r, g2i) = fft2(g, z44)
+    core.assert(g2r.shape[0] == 4 and g2r.shape[1] == 4)
+    # DC bin = sum of all entries = 136
+    core.assert(close(g2r.data[0], 136.0, 0.0001))
+    (g2br, g2bi) = ifft2(g2r, g2i)
+    core.assert(arr_close(g2br, g.data, 0.0000001))
+    core.assert(arr_close(g2bi, z44.data, 0.0000001))
+
+    # --- next_pow2 / fft_auto ---
+    core.assert(next_pow2(1) == 1)
+    core.assert(next_pow2(3) == 4)
+    core.assert(next_pow2(8) == 8)
+    core.assert(next_pow2(9) == 16)
+    # fft_auto pads [1,0,0] to n=4 -> all ones (zero-padding a delta at 0
+    # keeps X[k]=1 for all k)
+    p3 = ndarray([1.0, 0.0, 0.0], [3])
+    z3 = zeros([3])
+    (pa, pb) = fft_auto(p3, z3)
+    core.assert(pa.shape[0] == 4)
+    core.assert(arr_close(pa, [1.0, 1.0, 1.0, 1.0], tol))
+    core.assert(arr_close(pb, [0.0, 0.0, 0.0, 0.0], tol))
+
+    print("fft checks passed")

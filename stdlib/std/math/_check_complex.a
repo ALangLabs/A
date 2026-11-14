@@ -1,0 +1,174 @@
+#
+# Verification for complex.a — hand-computed expected values.
+# Run: ./build/a run _check_complex.a   (must exit 0)
+#
+from "complex.a" import Complex, c_new, c_real, c_imag, c_zero, c_one, c_i
+from "complex.a" import c_from_polar, c_from_real, c_neg, c_conj, c_abs, c_arg
+from "complex.a" import c_recip, c_eq, c_add, c_sub, c_mul, c_div
+from "complex.a" import c_add_scalar, c_sub_scalar, c_mul_scalar, c_div_scalar
+from "complex.a" import c_radd_scalar, c_rsub_scalar, c_rmul_scalar, c_rdiv_scalar
+from "complex.a" import c_exp, c_log, c_sqrt, c_sin, c_cos, c_tan
+from "complex.a" import c_sinh, c_cosh, c_tanh, c_asin, c_acos, c_atan, c_pow
+from "complex.a" import c_str, cpack, cunpack, c_array, cpack_list, cunpack_list
+from "ndarray.a" import NDArray, get
+
+CK_fails = 0
+
+fn ok_ck(CK_name: str) -> void:
+    print("ok   " + CK_name)
+
+fn fail_ck(CK_name: str, CK_got: f64, CK_want: f64) -> void:
+    CK_fails = CK_fails + 1
+    print("FAIL " + CK_name + " got=" + str(CK_got) + " want=" + str(CK_want))
+
+fn ck_num(CK_name: str, CK_got: f64, CK_want: f64) -> void:
+    # exact for integers/simple decimals, 1e-12 tolerance otherwise
+    d = CK_got - CK_want
+    if d < 0.0:
+        d = -d
+    if d < 1e-12:
+        ok_ck(CK_name)
+    else:
+        fail_ck(CK_name, CK_got, CK_want)
+
+fn ck_complex(CK_name: str, CK_got: Complex, CK_wre: f64, CK_wim: f64) -> void:
+    d1 = CK_got.re - CK_wre
+    if d1 < 0.0:
+        d1 = -d1
+    d2 = CK_got.im - CK_wim
+    if d2 < 0.0:
+        d2 = -d2
+    if d1 < 1e-12 and d2 < 1e-12:
+        ok_ck(CK_name)
+    else:
+        CK_fails = CK_fails + 1
+        print("FAIL " + CK_name + " got=(" + str(CK_got.re) + "," + str(CK_got.im) + ") want=(" + str(CK_wre) + "," + str(CK_wim) + ")")
+
+fn ck_bool(CK_name: str, CK_got: bool, CK_want: bool) -> void:
+    if CK_got == CK_want:
+        ok_ck(CK_name)
+    else:
+        CK_fails = CK_fails + 1
+        print("FAIL " + CK_name + " got=" + str(CK_got) + " want=" + str(CK_want))
+
+entry main():
+    # --- construction / accessors ---
+    z = c_new(1.0, 2.0)
+    ck_num("c_real", c_real(z), 1.0)
+    ck_num("c_imag", c_imag(z), 2.0)
+    ck_complex("c_new fields", z, 1.0, 2.0)
+    ck_complex("c_i", c_i(), 0.0, 1.0)
+    ck_complex("c_from_polar(1, pi/2)", c_from_polar(1.0, 1.5707963267948966), 0.0, 1.0)
+    ck_complex("c_from_real", c_from_real(3.5), 3.5, 0.0)
+
+    # --- arithmetic: (1+2i) op (3+4i) ---
+    a = c_new(1.0, 2.0)
+    b = c_new(3.0, 4.0)
+    ck_complex("add (1+2i)+(3+4i)", c_add(a, b), 4.0, 6.0)
+    ck_complex("sub (1+2i)-(3+4i)", c_sub(a, b), -2.0, -2.0)
+    # (1+2i)*(3+4i) = (3-8) + (4+6)i = -5+10i
+    ck_complex("mul (1+2i)*(3+4i)", c_mul(a, b), -5.0, 10.0)
+    # (1+2i)/(3+4i) = ((3+8) + (6-4)i)/25 = 0.44+0.08i
+    ck_complex("div (1+2i)/(3+4i)", c_div(a, b), 0.44, 0.08)
+    ck_complex("neg", c_neg(a), -1.0, -2.0)
+    ck_complex("conj", c_conj(a), 1.0, -2.0)
+    ck_num("abs(3+4i)", c_abs(b), 5.0)
+    ck_num("abs(1+2i)", c_abs(a), 2.23606797749979)
+    ck_num("arg(1+i)", c_arg(c_new(1.0, 1.0)), 0.7853981633974483)
+    ck_complex("recip(1+i)", c_recip(c_new(1.0, 1.0)), 0.5, -0.5)
+    ck_bool("eq true", c_eq(a, c_new(1.0, 2.0)), true)
+    ck_bool("eq false", c_eq(a, b), false)
+
+    # --- Complex OP scalar ---
+    ck_complex("add_scalar", c_add_scalar(a, 10.0), 11.0, 2.0)
+    ck_complex("sub_scalar", c_sub_scalar(a, 1.0), 0.0, 2.0)
+    ck_complex("mul_scalar", c_mul_scalar(a, 2.0), 2.0, 4.0)
+    ck_complex("div_scalar", c_div_scalar(a, 2.0), 0.5, 1.0)
+    ck_complex("radd_scalar", c_radd_scalar(10.0, a), 11.0, 2.0)
+    ck_complex("rsub_scalar", c_rsub_scalar(10.0, a), 9.0, -2.0)
+    ck_complex("rmul_scalar", c_rmul_scalar(2.0, a), 2.0, 4.0)
+    ck_complex("rdiv_scalar 10/(1+i)", c_rdiv_scalar(10.0, c_new(1.0, 1.0)), 5.0, -5.0)
+
+    # --- transcendental ---
+    ck_complex("exp(0)", c_exp(c_zero()), 1.0, 0.0)
+    # exp(i*pi) = -1 + ~0i
+    ck_complex("exp(i*pi)", c_exp(c_new(0.0, 3.141592653589793)), -1.0, 0.0)
+    ck_complex("log(1)", c_log(c_one()), 0.0, 0.0)
+    # log(e) = 1 + 0i
+    ck_complex("log(e)", c_log(c_new(2.718281828459045, 0.0)), 1.0, 0.0)
+    # sqrt(-1) = 0 + 1i
+    ck_complex("sqrt(-1)", c_sqrt(c_new(-1.0, 0.0)), 0.0, 1.0)
+    ck_complex("sqrt(4)", c_sqrt(c_new(4.0, 0.0)), 2.0, 0.0)
+    # sqrt(3+4i): |z|=5 -> w=sqrt(4)=2, v=sqrt(1)=1 -> 2+1i
+    ck_complex("sqrt(3+4i)", c_sqrt(c_new(3.0, 4.0)), 2.0, 1.0)
+    ck_complex("sin(0)", c_sin(c_zero()), 0.0, 0.0)
+    ck_complex("cos(0)", c_cos(c_zero()), 1.0, 0.0)
+    # sin(i) = i*sinh(1) = 0 + 1.1752011936438014i
+    ck_complex("sin(i)", c_sin(c_new(0.0, 1.0)), 0.0, 1.1752011936438014)
+    # cos(i) = cosh(1) = 1.5430806348152437
+    ck_complex("cos(i)", c_cos(c_new(0.0, 1.0)), 1.5430806348152437, 0.0)
+    # sinh(i) = i*sin(1) = 0 + 0.8414709848078965i
+    ck_complex("sinh(i)", c_sinh(c_new(0.0, 1.0)), 0.0, 0.8414709848078965)
+    # cosh(i) = cos(1) = 0.5403023058681398
+    ck_complex("cosh(i)", c_cosh(c_new(0.0, 1.0)), 0.5403023058681398, 0.0)
+    # tan(0) = 0, tanh(0) = 0
+    ck_complex("tan(0)", c_tan(c_zero()), 0.0, 0.0)
+    ck_complex("tanh(0)", c_tanh(c_zero()), 0.0, 0.0)
+    # asin(0) = 0, acos(1) = 0, atan(0) = 0
+    ck_complex("asin(0)", c_asin(c_zero()), 0.0, 0.0)
+    ck_complex("acos(1)", c_acos(c_one()), 0.0, 0.0)
+    ck_complex("atan(0)", c_atan(c_zero()), 0.0, 0.0)
+    # asin(1) = pi/2
+    ck_complex("asin(1)", c_asin(c_one()), 1.5707963267948966, 0.0)
+    # acos(0) = pi/2
+    ck_complex("acos(0)", c_acos(c_zero()), 1.5707963267948966, 0.0)
+    # atan(1) = pi/4
+    ck_complex("atan(1)", c_atan(c_one()), 0.7853981633974483, 0.0)
+    # pow: i^2 = -1, (-1)^0.5 = i, 2^3 = 8
+    ck_complex("pow(i,2)", c_pow(c_i(), 2.0), -1.0, 0.0)
+    ck_complex("pow(-1,0.5)", c_pow(c_new(-1.0, 0.0), 0.5), 0.0, 1.0)
+    ck_complex("pow(2,3)", c_pow(c_new(2.0, 0.0), 3.0), 8.0, 0.0)
+    ck_complex("pow(z,0)", c_pow(a, 0.0), 1.0, 0.0)
+    # |3+4i|^2 * exp(i*arg) roundtrip via pow exponent 1
+    ck_complex("pow(3+4i,1)", c_pow(b, 1.0), 3.0, 4.0)
+
+    # --- printing ---
+    ck_bool("c_str (1+2i)", c_str(c_new(1.0, 2.0)) == "(1.0+2.0j)", true)
+    ck_bool("c_str (1-2i)", c_str(c_new(1.0, -2.0)) == "(1.0-2.0j)", true)
+    ck_bool("c_str (0+1i)", c_str(c_i()) == "(0.0+1.0j)", true)
+
+    # --- NDArray bridges ---
+    re = NDArray([1.0, 2.0, 3.0], [3])
+    im = NDArray([4.0, 5.0, 6.0], [3])
+    packed = cpack(re, im)
+    ck_num("cpack size", packed.size(), 6.0)
+    ck_num("cpack[0]", packed.data[0], 1.0)
+    ck_num("cpack[1]", packed.data[1], 4.0)
+    ck_num("cpack[5]", packed.data[5], 6.0)
+
+    parts = cunpack(packed)
+    ck_num("cunpack re[2]", parts[0].data[2], 3.0)
+    ck_num("cunpack im[2]", parts[1].data[2], 6.0)
+
+    cs = c_array(re, im)
+    ck_num("c_array len", len(cs), 3.0)
+    ck_complex("c_array[1]", cs[1], 2.0, 5.0)
+
+    pl = cpack_list(cs)
+    ck_num("cpack_list size", pl.size(), 6.0)
+    ck_num("cpack_list[3]", pl.data[3], 5.0)
+    ul = cunpack_list(pl)
+    ck_num("cunpack_list len", len(ul), 3.0)
+    ck_complex("cunpack_list[2]", ul[2], 3.0, 6.0)
+
+    # pack -> scalar op -> unpack sanity: double all via c_mul_scalar
+    doubled = []
+    for c in cs:
+        doubled.append(c_mul_scalar(c, 2.0))
+    dp = cpack_list(doubled)
+    ck_num("scalar-mul roundtrip", dp.data[1], 8.0)
+
+    if CK_fails == 0:
+        print("ALL PASS")
+    else:
+        print(str(CK_fails) + " FAILURES")

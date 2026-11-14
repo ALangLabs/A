@@ -46,6 +46,11 @@ typedef aval (*a_builtin_fn)(uint64_t n, aval *argv);
 #define A_NONE   (A_TAG | 0x2ULL)
 #define A_FALSE  (A_TAG | 0x4ULL)
 #define A_TRUE   (A_TAG | 0x6ULL)
+/* stream constants for the `stdout`/`stderr` builtins (print file= kwarg).
+ * Same small-constant encoding as above: even payload, nonzero low nibble,
+ * so they are never pointers or inline ints. */
+#define A_STDOUT (A_TAG | 0x8ULL)
+#define A_STDERR (A_TAG | 0xAULL)
 
 /* inline int: 47-bit signed payload (payload>>1, sign-extended from bit 46) */
 static inline aval a_mkint(int64_t i) {
@@ -533,6 +538,11 @@ const char *a_builtin_name(uint64_t id);
 aval a_panic_msg(const char *msg);              /* prints + exit(1), noreturn-ish */
 aval a_printv(uint64_t n, aval *argv);          /* print: space-sep + \n, stdout */
 aval a_eprintv(uint64_t n, aval *argv);         /* eprint -> stderr */
+/* print/eprint with keyword options: sep/end are string avals or A_NONE
+ * (defaults " " / "\n"), file is A_NONE/A_STDOUT/A_STDERR (or a future IO
+ * stream aval), is_stderr selects the default stream like eprint. */
+aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
+                  int is_stderr);
 void a_runtime_init(void);                      /* idempotent */
 
 /* object predicates used by codegen-free helpers */

@@ -796,6 +796,8 @@ aval a_py_delitem(aval obj, aval key);
 aval a_py_import_module(const char *name);
 aval a_printv(uint64_t n, aval *argv);
 aval a_eprintv(uint64_t n, aval *argv);
+aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
+                  int is_stderr);
 aval a_panic_msg(const char *msg);
 aval a_list_push(aval list, aval v);
 aval a_list_push_int_str(aval list, int64_t v);

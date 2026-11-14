@@ -1,6 +1,6 @@
 # Special functions kept for stdlib consumers (statistics NormalDist).
 # Scalar helpers over the native math module.
-import std:math
+import math
 
 """
 _erf_pos(x) -> erf(x) for x >= 0 via Abramowitz & Stegun 7.1.26

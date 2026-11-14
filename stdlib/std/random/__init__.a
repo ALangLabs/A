@@ -35,7 +35,7 @@ import std:core
 import std:time
 import std:json
 import std:bytes
-import std:math
+import math
 
 # NOTE: the Park-Miller constants are inlined as literals in every function
 # below (2147483647 modulus, 48271 multiplier, 2147483646 max state/span).

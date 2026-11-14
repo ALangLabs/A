@@ -237,6 +237,42 @@ static void printv(FILE *f, uint64_t n, aval *argv) {
     fflush(f);
 }
 
+/* print/eprint with keyword options (sep/end/file). sep/end are string
+ * avals or A_NONE for the defaults; file is A_NONE (default stream),
+ * A_STDOUT, or A_STDERR. Like printv, output is flushed unconditionally so
+ * `flush=` remains a compatible no-op. */
+static FILE *print_opts_file(aval file, int is_stderr) {
+    if (a_is_none(file)) return is_stderr ? stderr : stdout;
+    if (file == A_STDOUT) return stdout;
+    if (file == A_STDERR) return stderr;
+    panicf("print(): file= expects a stream (stdout or stderr)");
+    return stderr; /* unreachable */
+}
+
+aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
+                  int is_stderr) {
+    if (a_rt_repl_quiet()) return A_NONE;
+    FILE *f = print_opts_file(file, is_stderr);
+    const char *sepS = " ";
+    uint64_t sepN = 1;
+    const char *endS = "\n";
+    uint64_t endN = 1;
+    if (!a_is_none(sep)) sepS = str_data(sep, &sepN);
+    if (!a_is_none(end)) endS = str_data(end, &endN);
+    Buf b;
+    buf_init(&b);
+    for (uint64_t i = 0; i < n; ++i) {
+        if (i) fwrite(sepS, 1, (size_t)sepN, f);
+        b.len = 0;
+        format_into(&b, argv[i], 0);
+        if (b.len) fwrite(b.p, 1, b.len, f);
+    }
+    free(b.p);
+    fwrite(endS, 1, (size_t)endN, f);
+    fflush(f);
+    return A_NONE;
+}
+
 aval a_printv(uint64_t n, aval *argv) {
     if (a_rt_repl_quiet()) return A_NONE;
     printv(stdout, n, argv);

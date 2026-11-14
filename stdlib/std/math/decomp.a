@@ -1,0 +1,504 @@
+#
+# std.math decompositions — eigen / SVD / QR / Cholesky / rank / condition.
+#
+# Dense f64 linear algebra on NDArray (C-order), built on ndarray.a and the
+# public linalg.a helpers (matmul, inv, matrix_norm, transpose).
+#
+# Algorithms:
+#   * eigh/eigvalsh — cyclic Jacobi eigenvalue algorithm for SYMMETRIC
+#     matrices (converges quadratically; ~100 sweeps max, early exit on
+#     off-diagonal energy). Eigenvalues returned ascending; eigenvectors are
+#     the COLUMNS of the returned matrix.
+#   * eigvals/eig — symmetric input delegates to eigh/eigvalsh; a general
+#     2x2 uses the closed-form real characteristic polynomial; a general
+#     n>2 falls back to `eig_power` (dominant eigenpair only — NOT a full
+#     spectrum). Complex eigenvalues are unsupported (f64 only) and panic.
+#   * svd — thin SVD via eigendecomposition of A^T A. Requires the normal
+#     equations path, so precision is lost on ill-conditioned A (sigma is
+#     squared before sqrt). m < n is handled by transposing (documented
+#     deviation: U is then m x m and Vt is m x n, matching NumPy's
+#     full_matrices=False thin shapes). U columns for (near-)zero singular
+#     values are left as ZERO columns — U is orthonormal only on the
+#     nonzero singular subspace.
+#   * pinv — Moore-Penrose pseudoinverse via svd with a relative cutoff
+#     rcond * sigma_max (default rcond = 1e-15).
+#   * qr — modified Gram-Schmidt with one reorthogonalization pass
+#     (twice-is-enough). Returns reduced (Q: m x n, R: n x n). Rank-deficient
+#     columns produce a zero Q column and r_jj = 0 (no pivoting).
+#   * cholesky — lower-triangular L for symmetric positive-definite input
+#     (only the lower triangle of `a` is read, like NumPy). Panics when a
+#     pivot is <= 0 (non-PD).
+#   * matrix_rank — count of singular values above tol (default
+#     eps * max(m,n) * sigma_max, NumPy convention).
+#   * cond — spectral condition number sigma_max/sigma_min via svd when
+#     ord is None/2; norm-based ||A||_p ||A^-1||_p for other ords
+#     ("fro"/"nuc"/"1"/"inf"/"-inf" or numeric 1/-1), which requires a
+#     square matrix. A has no IEEE inf literal, so a singular matrix returns
+#     1e308 as the "infinite" stand-in.
+#
+# Deviations vs NumPy:
+#   * f64 only; no complex arithmetic (eig of a matrix with complex
+#     eigenvalues panics).
+#   * eig/eigvals on general n>2 matrices return only the DOMINANT real
+#     eigenpair via power iteration; there is no QR/Francis double-shift
+#     eigensolver.
+#   * svd is normal-equations based (A^T A), not Golub-Kahan bidiagonalization.
+#   * hermitian= keyword variants are not provided.
+
+import std:core
+
+from "ndarray.a" import NDArray, zeros, eye, transpose, reshape
+from "linalg.a" import matmul, inv, matrix_norm
+
+fn _check(cond: bool, msg: str):
+    if cond == false:
+        core.panic(msg)
+
+fn _is_square2(a: NDArray) -> bool:
+    return len(a.shape) == 2 and a.shape[0] == a.shape[1]
+
+fn _is_sym(a: NDArray, tol: f64) -> bool:
+    # symmetric within `tol` relative to the max |entry|
+    n = a.shape[0]
+    scale = 0.0
+    for v in a.data:
+        if abs(v) > scale:
+            scale = abs(v)
+    t = tol * scale
+    if t == 0.0:
+        t = tol
+    for i in 0..n:
+        for j in i + 1..n:
+            if abs(a.data[i * n + j] - a.data[j * n + i]) > t:
+                return false
+    return true
+
+# --- symmetric eigensolver (cyclic Jacobi) ------------------------------------
+
+fn _jacobi(a: NDArray) -> (NDArray, NDArray):
+    # Returns (evals ascending [n], V [n,n] whose COLUMNS are eigenvectors).
+    n = a.shape[0]
+    d = []
+    for v in a.data:
+        d.append(v)
+    vv = []
+    for v in eye(n).data:
+        vv.append(v)
+    maxsweeps = 100
+    for sweep in 0..maxsweeps:
+        off2 = 0.0
+        dg2 = 0.0
+        for p in 0..n:
+            dg2 = dg2 + d[p * n + p] * d[p * n + p]
+            for q in p + 1..n:
+                off2 = off2 + d[p * n + q] * d[p * n + q]
+        if dg2 == 0.0:
+            break
+        # stop when rms off-diagonal ~ 1e-15 of the diagonal scale
+        if off2 <= dg2 * 1e-30:
+            break
+        for p in 0..n - 1:
+            for q in p + 1..n:
+                apq = d[p * n + q]
+                if apq == 0.0:
+                    continue
+                app = d[p * n + p]
+                aqq = d[q * n + q]
+                theta = (aqq - app) / (2.0 * apq)
+                t = 0.0
+                if theta == 0.0:
+                    t = 1.0
+                elif theta > 0.0:
+                    t = 1.0 / (theta + sqrt(theta * theta + 1.0))
+                else:
+                    t = -1.0 / (-theta + sqrt(theta * theta + 1.0))
+                c = 1.0 / sqrt(t * t + 1.0)
+                s = t * c
+                for k in 0..n:
+                    if k == p or k == q:
+                        continue
+                    akp = d[k * n + p]
+                    akq = d[k * n + q]
+                    nkp = c * akp - s * akq
+                    nkq = s * akp + c * akq
+                    d[k * n + p] = nkp
+                    d[p * n + k] = nkp
+                    d[k * n + q] = nkq
+                    d[q * n + k] = nkq
+                # eigenvector matrix rotates over ALL rows (no p/q exclusion)
+                for k in 0..n:
+                    vkp = vv[k * n + p]
+                    vkq = vv[k * n + q]
+                    vv[k * n + p] = c * vkp - s * vkq
+                    vv[k * n + q] = s * vkp + c * vkq
+                d[p * n + p] = app - t * apq
+                d[q * n + q] = aqq + t * apq
+                d[p * n + q] = 0.0
+                d[q * n + p] = 0.0
+    # eigenvalues are the diagonal; sort ascending, permuting V columns
+    ev = []
+    for i in 0..n:
+        ev.append(d[i * n + i])
+    ord = []
+    for i in 0..n:
+        ord.append(i)
+    for i in 0..n:
+        best = i
+        for j in i + 1..n:
+            if ev[ord[j]] < ev[ord[best]]:
+                best = j
+        tmp = ord[i]
+        ord[i] = ord[best]
+        ord[best] = tmp
+    sev = []
+    for i in 0..n:
+        sev.append(ev[ord[i]])
+    vdata = []
+    for k in 0..n:
+        for i in 0..n:
+            vdata.append(vv[k * n + ord[i]])
+    return (NDArray(sev, [n]), NDArray(vdata, [n, n]))
+
+fn eigvalsh(a: NDArray) -> NDArray:
+    # Eigenvalues of a symmetric matrix, ascending. (Distinct from linalg.a's
+    # eigvalsh_2x2 which is closed-form 2x2 only.)
+    _check(_is_square2(a), "eigvalsh: input must be square 2-D")
+    _check(_is_sym(a, 1e-9), "eigvalsh: matrix must be symmetric")
+    r = _jacobi(a)
+    return r[0]
+
+fn eigh(a: NDArray) -> (NDArray, NDArray):
+    # (evals ascending [n], evecs [n,n] with eigenvectors as columns).
+    _check(_is_square2(a), "eigh: input must be square 2-D")
+    _check(_is_sym(a, 1e-9), "eigh: matrix must be symmetric")
+    return _jacobi(a)
+
+# --- general eigen (limited) ---------------------------------------------------
+
+fn _eigvals2x2(a: NDArray) -> [f64]:
+    # closed-form real eigenvalues of a general 2x2; ascending
+    av = a.data[0]
+    bv = a.data[1]
+    cv = a.data[2]
+    dv = a.data[3]
+    tr = av + dv
+    det = av * dv - bv * cv
+    disc = tr * tr - 4.0 * det
+    if disc < 0.0:
+        core.panic("eig: complex eigenvalues unsupported (f64 only)")
+    sd = sqrt(disc)
+    out = []
+    out.append((tr - sd) / 2.0)
+    out.append((tr + sd) / 2.0)
+    return out
+
+fn _eigvecs2x2(a: NDArray, l1: f64, l2: f64) -> NDArray:
+    # columns are unit eigenvectors for l1, l2 (sign convention arbitrary)
+    av = a.data[0]
+    bv = a.data[1]
+    cv = a.data[2]
+    dv = a.data[3]
+    xs = []
+    ys = []
+    lams = [l1, l2]
+    for lam in lams:
+        x = bv
+        y = lam - av
+        if x == 0.0 and y == 0.0:
+            x = lam - dv
+            y = cv
+        if x == 0.0 and y == 0.0:
+            x = 1.0
+            y = 0.0
+        nrm = sqrt(x * x + y * y)
+        xs.append(x / nrm)
+        ys.append(y / nrm)
+    return NDArray([xs[0], xs[1], ys[0], ys[1]], [2, 2])
+
+fn eigvals(a: NDArray) -> NDArray:
+    # Eigenvalues ascending. Symmetric -> Jacobi; general 2x2 -> closed form;
+    # general n>2 -> PANIC (use eig_power for the dominant eigenvalue only).
+    _check(_is_square2(a), "eigvals: input must be square 2-D")
+    n = a.shape[0]
+    if n == 0:
+        return NDArray([], [0])
+    if n == 1:
+        return NDArray([a.data[0]], [1])
+    if _is_sym(a, 1e-9):
+        return eigvalsh(a)
+    if n == 2:
+        l = _eigvals2x2(a)
+        return NDArray(l, [2])
+    core.panic("eigvals: general matrices larger than 2x2 unsupported; use eig_power for the dominant eigenvalue")
+    return NDArray([], [0])
+
+fn eig_power(a: NDArray, iters: i64 = 500) -> (f64, NDArray):
+    # Dominant eigenpair (largest |lambda|) by power iteration with a
+    # deterministic non-orthogonal start vector. Returns (lambda, v [n]).
+    # Only meaningful when the dominant eigenvalue is real and unique in
+    # magnitude; complex/degenerate cases are not detected.
+    _check(_is_square2(a), "eig_power: input must be square 2-D")
+    n = a.shape[0]
+    _check(n > 0, "eig_power: empty matrix")
+    v = []
+    for i in 0..n:
+        v.append(1.0 + 0.01 * (i + 1))
+    nrm = 0.0
+    for x in v:
+        nrm = nrm + x * x
+    nrm = sqrt(nrm)
+    for j in 0..n:
+        v[j] = v[j] / nrm
+    for it in 0..iters:
+        w = []
+        for i in 0..n:
+            s = 0.0
+            for j in 0..n:
+                s = s + a.data[i * n + j] * v[j]
+            w.append(s)
+        nrm = 0.0
+        for x in w:
+            nrm = nrm + x * x
+        nrm = sqrt(nrm)
+        if nrm == 0.0:
+            return (0.0, NDArray(v, [n]))
+        for j in 0..n:
+            v[j] = w[j] / nrm
+    # Rayleigh quotient lambda = v^T A v / v^T v
+    num = 0.0
+    den = 0.0
+    for i in 0..n:
+        s = 0.0
+        for j in 0..n:
+            s = s + a.data[i * n + j] * v[j]
+        num = num + v[i] * s
+        den = den + v[i] * v[i]
+    if den == 0.0:
+        return (0.0, NDArray(v, [n]))
+    return (num / den, NDArray(v, [n]))
+
+fn eig(a: NDArray, iters: i64 = 500) -> (NDArray, NDArray):
+    # Eigenpairs. Symmetric -> full (evals [n] ascending, evecs [n,n] columns).
+    # General 2x2 -> full closed form. General n>2 -> DOMINANT pair only:
+    # evals shape [1], evecs shape [n,1] (documented deviation from NumPy,
+    # which returns the full spectrum).
+    _check(_is_square2(a), "eig: input must be square 2-D")
+    n = a.shape[0]
+    if n == 0:
+        return (NDArray([], [0]), zeros([0, 0]))
+    if n == 1:
+        return (NDArray([a.data[0]], [1]), NDArray([1.0], [1, 1]))
+    if _is_sym(a, 1e-9):
+        return eigh(a)
+    if n == 2:
+        l = _eigvals2x2(a)
+        return (NDArray(l, [2]), _eigvecs2x2(a, l[0], l[1]))
+    p = eig_power(a, iters)
+    return (NDArray([p[0]], [1]), reshape(p[1], [n, 1]))
+
+# --- SVD / pseudoinverse --------------------------------------------------------
+
+fn svd(a: NDArray) -> (NDArray, NDArray, NDArray):
+    # Thin SVD via eigh of A^T A. Returns (U [m,k], S [k], Vt [k,n]) with
+    # k = min(m,n) and singular values DESCENDING. Normal-equations based:
+    # loses ~half the digits on ill-conditioned input. U columns for
+    # (near-)zero sigma are left as zero columns.
+    _check(len(a.shape) == 2, "svd: input must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    if m == 0 or n == 0:
+        return (zeros([m, n]), NDArray([], [0]), zeros([n, n]))
+    if m < n:
+        # svd(A^T) = (Un, S, Vtn) with A^T = Un S Vtn
+        #   => A = Vtn^T S Un^T  =>  U = Vtn^T, Vt = Un^T
+        at = transpose(a)
+        r = svd(at)
+        return (transpose(r[2]), r[1], transpose(r[0]))
+    at = transpose(a)
+    g = matmul(at, a)               # n x n symmetric
+    er = _jacobi(g)                 # evals ascending, V columns ascending
+    lam = er[0]
+    V = er[1]
+    # reverse to descending singular-value order
+    vd = []
+    for k in 0..n:
+        for j in 0..n:
+            vd.append(V.data[k * n + (n - 1 - j)])
+    Vd = NDArray(vd, [n, n])
+    sig = []
+    for j in 0..n:
+        lv = lam.data[n - 1 - j]
+        if lv < 0.0:
+            lv = 0.0
+        sig.append(sqrt(lv))
+    S = NDArray(sig, [n])
+    AV = matmul(a, Vd)              # m x n, column j = sigma_j * u_j
+    U = zeros([m, n])
+    for j in 0..n:
+        sj = sig[j]
+        if sj > 0.0:
+            for i in 0..m:
+                U.data[i * n + j] = AV.data[i * n + j] / sj
+    Vt = transpose(Vd)
+    return (U, S, Vt)
+
+fn pinv(a: NDArray, rcond: any = None) -> NDArray:
+    # Moore-Penrose pseudoinverse (n x m for a m x n). Singular values
+    # below rcond * sigma_max are treated as zero. Default rcond = 1e-15.
+    rc = 1e-15
+    if rcond != None:
+        rc = rcond + 0.0
+    _check(len(a.shape) == 2, "pinv: input must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    if m == 0 or n == 0:
+        return zeros([n, m])
+    r = svd(a)
+    U = r[0]
+    S = r[1]
+    Vt = r[2]
+    k = len(S.data)
+    smax = 0.0
+    for v in S.data:
+        if v > smax:
+            smax = v
+    cut = rc * smax
+    D = zeros([k, k])
+    for i in 0..k:
+        if S.data[i] > cut:
+            D.data[i * k + i] = 1.0 / S.data[i]
+    V = transpose(Vt)               # n x k
+    Ut = transpose(U)               # k x m
+    t = matmul(V, D)                # n x k
+    return matmul(t, Ut)            # n x m
+
+# --- QR / Cholesky ---------------------------------------------------------------
+
+fn qr(a: NDArray) -> (NDArray, NDArray):
+    # Reduced QR via modified Gram-Schmidt with one reorthogonalization pass.
+    # Q: m x n with orthonormal columns (where A has full column rank),
+    # R: n x n upper triangular. Rank-deficient input yields zero Q columns
+    # and zero r_jj (no column pivoting).
+    _check(len(a.shape) == 2, "qr: input must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    Q = zeros([m, n])
+    R = zeros([n, n])
+    if m == 0 or n == 0:
+        return (Q, R)
+    for j in 0..n:
+        v = []
+        for i in 0..m:
+            v.append(a.data[i * n + j])
+        for rep in 0..2:
+            for i in 0..j:
+                s = 0.0
+                for r in 0..m:
+                    s = s + Q.data[r * n + i] * v[r]
+                R.data[i * n + j] = R.data[i * n + j] + s
+                for r in 0..m:
+                    v[r] = v[r] - s * Q.data[r * n + i]
+        nrm = 0.0
+        for x in v:
+            nrm = nrm + x * x
+        nrm = sqrt(nrm)
+        R.data[j * n + j] = nrm
+        if nrm > 0.0:
+            for r in 0..m:
+                Q.data[r * n + j] = v[r] / nrm
+    return (Q, R)
+
+fn cholesky(a: NDArray) -> NDArray:
+    # Lower-triangular L with A = L L^T for SPD input. Only the lower
+    # triangle of `a` is read (NumPy convention). Panics if a pivot is
+    # <= 0, i.e. the matrix is not positive definite.
+    _check(_is_square2(a), "cholesky: input must be square 2-D")
+    n = a.shape[0]
+    L = zeros([n, n])
+    for i in 0..n:
+        for j in 0..i + 1:
+            s = a.data[i * n + j]
+            for k in 0..j:
+                s = s - L.data[i * n + k] * L.data[j * n + k]
+            if i == j:
+                if s <= 0.0:
+                    core.panic("cholesky: matrix is not positive definite")
+                L.data[i * n + i] = sqrt(s)
+            else:
+                L.data[i * n + j] = s / L.data[j * n + j]
+    return L
+
+# --- rank / condition -------------------------------------------------------------
+
+fn matrix_rank(a: NDArray, tol: any = None) -> i64:
+    # Numerical rank: number of singular values > tol. Default tol follows
+    # NumPy: eps * max(m,n) * sigma_max.
+    _check(len(a.shape) == 2, "matrix_rank: input must be 2-D")
+    m = a.shape[0]
+    n = a.shape[1]
+    if m == 0 or n == 0:
+        return 0
+    r = svd(a)
+    S = r[1]
+    smax = 0.0
+    for v in S.data:
+        if v > smax:
+            smax = v
+    t = 0.0
+    if tol != None:
+        t = tol + 0.0
+    else:
+        mm = m
+        if n > m:
+            mm = n
+        t = 2.220446049250313e-16 * mm * smax
+    cnt = 0
+    for v in S.data:
+        if v > t:
+            cnt = cnt + 1
+    return cnt
+
+fn _cond2(a: NDArray) -> f64:
+    # spectral condition number via svd: sigma_max / sigma_min
+    r = svd(a)
+    S = r[1]
+    smax = 0.0
+    smin = -1.0
+    for v in S.data:
+        if v > smax:
+            smax = v
+        if smin < 0.0 or v < smin:
+            smin = v
+    if smin <= 0.0:
+        return 1e308   # "inf" stand-in (A has no IEEE inf literal)
+    return smax / smin
+
+fn _cond_norm(a: NDArray, ord: any) -> f64:
+    # ||A||_ord * ||A^-1||_ord — requires square input (uses inv).
+    _check(_is_square2(a), "cond: norm-based ord requires a square matrix")
+    ai = inv(a)
+    na = matrix_norm(a, ord)
+    ni = matrix_norm(ai, ord)
+    if ni == 0.0:
+        return 1e308
+    return na / ni
+
+fn cond(a: NDArray, ord: any = None) -> f64:
+    # Condition number. ord None or 2 -> spectral (svd, works for non-square).
+    # "fro"/"nuc"/"1"/"inf"/"-inf" or numeric -> norm-based, square only.
+    _check(len(a.shape) == 2, "cond: input must be 2-D")
+    if ord == None:
+        return _cond2(a)
+    if type(ord) == "str":
+        if ord == "2":
+            return _cond2(a)
+        return _cond_norm(a, ord)
+    p = ord + 0.0
+    if p == 2.0:
+        return _cond2(a)
+    if p == 1.0:
+        return _cond_norm(a, "1")
+    if p == -1.0:
+        return _cond_norm(a, "-1")
+    core.panic("cond: unsupported ord")
+    return 0.0

@@ -36,6 +36,8 @@ namespace {
 const std::string kNone = "-281474976710654";        // A_NONE
 const std::string kFalse = "-281474976710652";       // A_FALSE
 const std::string kTrue = "-281474976710650";        // A_TRUE
+const std::string kStdout = "-281474976710648";      // A_STDOUT (A_TAG|0x8)
+const std::string kStderr = "-281474976710646";      // A_STDERR (A_TAG|0xA)
 const std::string kMissing = "-281474976710656";     // A_TAG (missing arg)
 constexpr std::int64_t kInlineLim = INT64_C(1) << 46;
 
@@ -242,7 +244,7 @@ class LlvmEmitter {
   }
   // aval of a double literal: raw bits, NaN-canonicalized like a_mkdouble.
   std::string avalDoubleLit(double d) {
-    if (d != d) return "9218868437227405312";
+    if (d != d) return "9221120237041090560";
     std::uint64_t u;
     std::memcpy(&u, &d, 8);
     return std::to_string((std::int64_t)u);
@@ -888,6 +890,7 @@ declare i64 @a_py_getattr(i64, ptr)
 declare i64 @a_py_setattr(i64, ptr, i64)
 declare i64 @a_printv(i64, ptr)
 declare i64 @a_eprintv(i64, ptr)
+declare i64 @a_print_opts(i64, ptr, i64, i64, i64, i32)
 declare i64 @a_join_len(i64, i64)
 declare i64 @a_match_fail(i64)
 declare void @a_frame_push(ptr, ptr, i32)
@@ -1338,7 +1341,7 @@ define internal i64 @a.mint(i64 %i) {
 define internal i64 @a.mdouble(double %d) {
   %nan = fcmp uno double %d, %d
   %bits = bitcast double %d to i64
-  %r = select i1 %nan, i64 9218868437227405312, i64 %bits
+  %r = select i1 %nan, i64 9221120237041090560, i64 %bits
   ret i64 %r
 }
 
@@ -3108,6 +3111,8 @@ oth:
         {"F64_MAX", avalDoubleLit(1.7976931348623157e308)},
     };
     if (nm == "None") return kNone;
+    if (nm == "stdout") return kStdout;
+    if (nm == "stderr") return kStderr;
     if (nm == "I64_MIN" || nm == "I64_MAX") {
       std::int64_t v = nm == "I64_MIN" ? INT64_MIN : INT64_MAX;
       return callRt("a_i64n", {std::to_string(v)});
@@ -5517,20 +5522,33 @@ oth:
   std::string moduleMemberValue(const LlBinding& mb, const std::string& field) {
     int mid = mb.moduleId;
     if (mid < 0 || mid >= (int)graph_.modules.size()) return "";
-    const Module& mod = graph_.at(mid);
-    if (!mod.program) return "";
-    // Re-export following (like resolveModuleMember).
+    std::string name = field;
+    // Re-export following (like resolveModuleMember), multi-hop: each step
+    // looks for a direct declaration of `name` in the current module, else
+    // descends through a matching `from "x.a" import name` item.
     for (int depth = 0; depth < 16; ++depth) {
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) return "";
       bool declared = false;
       for (const StmtPtr& s : mod.program->statements) {
         if ((s->kind == StmtKind::FnDecl &&
-             static_cast<const FnDecl*>(s.get())->name == field) ||
+             static_cast<const FnDecl*>(s.get())->name == name) ||
             (s->kind == StmtKind::StructDecl &&
-             static_cast<const StructDecl*>(s.get())->name == field) ||
+             static_cast<const StructDecl*>(s.get())->name == name) ||
             (s->kind == StmtKind::Let &&
-             static_cast<const LetStmt*>(s.get())->name == field)) {
+             static_cast<const LetStmt*>(s.get())->name == name)) {
           declared = true;
           break;
+        }
+        if (s->kind == StmtKind::EnumDecl) {
+          const EnumDecl* ed = static_cast<const EnumDecl*>(s.get());
+          for (const EnumVariant& v : ed->variants) {
+            if (v.name == name) {
+              declared = true;
+              break;
+            }
+          }
+          if (declared) break;
         }
       }
       if (declared) break;
@@ -5539,62 +5557,43 @@ oth:
       for (const StmtPtr& s : mod.program->statements) {
         if (s->kind != StmtKind::FromImport) continue;
         const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
-        if (im->nativeModule || im->pythonModuleImport || im->moduleId < 0)
+        if (im->pythonModuleImport || (!im->nativeModule && im->moduleId < 0))
           continue;
         for (const auto& item : im->items) {
-          if (item.name == field || (!item.alias.empty() && item.alias == field)) {
-            nextId = im->moduleId;
-            nextName = item.name;
-            break;
+          if (item.name != name && item.alias != name) continue;
+          if (im->nativeModule) {
+            // `from math import PI` style re-export of a native module
+            // member: emit the constant/builtin value directly (mirrors
+            // the BKind::Module + moduleId < 0 branch in evalField).
+            if (const std::string* cn = nativeConstant(im->bareName, item.name)) {
+              double d = *cn == "PI"   ? 3.14159265358979323846
+                        : *cn == "E"    ? 2.71828182845904523536
+                                        : 0.0;
+              return avalDoubleLit(d);
+            }
+            if (const std::string* bn = nativeFunction(im->bareName, item.name)) {
+              int bid = builtinRuntimeId(*bn);
+              if (bid >= 0) return callRt("a_builtin", {std::to_string(bid)});
+            }
+            continue;
           }
+          nextId = im->moduleId;
+          nextName = item.name;
+          break;
         }
         if (nextId >= 0) break;
       }
       if (nextId < 0) break;
-      // Recurse into source module.
-      const Module& nm = graph_.at(nextId);
-      if (!nm.program) return "";
-      // Look up nextName in nm (non-recursive inner search).
-      for (const StmtPtr& s : nm.program->statements) {
-        if (s->kind == StmtKind::FnDecl &&
-            static_cast<const FnDecl*>(s.get())->name == nextName) {
-          auto it = fns_.find(static_cast<const FnDecl*>(s.get()));
-          if (it != fns_.end()) {
-            std::string r = T();
-            emit("  " + r + " = load i64, ptr @" + it->second->globalVar);
-            return r;
-          }
-        } else if (s->kind == StmtKind::StructDecl &&
-                   static_cast<const StructDecl*>(s.get())->name == nextName) {
-          auto it = structs_.find(nextName);
-          if (it != structs_.end()) {
-            std::string r = T();
-            emit("  " + r + " = load i64, ptr @" + it->second->globalVar);
-            return r;
-          }
-        } else if ((s->kind == StmtKind::Let || s->kind == StmtKind::Assign)) {
-          std::string vn = s->kind == StmtKind::Let
-                               ? static_cast<const LetStmt*>(s.get())->name
-                               : static_cast<const IdentExpr*>(
-                                     static_cast<const AssignStmt*>(s.get())
-                                         ->target.get())
-                                     ->name;
-          if (vn == nextName) {
-            auto it = topLevelGlobals_.find(std::to_string(nm.id) + ":" + vn);
-            if (it != topLevelGlobals_.end()) {
-              std::string r = T();
-              emit("  " + r + " = load i64, ptr @" + it->second);
-              return r;
-            }
-          }
-        }
-      }
-      return "";
+      mid = nextId;
+      name = nextName;
     }
-    // Direct lookup in `mod`.
+    if (mid < 0 || mid >= (int)graph_.modules.size()) return "";
+    const Module& mod = graph_.at(mid);
+    if (!mod.program) return "";
+    // Direct lookup in the resolved module.
     for (const StmtPtr& s : mod.program->statements) {
       if (s->kind == StmtKind::FnDecl &&
-          static_cast<const FnDecl*>(s.get())->name == field) {
+          static_cast<const FnDecl*>(s.get())->name == name) {
         auto it = fns_.find(static_cast<const FnDecl*>(s.get()));
         if (it != fns_.end()) {
           std::string r = T();
@@ -5602,16 +5601,16 @@ oth:
           return r;
         }
       } else if (s->kind == StmtKind::StructDecl &&
-                 static_cast<const StructDecl*>(s.get())->name == field) {
-        auto it = structs_.find(field);
+                 static_cast<const StructDecl*>(s.get())->name == name) {
+        auto it = structs_.find(name);
         if (it != structs_.end()) {
           std::string r = T();
           emit("  " + r + " = load i64, ptr @" + it->second->globalVar);
           return r;
         }
       } else if (s->kind == StmtKind::Let &&
-                 static_cast<const LetStmt*>(s.get())->name == field) {
-        auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + field);
+                 static_cast<const LetStmt*>(s.get())->name == name) {
+        auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + name);
         if (it != topLevelGlobals_.end()) {
           std::string r = T();
           emit("  " + r + " = load i64, ptr @" + it->second);
@@ -5621,10 +5620,9 @@ oth:
                  static_cast<const AssignStmt*>(s.get())->target->kind ==
                      ExprKind::Ident &&
                  static_cast<const IdentExpr*>(
-                     static_cast<const AssignStmt*>(s.get())
-                         ->target.get())
-                         ->name == field) {
-        auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + field);
+                     static_cast<const AssignStmt*>(s.get())->target.get())
+                     ->name == name) {
+        auto it = topLevelGlobals_.find(std::to_string(mod.id) + ":" + name);
         if (it != topLevelGlobals_.end()) {
           std::string r = T();
           emit("  " + r + " = load i64, ptr @" + it->second);
@@ -5633,7 +5631,7 @@ oth:
       } else if (s->kind == StmtKind::EnumDecl) {
         const EnumDecl* ed = static_cast<const EnumDecl*>(s.get());
         for (const EnumVariant& v : ed->variants) {
-          if (v.name != field) continue;
+          if (v.name != name) continue;
           auto it = enums_.find(std::to_string(mod.id) + ":" + ed->name + "." + v.name);
           if (it != enums_.end() && !it->second.algebraic) {
             std::string r = T();
@@ -5643,10 +5641,11 @@ oth:
         }
       }
     }
-    int bid = builtinRuntimeId(field);
+    int bid = builtinRuntimeId(name);
     if (bid >= 0) return callRt("a_builtin", {std::to_string(bid)});
     return "";
   }
+
 
   std::string evalSafeNav(const SafeNavExpr& x) {
     std::string obj = eval(x.object.get());
@@ -6321,6 +6320,14 @@ oth:
 
   // Builtin call: a_bi_call(id, n, argv) — argv holds just the args.
   std::string evalBiCall(int id, const CallExpr& call) {
+    // print/eprint accept Python-style keyword options (sep/end/file/
+    // flush); sema validated the names, so route them to a_print_opts
+    // instead of packing them into the positional argv like other builtins.
+    if ((id == 0 || id == 1) &&
+        std::any_of(call.args.begin(), call.args.end(),
+                    [](const CallArg& a) { return !a.name.empty(); })) {
+      return evalPrintCall(id == 1, call);
+    }
     std::vector<std::string> args;
     for (const CallArg& a : call.args) args.push_back(eval(a.value.get()));
     int n = (int)args.size();
@@ -6329,6 +6336,37 @@ oth:
     std::string r = T();
     emit("  " + r + " = call i64 @a_bi_call(i64 " + std::to_string(id) +
          ", i64 " + std::to_string(n) + ", ptr " + (n == 0 ? "null" : av) + ")");
+    return r;
+  }
+
+  // print(*objects, sep=, end=, file=, flush=) lowering. Positional args
+  // become the print argv; sep/end/file default to A_NONE (runtime applies
+  // " "/"\n"/default stream) and flush is evaluated for side effects only —
+  // the runtime flushes every print exactly like the positional path.
+  std::string evalPrintCall(bool isStderr, const CallExpr& call) {
+    std::vector<std::string> objs;
+    std::string sep = kNone, end = kNone, file = kNone;
+    for (const CallArg& a : call.args) {
+      std::string v = eval(a.value.get());
+      if (a.name.empty()) {
+        objs.push_back(v);
+      } else if (a.name == "sep") {
+        sep = v;
+      } else if (a.name == "end") {
+        end = v;
+      } else if (a.name == "file") {
+        file = v;
+      }
+      // "flush" (and any name sema somehow let through) is consumed above:
+      // the value was still evaluated for side effects.
+    }
+    int n = (int)objs.size();
+    std::string av = argvArray(n > 0 ? n : 1);
+    for (int i = 0; i < n; ++i) argvStore(av, i, objs[i]);
+    std::string r = T();
+    emit("  " + r + " = call i64 @a_print_opts(i64 " + std::to_string(n) +
+         ", ptr " + (n == 0 ? "null" : av) + ", i64 " + sep + ", i64 " + end +
+         ", i64 " + file + ", i32 " + (isStderr ? "1" : "0") + ")");
     return r;
   }
 

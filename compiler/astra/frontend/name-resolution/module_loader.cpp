@@ -195,7 +195,11 @@ void ModuleLoader::loadImports(Module& module) {
   // otherwise to a package under <stdlib>/std/.
   auto resolveStd = [&](const std::string& name, Span span, bool& nativeOut) -> int {
     nativeOut = false;
-    if (isNativeModule(name)) {
+    // `std:math` prefers the A-file package under std/math/ (the array API)
+    // over the native scalar module; bare `import math` still resolves
+    // native, which package files use for scalar math without cycles.
+    const bool preferPackage = (name == "math");
+    if (!preferPackage && isNativeModule(name)) {
       nativeOut = true;
       return -1;
     }
@@ -223,6 +227,10 @@ void ModuleLoader::loadImports(Module& module) {
         return -1;
       }
       return loadModule(path, path, nullptr);
+    }
+    if (preferPackage && isNativeModule(name)) {
+      nativeOut = true;
+      return -1;
     }
     sink_.error(span, "Cannot find stdlib package '" + name + "'.",
                 "Native packages are math, io, fs, strings, collections, core, and time. "

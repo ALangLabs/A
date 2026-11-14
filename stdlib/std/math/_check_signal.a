@@ -1,0 +1,148 @@
+#
+# Verification for signal.a — expected values hand-computed and cross-checked
+# against NumPy semantics (np.convolve/np.correlate doc examples and the
+# TestCorrelate vectors in numpy/_core/tests/test_numeric.py).
+#
+# Run: ./build/a run _check_signal.a   (from this directory)
+#
+from "signal.a" import convolve, correlate, convolve2d, correlate2d
+from "signal.a" import sliding_window_view
+from "ndarray.a" import NDArray, get
+
+fn check(name: str, got: f64, want: f64) -> bool:
+    if got == want:
+        print("ok   " + name)
+        return true
+    else:
+        print("FAIL " + name + " got=" + str(got) + " want=" + str(want))
+        return false
+
+fn check_shape(name: str, a: NDArray, want: [i64]) -> bool:
+    ok = true
+    if len(a.shape) != len(want):
+        print("FAIL " + name + " ndim got=" + str(len(a.shape)) + " want=" + str(len(want)))
+        return false
+    i = 0
+    while i < len(want):
+        if a.shape[i] != want[i]:
+            ok = check(name + " shape[" + str(i) + "]", a.shape[i], want[i]) and ok
+        i = i + 1
+    return ok
+
+fn check_arr(name: str, a: NDArray, want: [f64]) -> bool:
+    # flat-data comparison; works for any ndim (row-major)
+    ok = check(name + " size", a.size(), len(want))
+    i = 0
+    while i < len(want):
+        ok = check(name + " [" + str(i) + "]", a.data[i], want[i]) and ok
+        i = i + 1
+    return ok
+
+entry main():
+    ok = true
+
+    a123 = NDArray([1.0, 2.0, 3.0], [3])
+    v051 = NDArray([0.0, 1.0, 0.5], [3])
+
+    # --- convolve: np.convolve doc example ---
+    cf = convolve(a123, v051, "full")
+    ok = check_arr("convolve full", cf, [0.0, 1.0, 2.5, 4.0, 1.5]) and ok
+    cs = convolve(a123, v051, "same")
+    ok = check_arr("convolve same", cs, [1.0, 2.5, 4.0]) and ok
+    cv = convolve(a123, v051, "valid")
+    ok = check_arr("convolve valid", cv, [2.5]) and ok
+
+    # convolve swaps when v is longer than a
+    csw = convolve(NDArray([1.0, 2.0], [2]), NDArray([1.0, 2.0, 3.0], [3]), "full")
+    ok = check_arr("convolve swapped", csw, [1.0, 4.0, 7.0, 6.0]) and ok
+    # equal lengths: no swap, v is reversed internally
+    ce = convolve(NDArray([1.0, 2.0], [2]), NDArray([1.0, 1.0], [2]), "full")
+    ok = check_arr("convolve equal", ce, [1.0, 3.0, 2.0]) and ok
+    # invalid mode -> empty
+    ok = check("convolve bad mode empty", convolve(a123, v051, "bogus").size(), 0) and ok
+
+    # --- correlate: np.correlate doc examples ---
+    rv = correlate(a123, v051, "valid")
+    ok = check_arr("correlate valid", rv, [3.5]) and ok
+    rs = correlate(a123, v051, "same")
+    ok = check_arr("correlate same", rs, [2.0, 3.5, 3.0]) and ok
+    rf = correlate(a123, v051, "full")
+    ok = check_arr("correlate full", rf, [0.5, 2.0, 3.5, 3.0, 0.0]) and ok
+
+    # TestCorrelate vectors from numpy test_numeric.py
+    x5 = NDArray([1.0, 2.0, 3.0, 4.0, 5.0], [5])
+    y3 = NDArray([-1.0, -2.0, -3.0], [3])
+    z1 = correlate(x5, y3, "full")
+    ok = check_arr("correlate x,y full", z1, [-3.0, -8.0, -14.0, -20.0, -26.0, -14.0, -5.0]) and ok
+    z2 = correlate(y3, x5, "full")
+    ok = check_arr("correlate y,x full", z2, [-5.0, -14.0, -26.0, -20.0, -14.0, -8.0, -3.0]) and ok
+    # doc example: np.correlate([1, 1], [1..6], "valid") -> [11,9,7,5,3]
+    zv = correlate(NDArray([1.0, 1.0], [2]), NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [6]), "valid")
+    ok = check_arr("correlate swapped valid", zv, [11.0, 9.0, 7.0, 5.0, 3.0]) and ok
+    # correlate(x, y, 'valid') = [-14, -20, -26]; 'same' = [-8,-14,-20,-26,-14]
+    xv = correlate(x5, y3, "valid")
+    ok = check_arr("correlate x,y valid", xv, [-14.0, -20.0, -26.0]) and ok
+    xs = correlate(x5, y3, "same")
+    ok = check_arr("correlate x,y same", xs, [-8.0, -14.0, -20.0, -26.0, -14.0]) and ok
+
+    # correlate(a, v) == convolve(a, v reversed) for 'full' (real inputs)
+    v051r = NDArray([0.5, 1.0, 0.0], [3])
+    eq = correlate(a123, v051, "full")
+    eq2 = convolve(a123, v051r, "full")
+    same = true
+    i = 0
+    while i < eq.size():
+        if eq.data[i] != eq2.data[i]:
+            same = false
+        i = i + 1
+    if same == false:
+        ok = check("correlate==convolve(rev v)", 0.0, 1.0) and ok
+    else:
+        ok = check("correlate==convolve(rev v)", 1.0, 1.0) and ok
+
+    # --- convolve2d / correlate2d ---
+    m22 = NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])
+    kid = NDArray([1.0, 0.0, 0.0, 1.0], [2, 2])
+    c2f = convolve2d(m22, kid, "full")
+    ok = check_shape("convolve2d full shape", c2f, [3, 3]) and ok
+    ok = check("convolve2d full [0,0]", get(c2f, [0, 0]), 1.0) and ok
+    ok = check("convolve2d full [1,1]", get(c2f, [1, 1]), 5.0) and ok
+    ok = check("convolve2d full [2,2]", get(c2f, [2, 2]), 4.0) and ok
+    ok = check_arr("convolve2d full flat", c2f, [1.0, 2.0, 0.0, 3.0, 5.0, 2.0, 0.0, 3.0, 4.0]) and ok
+    c2v = convolve2d(m22, kid, "valid")
+    ok = check_arr("convolve2d valid", c2v, [5.0]) and ok
+    # 'same' -> shape of first input, top-left crop of full
+    c2s = convolve2d(m22, kid, "same")
+    ok = check_arr("convolve2d same", c2s, [1.0, 2.0, 3.0, 5.0]) and ok
+
+    kv = NDArray([1.0, 2.0, 3.0, 4.0], [2, 2])
+    r2f = correlate2d(m22, kv, "full")
+    ok = check_shape("correlate2d full shape", r2f, [3, 3]) and ok
+    ok = check("correlate2d full [0,0]", get(r2f, [0, 0]), 4.0) and ok
+    ok = check("correlate2d full [1,1]", get(r2f, [1, 1]), 30.0) and ok
+    ok = check("correlate2d full [2,2]", get(r2f, [2, 2]), 4.0) and ok
+    ok = check_arr("correlate2d full flat", r2f, [4.0, 11.0, 6.0, 14.0, 30.0, 14.0, 6.0, 11.0, 4.0]) and ok
+    r2v = correlate2d(m22, kv, "valid")
+    ok = check_arr("correlate2d valid", r2v, [30.0]) and ok
+
+    # --- sliding_window_view ---
+    w1 = sliding_window_view(NDArray([1.0, 2.0, 3.0, 4.0], [4]), [2], [])
+    ok = check_shape("swv 1d shape", w1, [3, 2]) and ok
+    ok = check_arr("swv 1d", w1, [1.0, 2.0, 2.0, 3.0, 3.0, 4.0]) and ok
+    # explicit axis (incl. negative axis on 2-D)
+    g = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [3, 2])
+    w2 = sliding_window_view(g, [2], [-1])
+    ok = check_shape("swv 2d ax-1 shape", w2, [3, 1, 2]) and ok
+    # windows along axis 0 of length 2 on a [3,2] array: out[2,2] window dim
+    w3 = sliding_window_view(g, [2], [0])
+    ok = check_shape("swv 2d ax0 shape", w3, [2, 2, 2]) and ok
+    ok = check("swv ax0 [0,0,1]", get(w3, [0, 0, 1]), 3.0) and ok
+    ok = check("swv ax0 [1,1,0]", get(w3, [1, 1, 0]), 4.0) and ok
+    # mismatched window/axis lengths -> empty
+    ok = check("swv mismatch empty", sliding_window_view(g, [2, 2], [0]).size(), 0) and ok
+
+    if ok:
+        print("ALL PASS")
+    else:
+        print("SOME FAILED")
+        assert(false)

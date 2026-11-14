@@ -3,7 +3,7 @@
 # with known results. Run: ./build/a run stdlib/std/math/numpy/_check_ufuncs.a
 # Exits non-zero (assert panic) on any mismatch.
 #
-import std:math
+import math
 from "ndarray.a" import NDArray, array_from_list, zeros, ones, arange1, full
 from "ufuncs.a" import add, subtract, multiply, divide, power, float_power, remainder, mod, fmod, floor_divide, hypot, maximum, minimum, fmax, fmin, copysign, arctan2
 from "ufuncs.a" import add_scalar, subtract_scalar, multiply_scalar, divide_scalar, power_scalar, float_power_scalar, remainder_scalar, mod_scalar, fmod_scalar, floor_divide_scalar, hypot_scalar, maximum_scalar, minimum_scalar, fmax_scalar, fmin_scalar, copysign_scalar, arctan2_scalar

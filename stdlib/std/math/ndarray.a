@@ -18,6 +18,292 @@ class NDArray:
             n = n * d
         return n
 
+    # --- NumPy-style methods ---------------------------------------------------
+    # NOTE: locals below are _m-prefixed — A function locals share a flat
+    # name->slot namespace with caller variables (see reductions.a note), so
+    # unprefixed locals could clobber same-named caller variables.
+
+    # reshape/ravel/flatten/transpose mirror the module-level fns of the same
+    # name; they are re-implemented here (via _nd_transpose for transpose) so
+    # the methods never recurse into themselves.
+
+    fn reshape(self, newshape: [i64]) -> NDArray:
+        return NDArray(self.data, newshape)
+
+    fn ravel(self) -> NDArray:
+        return NDArray(self.data, [self.size()])
+
+    fn flatten(self) -> NDArray:
+        _md = []
+        for _mv in self.data:
+            _md.append(_mv)
+        return NDArray(_md, [self.size()])
+
+    fn transpose(self) -> NDArray:
+        return _nd_transpose(self)
+
+    # NumPy exposes .T as a property; A has no properties, so T() is the
+    # method-call spelling of a.transpose().
+    fn T(self) -> NDArray:
+        return self.transpose()
+
+    fn copy(self) -> NDArray:
+        _md = []
+        for _mv in self.data:
+            _md.append(_mv)
+        _ms = []
+        for _mv in self.shape:
+            _ms.append(_mv)
+        return NDArray(_md, _ms)
+
+    # tolist: 0-d -> [[v]], 1-d -> [[v], ...], >=2-d -> rows of cols
+    # (same convention as the module-level tolist; deeper ranks flatten rows).
+    fn tolist(self) -> [[f64]]:
+        _mn = self.ndim()
+        _mo = []
+        if _mn == 0:
+            if len(self.data) > 0:
+                _mo.append([self.data[0]])
+            return _mo
+        if _mn == 1:
+            for _mv in self.data:
+                _mo.append([_mv])
+            return _mo
+        _mrows = self.shape[0]
+        if _mrows == 0:
+            return _mo
+        _mcols = self.size() // _mrows
+        for _mi in 0.._mrows:
+            _mrow = []
+            for _mj in 0.._mcols:
+                _mrow.append(self.data[_mi * _mcols + _mj])
+            _mo.append(_mrow)
+        return _mo
+
+    fn array_str(self) -> str:
+        return array2string(self)
+
+    # A does not dispatch __str__ for class instances; call a.__str__() or
+    # a.array_str() explicitly (same caveat as std/datetime).
+    fn __str__(self) -> str:
+        return array2string(self)
+
+    # --- flat reductions (population statistics, ddof=0) ----------------------
+    # NaN elements are NOT skipped (unlike reductions.a nan* variants); empty
+    # arrays give sum/prod = 0/1-ish and min/max/mean/var/std = NaN.
+
+    fn sum(self) -> f64:
+        _ms = 0.0
+        for _mv in self.data:
+            _ms = _ms + _mv
+        return _ms
+
+    fn mean(self) -> f64:
+        _mn = len(self.data)
+        if _mn == 0:
+            return _m_nan()
+        _ms = 0.0
+        for _mv in self.data:
+            _ms = _ms + _mv
+        return _ms / _mn
+
+    fn min(self) -> f64:
+        _mseen = false
+        _mb = 0.0
+        for _mv in self.data:
+            if not _mseen or _mv < _mb:
+                _mb = _mv
+                _mseen = true
+        if not _mseen:
+            return _m_nan()
+        return _mb
+
+    fn max(self) -> f64:
+        _mseen = false
+        _mb = 0.0
+        for _mv in self.data:
+            if not _mseen or _mv > _mb:
+                _mb = _mv
+                _mseen = true
+        if not _mseen:
+            return _m_nan()
+        return _mb
+
+    fn var(self) -> f64:
+        _mn = len(self.data)
+        if _mn == 0:
+            return _m_nan()
+        _ms = 0.0
+        for _mv in self.data:
+            _ms = _ms + _mv
+        _mm = _ms / _mn
+        _mrss = 0.0
+        for _mv in self.data:
+            _md = _mv - _mm
+            _mrss = _mrss + _md * _md
+        return _mrss / _mn
+
+    fn std(self) -> f64:
+        return sqrt(self.var())
+
+    fn prod(self) -> f64:
+        _mp = 1.0
+        for _mv in self.data:
+            _mp = _mp * _mv
+        return _mp
+
+    fn argmax(self) -> i64:
+        if len(self.data) == 0:
+            return -1
+        _mb = 0
+        _mi = 1
+        while _mi < len(self.data):
+            if self.data[_mi] > self.data[_mb]:
+                _mb = _mi
+            _mi = _mi + 1
+        return _mb
+
+    fn argmin(self) -> i64:
+        if len(self.data) == 0:
+            return -1
+        _mb = 0
+        _mi = 1
+        while _mi < len(self.data):
+            if self.data[_mi] < self.data[_mb]:
+                _mb = _mi
+            _mi = _mi + 1
+        return _mb
+
+    # --- dot ------------------------------------------------------------------
+    # 1-D.1-D -> 0-d NDArray scalar; 2-D.1-D -> [rows]; 1-D.2-D -> [cols];
+    # 2-D.2-D -> matmul [m,n]. Other rank combos return an empty NDArray.
+
+    fn dot(self, other: NDArray) -> NDArray:
+        _ma = self.ndim()
+        _mnd = other.ndim()
+        if _ma == 1 and _mnd == 1:
+            _ms = 0.0
+            _mi = 0
+            _mlim = len(self.data)
+            if len(other.data) < _mlim:
+                _mlim = len(other.data)
+            while _mi < _mlim:
+                _ms = _ms + self.data[_mi] * other.data[_mi]
+                _mi = _mi + 1
+            return NDArray([_ms], [])
+        if _ma == 2 and _mnd == 1:
+            _mrows = self.shape[0]
+            _mcols = self.shape[1]
+            _mout = []
+            _mi = 0
+            while _mi < _mrows:
+                _ms = 0.0
+                _mj = 0
+                while _mj < _mcols:
+                    _ms = _ms + self.data[_mi * _mcols + _mj] * other.data[_mj]
+                    _mj = _mj + 1
+                _mout.append(_ms)
+                _mi = _mi + 1
+            return NDArray(_mout, [_mrows])
+        if _ma == 1 and _mnd == 2:
+            _mrows = other.shape[0]
+            _mcols = other.shape[1]
+            _mout = []
+            _mj = 0
+            while _mj < _mcols:
+                _ms = 0.0
+                _mi = 0
+                while _mi < _mrows:
+                    _ms = _ms + self.data[_mi] * other.data[_mi * _mcols + _mj]
+                    _mi = _mi + 1
+                _mout.append(_ms)
+                _mj = _mj + 1
+            return NDArray(_mout, [_mcols])
+        if _ma == 2 and _mnd == 2:
+            _mm = self.shape[0]
+            _mk = self.shape[1]
+            _mn2 = other.shape[1]
+            if other.shape[0] != _mk:
+                return NDArray([], [])
+            _mout = []
+            _mi = 0
+            while _mi < _mm:
+                _mj = 0
+                while _mj < _mn2:
+                    _ms = 0.0
+                    _mk2 = 0
+                    while _mk2 < _mk:
+                        _ms = _ms + self.data[_mi * _mk + _mk2] * other.data[_mk2 * _mn2 + _mj]
+                        _mk2 = _mk2 + 1
+                    _mout.append(_ms)
+                    _mj = _mj + 1
+                _mi = _mi + 1
+            return NDArray(_mout, [_mm, _mn2])
+        return NDArray([], [])
+
+    # --- cumulative -------------------------------------------------------------
+    # Flat (raveled) cumulative ops, like numpy cumsum/cumprod with axis=None.
+
+    fn cumsum(self) -> NDArray:
+        _mn = self.size()
+        _mout = []
+        _macc = 0.0
+        _mi = 0
+        while _mi < _mn:
+            _macc = _macc + self.data[_mi]
+            _mout.append(_macc)
+            _mi = _mi + 1
+        return NDArray(_mout, [_mn])
+
+    fn cumprod(self) -> NDArray:
+        _mn = self.size()
+        _mout = []
+        _macc = 1.0
+        _mi = 0
+        while _mi < _mn:
+            _macc = _macc * self.data[_mi]
+            _mout.append(_macc)
+            _mi = _mi + 1
+        return NDArray(_mout, [_mn])
+
+    fn trace(self) -> f64:
+        # main-diagonal sum; NaN for non-2-D (NumPy raises instead)
+        if len(self.shape) != 2:
+            return _m_nan()
+        _mrows = self.shape[0]
+        _mcols = self.shape[1]
+        _mn = _mrows
+        if _mcols < _mrows:
+            _mn = _mcols
+        _ms = 0.0
+        _mi = 0
+        while _mi < _mn:
+            _ms = _ms + self.data[_mi * _mcols + _mi]
+            _mi = _mi + 1
+        return _ms
+
+    # --- misc -------------------------------------------------------------------
+
+    # scalar extract; NaN unless the array holds exactly one element
+    fn item(self) -> f64:
+        if len(self.data) == 1:
+            return self.data[0]
+        return _m_nan()
+
+    # truthiness reductions: all -> every element != 0.0 (empty -> true),
+    # any -> some element != 0.0 (empty -> false)
+    fn all(self) -> bool:
+        for _mv in self.data:
+            if _mv == 0.0:
+                return false
+        return true
+
+    fn any(self) -> bool:
+        for _mv in self.data:
+            if _mv != 0.0:
+                return true
+        return false
+
 # --- shape helpers -----------------------------------------------------------
 
 fn shape_of(a: NDArray) -> [i64]:
@@ -150,6 +436,9 @@ fn flatten(a: NDArray) -> NDArray:
     return NDArray(data, [a.size()])
 
 fn transpose(a: NDArray) -> NDArray:
+    return _nd_transpose(a)
+
+fn _nd_transpose(a: NDArray) -> NDArray:
     if len(a.shape) != 2:
         # generic: reverse axes
         newshape = []
@@ -402,3 +691,9 @@ fn array2string(a: NDArray) -> str:
 
 fn str_arr(a: NDArray) -> str:
     return array2string(a)
+
+# --- private helpers for NDArray methods --------------------------------------
+
+fn _m_nan() -> f64:
+    # IEEE NaN via pow domain edge (0.0/0.0 is a compile-time error in A)
+    return pow(-1.0, 0.5)

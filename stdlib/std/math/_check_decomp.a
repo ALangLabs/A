@@ -1,0 +1,123 @@
+# Check for decomp.a — run: ./build/a run _check_decomp.a  (from this dir)
+import std:core
+
+from "ndarray.a" import NDArray, ndarray, zeros, eye, transpose
+from "linalg.a" import matmul
+from "decomp.a" import eigvalsh, eigh, eigvals, eig, eig_power
+from "decomp.a" import svd, pinv, qr, cholesky, matrix_rank, cond
+
+fn close(a: f64, b: f64, tol: f64) -> bool:
+    d = a - b
+    if d < 0:
+        d = -d
+    return d < tol
+
+fn arr_close(x: NDArray, want: [f64], tol: f64) -> bool:
+    if x.size() != len(want):
+        return false
+    for i in 0..len(want):
+        if close(x.data[i], want[i], tol) == false:
+            return false
+    return true
+
+fn mat_close(x: NDArray, want: [f64], tol: f64) -> bool:
+    return arr_close(x, want, tol)
+
+entry main():
+    tol = 0.000001
+
+    # --- eigh / eigvalsh on [[2,1],[1,2]] ---
+    S = ndarray([2.0, 1.0, 1.0, 2.0], [2, 2])
+    ev = eigvalsh(S)
+    core.assert(close(ev.data[0], 1.0, tol) and close(ev.data[1], 3.0, tol))
+    er = eigh(S)
+    evecs = er[1]
+    evals = er[0]
+    core.assert(close(evals.data[0], 1.0, tol) and close(evals.data[1], 3.0, tol))
+    # every entry has |.| ~ 1/sqrt(2); eigenvector sign is arbitrary, so
+    # verify via the residual A V = V diag(lambda) plus unit norms instead
+    # of pinning signs.
+    for i in 0..4:
+        core.assert(close(abs(evecs.data[i]), 0.7071067811865476, tol))
+    AV = matmul(S, evecs)
+    VL = zeros([2, 2])
+    for j in 0..2:
+        for i in 0..2:
+            VL.data[i * 2 + j] = evecs.data[i * 2 + j] * evals.data[j]
+    for i in 0..4:
+        core.assert(close(AV.data[i], VL.data[i], 0.0000001))
+    # columns are unit norm
+    for j in 0..2:
+        nrm = sqrt(evecs.data[j] * evecs.data[j] + evecs.data[2 + j] * evecs.data[2 + j])
+        core.assert(close(nrm, 1.0, tol))
+
+    # --- svd on diag(3,2) ---
+    D = ndarray([3.0, 0.0, 0.0, 2.0], [2, 2])
+    sr = svd(D)
+    U = sr[0]
+    Sv = sr[1]
+    Vt = sr[2]
+    core.assert(U.shape[0] == 2 and U.shape[1] == 2)
+    core.assert(arr_close(Sv, [3.0, 2.0], tol))
+    core.assert(mat_close(U, [1.0, 0.0, 0.0, 1.0], tol))
+    core.assert(mat_close(Vt, [1.0, 0.0, 0.0, 1.0], tol))
+    # reconstruction U S Vt == D
+    Sd = zeros([2, 2])
+    Sd.data[0] = 3.0
+    Sd.data[3] = 2.0
+    rec = matmul(U, matmul(Sd, Vt))
+    core.assert(mat_close(rec, [3.0, 0.0, 0.0, 2.0], 0.0000001))
+
+    # --- pinv: pinv(A) A ~ I for A = [[1,2],[3,4]] ---
+    A = ndarray([1.0, 2.0, 3.0, 4.0], [2, 2])
+    P = pinv(A)
+    PA = matmul(P, A)
+    core.assert(mat_close(PA, [1.0, 0.0, 0.0, 1.0], 0.000001))
+    # pinv of diag(2,4) = diag(0.5, 0.25)
+    Pd = pinv(D)
+    core.assert(mat_close(Pd, [0.3333333333333333, 0.0, 0.0, 0.5], 0.000001))
+
+    # --- qr on [[1,1],[0,1]] ---
+    Qm = ndarray([1.0, 1.0, 0.0, 1.0], [2, 2])
+    qr_ = qr(Qm)
+    Q = qr_[0]
+    R = qr_[1]
+    core.assert(mat_close(Q, [1.0, 0.0, 0.0, 1.0], tol))
+    core.assert(mat_close(R, [1.0, 1.0, 0.0, 1.0], tol))
+    # reconstruction Q R == A
+    QRr = matmul(Q, R)
+    core.assert(mat_close(QRr, [1.0, 1.0, 0.0, 1.0], tol))
+
+    # --- cholesky on [[4,2],[2,3]] -> L = [[2,0],[1,sqrt(2)]] ---
+    C = ndarray([4.0, 2.0, 2.0, 3.0], [2, 2])
+    L = cholesky(C)
+    core.assert(mat_close(L, [2.0, 0.0, 1.0, 1.4142135623730951], tol))
+    # L L^T == C
+    LLt = matmul(L, transpose(L))
+    core.assert(mat_close(LLt, [4.0, 2.0, 2.0, 3.0], 0.0000001))
+
+    # --- matrix_rank ---
+    core.assert(matrix_rank(eye(2)) == 2)
+    core.assert(matrix_rank(zeros([2, 2])) == 0)
+    Rk = ndarray([1.0, 2.0, 2.0, 4.0], [2, 2])  # rank 1
+    core.assert(matrix_rank(Rk) == 1)
+
+    # --- cond ---
+    Dc = ndarray([1.0, 0.0, 0.0, 100.0], [2, 2])
+    core.assert(close(cond(Dc), 100.0, tol))
+    core.assert(close(cond(A), 14.933, 0.01))  # sigma_max/sigma_min ~ 14.93
+    # eigvals on general 2x2
+    evg = eigvals(A)
+    # eigenvalues of [[1,2],[3,4]]: (5 +- sqrt(33))/2
+    core.assert(close(evg.data[0], (5.0 - sqrt(33.0)) / 2.0, tol))
+    core.assert(close(evg.data[1], (5.0 + sqrt(33.0)) / 2.0, tol))
+    # eig on symmetric delegates to eigh
+    es = eig(S)
+    core.assert(close(es[0].data[0], 1.0, tol) and es[0].shape[0] == 2)
+    # eig_power dominant eigenvalue of [[1,2],[3,4]] is (5+sqrt(33))/2
+    pw = eig_power(A, 500)
+    core.assert(close(pw[0], (5.0 + sqrt(33.0)) / 2.0, 0.0001))
+    nrm = sqrt(pw[1].data[0] * pw[1].data[0] + pw[1].data[1] * pw[1].data[1])
+    core.assert(close(nrm, 1.0, 0.0001))
+
+    print("decomp checks passed")

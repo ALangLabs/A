@@ -1,0 +1,331 @@
+#
+# signal processing helpers: 1-D convolution/correlation (np.convolve /
+# np.correlate semantics, all three modes), 2-D variants
+# (scipy.signal.convolve2d / correlate2d style — NumPy has no 2-D convolve),
+# and sliding_window_view (np.lib.stride_tricks.sliding_window_view).
+#
+# dtype is f64 only; NDArray is a flat C-order (row-major) buffer (ndarray.a).
+#
+# Conventions / deviations from NumPy:
+#  - correlate/convolve require 1-D inputs; non-1-D (and non-scalar) inputs
+#    return an empty NDArray (NumPy raises for ndim > 1). 0-d scalars are
+#    treated as length-1 sequences (np.convolve uses ndmin=1).
+#  - Empty inputs return an empty NDArray (NumPy raises ValueError).
+#  - Unknown `mode` strings return an empty NDArray (NumPy raises).
+#  - correlate follows np.correlate exactly for real inputs, including the
+#    internal swap+reverse when len(v) > len(a); convolve follows
+#    np.convolve (pre-swap so the first arg is the longer one, second arg
+#    reversed). `method` is not supported.
+#  - convolve2d/correlate2d follow scipy.signal conventions instead:
+#    "same" returns the shape of the FIRST input (centered crop of the full
+#    result, start = (kernel_dim - 1) // 2 per axis); "valid" requires the
+#    kernel to fit inside the input on every axis (else empty). No swapping
+#    is performed for correlate2d.
+#  - sliding_window_view materializes a new NDArray (NumPy returns a view).
+#    window_shape/axis are [i64] lists; an empty `axis` list applies the
+#    windows to all axes in order (window_shape must then have len == ndim).
+#    Repeated axes are allowed, matching NumPy.
+#
+from "ndarray.a" import NDArray, ndarray, zeros, _shape_size, _row_major_index
+
+# --- small helpers ------------------------------------------------------------
+
+fn _sig_len1(a: NDArray) -> i64:
+    # length of a 1-D (or 0-d scalar treated as length 1) sequence
+    if len(a.shape) == 0:
+        return 1
+    return a.shape[0]
+
+fn _sig_is_vec(a: NDArray) -> bool:
+    return len(a.shape) <= 1
+
+fn _sig_rev(xs: [f64]) -> [f64]:
+    out = []
+    i = len(xs) - 1
+    while i >= 0:
+        out.append(xs[i])
+        i = i - 1
+    return out
+
+fn _sig_coords(shape: [i64], i: i64) -> [i64]:
+    # C-order multi-index for flat position i
+    coords = []
+    rem = i
+    k = len(shape) - 1
+    while k >= 0:
+        coords.insert(0, rem % shape[k])
+        rem = rem // shape[k]
+        k = k - 1
+    return coords
+
+fn _sig_row_idx(shape: [i64], coords: [i64]) -> i64:
+    return _row_major_index(shape, coords)
+
+# --- 1-D core -----------------------------------------------------------------
+
+# Full correlation of sequences A (len na) and V (len nv), any lengths:
+# out[t] = sum_j A[j + k] * V[j] with lag k = t - (nv - 1), t = 0 .. na+nv-2.
+fn _sig_corr_full(na: i64, av: [f64], nv: i64, vv: [f64]) -> [f64]:
+    f = na + nv - 1
+    out = []
+    t = 0
+    while t < f:
+        k = t - nv + 1
+        acc = 0.0
+        j = 0
+        while j < nv:
+            p = j + k
+            if p >= 0 and p < na:
+                acc = acc + av[p] * vv[j]
+            j = j + 1
+        out.append(acc)
+        t = t + 1
+    return out
+
+# Slice a full correlation (length n_long + n_short - 1) per mode.
+# n_long >= n_short is assumed (caller enforces the NumPy swap rules).
+fn _sig_mode_slice(full: [f64], n_long: i64, n_short: i64, mode: str) -> [f64]:
+    f = len(full)
+    start = 0
+    ln = f
+    if mode == "valid":
+        start = n_short - 1
+        ln = n_long - n_short + 1
+    elif mode == "same":
+        start = (n_short - 1) // 2
+        ln = n_long
+    elif mode == "full":
+        pass
+    else:
+        return []
+    out = []
+    i = 0
+    while i < ln:
+        out.append(full[start + i])
+        i = i + 1
+    return out
+
+fn _sig_arr1(data: [f64]) -> NDArray:
+    return NDArray(data, [len(data)])
+
+fn _sig_empty() -> NDArray:
+    return NDArray([], [0])
+
+# np.correlate(a, v, mode='valid') — real inputs only.
+fn correlate(a: NDArray, v: NDArray, mode: str) -> NDArray:
+    if _sig_is_vec(a) == false or _sig_is_vec(v) == false:
+        return _sig_empty()
+    na = _sig_len1(a)
+    nv = _sig_len1(v)
+    if na == 0 or nv == 0:
+        return _sig_empty()
+    # NumPy swaps so the first operand is the longer one, computes, then
+    # reverses the output (conjugation is a no-op for real f64).
+    swapped = false
+    A = a
+    V = v
+    nl = na
+    ns = nv
+    if na < nv:
+        A = v
+        V = a
+        nl = nv
+        ns = na
+        swapped = true
+    full = _sig_corr_full(nl, A.data, ns, V.data)
+    out = _sig_mode_slice(full, nl, ns, mode)
+    if swapped:
+        out = _sig_rev(out)
+    if len(out) == 0:
+        return _sig_empty()
+    return _sig_arr1(out)
+
+# np.convolve(a, v, mode='full') — real inputs only.
+fn convolve(a: NDArray, v: NDArray, mode: str) -> NDArray:
+    if _sig_is_vec(a) == false or _sig_is_vec(v) == false:
+        return _sig_empty()
+    na = _sig_len1(a)
+    nv = _sig_len1(v)
+    if na == 0 or nv == 0:
+        return _sig_empty()
+    # NumPy swaps so `a` is the longer sequence, then correlates with v[::-1].
+    A = a
+    V = v
+    nl = na
+    ns = nv
+    if nv > na:
+        A = v
+        V = a
+        nl = nv
+        ns = na
+    vrev = _sig_rev(V.data)
+    full = _sig_corr_full(nl, A.data, ns, vrev)
+    out = _sig_mode_slice(full, nl, ns, mode)
+    if len(out) == 0:
+        return _sig_empty()
+    return _sig_arr1(out)
+
+# --- 2-D core -----------------------------------------------------------------
+
+# Full 2-D correlation: out[i,j] = sum_{p,q} A[p + k0, q + k1] * V[p, q]
+# with lags k0 = i - (nv0-1), k1 = j - (nv1-1). Output shape na + nv - 1.
+fn _sig_corr2d_full(a: NDArray, v: NDArray) -> NDArray:
+    na0 = a.shape[0]
+    na1 = a.shape[1]
+    nv0 = v.shape[0]
+    nv1 = v.shape[1]
+    f0 = na0 + nv0 - 1
+    f1 = na1 + nv1 - 1
+    data = []
+    i = 0
+    while i < f0:
+        k0 = i - nv0 + 1
+        j = 0
+        while j < f1:
+            k1 = j - nv1 + 1
+            acc = 0.0
+            p = 0
+            while p < nv0:
+                r0 = p + k0
+                q = 0
+                while q < nv1:
+                    r1 = q + k1
+                    if r0 >= 0 and r0 < na0 and r1 >= 0 and r1 < na1:
+                        acc = acc + a.data[r0 * na1 + r1] * v.data[p * nv1 + q]
+                    q = q + 1
+                p = p + 1
+            data.append(acc)
+            j = j + 1
+        i = i + 1
+    return NDArray(data, [f0, f1])
+
+# Crop a full 2-D result per mode (scipy.signal style).
+fn _sig_mode_slice2d(full: NDArray, mode: str, a0: i64, a1: i64, v0: i64, v1: i64) -> NDArray:
+    f0 = full.shape[0]
+    f1 = full.shape[1]
+    s0 = 0
+    s1 = 0
+    l0 = f0
+    l1 = f1
+    if mode == "valid":
+        if v0 > a0 or v1 > a1:
+            return _sig_empty()
+        s0 = v0 - 1
+        s1 = v1 - 1
+        l0 = a0 - v0 + 1
+        l1 = a1 - v1 + 1
+    elif mode == "same":
+        s0 = (v0 - 1) // 2
+        s1 = (v1 - 1) // 2
+        l0 = a0
+        l1 = a1
+    elif mode == "full":
+        pass
+    else:
+        return _sig_empty()
+    data = []
+    i = 0
+    while i < l0:
+        j = 0
+        while j < l1:
+            data.append(full.data[(s0 + i) * f1 + (s1 + j)])
+            j = j + 1
+        i = i + 1
+    return NDArray(data, [l0, l1])
+
+fn _sig_is_2d(a: NDArray) -> bool:
+    return len(a.shape) == 2
+
+# _sig_corr2d_full computes a CORRELATION (a[p+k, q+l] * v[p, q]).
+# Convolution flips the kernel; for row-major 2-D, rot180 == flat reverse.
+fn _sig_rot180_2d(v: NDArray) -> NDArray:
+    return NDArray(_sig_rev(v.data), [v.shape[0], v.shape[1]])
+
+# scipy.signal.convolve2d(in1, in2, mode) equivalent for f64 NDArray.
+fn convolve2d(a: NDArray, v: NDArray, mode: str) -> NDArray:
+    if _sig_is_2d(a) == false or _sig_is_2d(v) == false:
+        return _sig_empty()
+    full = _sig_corr2d_full(a, _sig_rot180_2d(v))
+    return _sig_mode_slice2d(full, mode, a.shape[0], a.shape[1], v.shape[0], v.shape[1])
+
+# scipy.signal.correlate2d(in1, in2, mode): direct correlation, no flip.
+fn correlate2d(a: NDArray, v: NDArray, mode: str) -> NDArray:
+    if _sig_is_2d(a) == false or _sig_is_2d(v) == false:
+        return _sig_empty()
+    full = _sig_corr2d_full(a, v)
+    return _sig_mode_slice2d(full, mode, a.shape[0], a.shape[1], v.shape[0], v.shape[1])
+
+# --- sliding_window_view ------------------------------------------------------
+
+# np.lib.stride_tricks.sliding_window_view(x, window_shape, axis).
+# window_shape: [i64]; axis: [i64] (empty list = all axes in order).
+# Returns a materialized NDArray of shape x_shape_trimmed + window_shape.
+fn sliding_window_view(x: NDArray, window_shape: [i64], axis: [i64]) -> NDArray:
+    nd = len(x.shape)
+    axes = []
+    wins = []
+    if len(axis) == 0:
+        if len(window_shape) != nd:
+            return _sig_empty()
+        i = 0
+        while i < nd:
+            axes.append(i)
+            wins.append(window_shape[i])
+            i = i + 1
+    else:
+        if len(axis) != len(window_shape):
+            return _sig_empty()
+        i = 0
+        while i < len(axis):
+            ax = axis[i]
+            if ax < 0:
+                ax = ax + nd
+            if ax < 0 or ax >= nd:
+                return _sig_empty()
+            if window_shape[i] < 0:
+                return _sig_empty()
+            axes.append(ax)
+            wins.append(window_shape[i])
+            i = i + 1
+    k = len(axes)
+    # trimmed shape: each windowed axis loses (w - 1)
+    tshape = []
+    for d in x.shape:
+        tshape.append(d)
+    j = 0
+    while j < k:
+        ax = axes[j]
+        tshape[ax] = tshape[ax] - wins[j] + 1
+        j = j + 1
+    outshape = []
+    for d in tshape:
+        outshape.append(d)
+    for w in wins:
+        outshape.append(w)
+    # total output size (0 if any window is empty or axis underflows)
+    total = 1
+    bad = false
+    for d in outshape:
+        if d < 0:
+            bad = true
+        total = total * d
+    if bad or total < 0:
+        return _sig_empty()
+    if total == 0:
+        return NDArray([], outshape)
+    data = []
+    idx = 0
+    while idx < total:
+        coords = _sig_coords(outshape, idx)
+        src = []
+        i = 0
+        while i < nd:
+            src.append(coords[i])
+            i = i + 1
+        j = 0
+        while j < k:
+            src[axes[j]] = src[axes[j]] + coords[nd + j]
+            j = j + 1
+        data.append(x.data[_sig_row_idx(x.shape, src)])
+        idx = idx + 1
+    return NDArray(data, outshape)
