@@ -1,5 +1,5 @@
-import "lib/mathx.a" as m
-from "lib/mathx.a" import Point
+import "lib/mathx.astra" as m
+from "lib/mathx.astra" import Point
 
 p = m.Point(x=5, y=6)
 q = Point(1, 2)

@@ -21,8 +21,8 @@
 #    approximate equality.
 #
 import math
-from "ndarray.a" import NDArray
-from "ufuncs.a" import _nan, _pinf, _div, _hypot
+from "ndarray.astra" import NDArray
+from "ufuncs.astra" import _nan, _pinf, _div, _hypot
 
 class Complex:
     re: f64

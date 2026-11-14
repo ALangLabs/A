@@ -5,11 +5,11 @@ other languages.
 
 ## Layout
 
-- `benchmarks/arithmetic/sum.a` — integer accumulation loop.
-- `benchmarks/collections/pipeline.a` — collection pipeline workload.
-- `benchmarks/memory/strings.a` — string/memory workload.
-- `benchmarks/numerical/sqrt.a` — floating-point workload.
-- `benchmarks/numerical/matmul.a` — native blocked `matmul` workload (64x64x64).
+- `benchmarks/arithmetic/sum.astra` — integer accumulation loop.
+- `benchmarks/collections/pipeline.astra` — collection pipeline workload.
+- `benchmarks/memory/strings.astra` — string/memory workload.
+- `benchmarks/numerical/sqrt.astra` — floating-point workload.
+- `benchmarks/numerical/matmul.astra` — native blocked `matmul` workload (64x64x64).
 - `benchmarks/equivalents/` — same workloads in Python (`sum.py`,
   `pipeline.py`, `sqrt.py`, `strings.py`, `matmul.py`), C (`bench.c`),
   and C++ (`bench.cpp`) for comparison.

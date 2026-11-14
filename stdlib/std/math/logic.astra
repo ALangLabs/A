@@ -15,7 +15,7 @@
 # has no pointer identity for lists, so aliasing cannot be detected
 # (documented deviation).
 
-from "ndarray.a" import NDArray, ndarray, _broadcast_shape, _broadcast_strides, _shape_size
+from "ndarray.astra" import NDArray, ndarray, _broadcast_shape, _broadcast_strides, _shape_size
 
 # --- small helpers ------------------------------------------------------------
 

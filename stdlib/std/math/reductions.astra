@@ -17,7 +17,7 @@
 # caller variables — a local named e.g. `data` or `m` silently overwrites a
 # same-named variable in the calling scope. Keep the prefix.
 #
-from "ndarray.a" import NDArray, _shape_size, _row_major_index, _ew_bin, ravel
+from "ndarray.astra" import NDArray, _shape_size, _row_major_index, _ew_bin, ravel
 
 fn _nan() -> f64:
     # IEEE NaN via pow domain edge (0.0/0.0 is a compile-time error in A)

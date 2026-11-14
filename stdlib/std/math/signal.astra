@@ -26,7 +26,7 @@
 #    windows to all axes in order (window_shape must then have len == ndim).
 #    Repeated axes are allowed, matching NumPy.
 #
-from "ndarray.a" import NDArray, ndarray, zeros, _shape_size, _row_major_index
+from "ndarray.astra" import NDArray, ndarray, zeros, _shape_size, _row_major_index
 
 # --- small helpers ------------------------------------------------------------
 

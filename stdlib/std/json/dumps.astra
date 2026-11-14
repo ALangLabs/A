@@ -1,6 +1,6 @@
 # std.json.dumps — Python `json.dumps`/`json.loads` port.
 #
-# This file lives next to (not inside) `__init__.a` because `import json`
+# This file lives next to (not inside) `__init__.astra` because `import json`
 # inside the package `__init__` would resolve to the package itself
 # (self-import -> codegen failure). Bare `import json` here binds the
 # *native* module (parse/stringify/pretty/is_valid/get/at/len/has/keys/

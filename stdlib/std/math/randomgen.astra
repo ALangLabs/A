@@ -21,10 +21,10 @@
 #   * seed(s) shares state with the std:random module stream.
 #   * Park-Miller has period 2^31-2 — fine for simulation, weak for crypto.
 #
-# Sibling import: `from "randomgen.a" import ...`.
+# Sibling import: `from "randomgen.astra" import ...`.
 
 import std:random as _rng
-from "ndarray.a" import NDArray, zeros, empty, _shape_size
+from "ndarray.astra" import NDArray, zeros, empty, _shape_size
 
 # --- shape helpers ------------------------------------------------------------
 

@@ -3,7 +3,7 @@
 #
 # copy()/deepcopy() take and return dynamic Json values, so results are
 # inspected through the json.* accessors rather than typed indexing.
-from "std/copy/__init__.a" import copy, deepcopy
+from "std/copy/__init__.astra" import copy, deepcopy
 import std:json
 
 fn assert_eq(a, b):

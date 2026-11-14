@@ -24,22 +24,22 @@
 #     because A has no first-class `bytes` for this API.
 #   * os.chmod/utime on Windows are no-ops or unsupported, as in the runtime.
 
-from "constants.a" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS
+from "constants.astra" import name, sep, pathsep, linesep, curdir, pardir, extsep, devnull, altsep, supports_dir_fd, supports_effective_ids, supports_fd, supports_follow_symlinks, F_OK, R_OK, W_OK, X_OK, SEEK_SET, SEEK_CUR, SEEK_END, SIGHUP, SIGINT, SIGQUIT, SIGILL, SIGTRAP, SIGABRT, SIGBUS, SIGFPE, SIGKILL, SIGUSR1, SIGSEGV, SIGUSR2, SIGPIPE, SIGALRM, SIGTERM, SIGSTKFLT, SIGCHLD, SIGCONT, SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGXCPU, SIGXFSZ, SIGVTALRM, SIGPROF, SIGWINCH, SIGIO, SIGPWR, SIGSYS
 
-from "environment.a" import getenv, getenv_default, getenvb, environ_get, environ_all, putenv, unsetenv, environ, Environ
+from "environment.astra" import getenv, getenv_default, getenvb, environ_get, environ_all, putenv, unsetenv, environ, Environ
 
-from "process.a" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg, gethostname, umask, getpagesize, kill, _exit
+from "process.astra" import getcwd, getcwdb, chdir, getpid, getppid, getuid, geteuid, getgid, getegid, getlogin, cpu_count, system, uname, Uname, getloadavg, gethostname, umask, getpagesize, kill, _exit
 
-from "stat.a" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, chown, utime, samefile, samestat, ismount, disk_usage
+from "stat.astra" import StatResult, stat, lstat, try_stat, try_lstat, exists, lexists, isfile, isdir, islink, getsize, access, chmod, chown, utime, samefile, samestat, ismount, disk_usage
 
-from "dirs.a" import DirEntry, listdir, scandir, mkdir, makedirs, rmdir, removedirs, walk, fwalk
+from "dirs.astra" import DirEntry, listdir, scandir, mkdir, makedirs, rmdir, removedirs, walk, fwalk
 
-from "files.a" import remove, unlink, rename, replace, renames, truncate, link, symlink, readlink
+from "files.astra" import remove, unlink, rename, replace, renames, truncate, link, symlink, readlink
 
-from "randbytes.a" import urandom, getrandom
+from "randbytes.astra" import urandom, getrandom
 
-from "syscalls.a" import popen
+from "syscalls.astra" import popen
 
-from "termsize.a" import get_terminal_size, TerminalSize
+from "termsize.astra" import get_terminal_size, TerminalSize
 
-from "pathns.a" import path, PathNamespace
+from "pathns.astra" import path, PathNamespace

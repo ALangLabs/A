@@ -7,6 +7,6 @@
 #
 # Legacy helpers still available:
 #   utf8_encode, utf8_decode, b2s, s2b, s2b_fast, chr, ord
-from "codecs.a" import encode, decode, encode_list, supported_encodings
-from "utf8.a" import chr, ord, utf8_encode, utf8_decode
-from "latin1.a" import b2s, s2b, s2b_fast
+from "codecs.astra" import encode, decode, encode_list, supported_encodings
+from "utf8.astra" import chr, ord, utf8_encode, utf8_decode
+from "latin1.astra" import b2s, s2b, s2b_fast

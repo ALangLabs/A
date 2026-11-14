@@ -4,7 +4,7 @@
 # (print/eprint/input/flush). This package is reached via the quoted
 # path, same convention as `std/collections`:
 #
-#   from "std/io/__init__.a" import StringIO, BytesIO
+#   from "std/io/__init__.astra" import StringIO, BytesIO
 #
 # `StringIO` is the analogue of `io.StringIO` (text), `BytesIO` of
 # `io.BytesIO` (bytes as `[i64]` 0-255, matching `std.bytes`). Both keep
@@ -385,7 +385,7 @@ Implemented on `std:terminal.read_char`, so it is safe on terminals and
 pipes alike; avoid mixing it with `input()`/`read_file` on stdin in the
 same program (stdio buffering vs. raw fd reads do not share a buffer).
 
-    from "std/io/__init__.a" import read_line
+    from "std/io/__init__.astra" import read_line
     name = read_line()
 """
 fn read_line():

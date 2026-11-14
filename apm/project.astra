@@ -6,8 +6,8 @@
 # Cargo.lock analogue: commit it for reproducible installs).
 
 import json
-from "util.a" import join, dirname, basename, is_dir, is_file, exists, getenv, read_text, write_text, norm_import_name, fail, ob, cb
-from "manifest.a" import load_manifest, mf_get, mf_deps, json_esc
+from "util.astra" import join, dirname, basename, is_dir, is_file, exists, getenv, read_text, write_text, norm_import_name, fail, ob, cb
+from "manifest.astra" import load_manifest, mf_get, mf_deps, json_esc
 
 """project_root(flag) -> project dir: -p flag, APM_PROJECT, or cwd."""
 fn project_root(flag: String):

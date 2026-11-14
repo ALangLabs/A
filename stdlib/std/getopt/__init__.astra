@@ -1,2 +1,2 @@
 # std.getopt package — port of Python 3.14 Lib/getopt.py.
-from "getopt.a" import getopt, gnu_getopt, GetoptError
+from "getopt.astra" import getopt, gnu_getopt, GetoptError

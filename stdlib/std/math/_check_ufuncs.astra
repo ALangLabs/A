@@ -4,12 +4,12 @@
 # Exits non-zero (assert panic) on any mismatch.
 #
 import math
-from "ndarray.a" import NDArray, array_from_list, zeros, ones, arange1, full
-from "ufuncs.a" import add, subtract, multiply, divide, power, float_power, remainder, mod, fmod, floor_divide, hypot, maximum, minimum, fmax, fmin, copysign, arctan2
-from "ufuncs.a" import add_scalar, subtract_scalar, multiply_scalar, divide_scalar, power_scalar, float_power_scalar, remainder_scalar, mod_scalar, fmod_scalar, floor_divide_scalar, hypot_scalar, maximum_scalar, minimum_scalar, fmax_scalar, fmin_scalar, copysign_scalar, arctan2_scalar
-from "ufuncs.a" import radd_scalar, rsubtract_scalar, rmultiply_scalar, rdivide_scalar, rpower_scalar, rfloat_power_scalar, rremainder_scalar, rmod_scalar, rfmod_scalar, rfloor_divide_scalar, rhypot_scalar, rmaximum_scalar, rminimum_scalar, rfmax_scalar, rfmin_scalar, rcopysign_scalar, rarctan2_scalar
-from "ufuncs.a" import negative, positive, absolute, rint, round, sign, reciprocal, sqrt, square, exp, exp2, expm1, log, log2, log10, log1p, sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh, deg2rad, rad2deg, floor, ceil, trunc, fix, isnan, isinf, isfinite, signbit, sinc
-from "ufuncs.a" import where_, where_scalar, clip, clip_min, clip_max, clip_arr, nan_to_num, nan_to_num_full
+from "ndarray.astra" import NDArray, array_from_list, zeros, ones, arange1, full
+from "ufuncs.astra" import add, subtract, multiply, divide, power, float_power, remainder, mod, fmod, floor_divide, hypot, maximum, minimum, fmax, fmin, copysign, arctan2
+from "ufuncs.astra" import add_scalar, subtract_scalar, multiply_scalar, divide_scalar, power_scalar, float_power_scalar, remainder_scalar, mod_scalar, fmod_scalar, floor_divide_scalar, hypot_scalar, maximum_scalar, minimum_scalar, fmax_scalar, fmin_scalar, copysign_scalar, arctan2_scalar
+from "ufuncs.astra" import radd_scalar, rsubtract_scalar, rmultiply_scalar, rdivide_scalar, rpower_scalar, rfloat_power_scalar, rremainder_scalar, rmod_scalar, rfmod_scalar, rfloor_divide_scalar, rhypot_scalar, rmaximum_scalar, rminimum_scalar, rfmax_scalar, rfmin_scalar, rcopysign_scalar, rarctan2_scalar
+from "ufuncs.astra" import negative, positive, absolute, rint, round, sign, reciprocal, sqrt, square, exp, exp2, expm1, log, log2, log10, log1p, sin, cos, tan, arcsin, arccos, arctan, sinh, cosh, tanh, arcsinh, arccosh, arctanh, deg2rad, rad2deg, floor, ceil, trunc, fix, isnan, isinf, isfinite, signbit, sinc
+from "ufuncs.astra" import where_, where_scalar, clip, clip_min, clip_max, clip_arr, nan_to_num, nan_to_num_full
 
 fn _eq(x: f64, y: f64) -> bool:
     return abs(x - y) < 1e-9

@@ -1,1 +1,1 @@
-from "impl.a" import greet, Answer, double
+from "impl.astra" import greet, Answer, double

@@ -1,4 +1,4 @@
-from "std/collections/__init__.a" import namedtuple
+from "std/collections/__init__.astra" import namedtuple
 
 fn test_namedtuple_basic():
     Point = namedtuple("Point", ["x", "y"])

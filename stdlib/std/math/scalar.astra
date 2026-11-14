@@ -23,11 +23,11 @@
 #  * erf/erfc are re-exported from special.a (A&S 7.1.26 approximation).
 #
 from math import PI, E, sqrt as _nsqrt, sin as _nsin, cos as _ncos, tan as _ntan, asin as _nasin, acos as _nacos, atan as _natan, atan2 as _natan2, exp as _nexp, log as _nlog, log2 as _nlog2, log10 as _nlog10, floor as _nfloor, ceil as _nceil, round as _nround, trunc as _ntrunc, abs as _nabs, min as _nmin, max as _nmax, pow as _npow, random_int as _nrandom_int
-from "ndarray.a" import NDArray
-from "special.a" import erf, erfc
-from "ufuncs.a" import sqrt as _usqrt, sin as _usin, cos as _ucos, tan as _utan, exp as _uexp, expm1 as _uexpm1, log as _ulog, log2 as _ulog2, log10 as _ulog10, log1p as _ulog1p, arcsin as _uarcsin, arccos as _uarccos, arctan as _uarctan, floor as _ufloor, ceil as _uceil, trunc as _utrunc, round as _uround, absolute as _uabsolute, deg2rad as _udeg2rad, rad2deg as _urad2deg, hypot as _uhypot, hypot_scalar as _uhypot_scalar, rhypot_scalar as _rhypot_scalar, fmod as _ufmod, fmod_scalar as _ufmod_scalar, rfmod_scalar as _rfmod_scalar, arctan2 as _uarctan2, arctan2_scalar as _uarctan2_scalar, rarctan2_scalar as _urarctan2_scalar, power as _upower, power_scalar as _upower_scalar, rpower_scalar as _rpower_scalar, minimum as _uminimum, minimum_scalar as _uminimum_scalar, rminimum_scalar as _rminimum_scalar, maximum as _umaximum, maximum_scalar as _umaximum_scalar, rmaximum_scalar as _rmaximum_scalar
-from "reductions.a" import prod as _rprod, prod_all as _rprod_all, min as _rmin, min_all as _rmin_all, max as _rmax, max_all as _rmax_all
-from "randomgen.a" import gamma as _rgamma
+from "ndarray.astra" import NDArray
+from "special.astra" import erf, erfc
+from "ufuncs.astra" import sqrt as _usqrt, sin as _usin, cos as _ucos, tan as _utan, exp as _uexp, expm1 as _uexpm1, log as _ulog, log2 as _ulog2, log10 as _ulog10, log1p as _ulog1p, arcsin as _uarcsin, arccos as _uarccos, arctan as _uarctan, floor as _ufloor, ceil as _uceil, trunc as _utrunc, round as _uround, absolute as _uabsolute, deg2rad as _udeg2rad, rad2deg as _urad2deg, hypot as _uhypot, hypot_scalar as _uhypot_scalar, rhypot_scalar as _rhypot_scalar, fmod as _ufmod, fmod_scalar as _ufmod_scalar, rfmod_scalar as _rfmod_scalar, arctan2 as _uarctan2, arctan2_scalar as _uarctan2_scalar, rarctan2_scalar as _urarctan2_scalar, power as _upower, power_scalar as _upower_scalar, rpower_scalar as _rpower_scalar, minimum as _uminimum, minimum_scalar as _uminimum_scalar, rminimum_scalar as _rminimum_scalar, maximum as _umaximum, maximum_scalar as _umaximum_scalar, rmaximum_scalar as _rmaximum_scalar
+from "reductions.astra" import prod as _rprod, prod_all as _rprod_all, min as _rmin, min_all as _rmin_all, max as _rmax, max_all as _rmax_all
+from "randomgen.astra" import gamma as _rgamma
 
 # --- constants ---------------------------------------------------------------------
 # PI / E are re-exported native constants (math.PI / math.E values) — A

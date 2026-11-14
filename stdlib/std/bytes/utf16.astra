@@ -1,6 +1,6 @@
 # std.bytes.utf16 — UTF-16 codecs (LE/BE and BOM-aware).
 import std:core
-from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+from "common.astra" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
 
 """_u16_enc_le(cp, out)"""
 fn _u16_enc_le(cp, out):

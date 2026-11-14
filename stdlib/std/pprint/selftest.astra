@@ -1,6 +1,6 @@
 # std.pprint selftest — PrettyPrinter_new + module-level helpers.
 # Run: ./build/a test stdlib/std/pprint/selftest.a
-from "pretty.a" import PrettyPrinter_new, PrettyPrinter, pprint, pformat, saferepr, isreadable, isrecursive, pp, pformat_full
+from "pretty.astra" import PrettyPrinter_new, PrettyPrinter, pprint, pformat, saferepr, isreadable, isrecursive, pp, pformat_full
 
 fn assert_eq(a, b):
     assert(a == b)

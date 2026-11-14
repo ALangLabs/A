@@ -1,2 +1,2 @@
-from "range.a" import range_step
-from "functional.a" import repeat, zip_apply, take, enumerate_pairs, chain, product, permutations, combinations, combinations_with_replacement, groupby, groupby_key, accumulate, takewhile, dropwhile, pairwise, batched, islice, zip_longest, compress, filterfalse, tee, indexed, starmap, cycle, count_range, zip_all, zip_longest_all, chain_from_iterable, accumulate_init
+from "range.astra" import range_step
+from "functional.astra" import repeat, zip_apply, take, enumerate_pairs, chain, product, permutations, combinations, combinations_with_replacement, groupby, groupby_key, accumulate, takewhile, dropwhile, pairwise, batched, islice, zip_longest, compress, filterfalse, tee, indexed, starmap, cycle, count_range, zip_all, zip_longest_all, chain_from_iterable, accumulate_init

@@ -1,7 +1,7 @@
 # Modules and imports
 
 Verified against `compiler/astra/frontend/parser` (ImportStmt/FromImportStmt),
-`examples/modules/imports.a`, and `tests/integration/cases/modules/`.
+`examples/modules/imports.astra`, and `tests/integration/cases/modules/`.
 
 ## Import forms
 
@@ -33,7 +33,7 @@ from python:json import loads
   `from std:enum import Enum`. Plain `import std:enum` binds a keyword name
   — prefer `as` aliasing or the `from` form.
 - Modules are namespaced; `import "lib/mathx.a"` binds `mathx.*` members.
-- Package `__init__.a` re-exports resolve on every backend: a package can
+- Package `__init__.astra` re-exports resolve on every backend: a package can
   forward names with `from "impl.a" import name`, and attribute access
   through the package binding follows the re-export to the module that
   actually declares it (`a::resolveModuleMember` lives in
@@ -41,12 +41,12 @@ from python:json import loads
   x86-64 asm emitter, and in `codegen_native.cpp` for the per-arch native
   emitter). Example:
   `import "lib/pkg/__init__.a" as pkg` then `pkg.greet()` calls the
-  function re-exported by `pkg/__init__.a`.
+  function re-exported by `pkg/__init__.astra`.
 - Import cycles and missing modules are compile errors.
 
 ## Module files
 
-Any `.a` file is a module; `examples/modules/lib/mathx.a` shows a typical
+Any `.a` file is a module; `examples/modules/lib/mathx.astra` shows a typical
 fixture. Top-level statements run once at import.
 
 ## Entry point: `entry name()`

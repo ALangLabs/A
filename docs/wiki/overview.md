@@ -16,7 +16,7 @@ entry main():
 ```
 
 Top-level statements run first; `entry name():` marks the function the
-compiler invokes once after imports initialize. Save as `hello.a` and run
+compiler invokes once after imports initialize. Save as `hello.astra` and run
 `./build/a run hello.a`.
 
 ## Headline features

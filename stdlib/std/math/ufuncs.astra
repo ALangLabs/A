@@ -23,7 +23,7 @@
 #    (detected via atan2); documented per-function.
 #
 import math
-from "ndarray.a" import NDArray, _broadcast_shape, _shape_size, _scalar_or_arr
+from "ndarray.astra" import NDArray, _broadcast_shape, _shape_size, _scalar_or_arr
 
 # --- scalar helpers -----------------------------------------------------------
 

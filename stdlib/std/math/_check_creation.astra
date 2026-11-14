@@ -1,11 +1,11 @@
 #
 # Verification for creation.a — expected values computed by hand.
 #
-from "creation.a" import copy, ascontiguousarray, require, copyto
-from "creation.a" import asarray_ndarray, asarray_flat, asarray_list
-from "creation.a" import asarray_nested3, from_flat, indices, ogrid, mgrid
-from "ndarray.a" import NDArray, zeros, ones, array2string, get, size_of
-from "ndarray.a" import ndim, reshape
+from "creation.astra" import copy, ascontiguousarray, require, copyto
+from "creation.astra" import asarray_ndarray, asarray_flat, asarray_list
+from "creation.astra" import asarray_nested3, from_flat, indices, ogrid, mgrid
+from "ndarray.astra" import NDArray, zeros, ones, array2string, get, size_of
+from "ndarray.astra" import ndim, reshape
 
 fn check(name: str, got: f64, want: f64) -> bool:
     if got == want:

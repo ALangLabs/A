@@ -3,8 +3,8 @@
 # digitize, interp, gradient, trapz, diff, ediff1d, unwrap, windows,
 # meshgrid, diag/tril/triu indices, i0.
 
-from "ndarray.a" import NDArray, zeros, ones, arange, linspace, array_from_list, get, set, tolist, str_arr
-from "statslib.a" import histogram, histogram2d, histogram2d_edges, bincount, percentile, percentile_list, quantile, quantile_list, percentile_axis, quantile_axis, percentile_axis_list, median, median_axis, cov, corrcoef, digitize, interp, interp_scalar, gradient, gradient_axis, trapz, trapz_axis, diff, ediff1d, unwrap, bartlett, blackman, hamming, hann, hanning, kaiser, i0, i0_arr, meshgrid, meshgrid_ij, meshgrid_list, diag_indices, tril_indices, triu_indices
+from "ndarray.astra" import NDArray, zeros, ones, arange, linspace, array_from_list, get, set, tolist, str_arr
+from "statslib.astra" import histogram, histogram2d, histogram2d_edges, bincount, percentile, percentile_list, quantile, quantile_list, percentile_axis, quantile_axis, percentile_axis_list, median, median_axis, cov, corrcoef, digitize, interp, interp_scalar, gradient, gradient_axis, trapz, trapz_axis, diff, ediff1d, unwrap, bartlett, blackman, hamming, hann, hanning, kaiser, i0, i0_arr, meshgrid, meshgrid_ij, meshgrid_list, diag_indices, tril_indices, triu_indices
 
 fn _approx(a: f64, b: f64, tol: f64) -> bool:
     d = abs(a - b)

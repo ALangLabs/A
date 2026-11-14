@@ -1,4 +1,4 @@
-import "lib/mathx.a" as m
+import "lib/mathx.astra" as m
 
 print(m.counter)
 m.counter = 41

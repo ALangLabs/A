@@ -1,6 +1,6 @@
 # check for polynomial.a + set ops — run: ./build/a run stdlib/std/math/numpy/_check_polynomial.a
-from "ndarray.a" import NDArray
-from "polynomial.a" import polyval, polyval_arr, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, roots, piecewise_const, isin, in1d, intersect1d, union1d, setdiff1d, setxor1d, finfo_f64
+from "ndarray.astra" import NDArray
+from "polynomial.astra" import polyval, polyval_arr, polyfit, polyder, polyint, polymul, polyadd, polysub, polydiv, polyroots, roots, piecewise_const, isin, in1d, intersect1d, union1d, setdiff1d, setxor1d, finfo_f64
 
 fn assert_close(a, b, tol = 1e-9):
     assert(abs(a - b) < tol)

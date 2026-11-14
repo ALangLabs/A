@@ -24,7 +24,7 @@ maybeUser?.name            # safe navigation: None propagates
 - `expr?` (try) propagates failures upward — `Err` for builtin `Result`
   values and `None` for optionals (the enclosing function must then return
   a matching optional/`Result` type). Used in
-  `tests/integration/cases/result.a` as `q = divide(x, y)?`.
+  `tests/integration/cases/result.astra` as `q = divide(x, y)?`.
 
 ## Results (`Ok` / `Err`)
 

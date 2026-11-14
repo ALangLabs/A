@@ -7,9 +7,9 @@
 # satisfied by the chosen version, otherwise resolution fails with a
 # clear conflict message (no backtracking in v1).
 
-from "registry.a" import reg_versions, reg_best_version, reg_deps
-from "semver.a" import satisfies
-from "util.a" import fail
+from "registry.astra" import reg_versions, reg_best_version, reg_deps
+from "semver.astra" import satisfies
+from "util.astra" import fail
 
 """resolve(reg, reqs) -> (resolved_list, version_map).
 resolved_list: [ [name, version], ... ] sorted by name.

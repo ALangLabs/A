@@ -3,7 +3,7 @@
 import std:fs
 import std:core
 import std:path as pathlib
-from "dirs.a" import isdir, listdir, makedirs, removedirs, rmdir
+from "dirs.astra" import isdir, listdir, makedirs, removedirs, rmdir
 
 """remove(path, dir_fd=None) -> remove a file (not a directory)."""
 fn remove(path, dir_fd=None):

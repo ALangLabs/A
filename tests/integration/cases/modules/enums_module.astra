@@ -1,5 +1,5 @@
-import "lib/colors.a" as c
-from "lib/colors.a" import LIMIT, name_of
+import "lib/colors.astra" as c
+from "lib/colors.astra" import LIMIT, name_of
 
 print(c.Color.Red)
 print(c.Color.Green)

@@ -19,7 +19,7 @@
 #   * set ops (isin/in1d/intersect1d/union1d/setdiff1d/setxor1d) compare f64
 #     values with exact equality and return f64 0/1 masks (NumPy uses bool).
 #
-from "ndarray.a" import NDArray
+from "ndarray.astra" import NDArray
 
 # --- coefficient-list helpers --------------------------------------------------
 

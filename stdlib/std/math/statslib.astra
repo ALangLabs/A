@@ -10,8 +10,8 @@
 #
 # Requires: ndarray.a (NDArray core). No other numpy modules needed.
 
-from "ndarray.a" import NDArray, zeros, ones, empty, full, arange, arange1, linspace, eye, identity, array_from_list, ndarray, reshape, ravel, flatten, transpose, get, set, tolist, array2string, str_arr, shape_of, ndim, size_of, is_scalar_shape
-from "ndarray.a" import _shape_size, _row_major_index, _shape_prod, _broadcast_shape, _broadcast_strides, _asarray_scalar, _ew_bin, _ew_un, _scalar_or_arr, _with_scalar
+from "ndarray.astra" import NDArray, zeros, ones, empty, full, arange, arange1, linspace, eye, identity, array_from_list, ndarray, reshape, ravel, flatten, transpose, get, set, tolist, array2string, str_arr, shape_of, ndim, size_of, is_scalar_shape
+from "ndarray.astra" import _shape_size, _row_major_index, _shape_prod, _broadcast_shape, _broadcast_strides, _asarray_scalar, _ew_bin, _ew_un, _scalar_or_arr, _with_scalar
 
 # --- small helpers -------------------------------------------------------------
 

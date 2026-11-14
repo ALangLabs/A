@@ -3,8 +3,8 @@
 import std:fs
 import std:core
 import std:path as pathlib
-from "stat.a" import exists, isdir, isfile, islink
-import "stat.a" as osstat
+from "stat.astra" import exists, isdir, isfile, islink
+import "stat.astra" as osstat
 
 """DirEntry -> one result of scandir(), mirroring os.DirEntry."""
 class DirEntry:

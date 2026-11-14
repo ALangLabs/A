@@ -13,7 +13,7 @@
 #   * `p.keywords`          -> absent.
 #   * arbitrary arity       -> at most 8 total call arguments (`_apply`).
 #   * partial objects are not themselves callable values.
-from "_apply.a" import _apply
+from "_apply.astra" import _apply
 
 """
 Partial is the A analogue of a `functools.partial` object.

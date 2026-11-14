@@ -39,7 +39,7 @@
 import math
 import std:core
 
-from "ndarray.a" import NDArray, ndarray, zeros, reshape, ravel, _shape_size
+from "ndarray.astra" import NDArray, ndarray, zeros, reshape, ravel, _shape_size
 
 fn _pi() -> f64:
     return 3.14159265358979323846

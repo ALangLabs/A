@@ -3,7 +3,7 @@
 # NOTE: the typechecker instantiates each generic class once per module,
 # so every Queue<T> use in this file shares T = i64 (LifoQueue and
 # PriorityQueue are separate classes and keep their own element types).
-from "std/queue/__init__.a" import queue_new, Queue, lifo_queue_new, priority_queue_new
+from "std/queue/__init__.astra" import queue_new, Queue, lifo_queue_new, priority_queue_new
 
 fn assert_eq(a, b):
     assert(a == b)

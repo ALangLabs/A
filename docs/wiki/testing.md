@@ -34,7 +34,7 @@ fn test_assertions():
     assert_eq("A".lower(), "a")
 ```
 
-See `examples/advanced/testing.a`.
+See `examples/advanced/testing.astra`.
 
 ## Assertions
 

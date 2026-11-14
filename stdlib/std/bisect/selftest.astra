@@ -1,5 +1,5 @@
 # std.bisect selftest — run: ./build/a test stdlib/std/bisect/selftest.a
-from "std/bisect/__init__.a" import bisect_left, bisect_right, bisect, insort_left, insort_right, insort, bisort
+from "std/bisect/__init__.astra" import bisect_left, bisect_right, bisect, insort_left, insort_right, insort, bisort
 
 fn assert_eq(a, b):
     assert(a == b)

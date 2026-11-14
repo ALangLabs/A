@@ -1,7 +1,7 @@
 # std.http selftest — urls.a / client.a helpers plus the net socket layer.
 # Run: ./build/a test stdlib/std/http/selftest.a
-from "urls.a" import UrlParts, urlsplit, urlunsplit, quote, urlencode
-from "client.a" import Response, _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport, _pool_key, get
+from "urls.astra" import UrlParts, urlsplit, urlunsplit, quote, urlencode
+from "client.astra" import Response, _headers_map, _parse_hex, _dechunk, _is_redirect_status, _b_find_from, _b_slice, _dechunk_bytes, _split_hostport, _pool_key, get
 import std:net
 
 fn assert_eq(a, b):

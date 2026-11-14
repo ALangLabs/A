@@ -17,7 +17,7 @@ directory), with no external dependencies beyond the A toolchain and
 
 `apm/apm` is a small launcher: the A runtime exposes no `argv` to
 programs, so the launcher carries the real CLI in `APM_ARGS` and runs
-`apm.a`. You can also drive it directly:
+`apm.astra`. You can also drive it directly:
 
 ```sh
 APM_ARGS="install hello-lib" ./build/a run apm/apm.a

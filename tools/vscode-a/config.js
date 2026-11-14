@@ -136,7 +136,7 @@ function settings(vscode, uri, definition = {}, taskFolder) {
     const file = absolute(definition.file || config.get('entryFile', '') || uri.fsPath, cwd, uri.fsPath || '');
     const output = definition.output
         ? absolute(definition.output, cwd, file)
-        : file.replace(/\.a$/, '') || `${file}.out`;
+        : file.replace(/\.(astra|a)$/, '') || `${file}.out`;
     return {
         workspaceFolder, cwd, file,
         compiler: compilerPath(config.get('compilerPath', ''), cwd),
@@ -189,20 +189,22 @@ function quotedImportCandidates(rawPath, currentFile, config, env = process.env)
 }
 
 // Where a bare `import name` may live, mirroring ModuleLoader::resolveBare:
-// <root>/name.a, <root>/name/name.a, <root>/name/__init__.a under the stdlib
-// root and each module path.
+// <root>/name.astra, <root>/name/name.astra, <root>/name/__init__.astra under
+// the stdlib root and each module path (.a kept as legacy fallback).
 function bareImportCandidates(name, config) {
     const roots = [];
     if (config.stdlib) roots.push(config.stdlib);
     for (const dir of config.modulePaths) roots.push(dir);
     const candidates = [];
     for (const root of roots) {
-        candidates.push(path.join(root, `${name}.a`));
-        candidates.push(path.join(root, name, `${name}.a`));
-        candidates.push(path.join(root, name, '__init__.a'));
-        candidates.push(path.join(root, 'std', `${name}.a`));
-        candidates.push(path.join(root, 'std', name, `${name}.a`));
-        candidates.push(path.join(root, 'std', name, '__init__.a'));
+        for (const ext of ['astra', 'a']) {
+            candidates.push(path.join(root, `${name}.${ext}`));
+            candidates.push(path.join(root, name, `${name}.${ext}`));
+            candidates.push(path.join(root, name, `__init__.${ext}`));
+            candidates.push(path.join(root, 'std', `${name}.${ext}`));
+            candidates.push(path.join(root, 'std', name, `${name}.${ext}`));
+            candidates.push(path.join(root, 'std', name, `__init__.${ext}`));
+        }
     }
     return candidates;
 }

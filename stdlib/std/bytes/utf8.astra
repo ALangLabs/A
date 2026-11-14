@@ -1,6 +1,6 @@
 # std.bytes.utf8 — UTF-8 codec.
 import std:core
-from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+from "common.astra" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
 
 """utf8_encode(s) -> [i64] UTF-8 bytes of the string s."""
 fn utf8_encode(s: String):

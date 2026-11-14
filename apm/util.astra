@@ -34,7 +34,7 @@ fn apm_home():
     h = getenv("APM_HOME", "")
     if h != "":
         return h
-    # Fall back to "apm" so `a run apm/apm.a` works from the repo root; the
+    # Fall back to "apm" so `a run apm/apm.astra` works from the repo root; the
     # `apm` launcher always sets APM_HOME explicitly.
     return "apm"
 

@@ -1,2 +1,2 @@
-import "order_base.a" as base
+import "order_base.astra" as base
 val_seen = base.val + 10

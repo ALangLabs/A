@@ -1,7 +1,7 @@
 'use strict';
 
 // Run/Test CodeLens providers, Python-extension style: a "Run" and a
-// "Run Tests" lens at the top of every saved .a file, plus a "Run Tests"
+// "Run Tests" lens at the top of every saved .astra file, plus a "Run Tests"
 // lens above each detected `fn test_*` (found through whichever document
 // symbol provider is active -- a-lsp or the lexical fallback). The lenses
 // just invoke the a.run / a.test commands with the file URI; execution

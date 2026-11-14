@@ -1,4 +1,4 @@
-from "std/collections/__init__.a" import deque, deque_of, deque_bounded
+from "std/collections/__init__.astra" import deque, deque_of, deque_bounded
 
 fn test_basic_ops():
     d = deque_of([1, 2, 3])

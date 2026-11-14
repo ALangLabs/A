@@ -244,7 +244,7 @@ fn repeat(a, n):
 
 # `call(f, args)` applies function value `f` to the elements of `args`.
 # Backed by std.functools._apply (arity-dispatched, max 8 args).
-from "std/functools/_apply.a" import _apply
+from "std/functools/_apply.astra" import _apply
 
 fn call(f, args):
     return _apply(f, args)

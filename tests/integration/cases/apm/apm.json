@@ -1,6 +1,6 @@
 {
   "name": "apm-fixture",
   "version": "0.1.0",
-  "main": "main.a",
+  "main": "main.astra",
   "dependencies": {"hello-lib": "^1.0.0"}
 }

@@ -3,8 +3,8 @@
 # repr/str, tobytes/save/load. Uses temp files under /tmp and panics on
 # any failure (non-zero exit).
 
-from "ndarray.a" import NDArray, array_from_list, array2string, zeros
-from "io.a" import savetxt, loadtxt, loadtxt_delim, loadtxt_cols, fromstring, frombuffer, tofile, fromfile, genfromtxt, array_str, array_repr, tobytes, ndarray_to_bytes, save, load, save_text, load_text
+from "ndarray.astra" import NDArray, array_from_list, array2string, zeros
+from "io.astra" import savetxt, loadtxt, loadtxt_delim, loadtxt_cols, fromstring, frombuffer, tofile, fromfile, genfromtxt, array_str, array_repr, tobytes, ndarray_to_bytes, save, load, save_text, load_text
 
 TMP = "/tmp/a_numpy_io_check"
 

@@ -7,8 +7,8 @@
 # dtype is f64 only; arrays are always C-contiguous (row-major flat buffer),
 # so copy/ascontiguousarray are plain deep copies.
 
-from "ndarray.a" import NDArray
-from "ndarray.a" import _shape_size
+from "ndarray.astra" import NDArray
+from "ndarray.astra" import _shape_size
 
 # --- copy ---------------------------------------------------------------------
 

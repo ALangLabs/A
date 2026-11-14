@@ -1,10 +1,10 @@
 # Check for decomp.a — run: ./build/a run _check_decomp.a  (from this dir)
 import std:core
 
-from "ndarray.a" import NDArray, ndarray, zeros, eye, transpose
-from "linalg.a" import matmul
-from "decomp.a" import eigvalsh, eigh, eigvals, eig, eig_power
-from "decomp.a" import svd, pinv, qr, cholesky, matrix_rank, cond
+from "ndarray.astra" import NDArray, ndarray, zeros, eye, transpose
+from "linalg.astra" import matmul
+from "decomp.astra" import eigvalsh, eigh, eigvals, eig, eig_power
+from "decomp.astra" import svd, pinv, qr, cholesky, matrix_rank, cond
 
 fn close(a: f64, b: f64, tol: f64) -> bool:
     d = a - b

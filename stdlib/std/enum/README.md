@@ -169,5 +169,5 @@ Not included:
 
 ## Testing
 
-`tests/integration/cases/stdlib/enum.a` exercises the full API
+`tests/integration/cases/stdlib/enum.astra` exercises the full API
 (`.flags` = `test`, `fn test_*` functions).

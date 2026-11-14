@@ -21,7 +21,7 @@ astra. Nothing in the product path compiles C anymore.
 ## Why the C frontend exists today (must be replaced first)
 
 1. `compiler/astra/runtime/*.c` (~40 files) — the A runtime is C.
-   - Host: prebuilt to `libaruntime.a` by **system cc**
+   - Host: prebuilt to `libaruntime.astra` by **system cc**
      (`A_RUNTIME_SYSTEM_CC=ON`, `cmake/libastra.cmake:259`).
    - Cross: **no archive is built** (`libastra.cmake:576`); the `a`
      pipeline compiles every runtime `.c` with `astra-<arch>` per program

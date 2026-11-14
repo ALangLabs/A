@@ -32,7 +32,7 @@ import std:core
 import std:env
 from std:json import parse as parse_json, stringify as stringify_json
 from std:bytes import b2s, utf8_decode, encode
-from "urls.a" import urlsplit, urlunsplit, urlencode, UrlParts, _default_port, _bracket_host
+from "urls.astra" import urlsplit, urlunsplit, urlencode, UrlParts, _default_port, _bracket_host
 
 class Response:
     status: i64

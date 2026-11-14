@@ -32,7 +32,7 @@ LIB = '''fn greet(name: String):
 MANIFEST = '''{
   "name": "apm-lsp-fixture",
   "version": "0.1.0",
-  "main": "main.a",
+  "main": "main.astra",
   "dependencies": {"hello-lib": "^1.0.0"}
 }
 '''
@@ -52,9 +52,9 @@ def main() -> int:
         (root / "apm.json").write_text(MANIFEST, encoding="utf-8")
         lib_dir = root / ".apm" / "packages" / "hello_lib"
         lib_dir.mkdir(parents=True)
-        lib_path = lib_dir / "hello_lib.a"
+        lib_path = lib_dir / "hello_lib.astra"
         lib_path.write_text(LIB, encoding="utf-8")
-        path = root / "main.a"
+        path = root / "main.astra"
         path.write_text(SOURCE, encoding="utf-8")
         uri = path.as_uri()
 
@@ -92,7 +92,7 @@ def main() -> int:
             print("FAIL: no definition location for `import hello_lib`")
             return 1
         target = locs[0]["uri"]
-        if ".apm/packages/hello_lib/hello_lib.a" not in target:
+        if ".apm/packages/hello_lib/hello_lib.astra" not in target:
             print(f"FAIL: definition target {target!r} is not the installed package file")
             return 1
         print(f"OK import definition -> {target}")
@@ -113,7 +113,7 @@ def main() -> int:
             print("FAIL: no definition location for `hello_lib.greet`")
             return 1
         target = locs[0]["uri"]
-        if ".apm/packages/hello_lib/hello_lib.a" not in target:
+        if ".apm/packages/hello_lib/hello_lib.astra" not in target:
             print(f"FAIL: greet target {target!r} is not the installed package file")
             return 1
         print(f"OK member definition -> {target}")

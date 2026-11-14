@@ -1,6 +1,6 @@
 # std.bytes.utf32 — UTF-32 codecs (LE/BE and BOM-aware).
 import std:core
-from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+from "common.astra" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
 
 """_u32_enc_le(cp, out)"""
 fn _u32_enc_le(cp, out):

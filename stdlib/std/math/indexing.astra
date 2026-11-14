@@ -28,7 +28,7 @@
 #    axis1=0, axis2=1 defaults); remaining axes trail, diagonal axis last.
 #  - trim_zeros: trims zero rows (axis 0) for ndim>=2, elements for 1-D.
 
-from "ndarray.a" import NDArray, _shape_size, _row_major_index
+from "ndarray.astra" import NDArray, _shape_size, _row_major_index
 
 # --- small helpers ------------------------------------------------------------
 

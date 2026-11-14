@@ -1,7 +1,7 @@
 # Implicit parallelism demo.
 #
 # The A runtime parallelizes eligible work automatically — no async/await
-# or spawn syntax. Run with `./build/a run examples/advanced/implicit_parallel.a`.
+# or spawn syntax. Run with `./build/a run examples/advanced/implicit_parallel.astra`.
 # Set A_PAR=0 to force the serial path and compare timings.
 #
 # What parallelizes today (all results bit-identical to serial):

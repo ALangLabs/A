@@ -5,7 +5,7 @@
 # stat helpers introduced in stat.a.
 
 import std:path as _path
-import "stat.a" as osstat
+import "stat.astra" as osstat
 
 class PathNamespace:
     sep: String

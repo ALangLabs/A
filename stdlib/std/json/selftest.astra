@@ -1,6 +1,6 @@
 # std.json selftest — dumps/loads (pure-A layer over the native module).
 # Run: ./build/a test stdlib/std/json/selftest.a
-from "std/json/dumps.a" import dumps, loads
+from "std/json/dumps.astra" import dumps, loads
 import std:json
 
 fn assert_eq(a, b):

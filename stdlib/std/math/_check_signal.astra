@@ -5,9 +5,9 @@
 #
 # Run: ./build/a run _check_signal.a   (from this directory)
 #
-from "signal.a" import convolve, correlate, convolve2d, correlate2d
-from "signal.a" import sliding_window_view
-from "ndarray.a" import NDArray, get
+from "signal.astra" import convolve, correlate, convolve2d, correlate2d
+from "signal.astra" import sliding_window_view
+from "ndarray.astra" import NDArray, get
 
 fn check(name: str, got: f64, want: f64) -> bool:
     if got == want:

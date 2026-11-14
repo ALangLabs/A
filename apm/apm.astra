@@ -26,12 +26,12 @@
 import fs
 import json
 import std:shlex
-from "util.a" import join, dirname, basename, is_dir, is_file, exists, getenv, read_text, write_text, norm_import_name, shell, q, fail, ok, bullet, default_registry, a_bin, copy_dir, remove_all, dir_size
-from "manifest.a" import load_manifest, manifest_text, default_project_manifest, mf_get, mf_deps, add_dep, remove_dep
-from "registry.a" import load_registry, registry_dir, reg_packages, reg_entry, reg_versions, reg_description, reg_source, reg_deps, reg_best_version, reg_release, reg_kind, reg_model, render_model, model_add, save_registry
-from "resolver.a" import resolve
-from "install.a" import fetch, fetch_with_kind, package_manifest_dir
-from "project.a" import project_root, manifest_path, lock_path, packages_dir, cache_dir, package_dir, project_name, write_lock, read_lock, installed_packages
+from "util.astra" import join, dirname, basename, is_dir, is_file, exists, getenv, read_text, write_text, norm_import_name, shell, q, fail, ok, bullet, default_registry, a_bin, copy_dir, remove_all, dir_size
+from "manifest.astra" import load_manifest, manifest_text, default_project_manifest, mf_get, mf_deps, add_dep, remove_dep
+from "registry.astra" import load_registry, registry_dir, reg_packages, reg_entry, reg_versions, reg_description, reg_source, reg_deps, reg_best_version, reg_release, reg_kind, reg_model, render_model, model_add, save_registry
+from "resolver.astra" import resolve
+from "install.astra" import fetch, fetch_with_kind, package_manifest_dir
+from "project.astra" import project_root, manifest_path, lock_path, packages_dir, cache_dir, package_dir, project_name, write_lock, read_lock, installed_packages
 
 APM_VERSION = "0.1.0"
 
@@ -163,7 +163,7 @@ fn cmd_init(rest, opts):
         append_file(gi, "/.apm/\n")
         bullet("appended /.apm/ to .gitignore")
     bullet("add dependencies with: apm install <package>")
-    bullet("run programs with:    apm run main.a")
+    bullet("run programs with:    apm run main.astra")
     return None
 
 fn fetch_resolved(root, reg, regpath, resolved):
@@ -231,7 +231,7 @@ fn cmd_install(rest, opts, update_mode):
                 deps[name] = spec
         write_text(manifest_path(root), manifest_text(
             mf_get(m, "name", "project"), mf_get(m, "version", "0.1.0"),
-            mf_get(m, "description", ""), mf_get(m, "main", "main.a"), deps))
+            mf_get(m, "description", ""), mf_get(m, "main", "main.astra"), deps))
         bullet("updated " + manifest_path(root))
     fetch_resolved(root, reg, regpath, resolved_list)
     # Fetch custom (path/git) sources too; they are not in the registry.
@@ -251,7 +251,7 @@ fn cmd_install(rest, opts, update_mode):
     names = []
     for item in resolved_list:
         names.append(norm_import_name(item[0]))
-    bullet("use them with: import " + ", ".join(names) + "  (via `apm run app.a`)")
+    bullet("use them with: import " + ", ".join(names) + "  (via `apm run app.astra`)")
     return None
 
 fn custom_version(source: String):
@@ -309,7 +309,7 @@ fn cmd_remove(rest, opts):
         bullet("removed " + name + " (" + package_dir(root, name) + ")")
     write_text(manifest_path(root), manifest_text(
         mf_get(m, "name", "project"), mf_get(m, "version", "0.1.0"),
-        mf_get(m, "description", ""), mf_get(m, "main", "main.a"), deps))
+        mf_get(m, "description", ""), mf_get(m, "main", "main.astra"), deps))
     # Refresh lock: keep entries still reachable from remaining deps.
     lock = read_lock(root)
     if len(lock) > 0:

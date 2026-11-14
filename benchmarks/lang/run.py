@@ -27,7 +27,7 @@ def build(tmp):
     rs_bin = os.path.join(tmp, "bench_rs")
     subprocess.run(["rustc", "-O", "-o", rs_bin, os.path.join(HERE, "bench.rs")], check=True)
     cmds["Rust"] = [rs_bin]
-    cmds["A"] = [A, "run", os.path.join(HERE, "bench.a")]
+    cmds["A"] = [A, "run", os.path.join(HERE, "bench.astra")]
     cmds["Python"] = [sys.executable, os.path.join(HERE, "bench.py")]
     cmds["Node"] = ["node", os.path.join(HERE, "bench.js")]
     return cmds

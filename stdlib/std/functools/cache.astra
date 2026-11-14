@@ -19,7 +19,7 @@
 #   * at most 8 call arguments (`_apply`/`_key` limit).
 #   * `cache_info()` returns a `CacheInfo` struct instead of a namedtuple.
 #   * `cache_parameters()` is not provided.
-from "_apply.a" import _apply, _key
+from "_apply.astra" import _apply, _key
 
 """
 CacheInfo mirrors the fields of Python's `functools._CacheInfo`

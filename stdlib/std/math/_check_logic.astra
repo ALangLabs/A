@@ -4,8 +4,8 @@
 # Boolean arrays are NDArrays of 0.0/1.0 (f64-only dtype — documented
 # deviation from NumPy's bool dtype).
 
-from "ndarray.a" import NDArray, ndarray, array_from_list, zeros, ones, _shape_size
-from "logic.a" import greater, greater_equal, less, less_equal, equal, not_equal, logical_and, logical_or, logical_xor, logical_not, all, any, count_nonzero, isclose, allclose, array_equal, array_equiv, sign, isreal, iscomplex, isrealobj, iscomplexobj, shares_memory, may_share_memory, can_cast, min_scalar_type, result_type, packbits, unpackbits
+from "ndarray.astra" import NDArray, ndarray, array_from_list, zeros, ones, _shape_size
+from "logic.astra" import greater, greater_equal, less, less_equal, equal, not_equal, logical_and, logical_or, logical_xor, logical_not, all, any, count_nonzero, isclose, allclose, array_equal, array_equiv, sign, isreal, iscomplex, isrealobj, iscomplexobj, shares_memory, may_share_memory, can_cast, min_scalar_type, result_type, packbits, unpackbits
 
 fn assert_eq(a, b):
     assert(a == b)

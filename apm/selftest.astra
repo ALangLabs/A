@@ -3,10 +3,10 @@
 # Run: ./build/a test apm/selftest.a
 # (compiles fast against already-built apm modules; no network needed)
 
-import "semver.a" as semver
-import "manifest.a" as manifest
-import "registry.a" as registry
-import "resolver.a" as resolver
+import "semver.astra" as semver
+import "manifest.astra" as manifest
+import "registry.astra" as registry
+import "resolver.astra" as resolver
 
 fn assert_eq(a, b):
     assert(a == b)

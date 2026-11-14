@@ -27,15 +27,15 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 
 # name -> (A source, C/C++ workload key, Python source)
 BENCHES = {
-    "arithmetic/sum": ("benchmarks/arithmetic/sum.a", "arithmetic",
+    "arithmetic/sum": ("benchmarks/arithmetic/sum.astra", "arithmetic",
                        "benchmarks/equivalents/python/sum.py"),
-    "collections/pipeline": ("benchmarks/collections/pipeline.a", "collections",
+    "collections/pipeline": ("benchmarks/collections/pipeline.astra", "collections",
                              "benchmarks/equivalents/python/pipeline.py"),
-    "memory/strings": ("benchmarks/memory/strings.a", "memory",
+    "memory/strings": ("benchmarks/memory/strings.astra", "memory",
                        "benchmarks/equivalents/python/strings.py"),
-    "numerical/sqrt": ("benchmarks/numerical/sqrt.a", "numerical",
+    "numerical/sqrt": ("benchmarks/numerical/sqrt.astra", "numerical",
                        "benchmarks/equivalents/python/sqrt.py"),
-    "numerical/matmul": ("benchmarks/numerical/matmul.a", "matmul",
+    "numerical/matmul": ("benchmarks/numerical/matmul.astra", "matmul",
                          "benchmarks/equivalents/python/matmul.py"),
 }
 
@@ -116,7 +116,7 @@ def main() -> int:
         print(f"{name:26s} {a_run_best:9.2f} {a_nat_best:9.2f} {c_best:9.2f} {cpp_best:9.2f} {py_best:9.2f} {a_nat_best/c_best:8.2f}x  {a_out}")
 
     startup = {}
-    with tempfile.NamedTemporaryFile("w", suffix=".a", delete=False) as fh:
+    with tempfile.NamedTemporaryFile("w", suffix=".astra", delete=False) as fh:
         fh.write("fn main() -> void:\n    print(0)\n\nmain()\n")
         noop = fh.name
     try:

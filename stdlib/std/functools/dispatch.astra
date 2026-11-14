@@ -24,7 +24,7 @@
 #   * `singledispatchmethod`, annotation-based `register`, and `dispatch`
 #     caching are not provided.
 import std:json
-from "_apply.a" import _apply
+from "_apply.astra" import _apply
 
 fn _type_tag(x) -> str:
     kind = json.kind(x)

@@ -28,10 +28,10 @@
 #  - unique_sorted flattens the input and returns sorted unique values as
 #    a 1-D array (no return_index/return_counts/inverse).
 #
-from "ndarray.a" import NDArray, _shape_size, _row_major_index
-from "ndarray.a" import reshape, ravel, flatten, transpose, get, set
-from "ndarray.a" import zeros, ones, empty, full, ndarray
-from "ndarray.a" import _broadcast_shape
+from "ndarray.astra" import NDArray, _shape_size, _row_major_index
+from "ndarray.astra" import reshape, ravel, flatten, transpose, get, set
+from "ndarray.astra" import zeros, ones, empty, full, ndarray
+from "ndarray.astra" import _broadcast_shape
 
 # --- small helpers ------------------------------------------------------------
 

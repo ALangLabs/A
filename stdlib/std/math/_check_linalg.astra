@@ -1,11 +1,11 @@
 # Check for linalg.a — run: ./build/a run _check_linalg.a  (from this dir)
 import std:core
 
-from "ndarray.a" import NDArray, ndarray, zeros, eye, array2string
-from "linalg.a" import dot, inner, vdot, outer, kron, matmul, matvec
-from "linalg.a" import cross, norm, vector_norm, matrix_norm
-from "linalg.a" import det, inv, solve, lstsq, matrix_power, multi_dot
-from "linalg.a" import tensordot, eigvalsh_2x2, lu
+from "ndarray.astra" import NDArray, ndarray, zeros, eye, array2string
+from "linalg.astra" import dot, inner, vdot, outer, kron, matmul, matvec
+from "linalg.astra" import cross, norm, vector_norm, matrix_norm
+from "linalg.astra" import det, inv, solve, lstsq, matrix_power, multi_dot
+from "linalg.astra" import tensordot, eigvalsh_2x2, lu
 
 fn close(a: f64, b: f64, tol: f64) -> bool:
     d = a - b

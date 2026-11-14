@@ -11,8 +11,8 @@
 # Installed layout: .apm/packages/<import_name>/ where import_name maps
 # '-' -> '_' so `import hello_lib` works with the -I flag apm passes.
 
-from "util.a" import join, dirname, basename, is_dir, is_file, exists, copy_dir, list_paths, make_dirs, remove_all, read_text, write_text, shell, q, downloading, fail
-from "manifest.a" import load_manifest, mf_get
+from "util.astra" import join, dirname, basename, is_dir, is_file, exists, copy_dir, list_paths, make_dirs, remove_all, read_text, write_text, shell, q, downloading, fail
+from "manifest.astra" import load_manifest, mf_get
 
 """classify_source(source) -> "local", "git", or "http"."""
 fn classify_source(source: String):

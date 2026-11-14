@@ -47,8 +47,8 @@
 
 import std:core
 
-from "ndarray.a" import NDArray, zeros, eye, transpose, reshape
-from "linalg.a" import matmul, inv, matrix_norm
+from "ndarray.astra" import NDArray, zeros, eye, transpose, reshape
+from "linalg.astra" import matmul, inv, matrix_norm
 
 fn _check(cond: bool, msg: str):
     if cond == false:

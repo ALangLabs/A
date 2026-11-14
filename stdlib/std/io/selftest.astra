@@ -1,5 +1,5 @@
 # std.io selftest — run: ./build/a test stdlib/std/io/selftest.a
-from "std/io/__init__.a" import StringIO, StringIO_new, BytesIO, BytesIO_new
+from "std/io/__init__.astra" import StringIO, StringIO_new, BytesIO, BytesIO_new
 
 fn assert_eq(a, b):
     assert(a == b)

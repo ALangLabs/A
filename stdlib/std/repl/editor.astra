@@ -2,9 +2,9 @@
 # analog. Handles keys, history, tab completion, reverse-i-search, ghost
 # autosuggest, and ANSI-highlighted multiline rendering.
 import std:terminal
-import "highlight.a"
-import "complete.a"
-import "history.a"
+import "highlight.astra"
+import "complete.astra"
+import "history.astra"
 
 C_PROMPT = "\x1b[1;34m"
 C_CONT = "\x1b[1;34m"

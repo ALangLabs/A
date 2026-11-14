@@ -230,7 +230,7 @@ fn lifo_queue_new<T>(maxsize = 0) -> LifoQueue<T>:
 #
 # The heap uses the same sift algorithms as std:heapq via its internal
 # `_heappush_c`/`_heappop_c` with a tuple comparator.
-import "std/heapq/heapq.a"
+import "std/heapq/heapq.astra"
 
 fn _pq_lt(a, b):
     "entry a pops before entry b: lower priority, then lower sequence."

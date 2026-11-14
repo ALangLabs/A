@@ -22,7 +22,7 @@
 import math
 import std:core
 import std:json
-from "std/math/special.a" import erf, erfc
+from "std/math/special.astra" import erf, erfc
 
 fn _check_nonempty(data, name):
     if len(data) < 1:

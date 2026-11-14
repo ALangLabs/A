@@ -1,7 +1,7 @@
 # std.bytes selftest — codepoint helpers and the native UTF-8 conversions.
 # Run: ./build/a test stdlib/std/bytes/selftest.a
 import std:core
-from "bytes.a" import utf8_decode, utf8_encode, b2s, s2b, s2b_fast, chr, ord
+from "bytes.astra" import utf8_decode, utf8_encode, b2s, s2b, s2b_fast, chr, ord
 
 fn assert_eq(a, b):
     assert(a == b)

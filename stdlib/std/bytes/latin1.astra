@@ -1,6 +1,6 @@
 # std.bytes.latin1 — Latin-1 (ISO-8859-1) and ASCII codecs.
 import std:core
-from "common.a" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
+from "common.astra" import chr, ord, _check_errors, _is_strict, _is_replace, _is_ignore
 
 """b2s(bytes) -> String interpreting each byte as Latin-1 (byte value == codepoint)."""
 fn b2s(bytes):

@@ -1,8 +1,8 @@
 # Self-check for randomgen.a — run: ./build/a run stdlib/std/math/numpy/_check_randomgen.a
 # Exits 0 on success; panics (nonzero exit) on failure.
 
-from "randomgen.a" import seed, random, random_sample, rand, randn, standard_normal, randint, uniform, normal, exponential, standard_exponential, gamma, standard_gamma, beta, chisquare, f, standard_cauchy, standard_t, laplace, gumbel, logistic, rayleigh, weibull, pareto, power, lognormal, geometric, poisson, binomial, triangular, choice, shuffle, permutation
-from "ndarray.a" import NDArray
+from "randomgen.astra" import seed, random, random_sample, rand, randn, standard_normal, randint, uniform, normal, exponential, standard_exponential, gamma, standard_gamma, beta, chisquare, f, standard_cauchy, standard_t, laplace, gumbel, logistic, rayleigh, weibull, pareto, power, lognormal, geometric, poisson, binomial, triangular, choice, shuffle, permutation
+from "ndarray.astra" import NDArray
 
 fn _as_f64list(x: [f64]) -> [f64]:
     return x

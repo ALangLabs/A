@@ -41,7 +41,7 @@ faster dev builds).
   the only supported target today (`x86_64`, `aarch64`/`arm64`);
   non-host targets are rejected with a clear error. A lowers to LLVM IR
   (`frontend/llvm/`), then `opt -O<n>` → `llc -filetype=obj` → `clang`
-  links against `libaruntime.a` (tools found via `A_LLVM_OPT`/`A_LLVM_LLC`/
+  links against `libaruntime.astra` (tools found via `A_LLVM_OPT`/`A_LLVM_LLC`/
   `A_LLVM_CC` or PATH). `a run` executes natively; `a test`/`a repl`
   require the host target.
 

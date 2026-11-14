@@ -5,7 +5,7 @@
 # handling (documented deviation — A targets POSIX hosts).
 #
 #   import std:path
-#   path.join(["a", "b", "c.a"])   # "a/b/c.a"
+#   path.join(["a", "b", "c.astra"])   # "a/b/c.astra"
 #   path.split("/x/y/z.txt")       # ["/x/y", "z.txt"]  (array, not tuple)
 #   path.splitext("a/b.tar.gz")   # ["a/b.tar", ".gz"]
 #   path.normpath("a//b/../c")    # "a/c"

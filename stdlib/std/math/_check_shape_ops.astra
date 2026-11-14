@@ -2,20 +2,20 @@
 # Verification for shape_ops.a — expected values computed by hand
 # (cross-checked against NumPy semantics).
 #
-from "shape_ops.a" import expand_dims, squeeze, squeeze_axis, squeeze_all
-from "shape_ops.a" import broadcast_to, broadcast_shapes2, broadcast_shapes_list
-from "shape_ops.a" import stack_list, stack2, concatenate, concatenate2, append
-from "shape_ops.a" import split, split_n, array_split, array_split_n
-from "shape_ops.a" import hsplit, hsplit_idx, vsplit, vsplit_idx, dsplit, dsplit_idx
-from "shape_ops.a" import tile, repeat, repeat_list, roll
-from "shape_ops.a" import flip, fliplr, flipud, rot90
-from "shape_ops.a" import swapaxes, moveaxis, rollaxis, rollaxis0
-from "shape_ops.a" import atleast_1d, atleast_2d, atleast_3d
-from "shape_ops.a" import column_stack, column_stack2, row_stack, row_stack2
-from "shape_ops.a" import dstack, dstack2
-from "shape_ops.a" import tril, triu, fill_diagonal
-from "shape_ops.a" import delete, delete_slice, insert, unique_sorted
-from "ndarray.a" import NDArray, get, size_of, ndim, reshape
+from "shape_ops.astra" import expand_dims, squeeze, squeeze_axis, squeeze_all
+from "shape_ops.astra" import broadcast_to, broadcast_shapes2, broadcast_shapes_list
+from "shape_ops.astra" import stack_list, stack2, concatenate, concatenate2, append
+from "shape_ops.astra" import split, split_n, array_split, array_split_n
+from "shape_ops.astra" import hsplit, hsplit_idx, vsplit, vsplit_idx, dsplit, dsplit_idx
+from "shape_ops.astra" import tile, repeat, repeat_list, roll
+from "shape_ops.astra" import flip, fliplr, flipud, rot90
+from "shape_ops.astra" import swapaxes, moveaxis, rollaxis, rollaxis0
+from "shape_ops.astra" import atleast_1d, atleast_2d, atleast_3d
+from "shape_ops.astra" import column_stack, column_stack2, row_stack, row_stack2
+from "shape_ops.astra" import dstack, dstack2
+from "shape_ops.astra" import tril, triu, fill_diagonal
+from "shape_ops.astra" import delete, delete_slice, insert, unique_sorted
+from "ndarray.astra" import NDArray, get, size_of, ndim, reshape
 
 fn check(name: str, got: f64, want: f64) -> bool:
     if got == want:

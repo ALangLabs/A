@@ -26,8 +26,8 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 pass=0; fail=0; failed=""
 
-for src in $(find "$CASES" -name '*.a' | sort); do
-  base="${src%.a}"; name="${base#$CASES/}"
+for src in $(find "$CASES" -name '*.astra' | sort); do
+  base="${src%.astra}"; name="${base#$CASES/}"
   # lib/ fixtures are imports, not cases; .flags/.err cases aren't plain runs
   [[ "$name" == */lib/* ]] && continue
   [[ -f "$base.flags" || -f "$base.err" ]] && continue

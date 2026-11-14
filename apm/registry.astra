@@ -18,9 +18,9 @@
 # for `apm publish` (publishing to a URL is rejected).
 
 import json
-from "util.a" import read_text, write_text, is_file, dirname, downloading, fail, ob, cb
-from "manifest.a" import json_esc, deps_json
-from "semver.a" import max_satisfying
+from "util.astra" import read_text, write_text, is_file, dirname, downloading, fail, ob, cb
+from "manifest.astra" import json_esc, deps_json
+from "semver.astra" import max_satisfying
 
 """load_registry(path) -> parsed index (downloads http(s) URLs first)."""
 fn load_registry(path: String):

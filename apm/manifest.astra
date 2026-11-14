@@ -1,7 +1,7 @@
 # apm.manifest — read/write `apm.json` project & package manifests.
 
 import json
-from "util.a" import read_text, write_text, is_file, fail, ob, cb
+from "util.astra" import read_text, write_text, is_file, fail, ob, cb
 
 """json_esc(s) -> s escaped for embedding in a JSON string literal."""
 fn json_esc(s: String):
@@ -96,7 +96,7 @@ fn add_dep(m, name: String, spec: String):
     deps = mf_deps(m, "dependencies")
     deps[name] = spec
     return manifest_text(mf_get(m, "name", "project"), mf_get(m, "version", "0.1.0"),
-                         mf_get(m, "description", ""), mf_get(m, "main", "main.a"), deps)
+                         mf_get(m, "description", ""), mf_get(m, "main", "main.astra"), deps)
 
 """remove_dep(m, name) -> manifest text without deps[name]."""
 fn remove_dep(m, name: String):
@@ -104,4 +104,4 @@ fn remove_dep(m, name: String):
     if name in deps:
         deps.pop(name)
     return manifest_text(mf_get(m, "name", "project"), mf_get(m, "version", "0.1.0"),
-                         mf_get(m, "description", ""), mf_get(m, "main", "main.a"), deps)
+                         mf_get(m, "description", ""), mf_get(m, "main", "main.astra"), deps)

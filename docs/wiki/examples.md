@@ -8,19 +8,19 @@ organization.
 
 | Directory | Contents |
 | --- | --- |
-| `basics/` | `hello.a` (incl. `import std:prelude`), `literals_and_variables.a`, `operators.a`, `strings.a`. |
-| `control-flow/` | `if_while_for.a`, `match_and_ranges.a`, `comprehensions_defer.a`. |
-| `data-types/` | `arrays_tuples.a`, `maps_sets.a`. |
-| `functions/` | `functions_and_lambdas.a`, `recursion.a`, `pipeline.a`. |
-| `classes/` | `point.a`, `inheritance.a`. |
-| `enums-match/` | `enums.a`, `match.a`. |
-| `modules/` | `imports.a` + fixture `lib/mathx.a`. |
-| `optionals-result/` | `optionals.a`, `result.a`. |
-| `traits-generics/` | `traits.a`, `generics_and_aliases.a`. |
-| `stdlib/` | `core_math_fs_time.a`, `json_binary.a`, `ml_kernels.a`, `observability_net.a`. |
-| `python-interop/` | `json_pipeline.a`, `opaque_objects.a`, `optional/` (numpy_array, py_buffer, torch_tensor — need Python libs). |
-| `advanced/` | `testing.a`, `implicit_parallel.a`, `unsafe_arena_comptime.a`. |
-| `apm/` | `app.a` + `apm.json` — demo of apm-managed packages; run with `apm/apm install -p examples/apm` then `apm/apm run -p examples/apm examples/apm/app.a`. |
+| `basics/` | `hello.astra` (incl. `import std:prelude`), `literals_and_variables.astra`, `operators.astra`, `strings.astra`. |
+| `control-flow/` | `if_while_for.astra`, `match_and_ranges.astra`, `comprehensions_defer.astra`. |
+| `data-types/` | `arrays_tuples.astra`, `maps_sets.astra`. |
+| `functions/` | `functions_and_lambdas.astra`, `recursion.astra`, `pipeline.astra`. |
+| `classes/` | `point.astra`, `inheritance.astra`. |
+| `enums-match/` | `enums.astra`, `match.astra`. |
+| `modules/` | `imports.astra` + fixture `lib/mathx.astra`. |
+| `optionals-result/` | `optionals.astra`, `result.astra`. |
+| `traits-generics/` | `traits.astra`, `generics_and_aliases.astra`. |
+| `stdlib/` | `core_math_fs_time.astra`, `json_binary.astra`, `ml_kernels.astra`, `observability_net.astra`. |
+| `python-interop/` | `json_pipeline.astra`, `opaque_objects.astra`, `optional/` (numpy_array, py_buffer, torch_tensor — need Python libs). |
+| `advanced/` | `testing.astra`, `implicit_parallel.astra`, `unsafe_arena_comptime.astra`. |
+| `apm/` | `app.astra` + `apm.json` — demo of apm-managed packages; run with `apm/apm install -p examples/apm` then `apm/apm run -p examples/apm examples/apm/app.a`. |
 
 ## Running
 

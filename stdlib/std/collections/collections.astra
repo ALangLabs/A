@@ -1,10 +1,10 @@
-from "list.a" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
-from "dict.a" import dict_get, dict_has
-from "namedtuple.a" import namedtuple, NamedTuple, NamedTupleSpec
-from "counter.a" import Counter
-from "ordereddict.a" import OrderedDict, ordered_dict_fromkeys
-from "defaultdict.a" import defaultdict, DefaultDict
-from "chainmap.a" import ChainMap, chain_map, chain_map_of
-from "userdict.a" import UserDict, user_dict, user_dict_of
-from "userlist.a" import UserList, user_list, user_list_of
-from "deque.a" import deque, deque_of, deque_bounded, Deque
+from "list.astra" import map_list, filter_list, reduce_list, sum_list, any_list, all_list, len_of, list_reverse
+from "dict.astra" import dict_get, dict_has
+from "namedtuple.astra" import namedtuple, NamedTuple, NamedTupleSpec
+from "counter.astra" import Counter
+from "ordereddict.astra" import OrderedDict, ordered_dict_fromkeys
+from "defaultdict.astra" import defaultdict, DefaultDict
+from "chainmap.astra" import ChainMap, chain_map, chain_map_of
+from "userdict.astra" import UserDict, user_dict, user_dict_of
+from "userlist.astra" import UserList, user_list, user_list_of
+from "deque.astra" import deque, deque_of, deque_bounded, Deque

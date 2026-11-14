@@ -51,7 +51,7 @@ caching the frontend.
 ### Acceptance criteria
 
 1. Cold build unchanged or faster (`std:http`: <= 270 ms).
-2. Edit one leaf module (`stdlib/std/bytes/bytes.a`): full rebuild <= 60 ms
+2. Edit one leaf module (`stdlib/std/bytes/bytes.astra`): full rebuild <= 60 ms
    (target ~35 ms), emitting only that module.
 3. Edit the entry only: <= 60 ms.
 4. Edit a module's *interface* (add/remove a decl): dependents rebuild
@@ -176,8 +176,8 @@ a bonus: cold builds gain parallelism even with a empty cache.
 | cold, empty cache (`std:http`) | 270 ms | ~270 ms (or ~180 ms with parallel assembly) |
 | warm, nothing changed | 1–10 ms | 1–10 ms (binary cache, unchanged) |
 | edit entry only | 270 ms | **~50 ms** (entry unit + link) |
-| edit `bytes.a` body | 270 ms | **~35 ms** (one unit + link) |
-| edit a struct's fields in `bytes.a` | 270 ms | ~120 ms (bytes + dependents) |
+| edit `bytes.astra` body | 270 ms | **~35 ms** (one unit + link) |
+| edit a struct's fields in `bytes.astra` | 270 ms | ~120 ms (bytes + dependents) |
 
 ## Phases
 
@@ -209,7 +209,7 @@ Gate: full suite with the flag on; binary size within 5% of today; both
 benchmark suites within noise (asm layout changes may move numbers ±3%);
 explicit check that module-init topological order matches today (test with
 globals that depend on imported module state — add a golden case
-`tests/integration/cases/module_init_order.a`).
+`tests/integration/cases/module_init_order.astra`).
 
 ### Phase 3 — object cache + interface hashing
 

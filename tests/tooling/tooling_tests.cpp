@@ -109,7 +109,7 @@ PI: f64 = 3.14159
 
   a::DiagnosticSink sink;
   a::tooling::DocOptions options;
-  options.sourceName = "geometry.a";
+  options.sourceName = "geometry.astra";
   a::tooling::DocResult result = a::tooling::extractDocs(source, sink, options);
   check(result.ok, "doc generator succeeds on valid source");
   check(result.module.items.size() == 4, "doc generator indexes every declaration");
@@ -160,7 +160,7 @@ class Point:
 
   a::DiagnosticSink sink;
   a::tooling::DocOptions options;
-  options.sourceName = "docstrings.a";
+  options.sourceName = "docstrings.astra";
   a::tooling::DocResult result = a::tooling::extractDocs(source, sink, options);
   check(result.ok, "doc generator accepts docstrings");
   check(result.module.doc == "Module docstring.", "module docstring is rendered");

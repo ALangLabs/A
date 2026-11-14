@@ -36,8 +36,8 @@
 
 import std:core
 
-from "ndarray.a" import NDArray, ndarray, zeros, eye, transpose, reshape, ravel
-from "ndarray.a" import _shape_size, _broadcast_shape, _ew_bin, _scalar_or_arr
+from "ndarray.astra" import NDArray, ndarray, zeros, eye, transpose, reshape, ravel
+from "ndarray.astra" import _shape_size, _broadcast_shape, _ew_bin, _scalar_or_arr
 
 # --- small shape helpers ------------------------------------------------------
 

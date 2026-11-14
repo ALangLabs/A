@@ -18,11 +18,11 @@
 #   utf-32-le, utf-32le, utf32le
 #   utf-32-be, utf-32be, utf32be
 import std:core
-from "common.a" import _norm_encoding, _check_errors
-from "utf8.a" import utf8_encode, utf8_decode, utf8_encode_errors, utf8_decode_errors
-from "latin1.a" import latin1_encode, latin1_decode, ascii_encode, ascii_decode
-from "utf16.a" import utf16_encode, utf16_decode, utf16le_encode, utf16le_decode, utf16be_encode, utf16be_decode
-from "utf32.a" import utf32_encode, utf32_decode, utf32le_encode, utf32le_decode, utf32be_encode, utf32be_decode
+from "common.astra" import _norm_encoding, _check_errors
+from "utf8.astra" import utf8_encode, utf8_decode, utf8_encode_errors, utf8_decode_errors
+from "latin1.astra" import latin1_encode, latin1_decode, ascii_encode, ascii_decode
+from "utf16.astra" import utf16_encode, utf16_decode, utf16le_encode, utf16le_decode, utf16be_encode, utf16be_decode
+from "utf32.astra" import utf32_encode, utf32_decode, utf32le_encode, utf32le_decode, utf32be_encode, utf32be_decode
 
 """_utf8sig_encode(s, errors) -> [i64]"""
 fn _utf8sig_encode(s: String, errors: String):

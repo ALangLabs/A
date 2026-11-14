@@ -7,8 +7,8 @@
 # the same name (a local `data`/`c`/`n` inside a callee overwrites the
 # caller's top-level variable). See report.
 #
-from "ndarray.a" import NDArray, array2string
-from "indexing.a" import take, put_flat, diagonal, diag, compress, compress_mask, compress_idx, extract, extract_mask, place, place_mask, argwhere, nonzero, flatnonzero, slice_nd, slice_axis, select, select_bool, choose_idx, trim_zeros
+from "ndarray.astra" import NDArray, array2string
+from "indexing.astra" import take, put_flat, diagonal, diag, compress, compress_mask, compress_idx, extract, extract_mask, place, place_mask, argwhere, nonzero, flatnonzero, slice_nd, slice_axis, select, select_bool, choose_idx, trim_zeros
 
 CK_fails = 0
 

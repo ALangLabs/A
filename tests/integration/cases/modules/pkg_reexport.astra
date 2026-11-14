@@ -1,4 +1,4 @@
-import "lib/pkg/__init__.a" as pkg
+import "lib/pkg/__init__.astra" as pkg
 
 print(pkg.greet("a"))
 print(pkg.Answer)

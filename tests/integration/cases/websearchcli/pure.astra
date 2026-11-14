@@ -1,6 +1,6 @@
 # Golden test: websearchcli.a pure helpers (no network).
 import json
-from "../../../../websearchcli.a" import _extract_text, _parse_response, _search_payload
+from "../../../../websearchcli.astra" import _extract_text, _parse_response, _search_payload
 
 fn test_sse_result_text():
     body = """event: message

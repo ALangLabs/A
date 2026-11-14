@@ -75,7 +75,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
 - **A**: `comptime` params are **parsed but not implemented** —
   `docs/wiki/declarations.md:80-85`: "call-site specialization is not
   implemented … comptime functions are effectively unusable today."
-  `stdlib/std/comptime/comptime.a` is a stub (`comptime_version() -> "0.0.1"`,
+  `stdlib/std/comptime/comptime.astra` is a stub (`comptime_version() -> "0.0.1"`,
   runtime `type_tag` helpers). AST already has `ComptimeParam`
   (`ast/stmts.hpp`, `parser/parser_decl.cpp:53-122`); `llvm_emit.cpp:330`
   reads them into `FnInfo::paramNames`.
@@ -92,7 +92,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
   intrinsics; `std.algorithm.vectorize` backend asks the compiler to
   autovectorize `map`-style loops; `SimdLength`/`_RegisterPackType` for
   register packing; GPU `DevicePassable` types.
-- **A**: `stdlib/std/simd/simd.a` is explicitly "scalar-emulated fixed-width
+- **A**: `stdlib/std/simd/simd.astra` is explicitly "scalar-emulated fixed-width
   lanes" (`docs/wiki/stdlib.md:21`); real perf comes from hand-written C
   kernels (`linalg_*` builtins in `compiler/astra/runtime/`). The LLVM
   backend `llvm/llvm_emit.cpp` emits **only i64 `aval` words** and routes every

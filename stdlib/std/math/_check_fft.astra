@@ -1,9 +1,9 @@
 # Check for fft.a — run: ./build/a run _check_fft.a  (from this dir)
 import std:core
 
-from "ndarray.a" import NDArray, ndarray, zeros
-from "fft.a" import fft, ifft, fft2, ifft2, rfft, irfft
-from "fft.a" import fftfreq, rfftfreq, fftshift, ifftshift, next_pow2, fft_auto
+from "ndarray.astra" import NDArray, ndarray, zeros
+from "fft.astra" import fft, ifft, fft2, ifft2, rfft, irfft
+from "fft.astra" import fftfreq, rfftfreq, fftshift, ifftshift, next_pow2, fft_auto
 
 fn close(a: f64, b: f64, tol: f64) -> bool:
     d = a - b

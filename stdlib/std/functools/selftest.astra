@@ -1,6 +1,6 @@
 # std.functools selftest — partial/reduce/cache/lru_cache/sort_by/singledispatch.
 # Run: ./build/a test stdlib/std/functools/selftest.a
-from "std/functools/__init__.a" import Partial, partial, partial1, partial2, partial3, partial4, CacheInfo, LRUCache, lru_cache, cache, sort_by, Dispatcher, singledispatch, reduce, reduce_init
+from "std/functools/__init__.astra" import Partial, partial, partial1, partial2, partial3, partial4, CacheInfo, LRUCache, lru_cache, cache, sort_by, Dispatcher, singledispatch, reduce, reduce_init
 
 fn assert_eq(a, b):
     assert(a == b)

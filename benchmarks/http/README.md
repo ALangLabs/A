@@ -72,7 +72,7 @@ bytes costs 8x the memory traffic. Text bodies now avoid that entirely.
 | `net.recv_body` materialised bodies as `[i64]` (8 B/byte) and then decoded them | 1 MiB text body: one read pass into the destination String, ~2.5x faster |
 | `json.parse` grew every string through a `Buf` byte by byte | no-escape fast path (a String copy of the input slice); A now parses JSON faster than CPython's C parser (820 KB: 42 ms vs 73 ms) |
 | header reads over-read up to 64 KiB into the body as `[i64]` | capped at 4 KiB and handed to the body reader as a byte prefix (byte-exact: `b2s` would drop invalid UTF-8) |
-| the run-binary cache hashed module sources but **not** the runtime C sources | editing the runtime silently reused a stale cached binary; the key now covers every runtime `.c`/`.h` and `libaruntime.a` |
+| the run-binary cache hashed module sources but **not** the runtime C sources | editing the runtime silently reused a stale cached binary; the key now covers every runtime `.c`/`.h` and `libaruntime.astra` |
 
 Progression for this benchmark, 1 MiB bodies: **94 -> 388 MB/s** (4.1x),
 10 MiB bodies: **108 -> 610 MB/s** (5.6x), against a raw-socket C++ baseline of

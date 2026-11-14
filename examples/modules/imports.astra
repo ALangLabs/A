@@ -1,7 +1,7 @@
 # Module imports (run from repo root: ./build/a run examples/modules/imports.a)
-import "lib/mathx.a"
-import "lib/mathx.a" as mx
-from "lib/mathx.a" import add, Point
+import "lib/mathx.astra"
+import "lib/mathx.astra" as mx
+from "lib/mathx.astra" import add, Point
 import std:math
 import std:core
 

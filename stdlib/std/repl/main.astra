@@ -5,9 +5,9 @@ import std:repl
 import std:fs
 import std:env
 import std:time
-import "editor.a"
-import "complete.a"
-import "history.a"
+import "editor.astra"
+import "complete.astra"
+import "history.astra"
 
 fn print_help():
     print("A interactive shell for the A language")

@@ -21,9 +21,9 @@
 #     (printf-style %[flags][width][.precision]conv for f/e/g etc.), so
 #     "%.18e", "%.6f", "%g", "%10.3e" all work like NumPy's fmt.
 #
-# Requires sibling `ndarray.a` (same directory).
+# Requires sibling `ndarray.astra` (same directory).
 
-from "ndarray.a" import NDArray, array2string
+from "ndarray.astra" import NDArray, array2string
 
 # --- small helpers ------------------------------------------------------------
 

@@ -1,5 +1,5 @@
 # std.collections selftest — run: ./build/a test stdlib/std/collections/selftest.a
-from "std/collections/__init__.a" import deque, deque_of, deque_bounded, OrderedDict, Counter, counter_of, defaultdict, namedtuple, user_list_of, user_dict_of, chain_map_of
+from "std/collections/__init__.astra" import deque, deque_of, deque_bounded, OrderedDict, Counter, counter_of, defaultdict, namedtuple, user_list_of, user_dict_of, chain_map_of
 
 fn assert_eq(a, b):
     assert(a == b)
