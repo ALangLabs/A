@@ -202,7 +202,7 @@ class Sema {
   ModuleExports& exportsFor(int moduleId);
   TypePtr moduleMemberType(const ModuleAlias& alias, const std::string& member, Span span,
                            bool report);
-  // Follow `from "x.a" import name` value re-exports to the declaring
+  // Follow `from "x.astra" import name` value re-exports to the declaring
   // module so exported package values keep their concrete type.
   TypePtr resolveReexportedValue(int moduleId, const std::string& name, int depth);
   TypePtr moduleMemberCall(const ModuleAlias& alias, const std::string& member, CallExpr& call);

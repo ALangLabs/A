@@ -284,7 +284,7 @@ void Sema::registerModule(Module& module) {
   auto& statements = module.program->statements;
 
   // Re-export imported names, so package `__init__.a` files can aggregate
-  // their submodules (`from "collections.a" import map_list`). Locally
+  // their submodules (`from "collections.astra" import map_list`). Locally
   // declared names below take precedence on collision.
   for (const auto& entry : fromBindings_) {
     const FromBinding& binding = entry.second;

@@ -5525,7 +5525,7 @@ oth:
     std::string name = field;
     // Re-export following (like resolveModuleMember), multi-hop: each step
     // looks for a direct declaration of `name` in the current module, else
-    // descends through a matching `from "x.a" import name` item.
+    // descends through a matching `from "x.astra" import name` item.
     for (int depth = 0; depth < 16; ++depth) {
       const Module& mod = graph_.at(mid);
       if (!mod.program) return "";
@@ -6072,7 +6072,7 @@ oth:
     fn = nullptr; st = nullptr; glob.clear();
     int mid = mb.moduleId;
     if (mid < 0 || mid >= (int)graph_.modules.size()) return;
-    // Follow `from "x.a" import name` re-exports (package __init__ modules).
+    // Follow `from "x.astra" import name` re-exports (package __init__ modules).
     auto rm = resolveModuleMember(graph_, mid, field);
     mid = rm.first;
     const std::string& name = rm.second;

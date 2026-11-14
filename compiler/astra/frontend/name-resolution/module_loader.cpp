@@ -16,6 +16,15 @@ namespace a {
 namespace fs = std::filesystem;
 namespace {
 
+// Build the candidate file paths for a module stem, trying the canonical
+// `.astra` extension first and the legacy `.a` extension second, so old
+// sources keep resolving while new code uses `.astra`.
+void addSourceExtCandidates(std::vector<fs::path>& out, const fs::path& base) {
+  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
+    out.push_back(base.parent_path() / (base.filename().string() + "." + ext));
+  }
+}
+
 std::string readFile(const std::string& path) {
   std::ifstream file(path, std::ios::binary);
   if (!file) return {};
@@ -68,7 +77,7 @@ std::string defaultStdlibRoot() {
     if (!ec) {
       std::vector<fs::path> found;
       for (fs::path up = cwd; !up.empty(); up = up.parent_path()) { found.push_back(up / "stdlib"); if (up == up.parent_path()) break; }
-      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / "prelude.a", e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
+      for (const auto& f : found) { std::error_code e2; if (fs::exists(f / "std" / (std::string("prelude.") + kSourceExt), e2) || fs::exists(f / "std" / (std::string("prelude.") + kLegacySourceExt), e2) || fs::is_directory(f / "std", e2)) candidates.push_back(f); }
       for (const auto& f : found) candidates.push_back(f);
     }
   }
@@ -122,8 +131,10 @@ ModuleGraph ModuleLoader::load(const std::string& entryPath, std::string entrySo
   // everywhere. Programs compiled without a stdlib on disk are unaffected.
   std::error_code exists;
   const fs::path stdRoot = fs::path(options_.stdlibRoot);
-  for (const auto& candidate : {stdRoot / "std" / "prelude.a",
-                                stdRoot / "prelude.a"}) {
+  for (const auto& candidate : {stdRoot / "std" / (std::string("prelude.") + kSourceExt),
+                                stdRoot / (std::string("prelude.") + kSourceExt),
+                                stdRoot / "std" / (std::string("prelude.") + kLegacySourceExt),
+                                stdRoot / (std::string("prelude.") + kLegacySourceExt)}) {
     if (fs::exists(candidate, exists)) {
       graph_.preludeId = loadModule(candidate.string(), candidate.string(), nullptr);
       break;
@@ -214,8 +225,11 @@ void ModuleLoader::loadImports(Module& module) {
     const std::size_t slash = rel.find_last_of('/');
     const std::string leaf = slash == std::string::npos ? rel : rel.substr(slash + 1);
     const fs::path root = fs::path(options_.stdlibRoot) / "std";
-    for (const fs::path& candidate :
-         {root / (rel + ".a"), root / rel / "__init__.a", root / rel / (leaf + ".a")}) {
+    std::vector<fs::path> stdCandidates;
+    addSourceExtCandidates(stdCandidates, root / rel);
+    addSourceExtCandidates(stdCandidates, root / rel / "__init__");
+    addSourceExtCandidates(stdCandidates, root / rel / leaf);
+    for (const fs::path& candidate : stdCandidates) {
       std::error_code error;
       if (!fs::is_regular_file(candidate, error) || error) continue;
       const std::string path = candidate.string();
@@ -315,18 +329,18 @@ int ModuleLoader::resolveBare(const std::string& name, Span span, bool& nativeOu
 
   std::vector<fs::path> candidates;
   const auto addPkg = [&](const fs::path& root) {
-    candidates.push_back(root / (name + ".a"));
-    candidates.push_back(root / name / (name + ".a"));
-    candidates.push_back(root / name / "__init__.a");
-    candidates.push_back(root / "std" / (name + ".a"));
-    candidates.push_back(root / "std" / name / (name + ".a"));
-    candidates.push_back(root / "std" / name / "__init__.a");
+    addSourceExtCandidates(candidates, root / name);
+    addSourceExtCandidates(candidates, root / name / name);
+    addSourceExtCandidates(candidates, root / name / "__init__");
+    addSourceExtCandidates(candidates, root / "std" / name);
+    addSourceExtCandidates(candidates, root / "std" / name / name);
+    addSourceExtCandidates(candidates, root / "std" / name / "__init__");
   };
   if (!options_.stdlibRoot.empty()) addPkg(fs::path(options_.stdlibRoot));
   for (const auto& dir : options_.modulePaths) {
-    candidates.push_back(fs::path(dir) / (name + ".a"));
-    candidates.push_back(fs::path(dir) / name / (name + ".a"));
-    candidates.push_back(fs::path(dir) / name / "__init__.a");
+    addSourceExtCandidates(candidates, fs::path(dir) / name);
+    addSourceExtCandidates(candidates, fs::path(dir) / name / name);
+    addSourceExtCandidates(candidates, fs::path(dir) / name / "__init__");
   }
 
   for (const auto& candidate : candidates) {

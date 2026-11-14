@@ -37,6 +37,14 @@
 namespace a {
 namespace {
 constexpr int kOk=0,kCErr=1,kNoIn=66;
+
+// Append candidate source paths trying the canonical `.astra` extension first,
+// then the legacy `.a` extension, so old and new module files both resolve.
+void appendSourceExtCandidates(std::vector<std::string>& out, const std::filesystem::path& base) {
+  for (const char* ext : {kSourceExt, kLegacySourceExt}) {
+    out.push_back((base.parent_path() / (base.filename().string() + "." + ext)).string());
+  }
+}
 bool flushErrors(DiagnosticSink& s,const PipelineConfig& c,std::ostream& o,std::ostream& e){
   if(!s.hasErrors()) return true;
   if(c.jsonDiagnostics&&c.checkOnly) s.writeJson(o); else s.flush(e,c.useColor);
@@ -403,7 +411,7 @@ inline std::string defaultCacheRoot() {
 }
 
 // Absolute, lexically-normal form of a module path for cache keys.
-// Display paths may be relative ("src/main.a"), and the shared central
+// Display paths may be relative ("src/main.astra"), and the shared central
 // cache must not confuse identical relative paths in different projects —
 // emitted symbols embed canonical paths, so keys must too.
 inline std::string absCachePath(const std::string& path) {
@@ -763,25 +771,25 @@ inline void preWalk(PreScan& s, const std::string& fromDir, const PreImport& imp
         slash == std::string::npos ? rel : rel.substr(slash + 1);
     const std::filesystem::path root =
         std::filesystem::path(s.stdRoot) / "std";
-    cands.push_back((root / (rel + ".a")).string());
-    cands.push_back((root / rel / "__init__.a").string());
-    cands.push_back((root / rel / (leaf + ".a")).string());
+    appendSourceExtCandidates(cands, root / rel);
+    appendSourceExtCandidates(cands, root / rel / "__init__");
+    appendSourceExtCandidates(cands, root / rel / leaf);
   } else {
     // Bare name: stdlib package layout first, then each search dir, exactly
     // as ModuleLoader::resolveBare orders them.
     const std::string& name = imp.target;
     const auto addRoot = [&](const std::filesystem::path& root) {
-      cands.push_back((root / (name + ".a")).string());
-      cands.push_back((root / name / (name + ".a")).string());
-      cands.push_back((root / name / "__init__.a").string());
+      appendSourceExtCandidates(cands, root / name);
+      appendSourceExtCandidates(cands, root / name / name);
+      appendSourceExtCandidates(cands, root / name / "__init__");
     };
     if (!s.stdRoot.empty()) {
       const std::filesystem::path root(s.stdRoot);
       addRoot(root);
       addRoot(root / "std");
-      cands.push_back((root / "std" / (name + ".a")).string());
-      cands.push_back((root / "std" / name / (name + ".a")).string());
-      cands.push_back((root / "std" / name / "__init__.a").string());
+      appendSourceExtCandidates(cands, root / "std" / name);
+      appendSourceExtCandidates(cands, root / "std" / name / name);
+      appendSourceExtCandidates(cands, root / "std" / name / "__init__");
     }
     for (const std::string& d : s.config.modulePaths) addRoot(d);
   }
@@ -852,7 +860,8 @@ inline std::string precheckKey(const std::string& path,
     const std::filesystem::path root(ps.stdRoot);
     bool found = false;
     for (const std::filesystem::path& cand :
-         {root / "std" / "prelude.a", root / "prelude.a"}) {
+         {root / "std" / (std::string("prelude.") + kSourceExt), root / (std::string("prelude.") + kSourceExt),
+          root / "std" / (std::string("prelude.") + kLegacySourceExt), root / (std::string("prelude.") + kLegacySourceExt)}) {
       std::error_code ec;
       if (std::filesystem::is_regular_file(cand, ec) && !ec) {
         preVisitor(ps, cand.string());
@@ -1931,7 +1940,7 @@ std::vector<std::filesystem::path> discoverTestFiles(const std::filesystem::path
     if(ec){ ec.clear(); continue; }
     if(!entry.is_regular_file(ec)){ ec.clear(); continue; }
     const auto& p=entry.path();
-    if(p.extension()==".a" && fileHasTestDecl(p)) out.push_back(p);
+    if((p.extension()=="."+std::string(kSourceExt) || p.extension()=="."+std::string(kLegacySourceExt)) && fileHasTestDecl(p)) out.push_back(p);
   }
   std::sort(out.begin(), out.end());
   return out;

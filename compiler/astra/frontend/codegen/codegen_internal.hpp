@@ -245,7 +245,7 @@ inline std::string stableTag(const std::string& s) {
   return stableHex64(stableHash64(s));
 }
 
-// Follow `from "x.a" import name` re-exports (package __init__ modules) to
+// Follow `from "x.astra" import name` re-exports (package __init__ modules) to
 // the module that actually declares `name`. Returns {moduleId, name};
 // unchanged when there is no re-export. Moved here from codegen.cpp when
 // the assembly backend was removed; the LLVM emitter is the only consumer.

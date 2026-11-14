@@ -19,7 +19,7 @@
 #     `sorted()` builtin. Element order and results are unchanged up to
 #     last-ulp rounding differences in the mean.
 
-import std:math
+import math
 import std:core
 import std:json
 from "std/math/special.a" import erf, erfc

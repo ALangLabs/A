@@ -62,7 +62,7 @@ struct DeferStmt : Stmt {
   StmtPtr body;
 };
 
-// `import "lib/util.a"`, `import "lib/util.a" as u`, `import math`, or
+// `import "lib/util.astra"`, `import "lib/util.astra" as u`, `import math`, or
 struct ImportStmt : Stmt {
   ImportStmt() : Stmt(StmtKind::Import) {}
   std::string path;        // quoted path, empty for native/bare/python imports
@@ -78,7 +78,7 @@ struct ImportStmt : Stmt {
   Span targetSpan;
 };
 
-// `from "lib/util.a" import add, Vec as Point` or `from python:<pkg> import x`.
+// `from "lib/util.astra" import add, Vec as Point` or `from python:<pkg> import x`.
 struct FromImportStmt : Stmt {
   FromImportStmt() : Stmt(StmtKind::FromImport) {}
   struct Item {
