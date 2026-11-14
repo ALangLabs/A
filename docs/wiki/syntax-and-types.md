@@ -70,13 +70,48 @@ semantics for floats (`-7.0 % 3.0 == 2.0`).
 | `i8 i16 i32 i64`, `u8 u16 u32 u64`, `f32` | explicit-width types for low-level/FFI code; `i64`/`f64` spell the same types as `int`/`float` |
 | `[T]` / `T[N]` | dynamic arrays and fixed-size arrays — fixed sizes use a C-like suffix (`int[3]`, `i32[2][3]` for two rows of three) |
 | `(a, b, …)` | tuples |
-| `map<K, V>`, `set<T>` | dictionaries (`{"k": v}`) and sets (`{v}`); inferred only — `map`/`set` are not nameable in type annotations |
+| `{K: V}`, `set<T>`/`{T}` | dictionaries (`{"k": v}`) and sets (`{v}`) |
 | `T?` | optional (`None` or `Some(v)`) |
+| `T \| U` | union — accepts either side (see below) |
+| `any` / `Any` | dynamic top type — accepts and is accepted by every type |
+| `list[T]`, `dict[K, V]`, `set[T]`, `tuple[T1, T2]` | Python-typing spellings of `[T]`, `{K: V}`, `{T}`, `(T1, T2)` — also `List`/`Dict`/`Set`/`Tuple`/`FrozenSet`/`Sequence`/`Mapping` |
+| `tuple[T, ...]` | homogeneous variable-length tuple |
+| `Optional[T]`, `Union[T, U]`, `T \| None` | `Optional[T]` ≡ `T?`; `T \| None` ≡ `T?`; `Union[...]` ≡ `\|` |
+| `fn(params) -> ret` | function values / lambdas (also usable as a parameter/return/field type) |
 | `Result<T, E>` | builtin sum type produced by `Ok(v)` / `Err(e)` (no import needed); `expr?` unwraps `Ok` and propagates `Err`. Note `std:prelude` defines a *separate* plain `Result` class with its own `Ok`/`Err`/`is_ok`/`unwrap` helpers that do not interoperate with `?` |
 | `range` | produced by `a..b` literals; iterable in `for` (not nameable in annotations) |
-| `fn(params) -> ret` | function values / lambdas |
 | `Pointer<T>`, `Allocator`, `Json`, `IO` | low-level / interop types |
 | user types | `class`, `enum`, `trait` declarations |
+
+### Python-`typing` compatibility
+
+Annotations accept Python-`typing` spellings without any import:
+
+```python
+fn first(xs: list[int]) -> int: return xs[0]
+fn lookup(m: dict[str, int]) -> int: return m["k"]
+fn either(x: int | str) -> str: return "ok"
+fn maybe(x: int | None) -> int: return x ?? 0   # == int?
+fn cb(f: fn(int) -> int) -> int: return f(1)
+fn anything(x: any) -> any: return x
+type IntList = list[int]                        # type alias
+v = "5" as int                                  # == cast<int>("5"); runtime no-op
+y = cast<list[int]>([1, 2])
+```
+
+`Name[T, ...]` square brackets work anywhere `<T>` generic arguments do
+(`Box[int]` ≡ `Box<i64>`-style explicit args, `vector[float, 4]`). Bare
+container names (`list`, `dict`, `set`, `tuple`) annotate the container kind
+with `any` elements. `Literal[...]`, `Callable[...]`, `Type[T]`, and
+`issubclass` are not supported (`Callable` suggests `fn(T) -> R`; `isinstance`
+exists and takes a runtime type-name string).
+
+Union/any semantics: `T | U` constrains assignments, arguments, and return
+types (a `list[int]` parameter rejects `list[str]`, an `int | str` parameter
+accepts either). *Uses* of union/any-typed values — method calls, field
+access, indexing, arithmetic — are checked dynamically at runtime, like
+untyped values. A union-typed value assigned to a concrete type must have
+every member fit; assigning to a union target needs only one member to fit.
 
 See [types in declarations](declarations.md) and
 [expressions](statements-and-expressions.md).

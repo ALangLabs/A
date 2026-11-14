@@ -115,7 +115,9 @@ TypeExprPtr Parser::parseTypeExprAtom() {
           konst->value = lit.intValue;
           named->typeArgs.push_back(std::move(konst));
         } else if (check(Tok::DotDot)) {
+          // `...` lexes as '..' + '.'; consume both halves.
           const Token& dots = advance();
+          if (check(Tok::Dot)) advance();
           auto ellipsis = std::make_unique<EllipsisTypeExpr>();
           ellipsis->span = dots.span;
           named->typeArgs.push_back(std::move(ellipsis));
@@ -161,7 +163,9 @@ TypeExprPtr Parser::parseTypeExprAtom() {
           konst->value = lit.intValue;
           namedType->typeArgs.push_back(std::move(konst));
         } else if (check(Tok::DotDot)) {
+          // `...` lexes as '..' + '.'; consume both halves.
           const Token& dots = advance();
+          if (check(Tok::Dot)) advance();
           auto ellipsis = std::make_unique<EllipsisTypeExpr>();
           ellipsis->span = dots.span;
           namedType->typeArgs.push_back(std::move(ellipsis));

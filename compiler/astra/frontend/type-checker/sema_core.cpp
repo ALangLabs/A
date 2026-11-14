@@ -350,6 +350,16 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     return true;
   }
 
+  // A variable against a union target tries each member so the variable is
+  // constrained to (and reported as) a member type rather than the union
+  // itself — bindVar would reject the Union kind for constrained vars.
+  if (a->kind == TypeKind::Var && b->kind == TypeKind::Union) {
+    for (const auto& mb : b->params) {
+      if (unify(a, mb)) return true;
+    }
+    return false;
+  }
+
   if (a->kind == TypeKind::Var) return bindVar(a, b);
   if (b->kind == TypeKind::Var) return bindVar(b, a);
   if (isNumericType(a) && isNumericType(b)) return true;
@@ -428,6 +438,23 @@ bool Sema::unify(TypePtr a, TypePtr b) {
     case TypeKind::Result:
       return unify(a->elem, b->elem) && unify(a->errorType, b->errorType);
     case TypeKind::Tuple: {
+      // `tuple[T, ...]` (length == -2) matches a tuple of any arity whose
+      // elements all unify with T — including the empty tuple.
+      const bool aVar = a->length == -2;
+      const bool bVar = b->length == -2;
+      if (aVar && bVar) return unify(a->params[0], b->params[0]);
+      if (aVar) {
+        for (const auto& p : b->params) {
+          if (!unify(a->params[0], p)) return false;
+        }
+        return true;
+      }
+      if (bVar) {
+        for (const auto& p : a->params) {
+          if (!unify(p, b->params[0])) return false;
+        }
+        return true;
+      }
       // `tuple` (bare) resolves to Tuple{any}: a wildcard matching tuples of
       // any arity, like Python's bare `tuple` annotation.
       auto anyTuple = [](const TypePtr& t) {
@@ -771,17 +798,18 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
       return typeSet(containerElem(0, args));
     }
     if (named->name == "tuple" || named->name == "Tuple") {
-      std::vector<TypePtr> args = resolveArgs();
-      // `tuple[T, ...]` is a homogeneous variable-length tuple; A's dynamic
-      // array is the closest existing type.
-      if (!args.empty() &&
+      // `tuple[T, ...]` is a homogeneous variable-length tuple; `...` is only
+      // valid as the last argument. Check it before resolving the arguments
+      // (the marker itself has no type).
+      if (!named->typeArgs.empty() &&
           dynamic_cast<EllipsisTypeExpr*>(named->typeArgs.back().get())) {
-        if (args.size() != 2) {
+        if (named->typeArgs.size() != 2) {
           sink_.error(named->typeArgs.back()->span,
                       "'tuple[T, ...]' takes exactly one element type before '...'.");
           return typeError();
         }
-        return typeArray(args[0]);
+        TypePtr elem = resolveTypeExpr(*named->typeArgs[0]);
+        return typeTupleVariadic(elem);
       }
       for (auto& a : named->typeArgs) {
         if (dynamic_cast<EllipsisTypeExpr*>(a.get())) {
@@ -789,6 +817,7 @@ TypePtr Sema::resolveTypeExprImpl(TypeExpr& expr) {
           return typeError();
         }
       }
+      std::vector<TypePtr> args = resolveArgs();
       if (args.empty()) return typeTuple({typeAny()});
       return typeTuple(std::move(args));
     }

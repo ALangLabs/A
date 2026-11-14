@@ -595,8 +595,12 @@ bool scanTypeExprAtomTokens(TypeScan& s) {
       // Square-bracket type arguments; integer literals are comptime
       // arguments (e.g. the lane count in `vector[float, 4]`).
       while (true) {
-        if (s.kind() == Tok::Int || s.kind() == Tok::DotDot) {
-          s.eat(s.kind());
+        if (s.kind() == Tok::Int) {
+          s.eat(Tok::Int);
+        } else if (s.kind() == Tok::DotDot) {
+          // `...` lexes as '..' + '.'; consume both halves.
+          s.eat(Tok::DotDot);
+          if (s.kind() == Tok::Dot) s.eat(Tok::Dot);
         } else if (!scanTypeExprTokens(s)) {
           return false;
         }
@@ -615,8 +619,12 @@ bool scanTypeExprAtomTokens(TypeScan& s) {
 bool scanTypeArgListTokens(TypeScan& s) {
   if (!s.eat(Tok::Lt)) return false;
   while (s.kind() != Tok::Gt && s.rawKind() != Tok::Shr && !s.atEnd()) {
-    if (s.kind() == Tok::Int || s.kind() == Tok::DotDot) {
-      s.eat(s.kind());
+    if (s.kind() == Tok::Int) {
+      s.eat(Tok::Int);
+    } else if (s.kind() == Tok::DotDot) {
+      // `...` lexes as '..' + '.'; consume both halves.
+      s.eat(Tok::DotDot);
+      if (s.kind() == Tok::Dot) s.eat(Tok::Dot);
     } else if (!scanTypeExprTokens(s)) {
       return false;
     }

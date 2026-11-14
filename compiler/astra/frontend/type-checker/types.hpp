@@ -185,6 +185,16 @@ inline TypePtr typeTuple(std::vector<TypePtr> elements) {
   return type;
 }
 
+// `tuple[T, ...]` — homogeneous variable-length tuple (Python typing). Stored
+// as Tuple with length == -2 and params == {T}; unify() treats it as "any
+// arity of T".
+inline TypePtr typeTupleVariadic(TypePtr elem) {
+  auto type = makeType(TypeKind::Tuple);
+  type->params = {std::move(elem)};
+  type->length = -2;
+  return type;
+}
+
 inline TypePtr typeUnion(std::vector<TypePtr> members) {
   auto type = makeType(TypeKind::Union);
   type->params = std::move(members);
@@ -315,6 +325,10 @@ inline std::string typeName(const TypePtr& type) {
     case TypeKind::IO: return "IO";
     case TypeKind::Bytes: return "Bytes";
     case TypeKind::Tuple: {
+      if (t->length == -2) {
+        // `tuple[T, ...]`: homogeneous variable-length tuple.
+        return "tuple[" + typeName(t->params[0]) + ", ...]";
+      }
       std::string s = "(";
       for (std::size_t i = 0; i < t->params.size(); ++i) {
         if (i) s += ", ";

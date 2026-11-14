@@ -1,0 +1,53 @@
+# Python-typing parity: parametrized containers, unions, any, callables, cast.
+
+fn takes_list(x: list[int]) -> int: return x[0]
+fn takes_dict(x: dict[str, int]) -> int: return x["a"]
+fn takes_set(x: set[str]) -> bool: return "k" in x
+fn takes_tuple(x: tuple[int, str]) -> str: return x[1]
+fn takes_union(x: int | str) -> str: return "u"
+fn takes_union3(x: int | str | float) -> str: return "u3"
+fn takes_any(x: any) -> any: return x
+fn takes_opt(x: int | None) -> int: return x ?? -1
+fn takes_fn(f: fn(int) -> int) -> int: return f(3)
+fn takes_variadic(x: tuple[int, ...]) -> int: return len(x)
+
+print(takes_list([1, 2, 3]))
+print(takes_dict({"a": 5}))
+print(takes_set({"k", "z"}))
+print(takes_tuple((1, "hi")))
+print(takes_union("s"))
+print(takes_union(9))
+print(takes_union3(1.5))
+print(takes_any([1, 2]))
+print(takes_any("whatever"))
+print(takes_opt(None))
+print(takes_opt(7))
+print(takes_fn(fn(n) => n + 1))
+print(takes_variadic((1, 2, 3, 4)))
+
+# Variable annotations.
+x: list[int] = [1, 2, 3]
+y: int | str = "hello"
+z: dict[str, int] = {"k": 1}
+w: tuple[int, str, bool] = (1, "a", true)
+v: any = {"nested": [1, 2]}
+b: list = [1, 2]           # bare container: any element type
+b2: dict = {"k": "v"}
+print(x[2], y, z["k"], w, v, b, b2)
+
+# Optional/Union/None spellings.
+fn opt1(x: Optional[int]) -> int: return x ?? 0
+fn uni1(x: Union[int, str]) -> int: return 1
+fn uni2(x: Union[int, str, None]) -> int: return 2
+type IntOrStr = int | str
+fn aliased(x: IntOrStr) -> int: return 3
+print(opt1(None), opt1(4), uni1("s"), uni2(None), aliased(8))
+
+# Cast: compile-time annotation, runtime no-op.
+print(cast<int>("5"))
+print("5" as int)
+c = cast<list[int]>([9, 8])
+print(c)
+
+# isinstance already exists; unions don't affect it.
+print(isinstance(1, "int"), isinstance("s", "str"))
