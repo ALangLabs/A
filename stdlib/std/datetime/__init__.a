@@ -76,7 +76,7 @@ class DateTime:
 
 """_fdiv(a, b) -> floor division for i64 (b > 0)."""
 fn _fdiv(a, b):
-    q = a / b
+    q = a // b
     r = a % b
     if r != 0 and r < 0:
         q = q - 1
@@ -94,8 +94,8 @@ fn _days_from_civil(y, m, d):
         mp = mp - 3
     else:
         mp = mp + 9
-    doy = (153 * mp + 2) / 5 + d - 1
-    doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    doy = (153 * mp + 2) // 5 + d - 1
+    doe = yoe * 365 + yoe // 4 - yoe // 100 + doy
     return era * 146097 + doe - 719468
 
 """_civil_from_days(z) -> [year, month, day]."""
@@ -103,11 +103,11 @@ fn _civil_from_days(z):
     zz = z + 719468
     era = _fdiv(zz, 146097)
     doe = zz - era * 146097
-    yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    yoe = (doe - doe // 1460 + doe // 36524 - doe // 146096) // 365
     y = yoe + era * 400
-    doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
-    mp = (5 * doy + 2) / 153
-    d = doy - (153 * mp + 2) / 5 + 1
+    doy = doe - (365 * yoe + yoe // 4 - yoe // 100)
+    mp = (5 * doy + 2) // 153
+    d = doy - (153 * mp + 2) // 5 + 1
     m = mp
     if mp < 10:
         m = mp + 3
@@ -124,11 +124,11 @@ fn _dt_from_ms(ms):
     if rem < 0:
         rem = rem + 86400000
         days = days - 1
-    h = rem / 3600000
+    h = rem // 3600000
     rem = rem - h * 3600000
-    mi = rem / 60000
+    mi = rem // 60000
     rem = rem - mi * 60000
-    s = rem / 1000
+    s = rem // 1000
     msec = rem - s * 1000
     ymd = _civil_from_days(days)
     return DateTime(ymd[0], ymd[1], ymd[2], h, mi, s, msec)
@@ -190,7 +190,7 @@ fn _week_num(dt, monday_first):
     if monday_first:
         dow = _dow_mon(dt)
     # Days before the first target weekday are week 0.
-    w = (yday - 1 - dow + 7) / 7
+    w = (yday - 1 - dow + 7) // 7
     return w
 
 """
@@ -215,8 +215,8 @@ fn _strftime(dt, fmt):
     if dowm < 0:
         dowm = dowm + 7
     dows = (dowm + 1) % 7
-    w_sun = (yday_v - 1 - dows + 7) / 7
-    w_mon = (yday_v - 1 - dowm + 7) / 7
+    w_sun = (yday_v - 1 - dows + 7) // 7
+    w_mon = (yday_v - 1 - dowm + 7) // 7
     # Accumulate fragments and join once — `out = out + c` per char is
     # O(len^2) in string copies; join is a single native pass.
     parts = []
@@ -396,7 +396,7 @@ class TimeDelta:
     fn seconds(self):
         d = self.days()
         rem = self.ms - d * 86400000
-        return rem / 1000
+        return rem // 1000
 
     """milliseconds(self) -> ms component within the second (0..999)."""
     fn milliseconds(self):
@@ -427,13 +427,13 @@ class TimeDelta:
         if v < 0:
             neg = true
             v = -v
-        d = v / 86400000
+        d = v // 86400000
         rem = v - d * 86400000
-        h = rem / 3600000
+        h = rem // 3600000
         rem = rem - h * 3600000
-        mi = rem / 60000
+        mi = rem // 60000
         rem = rem - mi * 60000
-        s = rem / 1000
+        s = rem // 1000
         msec = rem - s * 1000
         # Python str(timedelta) does not zero-pad the hours field
         time_part = str(h) + ":" + _pad2(mi) + ":" + _pad2(s) + "." + _pad3(msec)
@@ -659,7 +659,7 @@ class _Strp:
             while k < n:
                 div = div * 10
                 k = k + 1
-            ds = ds / div
+            ds = ds // div
         return ds
 
     fn _tz(self):

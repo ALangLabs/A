@@ -53,7 +53,7 @@ fn median(data):
     _check_nonempty(data, "median")
     xs = _sorted_copy(data)
     n = len(xs)
-    mid = n / 2
+    mid = n // 2
     if n % 2 == 1:
         return _to_float(xs[mid])
     return (_to_float(xs[mid - 1]) + _to_float(xs[mid])) / 2.0
@@ -64,15 +64,15 @@ fn median_low(data):
     xs = _sorted_copy(data)
     n = len(xs)
     if n % 2 == 1:
-        return _to_float(xs[n / 2])
-    return _to_float(xs[n / 2 - 1])
+        return _to_float(xs[n // 2])
+    return _to_float(xs[n // 2 - 1])
 
 fn median_high(data):
     "High median of data."
     _check_nonempty(data, "median_high")
     xs = _sorted_copy(data)
     n = len(xs)
-    return _to_float(xs[n / 2])
+    return _to_float(xs[n // 2])
 
 fn mode(data):
     "Most common data point (first among ties for highest count)."
@@ -329,7 +329,7 @@ fn median_grouped(data, interval = 1.0):
     if n == 0:
         core.panic("median_grouped: no median for empty data")
     # midpoint value of the median bin
-    x = _to_float(xs[n / 2])
+    x = _to_float(xs[n // 2])
     # bisect_left: i = count of values < x ; bisect_right: j = count <= x
     i = 0
     while i < n and _to_float(xs[i]) < x:

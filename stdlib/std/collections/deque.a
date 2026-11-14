@@ -242,7 +242,7 @@ class Deque<T>:
         keep_to = len(out)
         if self.maxlen >= 0 and len(out) > self.maxlen:
             overflow = len(out) - self.maxlen
-            if idx <= n / 2:
+            if idx <= n // 2:
                 # inserted near the left: drop from the right
                 keep_to = keep_to - overflow
             else:

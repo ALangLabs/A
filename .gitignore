@@ -36,3 +36,4 @@ websearchcli.a
 # A compiler cache (like Python's __pycache__)
 _acache_/
 **/_acache_/
+lol.a

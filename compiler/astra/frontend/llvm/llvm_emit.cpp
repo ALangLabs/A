@@ -1428,20 +1428,19 @@ dblp:
   %bx = call i64 @a.mdouble(double %dr)
   ret i64 %bx
 )LLVM" << tail("a_mul_slow");
-    // div: b==0 -> slow (panic path); INT64_MIN/-1 cannot occur for 47-bit
-    // inline ints. Double division by 0.0 must go slow (panic, not inf).
+    // div: true division (Python parity) — int/int yields double, so both
+    // paths reduce to nval/nval/fdiv with a zero check routed to slow.
     helpers_ << head("a.div.fast") << R"LLVM(intp:
   %a = call i64 @a.ival(i64 %l)
   %b = call i64 @a.ival(i64 %r)
   %bz = icmp eq i64 %b, 0
   br i1 %bz, label %slow, label %go
 go:
-  %res = sdiv i64 %a, %b
-  %ok = call i1 @a.inrange(i64 %res)
-  br i1 %ok, label %mint, label %slow
-mint:
-  %m = call i64 @a.mint(i64 %res)
-  ret i64 %m
+  %da0 = sitofp i64 %a to double
+  %db0 = sitofp i64 %b to double
+  %dr0 = fdiv double %da0, %db0
+  %bx0 = call i64 @a.mdouble(double %dr0)
+  ret i64 %bx0
 dblp:
   %da = call double @a.nval(i64 %l)
   %db = call double @a.nval(i64 %r)
@@ -4571,6 +4570,8 @@ oth:
       emit("  " + eeN + " = icmp eq i1 " + ee + ", false");
       emit("  " + edge + " = and i1 " + bothI + ", " + eeN);
       useI = edge;
+      // True division: int/int yields double — never take the int path.
+      if (op == BinOp::Div) useI = "false";
     }
     std::string lInt = newLabel("ndi"), lDbl = newLabel("ndf");
     emit("  br i1 " + useI + ", label %" + lInt + ", label %" + lDbl);

@@ -78,7 +78,7 @@ fn _randbelow(self, n):
         # Range wider than one draw: fall back to a single modulo draw
         # (bias is negligible relative to the range size).
         return _next31(self) % n
-    limit = (2147483646 / n) * n
+    limit = (2147483646 // n) * n
     while true:
         x = _next31(self)
         if x < limit:
@@ -187,7 +187,7 @@ class Random:
             width = hi - lo
             if width <= 0:
                 core.panic("randrange: empty range")
-            count = (width + step - 1) / step
+            count = (width + step - 1) // step
             if count <= 0:
                 core.panic("randrange: empty range")
             return lo + step * _randbelow(self, count)
@@ -195,7 +195,7 @@ class Random:
         span = lo - hi
         if span <= 0:
             core.panic("randrange: empty range")
-        count = (span - step - 1) / (-step)
+        count = (span - step - 1) // (-step)
         if count <= 0:
             core.panic("randrange: empty range")
         return lo + step * _randbelow(self, count)
@@ -507,7 +507,7 @@ fn _grandbelow(n):
         v = (st - 1) % n
         _gstore_i(st)
         return v
-    limit = (2147483646 / n) * n
+    limit = (2147483646 // n) * n
     while true:
         st = _pm_step(st)
         x = st - 1
@@ -545,7 +545,7 @@ fn randrange(start, stop = None, step = 1):
         width = hi - lo
         if width <= 0:
             core.panic("randrange: empty range")
-        count = (width + step - 1) / step
+        count = (width + step - 1) // step
         if count <= 0:
             core.panic("randrange: empty range")
         return lo + step * _grandbelow(count)
@@ -553,7 +553,7 @@ fn randrange(start, stop = None, step = 1):
     span = lo - hi
     if span <= 0:
         core.panic("randrange: empty range")
-    count = (span - step - 1) / (-step)
+    count = (span - step - 1) // (-step)
     if count <= 0:
         core.panic("randrange: empty range")
     return lo + step * _grandbelow(count)
@@ -733,8 +733,8 @@ fn paretovariate(alpha):
     _store(r)
     return v
 
-"""weibullvariate(alpha, beta) -> Weibull-distributed float (global stream)."""
 fn weibullvariate(alpha, beta):
+    """weibullvariate(alpha, beta) -> Weibull-distributed float (global stream)."""
     r = _load()
     v = r.weibullvariate(alpha, beta)
     _store(r)

@@ -281,6 +281,52 @@ void Lexer::scanChar() {
   std::size_t start = pos_;
   int startLine = line_;
   int startCol = col_;
+  // '''...''' triple-quoted raw string (Python parity with """...""").
+  if (peek(1) == '\'' && peek(2) == '\'') {
+    advance();
+    advance();
+    advance();
+    if (peek() == '\r' && peek(1) == '\n') {
+      advance();
+      advance();
+    } else if (peek() == '\n') {
+      advance();
+    }
+    std::size_t contentStart = pos_;
+    bool terminated = false;
+    while (!atEnd()) {
+      if (peek() == '\'' && peek(1) == '\'' && peek(2) == '\'') {
+        std::size_t contentEnd = pos_;
+        advance();
+        advance();
+        advance();
+        terminated = true;
+        Token token;
+        token.kind = Tok::String;
+        token.rawString = true;
+        token.span = makeSpan(start, startLine, startCol);
+        token.lexeme = text_.substr(start, pos_ - start);
+        token.strValue = text_.substr(contentStart, contentEnd - contentStart);
+        if (!terminated) {
+          error(token.span, "Unterminated triple-quoted string literal.",
+                "Close the raw string with '''.");
+        }
+        tokens_.push_back(std::move(token));
+        return;
+      }
+      advance();
+    }
+    Token token;
+    token.kind = Tok::String;
+    token.rawString = true;
+    token.span = makeSpan(start, startLine, startCol);
+    token.lexeme = text_.substr(start, pos_ - start);
+    token.strValue = text_.substr(contentStart);
+    error(token.span, "Unterminated triple-quoted string literal.",
+          "Close the raw string with '''.");
+    tokens_.push_back(std::move(token));
+    return;
+  }
   advance();  // opening quote
   // Python parity: 'abc' is a string, 'a' stays a char literal. Pre-scan
   // for the closing quote (respecting backslash escapes) and upgrade to a

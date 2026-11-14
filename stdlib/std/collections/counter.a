@@ -38,7 +38,7 @@ fn _sort_by_count_desc(items):
     n = len(items)
     if n <= 1:
         return items
-    mid = n / 2
+    mid = n // 2
     left = _sort_by_count_desc(items[0..mid])
     right = _sort_by_count_desc(items[mid..])
     return _merge_by_count(left, right)

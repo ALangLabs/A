@@ -1,5 +1,5 @@
 fn divmod(a, b):
-    return (a / b, a % b)
+    return (a // b, a % b)
 
 (q, r) = divmod(17, 5)
 print(q, r)

@@ -90,9 +90,10 @@ static aval arith_int_int(aval l, aval r, char op) {
             if (imul_of(a, b, &res)) return mkdouble((double)a * (double)b);
             return mkint_full(res);
         case '/':
+            /* Python parity: `/` is true division — int/int yields float.
+               Use `//` for floor division. */
             if (b == 0) panicf("Division by zero.\n  = help: Check the divisor before dividing.");
-            if (a == INT64_MIN && b == -1) return mkdouble(9223372036854775808.0);
-            return mkint_full(a / b);
+            return mkdouble((double)a / (double)b);
         case '%':
             if (b == 0) panicf("Remainder by zero.\n  = help: Check the divisor before dividing.");
             if (b == -1) return mkint_full(0);

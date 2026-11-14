@@ -1,7 +1,7 @@
 fn divide(a, b):
     if b == 0:
         return Err("division by zero")
-    return Ok(a / b)
+    return Ok(a // b)
 
 fn compute(x, y):
     q = divide(x, y)?
