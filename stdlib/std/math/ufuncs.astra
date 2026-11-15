@@ -23,6 +23,7 @@
 #    (detected via atan2); documented per-function.
 #
 import math
+from math import ew_un as _kew_un, ew_bin as _kew_bin, ew_bin_scalar as _kew_bsc
 from "ndarray.astra" import NDArray, _broadcast_shape, _shape_size, _scalar_or_arr
 
 # --- scalar helpers -----------------------------------------------------------
@@ -275,25 +276,68 @@ fn _sinc(x: f64) -> f64:
 
 # --- unary elementwise ----------------------------------------------------------
 
-fn _un_scalar(op: str, v: f64) -> f64:
+# Integer opcodes for the hot elementwise loops: mapping the op name to an
+# i64 happens ONCE per array call, so the per-element dispatch is a raw int
+# compare instead of a boxed string == runtime call.
+fn _un_opi(op: str) -> i64:
+    if op == "isnan": return 1
+    if op == "isinf": return 2
+    if op == "isfinite": return 3
+    if op == "signbit": return 4
+    if op == "neg": return 5
+    if op == "pos": return 6
+    if op == "abs": return 7
+    if op == "sqrt": return 8
+    if op == "square": return 9
+    if op == "sin": return 10
+    if op == "cos": return 11
+    if op == "tan": return 12
+    if op == "asin": return 13
+    if op == "acos": return 14
+    if op == "atan": return 15
+    if op == "sinh": return 16
+    if op == "cosh": return 17
+    if op == "tanh": return 18
+    if op == "asinh": return 19
+    if op == "acosh": return 20
+    if op == "atanh": return 21
+    if op == "exp": return 22
+    if op == "exp2": return 23
+    if op == "expm1": return 24
+    if op == "log": return 25
+    if op == "log2": return 26
+    if op == "log10": return 27
+    if op == "log1p": return 28
+    if op == "floor": return 29
+    if op == "ceil": return 30
+    if op == "trunc" or op == "fix": return 31
+    if op == "rint": return 32
+    if op == "sign": return 33
+    if op == "reciprocal": return 34
+    if op == "sinc": return 35
+    if op == "deg2rad": return 36
+    if op == "rad2deg": return 37
+    return 0
+
+fn _un_scalar(opi: i64, v: f64) -> f64:
     nan = (v != v)
-    if op == "isnan":
+    if opi == 1:
         if nan:
             return 1.0
         return 0.0
-    if op == "isinf":
+    if opi == 2:
         if nan:
             return 0.0
         if fabs(v) == _pinf():
             return 1.0
         return 0.0
-    if op == "isfinite":
+    if opi == 3:
         if nan:
             return 0.0
         if fabs(v) == _pinf():
             return 0.0
         return 1.0
-    if op == "signbit":
+    if opi == 4:
         if nan:
             return 0.0
         if v < 0.0:
@@ -305,109 +349,117 @@ fn _un_scalar(op: str, v: f64) -> f64:
     if nan:
         return _nan()
     inf = (fabs(v) == _pinf())
-    if op == "neg":
+    if opi == 5:
         return -v
-    if op == "pos":
+    if opi == 6:
         return v
-    if op == "abs":
+    if opi == 7:
         return fabs(v)
-    if op == "sqrt":
+    if opi == 8:
         if v < 0.0:
             return _nan()
         return math.sqrt(v)
-    if op == "square":
+    if opi == 9:
         return v * v
-    if op == "sin":
+    if opi == 10:
         if inf:
             return _nan()
         return math.sin(v)
-    if op == "cos":
+    if opi == 11:
         if inf:
             return _nan()
         return math.cos(v)
-    if op == "tan":
+    if opi == 12:
         if inf:
             return _nan()
         return math.tan(v)
-    if op == "asin":
+    if opi == 13:
         if inf or fabs(v) > 1.0:
             return _nan()
         return math.asin(v)
-    if op == "acos":
+    if opi == 14:
         if inf or fabs(v) > 1.0:
             return _nan()
         return math.acos(v)
-    if op == "atan":
+    if opi == 15:
         return math.atan(v)
-    if op == "sinh":
+    if opi == 16:
         return _sinh(v)
-    if op == "cosh":
+    if opi == 17:
         return _cosh(v)
-    if op == "tanh":
+    if opi == 18:
         return _tanh(v)
-    if op == "asinh":
+    if opi == 19:
         return _asinh(v)
-    if op == "acosh":
+    if opi == 20:
         return _acosh(v)
-    if op == "atanh":
+    if opi == 21:
         return _atanh(v)
-    if op == "exp":
+    if opi == 22:
         return math.exp(v)
-    if op == "exp2":
+    if opi == 23:
         return math.pow(2.0, v)
-    if op == "expm1":
+    if opi == 24:
         return _expm1(v)
-    if op == "log":
+    if opi == 25:
         return _log_guarded(v, false, false)
-    if op == "log2":
+    if opi == 26:
         return _log_guarded(v, true, false)
-    if op == "log10":
+    if opi == 27:
         return _log_guarded(v, false, true)
-    if op == "log1p":
+    if opi == 28:
         if v <= -1.0:
             if v == -1.0:
                 return -_pinf()
             return _nan()
         return _log1p(v)
-    if op == "floor":
+    if opi == 29:
         if inf:
             return v
         return math.floor(v)
-    if op == "ceil":
+    if opi == 30:
         if inf:
             return v
         return math.ceil(v)
-    if op == "trunc" or op == "fix":
+    if opi == 31:
         if inf:
             return v
         return math.trunc(v)
-    if op == "rint":
+    if opi == 32:
         if inf:
             return v
         return _rint(v)
-    if op == "sign":
+    if opi == 33:
         if v > 0.0:
             return 1.0
         if v < 0.0:
             return -1.0
         return v
-    if op == "reciprocal":
+    if opi == 34:
         if v == 0.0:
             return _cs(_pinf(), v)
         return 1.0 / v
-    if op == "sinc":
+    if opi == 35:
         return _sinc(v)
-    if op == "deg2rad":
+    if opi == 36:
         return v * 0.017453292519943295
-    if op == "rad2deg":
+    if opi == 37:
         return v * 57.29577951308232
     return v
 
 fn _uf_un(op: str, a: NDArray) -> NDArray:
     n = a.size()
+    opi = _un_opi(op)
+    ad = a.data
+    # Fast path: flat [f64] buffer -> native kernel (math_ew.c). The A loop
+    # below remains for buffers whose length disagrees with the shape size.
+    if len(ad) == n:
+        return NDArray(_kew_un(opi, ad), a.shape)
     data = []
-    for i in 0..n:
-        data.append(_un_scalar(op, a.data[i]))
+    i = 0
+    while i < n:
+        data.append(_un_scalar(opi, ad[i]))
+        i = i + 1
     return NDArray(data, a.shape)
 
 # --- binary elementwise ---------------------------------------------------------
@@ -417,14 +469,32 @@ fn _pow(x: f64, y: f64) -> f64:
         return _nan()
     return math.pow(x, y)
 
-fn _bin_scalar(op: str, x: f64, y: f64) -> f64:
+fn _bin_opi(op: str) -> i64:
+    if op == "add": return 1
+    if op == "sub": return 2
+    if op == "mul": return 3
+    if op == "div": return 4
+    if op == "pow": return 5
+    if op == "rem" or op == "mod": return 6
+    if op == "fmod": return 7
+    if op == "floordiv": return 8
+    if op == "hypot": return 9
+    if op == "maximum": return 10
+    if op == "minimum": return 11
+    if op == "fmax": return 12
+    if op == "fmin": return 13
+    if op == "cs": return 14
+    if op == "atan2": return 15
+    return 0
+
+fn _bin_scalar(opi: i64, x: f64, y: f64) -> f64:
     # WORKAROUND for an A runtime bug: an f64 NaN that is bound to a function
     # parameter is corrupted to +inf when it crosses the NEXT call boundary
     # (forwarded as an argument or returned). Params can be *read* fine, so
     # all NaN handling must happen in THIS frame before delegating to helpers
     # (a second hop would hand them +inf instead of NaN).
     if x != x or y != y:
-        if op == "fmax" or op == "fmin":
+        if opi == 12 or opi == 13:
             # NaN-tolerant ops return the non-NaN operand.
             if x != x:
                 if y != y:
@@ -433,44 +503,44 @@ fn _bin_scalar(op: str, x: f64, y: f64) -> f64:
             return x
         # every other ufunc propagates NaN
         return _nan()
-    if op == "add":
+    if opi == 1:
         r = x + y
         if r != r:
             return _nan()
         return r
-    if op == "sub":
+    if opi == 2:
         r = x - y
         if r != r:
             return _nan()
         return r
-    if op == "mul":
+    if opi == 3:
         r = x * y
         if r != r:
             return _nan()
         return r
-    if op == "div":
+    if opi == 4:
         return _div(x, y)
-    if op == "pow":
+    if opi == 5:
         return _pow(x, y)
-    if op == "rem" or op == "mod":
+    if opi == 6:
         return _rem(x, y)
-    if op == "fmod":
+    if opi == 7:
         return _fmod(x, y)
-    if op == "floordiv":
+    if opi == 8:
         return _floordiv(x, y)
-    if op == "hypot":
+    if opi == 9:
         return _hypot(x, y)
-    if op == "maximum":
+    if opi == 10:
         return _maximum(x, y)
-    if op == "minimum":
+    if opi == 11:
         return _minimum(x, y)
-    if op == "fmax":
+    if opi == 12:
         return _fmax(x, y)
-    if op == "fmin":
+    if opi == 13:
         return _fmin(x, y)
-    if op == "cs":
+    if opi == 14:
         return _cs(x, y)
-    if op == "atan2":
+    if opi == 15:
         # builtin call result: a NaN produced here is "fresh" and survives
         return math.atan2(x, y)
     return x
@@ -546,13 +616,40 @@ fn _coords_at(shape: [i64], i: i64) -> [i64]:
         k = k - 1
     return coords
 
+fn _shape_eq(a: [i64], b: [i64]) -> bool:
+    if len(a) != len(b):
+        return false
+    i = 0
+    while i < len(a):
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    return true
+
 fn _uf_bin(op: str, a: NDArray, b: NDArray) -> NDArray:
     shape = _broadcast_shape(a.shape, b.shape)
     if len(shape) == 0 and not _bcompat(a.shape, b.shape):
         return NDArray([], [])
     n = _shape_size(shape)
+    opi = _bin_opi(op)
+    # Fast path: identical shapes mean both operands are contiguous with
+    # stride 1 — skip coords/stride math entirely (the common case).
+    if _shape_eq(a.shape, b.shape) and _shape_eq(a.shape, shape):
+        ad = a.data
+        bd = b.data
+        # Fast path: identical flat [f64] buffers -> native kernel.
+        if len(ad) == n and len(bd) == n:
+            return NDArray(_kew_bin(opi, ad, bd), shape)
+        data = []
+        i = 0
+        while i < n:
+            data.append(_bin_scalar(opi, ad[i], bd[i]))
+            i = i + 1
+        return NDArray(data, shape)
     sa = _bstride(a.shape, shape)
     sb = _bstride(b.shape, shape)
+    ad = a.data
+    bd = b.data
     data = []
     for i in 0..n:
         coords = _coords_at(shape, i)
@@ -563,14 +660,30 @@ fn _uf_bin(op: str, a: NDArray, b: NDArray) -> NDArray:
             oa = oa + coords[k] * sa[k]
             ob = ob + coords[k] * sb[k]
             k = k + 1
-        data.append(_bin_scalar(op, a.data[oa], b.data[ob]))
+        data.append(_bin_scalar(opi, ad[oa], bd[ob]))
     return NDArray(data, shape)
 
 fn _with_scalar2(op: str, a: NDArray, s: f64, scalar_left: bool) -> NDArray:
-    sa = _scalar_or_arr(s, a.shape)
+    # Scalar-broadcast fast path: avoids materializing an n-element array
+    # of the scalar and running the full broadcast binop.
+    n = a.size()
+    opi = _bin_opi(op)
+    ad = a.data
+    # Fast path: flat [f64] buffer -> native kernel (scalar broadcast).
+    if len(ad) == n:
+        return NDArray(_kew_bsc(opi, ad, s, scalar_left), a.shape)
+    data = []
     if scalar_left:
-        return _uf_bin(op, sa, a)
-    return _uf_bin(op, a, sa)
+        i = 0
+        while i < n:
+            data.append(_bin_scalar(opi, s, ad[i]))
+            i = i + 1
+    else:
+        i = 0
+        while i < n:
+            data.append(_bin_scalar(opi, ad[i], s))
+            i = i + 1
+    return NDArray(data, a.shape)
 
 # --- binary ufuncs: array OP array ----------------------------------------------
 

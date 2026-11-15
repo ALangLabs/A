@@ -51,7 +51,7 @@ function makeVscodeStub(mode) {
             createFileSystemWatcher: () => ({ onDidCreate: () => ({ dispose() {} }), onDidChange: () => ({ dispose() {} }), onDidDelete: () => ({ dispose() {} }), dispose() {} }),
             onDidOpenTextDocument: disp, onDidSaveTextDocument: disp, onDidChangeTextDocument: disp,
             onDidCloseTextDocument: disp, onDidChangeConfiguration: disp, onDidChangeWorkspaceFolders: disp,
-            onDidGrantWorkspaceTrust: disp,
+            onDidGrantWorkspaceTrust: disp, onWillSaveTextDocument: disp,
             fs: { readFile: async () => Buffer.from(''), stat: async () => { throw new Error('no'); }, createDirectory: async () => {}, writeFile: async () => {} },
             findFiles: async () => [], openTextDocument: async () => { throw new Error('no'); },
         },

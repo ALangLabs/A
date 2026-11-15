@@ -26,6 +26,16 @@ inline void addCoreDocs(StringMap<BuiltinDoc>& docs) {
       {"now", {"now", "now() -> i64", "Current time as Unix epoch milliseconds."}},
       {"sleep", {"sleep", "sleep(milliseconds)", "Pauses for a non-negative duration."}},
 
+      // auto-async fibers (async.spawn/join/done/cancel)
+      {"fib_spawn", {"spawn", "spawn(fn, *args) -> handle",
+                     "Runs fn on a cooperative fiber; returns a task handle immediately."}},
+      {"fib_join", {"join", "join(handle) -> result",
+                    "Waits for a spawned task and returns its result (once per handle)."}},
+      {"fib_done", {"done", "done(handle) -> bool",
+                    "Non-blocking check whether a spawned task has finished."}},
+      {"fib_cancel", {"cancel", "cancel(handle) -> handle",
+                      "Cancellation hook; currently a no-op (fibers are cooperative)."}},
+
       // struct introspection (class instances)
       {"struct_name", {"struct_name", "struct_name(value) -> String",
                        "Declared class name for a struct instance; empty string otherwise."}},

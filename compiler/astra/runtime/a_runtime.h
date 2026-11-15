@@ -210,6 +210,13 @@ enum {
     A_BI_DIVMOD,
     /* bulk little-endian f32 -> [f64] decode (appended; ids stay stable) */
     A_BI_F32S,
+    /* auto-async fibers: spawn(fn,*args)->handle, join(handle)->result,
+       done(handle)->bool, cancel(handle)->handle (appended) */
+    A_BI_FIB_SPAWN, A_BI_FIB_JOIN, A_BI_FIB_DONE, A_BI_FIB_CANCEL,
+    /* std.math elementwise ufunc + flat-reduction kernels over [f64]
+       lists (appended so existing builtin ids stay stable) */
+    A_BI_MATH_EW_UN, A_BI_MATH_EW_BIN, A_BI_MATH_EW_BIN_SCALAR,
+    A_BI_MATH_EW_REDUCE,
     A_BI_COUNT
 };
 
@@ -477,6 +484,7 @@ aval a_dict_has(aval d, aval k);                /* a_bool(key in d) */
 aval a_set_new(void);
 aval a_set_add(aval s, aval v);
 aval a_range_new(aval lo, aval hi, aval step);
+int64_t a_range_bound(aval v, int64_t is_step);  /* expect_int64, range() wording */
 aval a_range_contains(aval r, aval v);
 
 /* indexing / slicing */

@@ -20,14 +20,9 @@ aval bi_time_sleep(uint64_t n, aval *argv) {
     want_args("sleep", n, 1, 1);
     int64_t ms = expect_int64(argv[0], "sleep() milliseconds");
     if (ms < 0) ms = 0;
-#if defined(_WIN32)
-    a_win_sleep_ms(ms);
-#else
-    struct timespec ts;
-    ts.tv_sec = (time_t)(ms / 1000);
-    ts.tv_nsec = (long)(ms % 1000) * 1000000L;
-    while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
-#endif
+    /* Inside a fiber this yields to the scheduler (other fibers keep
+       running); outside a fiber a_fib_sleep_ms degrades to nanosleep. */
+    a_fib_sleep_ms(ms);
     return A_NONE;
 }
 

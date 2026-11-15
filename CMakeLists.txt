@@ -20,6 +20,11 @@ add_subdirectory(tools/lsp)
 # compiles the C
 # emitter's output into memory for `a run`.
 include(cmake/libastra.cmake)
+# `a run`/`a build` link the staged libaruntime.a under build/astralib and the
+# run-cache fingerprints it — keep the staged runtime fresh whenever `a` is
+# rebuilt so `--target a` builds cannot serve binaries linked against a stale
+# runtime.
+add_dependencies(a astra_runtime)
 # Packaging
 include(GNUInstallDirs)
 install(TARGETS a RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

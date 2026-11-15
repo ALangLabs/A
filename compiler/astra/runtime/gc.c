@@ -1032,10 +1032,30 @@ static int gc_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
 static int gc_stack_bounds(uintptr_t *lo, uintptr_t *hi) { (void)lo; (void)hi; return 0; }
 #endif
 
+/* Scan an arbitrary word range as conservative roots. Used by async.c
+   for suspended fiber stacks (raw malloc'd, not GC blocks). Safe to call
+   any time; words are only interpreted while g_in_gc. */
+void a_gc_scan_region(uintptr_t lo, uintptr_t hi) {
+    if (!g_in_gc || hi <= lo) return;
+    uintptr_t w = (lo + sizeof(uintptr_t) - 1) & ~(uintptr_t)(sizeof(uintptr_t) - 1);
+    if (w >= hi) return;
+    for (; w + sizeof(uintptr_t) <= hi; w += sizeof(uintptr_t))
+        mark_word(*(const uintptr_t *)w);
+}
+
 static void mark_c_stack(void) {
     volatile char anchor;
     uintptr_t sp = (uintptr_t)&anchor;
     uintptr_t lo = 0, hi = 0;
+#if A_FIBERS
+    /* Inside a fiber the pthread stack bounds name the MAIN stack, not
+       the fiber's malloc'd stack. Use the fiber's bounds instead; `sp`
+       (the anchor) lies inside them, so the usual [sp,hi) scan covers
+       exactly the live portion. */
+    if (a_fib_on() && a_fib_stack_bounds(&lo, &hi)) {
+        /* fall through with fiber bounds */
+    } else
+#endif
     if (!gc_stack_bounds(&lo, &hi) || hi <= sp) {
         /* Last-resort window: scan what we can above SP. Under-scanning is
            the dangerous direction, so bias generous but stay in bounds we

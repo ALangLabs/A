@@ -116,11 +116,10 @@ _assert_scalar(nanmax_all(an), 3.0, "nanmax_all")
 mn = NDArray([1.0, nan, 3.0, 4.0, 5.0, 6.0], [2, 3])
 _assert_arr_eq(nansum(mn, -1), [4.0, 15.0], [2], "nansum 2d axis-1")
 _assert_arr_eq(nanmin(mn, -1), [1.0, 4.0], [2], "nanmin 2d axis-1")
-# plain reductions do NOT skip NaN; note A float arithmetic maps NaN
-# operands to +inf (NaN is only detectable via v != v), so the result is
-# non-finite rather than NaN — a documented deviation from NumPy.
-assert(sum_all(an) > 1e307, "sum_all with nan should be non-finite")
-assert(mean_all(an) > 1e307, "mean_all with nan should be non-finite")
+# plain reductions do NOT skip NaN; NaN propagates through the accumulator
+# (v != v detects it), matching NumPy sum/mean semantics.
+assert(sum_all(an) != sum_all(an), "sum_all with nan should be nan")
+assert(mean_all(an) != mean_all(an), "mean_all with nan should be nan")
 
 # --- 3-D axis reduction -----------------------------------------------------------------
 c = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], [2, 2, 2])

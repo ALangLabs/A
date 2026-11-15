@@ -197,6 +197,13 @@ aval a_range_new(aval lo, aval hi, aval step) {
     return mkobj(&r->h);
 }
 
+/* Single-bound extraction for the LLVM emitter's counted range-for: same
+   check (and panic) a_range_new applies to each bound, without building
+   the range object. is_step selects the "range() step" wording. */
+int64_t a_range_bound(aval v, int64_t is_step) {
+    return expect_int64(v, is_step ? "range() step" : "range() argument");
+}
+
 /* ------------------------------------------------------------------ */
 /* deep copy (copy() builtin)                                          */
 /* ------------------------------------------------------------------ */

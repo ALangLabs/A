@@ -45,9 +45,44 @@ const char *path_arg(aval v, const char *what) {
     return str_of(v, what)->data;
 }
 
+#if A_FIBERS
+/* Blocking-op worker jobs (defined at file end). Job structs live on the
+   calling fiber's stack — valid while the fiber is suspended. Worker
+   threads use raw libc malloc only: the GC registry is not thread-safe. */
+typedef struct {
+    const char *path;
+    char *buf;       /* out: raw malloc'd file contents */
+    size_t len;
+    int err;
+} FsReadJob;
+static void *fs_read_job(void *p);
+
+typedef struct {
+    const char *path;
+    const char *mode;
+    const char *data;
+    size_t len;
+    int rc;          /* 0 ok, -1 open error, -2 short write */
+} FsWriteJob;
+static void *fs_write_job(void *p);
+#endif
+
 aval bi_read_file(uint64_t n, aval *argv) {
     want_args("read_file", n, 1, 1);
     const char *path = path_arg(argv[0], "path");
+#if A_FIBERS
+    if (a_fib_on()) {
+        /* Whole read+alloc runs on a blocking-pool worker; only the
+           String construction (xmalloc) happens here on the fiber. */
+        FsReadJob j;
+        j.path = path; j.buf = NULL; j.len = 0; j.err = 0;
+        a_fib_blocking(fs_read_job, &j);
+        if (j.err || !j.buf) panicf("cannot read file '%s'", path);
+        aval r = a_str_new(j.buf, (uint64_t)j.len);
+        free(j.buf);   /* raw malloc: a_gc_free passes untracked ptrs through */
+        return r;
+    }
+#endif
     /* Fast path: a seekable file of known size is read straight into the
        string's own storage — no intermediate buffer and no second copy.
        This is what makes multi-hundred-MB reads (model weights, etc.)
@@ -111,6 +146,16 @@ static aval write_file_impl(aval pathv, aval textv, const char *mode, const char
         if (kind_of(textv) != K_STR) panicf("%s() text must be str or Bytes", name);
         p = str_data(textv, &len);
     }
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsWriteJob j;
+        j.path = path; j.mode = mode; j.data = p; j.len = len; j.rc = 0;
+        a_fib_blocking(fs_write_job, &j);
+        if (j.rc == -1) panicf("cannot open file '%s'", path);
+        if (j.rc == -2) panicf("cannot write file '%s'", path);
+        return A_NONE;
+    }
+#endif
     FILE *f = fopen(path, mode);
     if (!f) panicf("cannot open file '%s'", path);
     if (len && fwrite(p, 1, (size_t)len, f) != len) {
@@ -127,8 +172,20 @@ aval bi_append_file(uint64_t n, aval *argv) { want_args("append_file", n, 2, 2);
 aval bi_read_bytes(uint64_t n, aval *argv) {
     want_args("read_bytes", n, 1, 1);
     const char *path = path_arg(argv[0], "path");
-    size_t len;
-    char *data = read_all_file(path, &len);
+    size_t len = 0;
+    char *data = NULL;
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsReadJob j;
+        j.path = path; j.buf = NULL; j.len = 0; j.err = 0;
+        a_fib_blocking(fs_read_job, &j);
+        if (j.err || !j.buf) panicf("cannot read file '%s'", path);
+        data = j.buf; len = j.len;
+    } else
+#endif
+    {
+        data = read_all_file(path, &len);
+    }
     /* Straight into packed int64 storage: no AVec regrowth, no aval
        round-trip — one pass over the bytes, 8x less memory than the
        tagged-value path. */
@@ -167,6 +224,17 @@ aval bi_write_bytes(uint64_t n, aval *argv) {
             buf[i] = (char)v;
         }
     }
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsWriteJob j;
+        j.path = path; j.mode = "wb"; j.data = buf; j.len = len; j.rc = 0;
+        a_fib_blocking(fs_write_job, &j);
+        free(buf);
+        if (j.rc == -1) panicf("cannot open file '%s'", path);
+        if (j.rc == -2) panicf("cannot write file '%s'", path);
+        return A_NONE;
+    }
+#endif
     FILE *f = fopen(path, "wb");
     if (!f) { free(buf); panicf("cannot open file '%s'", path); }
     if (len && fwrite(buf, 1, (size_t)len, f) != len) {
@@ -441,4 +509,82 @@ aval bi_current_dir(uint64_t n, aval *argv) {
     return a_str_new(buf, strlen(buf));
 #endif
 }
+
+#if A_FIBERS
+/* ------------------------------------------------------------------ */
+/* blocking-pool workers (raw libc alloc ONLY — never xmalloc/a_gc_*)  */
+/* ------------------------------------------------------------------ */
+#undef free   /* libc free: worker allocations are raw malloc, not GC blocks */
+
+static void *fs_read_job(void *p) {
+    FsReadJob *j = (FsReadJob *)p;
+    FILE *f = fopen(j->path, "rb");
+    if (!f) { j->err = 1; return NULL; }
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap + 1);
+    if (!buf) { fclose(f); j->err = 1; return NULL; }
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            free(buf);
+            cap = (size_t)sz;
+            buf = (char *)malloc(cap + 1);
+            if (!buf) { fclose(f); j->err = 1; return NULL; }
+            len = fread(buf, 1, cap, f);
+            if (len == cap) {
+                int c = fgetc(f);
+                if (c != EOF) {
+                    /* grew past ftell: keep reading */
+                    while (!feof(f)) {
+                        if (len == cap) {
+                            cap *= 2;
+                            char *nb = (char *)realloc(buf, cap + 1);
+                            if (!nb) { free(buf); fclose(f); j->err = 1; return NULL; }
+                            buf = nb;
+                        }
+                        len += fread(buf + len, 1, cap - len, f);
+                    }
+                }
+            }
+        }
+    } else {
+        /* non-seekable: doubling reads */
+        for (;;) {
+            if (len == cap) {
+                cap *= 2;
+                char *nb = (char *)realloc(buf, cap + 1);
+                if (!nb) { free(buf); fclose(f); j->err = 1; return NULL; }
+                buf = nb;
+            }
+            size_t r = fread(buf + len, 1, cap - len, f);
+            len += r;
+            if (r == 0) break;
+        }
+    }
+    int ferr = ferror(f);
+    fclose(f);
+    if (ferr) { free(buf); j->err = 1; return NULL; }
+    buf[len] = '\0';
+    j->buf = buf;
+    j->len = len;
+    j->err = 0;
+    return NULL;
+}
+
+static void *fs_write_job(void *p) {
+    FsWriteJob *j = (FsWriteJob *)p;
+    FILE *f = fopen(j->path, j->mode);
+    if (!f) { j->rc = -1; return NULL; }
+    if (j->len && fwrite(j->data, 1, j->len, f) != j->len) {
+        fclose(f);
+        j->rc = -2;
+        return NULL;
+    }
+    fclose(f);
+    j->rc = 0;
+    return NULL;
+}
+
+#define free(p) a_gc_free(p)   /* restore the runtime macro for anything below */
+#endif
 

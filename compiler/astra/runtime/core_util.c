@@ -122,6 +122,18 @@ static void stack_overflow_error(uintptr_t sp) {
 
 static void stack_guard_check(void) {
     uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
+#if A_FIBERS
+    /* Inside a fiber the SP lives on the fiber's malloc'd stack, not the
+       pthread stack — use the fiber's bounds or every deep-ish call
+       would look like an overflow. */
+    if (a_fib_on()) {
+        uintptr_t flo = 0, fhi = 0;
+        if (a_fib_stack_bounds(&flo, &fhi) && fhi > flo) {
+            if (sp < flo + A_STACK_GUARD_MARGIN) stack_overflow_error(sp);
+        }
+        return;
+    }
+#endif
     if (!g_stack_guard_init) {
         g_stack_guard_init = 1;
         g_stack_probe = (char *)sp;

@@ -347,8 +347,10 @@ fn array_from_list(xs: [[f64]]) -> NDArray:
 fn _full(shape: [i64], v: f64) -> NDArray:
     n = _shape_size(shape)
     data = []
-    for i in 0..n:
+    i = 0
+    while i < n:
         data.append(v)
+        i = i + 1
     return NDArray(data, shape)
 
 fn zeros(shape: [i64]) -> NDArray:
@@ -360,8 +362,10 @@ fn ones(shape: [i64]) -> NDArray:
 fn empty(shape: [i64]) -> NDArray:
     n = _shape_size(shape)
     data = []
-    for i in 0..n:
+    i = 0
+    while i < n:
         data.append(0.0)
+        i = i + 1
     return NDArray(data, shape)
 
 fn full(shape: [i64], v: f64) -> NDArray:
@@ -390,8 +394,10 @@ fn linspace(start: f64, stop: f64, num: i64) -> NDArray:
         return NDArray([start], [1])
     step = (stop - start) / (num - 1.0)
     data = []
-    for i in 0..num:
+    i = 0
+    while i < num:
         data.append(start + i * step)
+        i = i + 1
     return NDArray(data, [num])
 
 fn eye(n: i64) -> NDArray:

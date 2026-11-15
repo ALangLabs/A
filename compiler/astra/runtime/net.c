@@ -135,6 +135,8 @@ typedef struct {
     void *ssl;      /* SSL* when TLS, else NULL */
     int used;
     int recv_status; /* NET_RX_* from the last net.recv on this handle */
+    int rcv_timeout_ms; /* SO_RCVTIMEO mirror for fiber waits; -1 = forever */
+    int snd_timeout_ms;
 } NetSock;
 
 static NetSock g_socks[NET_MAX_SOCKS];
@@ -146,6 +148,8 @@ static int net_sock_new(net_fd_t fd) {
             g_socks[i].fd = fd;
             g_socks[i].ssl = NULL;
             g_socks[i].recv_status = NET_RX_OK;
+            g_socks[i].rcv_timeout_ms = -1;
+            g_socks[i].snd_timeout_ms = -1;
             return i + 1;   /* handles are 1-based; 0 = invalid */
         }
     }
@@ -159,6 +163,150 @@ static NetSock *net_sock_get(aval hv, const char *what) {
         panicf("%s: bad socket handle %lld", what, (long long)h);
     return &g_socks[h - 1];
 }
+
+/* ------------------------------------------------------------------ */
+/* auto-async: fiber-aware socket IO                                   */
+/* ------------------------------------------------------------------ */
+#if A_FIBERS
+/* recv that yields the fiber scheduler on EAGAIN instead of blocking
+   the OS thread. timeout_ms: -1 forever, 0 = single try, >0 deadline.
+   Mirrors SO_RCVTIMEO semantics for fiber callers. */
+static net_ssize_t net_fib_recv(net_fd_t fd, void *buf, size_t len,
+                                int timeout_ms) {
+    for (;;) {
+        net_ssize_t r = recv(fd, buf, len, MSG_DONTWAIT);
+        if (r >= 0 || !net_err_wouldblock()) return r;
+        if (net_err_intr()) continue;
+        if (timeout_ms == 0) { errno = EAGAIN; return (net_ssize_t)-1; }
+        int64_t t = timeout_ms > 0 ? (int64_t)timeout_ms : -1;
+        if (a_fib_wait_fd((int)fd, POLLIN, t) == 0) {
+            errno = EAGAIN;
+            return (net_ssize_t)-1;
+        }
+    }
+}
+
+static net_ssize_t net_fib_send(net_fd_t fd, const void *buf, size_t len,
+                                int timeout_ms) {
+    for (;;) {
+        net_ssize_t w = send(fd, buf, len, MSG_DONTWAIT | MSG_NOSIGNAL);
+        if (w >= 0 || !net_err_wouldblock()) return w;
+        if (net_err_intr()) continue;
+        if (timeout_ms == 0) { errno = EAGAIN; return (net_ssize_t)-1; }
+        int64_t t = timeout_ms > 0 ? (int64_t)timeout_ms : -1;
+        if (a_fib_wait_fd((int)fd, POLLOUT, t) == 0) {
+            errno = EAGAIN;
+            return (net_ssize_t)-1;
+        }
+    }
+}
+
+/* accept() has no flags argument on all platforms: briefly flip the
+   listener nonblocking while the fiber waits, then restore. The new
+   connection fd is returned in blocking mode like a plain accept(). */
+static net_fd_t net_fib_accept(net_fd_t lfd, int timeout_ms) {
+    int flags = fcntl((int)lfd, F_GETFL, 0);
+    if (flags >= 0) fcntl((int)lfd, F_SETFL, flags | O_NONBLOCK);
+    for (;;) {
+        net_fd_t c = accept(lfd, NULL, NULL);
+        if (c >= 0) {
+            int cf = fcntl((int)c, F_GETFL, 0);
+            if (cf >= 0) fcntl((int)c, F_SETFL, cf & ~O_NONBLOCK);
+            if (flags >= 0) fcntl((int)lfd, F_SETFL, flags);
+            return c;
+        }
+        if (net_err_intr()) continue;
+        if (!net_err_wouldblock() || timeout_ms == 0) {
+            if (flags >= 0) fcntl((int)lfd, F_SETFL, flags);
+            if (net_err_wouldblock()) errno = EAGAIN;
+            return (net_fd_t)-1;
+        }
+        int64_t t = timeout_ms > 0 ? (int64_t)timeout_ms : -1;
+        if (a_fib_wait_fd((int)lfd, POLLIN, t) == 0) {
+            if (flags >= 0) fcntl((int)lfd, F_SETFL, flags);
+            errno = EAGAIN;
+            return (net_fd_t)-1;
+        }
+    }
+}
+
+/* TLS I/O cannot yield mid-handshake, so the whole SSL_read/SSL_write
+   call is offloaded to the blocking-op pool (pure C, raw malloc only —
+   OpenSSL is thread-safe per SSL*). The job struct lives on the fiber's
+   own stack, which stays valid while the fiber is suspended. */
+typedef struct {
+    void *ssl;
+    void *buf;
+    int len;
+    int is_write;
+    const void *wbuf;
+} NetSslJob;
+
+static void *net_ssl_job_run(void *p) {
+    NetSslJob *j = (NetSslJob *)p;
+    if (j->is_write)
+        return (void *)(intptr_t)net_ssl_write(j->ssl, j->wbuf, j->len);
+    return (void *)(intptr_t)net_ssl_read(j->ssl, j->buf, j->len);
+}
+
+static net_ssize_t net_fib_ssl_read(void *ssl, void *buf, int len) {
+    NetSslJob j;
+    j.ssl = ssl; j.buf = buf; j.len = len; j.is_write = 0; j.wbuf = NULL;
+    return (net_ssize_t)(intptr_t)a_fib_blocking(net_ssl_job_run, &j);
+}
+
+static net_ssize_t net_fib_ssl_write(void *ssl, const void *buf, int len) {
+    NetSslJob j;
+    j.ssl = ssl; j.buf = NULL; j.len = len; j.is_write = 1; j.wbuf = buf;
+    return (net_ssize_t)(intptr_t)a_fib_blocking(net_ssl_job_run, &j);
+}
+
+/* net.poll() inside a fiber: the whole poll(2) wait is offloaded to the
+   blocking-op pool so the scheduler keeps running other fibers. The job
+   lives on the caller's (fiber) stack — valid while suspended. */
+typedef struct {
+    struct pollfd *fds;
+    nfds_t n;
+    int ms;
+    int rc;
+} NetPollJob;
+
+static void *net_poll_job_run(void *p) {
+    NetPollJob *j = (NetPollJob *)p;
+    j->rc = poll(j->fds, j->n, j->ms);
+    return NULL;
+}
+
+static int net_poll_wait(struct pollfd *fds, nfds_t n, int ms) {
+    if (!a_fib_on() || ms <= 0)
+        return poll(fds, n, ms);
+    NetPollJob j;
+    j.fds = fds; j.n = n; j.ms = ms; j.rc = 0;
+    a_fib_blocking(net_poll_job_run, &j);
+    return j.rc;
+}
+
+/* Unified socket read/write honoring per-socket timeouts; inside a
+   fiber the syscall becomes a scheduler wait, outside it is identical
+   to the previous blocking call. */
+static net_ssize_t net_sock_read(NetSock *s, void *buf, int len) {
+    if (a_fib_on()) {
+        if (s->ssl) return net_fib_ssl_read(s->ssl, buf, len);
+        return net_fib_recv(s->fd, buf, (size_t)len, s->rcv_timeout_ms);
+    }
+    return s->ssl ? net_ssl_read(s->ssl, buf, len)
+                  : recv(s->fd, buf, (size_t)len, 0);
+}
+
+static net_ssize_t net_sock_write(NetSock *s, const void *buf, size_t len) {
+    if (a_fib_on()) {
+        if (s->ssl) return net_fib_ssl_write(s->ssl, buf, (int)len);
+        return net_fib_send(s->fd, buf, len, s->snd_timeout_ms);
+    }
+    return s->ssl ? net_ssl_write(s->ssl, buf, (int)len)
+                  : send(s->fd, buf, len, MSG_NOSIGNAL);
+}
+#endif /* A_FIBERS */
 
 static void net_host_port(aval hv, aval pv, char *host, size_t hsz,
                           char *port, size_t psz) {
@@ -228,11 +376,15 @@ aval bi_net_send(uint64_t n, aval *argv) {
     size_t off = 0;
     while (off < len) {
         net_ssize_t w;
+#if A_FIBERS
+        w = net_sock_write(s, data + off, len - off);
+#else
         if (s->ssl) {
             w = net_ssl_write(s->ssl, data + off, (int)(len - off));
         } else {
             w = send(s->fd, data + off, len - off, MSG_NOSIGNAL);
         }
+#endif
         if (w <= 0) break;
         off += (size_t)w;
     }
@@ -247,11 +399,15 @@ aval bi_net_recv(uint64_t n, aval *argv) {
     if (maxb > (1 << 20)) maxb = 1 << 20;
     char *buf = (char *)xmalloc((size_t)maxb);
     net_ssize_t r;
+#if A_FIBERS
+    r = net_sock_read(s, buf, (int)maxb);
+#else
     if (s->ssl) {
         r = net_ssl_read(s->ssl, buf, (int)maxb);
     } else {
         r = recv(s->fd, buf, (size_t)maxb, 0);
     }
+#endif
     if (r > 0) {
         s->recv_status = NET_RX_OK;
     } else if (r == 0) {
@@ -291,6 +447,8 @@ aval bi_net_set_timeout(uint64_t n, aval *argv) {
     NetSock *s = net_sock_get(argv[0], "net.set_timeout");
     int64_t ms = expect_int64(argv[1], "net.set_timeout millis");
     if (ms < 0) ms = 0;
+    s->rcv_timeout_ms = (int)ms;
+    s->snd_timeout_ms = (int)ms;
 #if defined(_WIN32)
     /* Winsock SO_*TIMEO takes a DWORD of milliseconds, not a timeval. */
     DWORD tv = (DWORD)ms;
@@ -541,7 +699,12 @@ aval bi_net_tcp_listen(uint64_t n, aval *argv) {
 aval bi_net_accept(uint64_t n, aval *argv) {
     want_args("net.accept", n, 1, 1);
     NetSock *s = net_sock_get(argv[0], "net.accept");
+#if A_FIBERS
+    net_fd_t fd = a_fib_on() ? net_fib_accept(s->fd, s->rcv_timeout_ms)
+                             : accept(s->fd, NULL, NULL);
+#else
     net_fd_t fd = accept(s->fd, NULL, NULL);
+#endif
     if (fd < 0) return mkint_full(-1);
     int h = net_sock_new(fd);
     if (!h) return mkint_full(-1);   /* net_sock_new already closed fd */
@@ -579,7 +742,12 @@ aval bi_net_poll(uint64_t n, aval *argv) {
         fds[i].events = POLLIN;
         fds[i].revents = 0;
     }
+#if A_FIBERS
+    int poll_rc = net_poll_wait(fds, (nfds_t)a->h.len, (int)ms);
+    if (poll_rc > 0) {
+#else
     if (poll(fds, (nfds_t)a->h.len, (int)ms) > 0) {
+#endif
         for (uint64_t i = 0; i < a->h.len; ++i) {
             if (!fds[i].revents) continue;
             if (cnt == cap) {
@@ -648,7 +816,20 @@ aval bi_net_udp_send(uint64_t n, aval *argv) {
     if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return mkint_full(-1);
     uint64_t len;
     const char *data = str_data(argv[3], &len);
-    net_ssize_t sent = sendto(s->fd, data, len, 0, res->ai_addr, res->ai_addrlen);
+#if A_FIBERS
+    net_ssize_t sent;
+    if (a_fib_on()) {
+        for (;;) {
+            sent = sendto(s->fd, data, len, MSG_DONTWAIT, res->ai_addr, res->ai_addrlen);
+            if (sent >= 0 || !net_err_wouldblock()) break;
+            if (net_err_intr()) continue;
+            if (s->snd_timeout_ms == 0) { errno = EAGAIN; sent = -1; break; }
+            int64_t t = s->snd_timeout_ms > 0 ? (int64_t)s->snd_timeout_ms : -1;
+            if (a_fib_wait_fd((int)s->fd, POLLOUT, t) == 0) { errno = EAGAIN; sent = -1; break; }
+        }
+    } else
+#endif
+    sent = sendto(s->fd, data, len, 0, res->ai_addr, res->ai_addrlen);
     freeaddrinfo(res);
     return mkint_full(sent < 0 ? -1 : (int64_t)sent);
 }
@@ -662,7 +843,21 @@ aval bi_net_udp_recv(uint64_t n, aval *argv) {
     char *buf = (char *)xmalloc((size_t)maxb);
     struct sockaddr_storage from;
     socklen_t fl = sizeof from;
-    net_ssize_t r = recvfrom(s->fd, buf, (size_t)maxb, 0, (struct sockaddr *)&from, &fl);
+#if A_FIBERS
+    net_ssize_t r;
+    if (a_fib_on()) {
+        for (;;) {
+            r = recvfrom(s->fd, buf, (size_t)maxb, MSG_DONTWAIT,
+                         (struct sockaddr *)&from, &fl);
+            if (r >= 0 || !net_err_wouldblock()) break;
+            if (net_err_intr()) continue;
+            if (s->rcv_timeout_ms == 0) { errno = EAGAIN; r = -1; break; }
+            int64_t t = s->rcv_timeout_ms > 0 ? (int64_t)s->rcv_timeout_ms : -1;
+            if (a_fib_wait_fd((int)s->fd, POLLIN, t) == 0) { errno = EAGAIN; r = -1; break; }
+        }
+    } else
+#endif
+    r = recvfrom(s->fd, buf, (size_t)maxb, 0, (struct sockaddr *)&from, &fl);
     aval items[3];
     if (r < 0) {
         s->recv_status = net_err_wouldblock() ? NET_RX_TIMEOUT : NET_RX_ERR;
@@ -728,8 +923,12 @@ aval bi_net_send_bytes(uint64_t n, aval *argv) {
     char *data = net_bytes_in(argv[1], &len);
     size_t off = 0;
     while (off < len) {
+#if A_FIBERS
+        net_ssize_t w = net_sock_write(s, data + off, len - off);
+#else
         net_ssize_t w = s->ssl ? net_ssl_write(s->ssl, data + off, (int)(len - off))
                            : send(s->fd, data + off, len - off, MSG_NOSIGNAL);
+#endif
         if (w <= 0) break;
         off += (size_t)w;
     }
@@ -744,8 +943,12 @@ aval bi_net_recv_bytes(uint64_t n, aval *argv) {
     if (maxb <= 0) maxb = 1;
     if (maxb > (1 << 20)) maxb = 1 << 20;
     char *buf = (char *)xmalloc((size_t)maxb);
+#if A_FIBERS
+    net_ssize_t r = net_sock_read(s, buf, (int)maxb);
+#else
     net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf, (int)maxb)
                            : recv(s->fd, buf, (size_t)maxb, 0);
+#endif
     if (r > 0) {
         s->recv_status = NET_RX_OK;
     } else if (r == 0) {
@@ -775,8 +978,12 @@ aval bi_net_recv_exact(uint64_t n, aval *argv) {
     while (got < (size_t)want) {
         size_t room = (size_t)want - got;
         size_t chunk = room < sizeof tmp ? room : sizeof tmp;
+#if A_FIBERS
+        net_ssize_t r = net_sock_read(s, tmp, (int)chunk);
+#else
         net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, tmp, (int)chunk)
                            : recv(s->fd, tmp, chunk, 0);
+#endif
         if (r < 0 && net_err_intr()) continue;
         if (r <= 0) break;
         for (net_ssize_t i = 0; i < r; ++i) items[got + (size_t)i] = (unsigned char)tmp[i];
@@ -844,8 +1051,12 @@ aval bi_net_recv_buf(uint64_t n, aval *argv) {
     while (got < (size_t)want) {
         size_t chunk = (size_t)want - got;
         if (chunk > 262144) chunk = 262144;
+#if A_FIBERS
+        net_ssize_t r = net_sock_read(s, b->data + got, (int)chunk);
+#else
         net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, b->data + got, (int)chunk)
                            : recv(s->fd, b->data + got, chunk, 0);
+#endif
         if (r < 0 && net_err_intr()) continue;
         if (r <= 0) break;
         got += (size_t)r;
@@ -874,8 +1085,12 @@ aval bi_net_recv_buf_all(uint64_t n, aval *argv) {
         a_bytes_grow(b, (uint64_t)b->h.len + 262144);
         size_t chunk = (size_t)(b->h.cap - 1) - (size_t)b->h.len;
         if (chunk > 262144) chunk = 262144;
+#if A_FIBERS
+        net_ssize_t r = net_sock_read(s, b->data + b->h.len, (int)chunk);
+#else
         net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, b->data + b->h.len, (int)chunk)
                            : recv(s->fd, b->data + b->h.len, chunk, 0);
+#endif
         if (r < 0 && net_err_intr()) continue;
         if (r <= 0) break;
         b->h.len = (uint32_t)((uint64_t)b->h.len + (uint64_t)r);
@@ -911,8 +1126,12 @@ aval bi_net_recv_body(uint64_t n, aval *argv) {
     while (got < (size_t)want) {
         size_t chunk = (size_t)want - got;
         if (chunk > 262144) chunk = 262144;
+#if A_FIBERS
+        net_ssize_t r = net_sock_read(s, dst + got, (int)chunk);
+#else
         net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, dst + got, (int)chunk)
                            : recv(s->fd, dst + got, chunk, 0);
+#endif
         if (r < 0 && net_err_intr()) continue;
         if (r <= 0) break;
         got += (size_t)r;
@@ -948,8 +1167,12 @@ aval bi_net_recv_body_all(uint64_t n, aval *argv) {
         if (got == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap); }
         size_t chunk = cap - got;
         if (chunk > 262144) chunk = 262144;
+#if A_FIBERS
+        net_ssize_t r = net_sock_read(s, buf + got, (int)chunk);
+#else
         net_ssize_t r = s->ssl ? net_ssl_read(s->ssl, buf + got, (int)chunk)
                            : recv(s->fd, buf + got, chunk, 0);
+#endif
         if (r < 0 && net_err_intr()) continue;
         if (r <= 0) break;
         got += (size_t)r;

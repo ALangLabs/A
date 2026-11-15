@@ -159,7 +159,14 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     { "os_ismount", os_ismount }, { "os_disk_usage", os_disk_usage },
     { "os_popen", os_popen }, { "os_kill", os_kill }, { "os_exit", os_exit },
     { "divmod", bi_divmod },
-    { "f32s", bi_f32s }
+    { "f32s", bi_f32s },
+    { "fib_spawn", bi_fib_spawn }, { "fib_join", bi_fib_join },
+    { "fib_done", bi_fib_done }, { "fib_cancel", bi_fib_cancel },
+    /* math elementwise/reduction kernels (appended; order matches
+       A_BI_MATH_EW_* enum) */
+    { "math_ew_un", bi_math_ew_un }, { "math_ew_bin", bi_math_ew_bin },
+    { "math_ew_bin_scalar", bi_math_ew_bin_scalar },
+    { "math_ew_reduce", bi_math_ew_reduce }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

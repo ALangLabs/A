@@ -41,7 +41,14 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                          {"exp", "exp"},     {"log", "log"},       {"log2", "log2"},
                          {"log10", "log10"}, {"floor", "floor"},   {"ceil", "ceil"},
                          {"round", "round"}, {"trunc", "trunc"},   {"random", "random"},
-                         {"random_int", "random_int"}},
+                         {"random_int", "random_int"},
+                         /* internal kernels backing std.math ufuncs /
+                            reductions (called from ufuncs.astra /
+                            reductions.astra fast paths) */
+                         {"ew_un", "math_ew_un"},
+                         {"ew_bin", "math_ew_bin"},
+                         {"ew_bin_scalar", "math_ew_bin_scalar"},
+                         {"ew_reduce", "math_ew_reduce"}},
                         {{"PI", "PI"}, {"E", "E"}})},
       {"io",
        makeSpec({{"print", "print"}, {"eprint", "eprint"}, {"input", "input"}, {"flush", "flush"}},
@@ -141,6 +148,9 @@ inline const StringMap<NativeModuleSpec>& nativeModules() {
                  {"bytes_append", "bytes_append"},
                  {"bytes_to_str", "bytes_to_str"}}, {})},
       {"time", makeSpec({{"now", "now"}, {"sleep", "sleep"}}, {})},
+      {"async", makeSpec({{"spawn", "fib_spawn"}, {"join", "fib_join"},
+                          {"done", "fib_done"}, {"cancel", "fib_cancel"},
+                          {"sleep", "sleep"}}, {})},
       {"json", makeSpec({{"parse", "json_parse"},
                          {"stringify", "json_stringify"},
                          {"pretty", "json_pretty"},

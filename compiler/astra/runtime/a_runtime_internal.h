@@ -43,6 +43,15 @@
 #define A_PAR_REAL 0
 #endif
 
+/* Cooperative fibers (async.c): ucontext + pthreads required. Off on
+   Windows and TinyCC/astoc-built runtimes; A_ASYNC=0 disables at
+   runtime. When 0, all a_fib_* entry points take the sync path. */
+#if !defined(_WIN32) && !defined(__TINYC__)
+#define A_FIBERS 1
+#else
+#define A_FIBERS 0
+#endif
+
 /* Per-thread scratch state. When the worker pool is real (A_PAR_REAL),
    runtime helpers reachable from parallel kernels (map/filter/sum/linalg)
    must not share mutable globals: traceback frames, the small-string bump
@@ -476,6 +485,7 @@ aval a_dict_has(aval d, aval k);
 aval a_set_new(void);
 aval a_set_add(aval s, aval v);
 aval a_range_new(aval lo, aval hi, aval step);
+int64_t a_range_bound(aval v, int64_t is_step);
 int64_t normalize_index(int64_t idx, uint64_t len);
 AArr *view_root(aval v, int64_t *off);
 int64_t slice_bound(aval v, int64_t n, int64_t lower, int64_t upper, int64_t dflt);
@@ -735,6 +745,11 @@ aval bi_linalg_matmul(uint64_t n, aval *argv);
 aval bi_linalg_softmax(uint64_t n, aval *argv);
 aval bi_linalg_attention(uint64_t n, aval *argv);
 aval bi_f32s(uint64_t n, aval *argv);
+/* math_ew.c: std.math elementwise ufuncs + flat reductions over [f64] */
+aval bi_math_ew_un(uint64_t n, aval *argv);
+aval bi_math_ew_bin(uint64_t n, aval *argv);
+aval bi_math_ew_bin_scalar(uint64_t n, aval *argv);
+aval bi_math_ew_reduce(uint64_t n, aval *argv);
 aval bi_unsafe_get(uint64_t n, aval *argv);
 aval bi_unsafe_set(uint64_t n, aval *argv);
 aval bi_unsafe_address_of(uint64_t n, aval *argv);
@@ -855,6 +870,39 @@ void a_gc_free(void *p);               /* free() replacement: delist + release *
 /* True while the calling thread is a pool worker or any a_par_for region
    is active: the collector must not run (worker stacks are not scanned). */
 int a_par_gc_blocked(void);
+
+/* Mark every 8-byte word in [lo,hi) as a potential pointer. Only valid
+   while the collector is running (g_in_gc); used by async.c to scan
+   suspended fiber stacks, which are raw malloc'd and therefore not GC
+   blocks themselves. No-op outside a collection. */
+void a_gc_scan_region(uintptr_t lo, uintptr_t hi);
+
+/* ------------------------------------------------------------------ */
+/* auto-async fibers (async.c)                                         */
+/* ------------------------------------------------------------------ */
+/* Cooperative ucontext fibers + poll event loop. When A_FIBERS=0 every
+   function degrades to the synchronous path and a_fib_on() is always 0.
+   AFib is opaque to callers outside async.c. */
+typedef struct AFib AFib;
+int  a_fib_on(void);                 /* nonzero inside a running fiber   */
+int  a_fib_stack_bounds(uintptr_t *lo, uintptr_t *hi); /* current fiber */
+int  a_fib_count(void);              /* live fibers (diagnostics)        */
+void a_fib_sleep_ms(int64_t ms);     /* yields inside a fiber            */
+int  a_fib_wait_fd(int fd, short events, int64_t timeout_ms);
+int  a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms);
+void *a_fib_blocking(void *(*fn)(void *), void *arg); /* pool offload */
+AFib *a_fib_spawn_fn(aval fnval, uint64_t n, aval *args);
+aval a_fib_spawn_handle(aval fnval, uint64_t n, aval *args);
+aval a_fib_join_handle(aval h);
+AFib *a_fib_spawn_raw(uint64_t entry, aval env, uint64_t n, aval *args);
+void a_fib_wait_fiber(AFib *target);
+aval a_fib_call(aval fn, uint64_t n, aval *args);
+aval a_fib_main(uint64_t entry, aval env, uint64_t n, aval *args);
+void a_fib_reap_all(void);
+aval bi_fib_spawn(uint64_t n, aval *argv);
+aval bi_fib_join(uint64_t n, aval *argv);
+aval bi_fib_done(uint64_t n, aval *argv);
+aval bi_fib_cancel(uint64_t n, aval *argv);
 
 /* ------------------------------------------------------------------ */
 /* deterministic regions (region.c) + gc.c region hooks               */

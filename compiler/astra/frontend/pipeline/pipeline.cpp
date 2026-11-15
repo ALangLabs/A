@@ -459,6 +459,26 @@ inline std::uint64_t mixFileStat(std::uint64_t h, const std::string& p) {
   return mixInt(h, mt);
 }
 
+// Content hash for files whose bytes determine the produced binary. Stat
+// (size+mtime) is not enough for archives: `ar` output can be byte-stable
+// across rebuilds while the objects inside changed, and staged copies may
+// preserve mtimes. libaruntime.a is small enough that hashing it per
+// invocation is cheap next to a compile.
+inline std::uint64_t mixFileBytes(std::uint64_t h, const std::string& p) {
+  std::error_code ec;
+  if (!std::filesystem::exists(p, ec)) return mixBytes(h, "<missing>:" + p);
+  std::ifstream f(p, std::ios::binary);
+  if (!f) return mixBytes(h, "<unreadable>:" + p);
+  h = mixBytes(h, p);
+  char buf[65536];
+  while (f) {
+    f.read(buf, sizeof buf);
+    std::streamsize n = f.gcount();
+    if (n > 0) h = mixBytes(h, std::string(buf, (size_t)n));
+  }
+  return h;
+}
+
 // Fold the resolved LLVM tool binaries (opt/llc/clang) into the cache key:
 // a toolchain upgrade must invalidate cached binaries even when sources,
 // runtime and the `a` binary itself are unchanged.
@@ -469,7 +489,8 @@ inline void mixLLVMToolStats(std::uint64_t& h) {
       "A_LLVM_LLC", {"llc", "llc-18", "llc-17", "llc-16", "llc-15"});
   const std::string cc = findLLVMTool(
       "A_LLVM_CC",
-      {"clang", "clang-18", "clang-17", "clang-16", "clang-15"});
+      {"clang", "clang-18", "clang-17", "clang-16", "clang-15",
+       "clang++", "clang++-18", "clang++-17"});
   if (!opt.empty()) h = mixFileStat(h, opt);
   if (!llc.empty()) h = mixFileStat(h, llc);
   if (!cc.empty()) h = mixFileStat(h, cc);
@@ -509,11 +530,14 @@ inline const std::vector<RuntimeStat>& runtimeStats(const std::string& runtimeC)
           const std::filesystem::path p = dit->path();
           std::filesystem::file_status st = dit->symlink_status(sec);
           if (std::filesystem::is_directory(st)) {
-            if (depth < 1) collect(p, depth + 1);
+            // Recurse several levels: runtime/vendor/** (mimalloc etc.) is
+            // compiled into libaruntime.a and must be covered by the key.
+            if (depth < 4) collect(p, depth + 1);
             continue;
           }
           const std::string ext = p.extension().string();
-          if (ext == ".c" || ext == ".h") files.push_back(p.string());
+          if (ext == ".c" || ext == ".h" || ext == ".s" || ext == ".S" ||
+              ext == ".def") files.push_back(p.string());
         }
       };
       collect(src, 0);
@@ -617,7 +641,7 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   }
   h = mixBytes(h, runtimeDir);
   mixRuntimeSources(h, runtimeC);
-  h = mixFileStat(h, runtimeDir + "/libaruntime.a");
+  h = mixFileBytes(h, runtimeDir + "/libaruntime.a");
   mixLLVMToolStats(h);
   // Module sources: entry first-class (inline "<repl>"/"-c" sources come
   // from entrySource), every other module must read from disk.
@@ -816,7 +840,7 @@ inline std::string precheckKey(const std::string& path,
   std::string astraBin, runtimeC, runtimeDir;
   if (!findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) return "";
   std::uint64_t h = 1469598103934665603ULL;
-  h = mixBytes(h, "pre1");
+  h = mixBytes(h, "pre2");
   h = mixBytes(h, kVersion);
   {
     const std::string self = selfExePath();
@@ -879,10 +903,11 @@ inline std::string precheckKey(const std::string& path,
     for (const PreImport& imp : imps) preWalk(ps, dir, imp);
   }
   if (!ps.ok) return "";
-  // Runtime sources and the archived runtime objects (mtime/size).
+  // Runtime sources and the archived runtime objects (content for the
+  // archive — stat is not a safe fingerprint for `ar` output).
   std::uint64_t h2 = ps.h;
   mixRuntimeSources(h2, runtimeC);
-  h2 = mixFileStat(h2, runtimeDir + "/libaruntime.a");
+  h2 = mixFileBytes(h2, runtimeDir + "/libaruntime.a");
   mixLLVMToolStats(h2);
   char hex[17];
   std::snprintf(hex, sizeof hex, "%016llx",
@@ -1221,7 +1246,7 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
     h = run_cache::mixFileStat(h, astraBin);
     h = run_cache::mixBytes(h, runtimeDir);
     run_cache::mixRuntimeSources(h, runtimeC);
-    h = run_cache::mixFileStat(h, runtimeDir + "/libaruntime.a");
+    h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
     for (const std::string& cand : {runtimeDir + "/libastra1.a",
                                     runtimeDir + "/lib/libastra1.a"}) {
       if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
@@ -1285,7 +1310,7 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
     h = run_cache::mixFileStat(h, astraBin);
     h = run_cache::mixBytes(h, runtimeDir);
     run_cache::mixRuntimeSources(h, runtimeC);
-    h = run_cache::mixFileStat(h, runtimeDir + "/libaruntime.a");
+    h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
     for (const std::string& cand : {runtimeDir + "/libastra1.a",
                                     runtimeDir + "/lib/libastra1.a"}) {
       if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
@@ -1542,16 +1567,24 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
       return 1;
     }
     optPath = tempPath("llvm", "x.ll");
-    if (runChild(opt, {optFlag, "-S", cur, "-o", optPath}) != 0) {
+    // -mcpu=native makes opt's TTI/vectorizer see host features (AVX2/FMA);
+    // without it vectorization decisions use the baseline x86-64 model.
+    // Host-only is already enforced by llvmBuild's arch check.
+    if (runChild(opt, {optFlag, "-mcpu=native", "-S", cur, "-o", optPath}) != 0) {
       err << "error: llvm backend: opt failed on '" << llPath << "'\n";
       cleanup();
       return 1;
     }
     cur = optPath;
   }
-  // Stage 2: llc -> object file.
+  // Stage 2: llc -> object file. -mcpu=native targets the host CPU (the
+  // backend is already host-only) so AVX2/FMA/BMI2 are available; without
+  // it llc emits baseline x86-64. -fp-contract=fast lets llc fuse
+  // mul+add into FMA — the same contraction clang applies to C by
+  // default; it does not affect NaN propagation.
   objPath = tempPath("llvm", "x.o");
-  if (runChild(llc, {optFlag, "-filetype=obj", cur, "-o", objPath}) != 0) {
+  if (runChild(llc, {optFlag, "-mcpu=native", "-fp-contract=fast",
+                     "-filetype=obj", cur, "-o", objPath}) != 0) {
     err << "error: llvm backend: llc failed\n";
     cleanup();
     return 1;
@@ -1586,6 +1619,33 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
 #ifndef __APPLE__
   args.push_back("-ldl");
 #endif
+  // mold is dramatically faster than ld/lld for the final link; use it
+  // when present and retry with the default linker if it fails.
+  bool tryMold = false;
+  {
+    const char* moldEnv = std::getenv("A_NO_MOLD");
+    if (!(moldEnv && *moldEnv)) {
+      const char* path = std::getenv("PATH");
+      std::string p(path ? path : "");
+      size_t pos = 0;
+      while (pos <= p.size()) {
+        size_t colon = p.find(':', pos);
+        std::string dir = p.substr(pos, colon == std::string::npos
+                                              ? std::string::npos : colon - pos);
+        std::error_code mec;
+        if (std::filesystem::exists(dir + "/mold", mec)) { tryMold = true; break; }
+        if (colon == std::string::npos) break;
+        pos = colon + 1;
+      }
+    }
+  }
+  if (tryMold) {
+    std::vector<std::string> margs = args;
+    margs.insert(margs.begin() + 1, "-fuse-ld=mold");
+    int rc = runChild(cc, margs);
+    if (rc == 0) { cleanup(); return 0; }
+    // mold missing/broken: fall through to the default linker.
+  }
   int rc = runChild(cc, args);
   cleanup();
   if (rc != 0) err << "error: llvm backend: clang link failed\n";

@@ -27,6 +27,29 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
     return linalg == "linalg_dot" ? typeFloat(64) : typeArray(typeFloat(64));
   }
 
+  // std.math elementwise/reduction kernels (math_ew.c). Called from the
+  // ufuncs.astra/reductions.astra fast paths with integer opcodes; the
+  // list arguments are always flat [f64] NDArray.data buffers.
+  if (name == "math_ew_un" || name == "math_ew_bin" ||
+      name == "math_ew_bin_scalar" || name == "math_ew_reduce") {
+    const std::size_t expected =
+        name == "math_ew_un" ? 2
+        : name == "math_ew_bin" ? 3
+        : name == "math_ew_bin_scalar" ? 4
+                                      : 3;
+    const bool returnsScalar = name == "math_ew_reduce";
+    if (call.args.size() != expected) {
+      builtinArityError(name, call, expected);
+      inferCallArgTypes(call);
+      return returnsScalar ? typeFloat(64) : typeArray(typeFloat(64));
+    }
+    requireInteger(inferExpr(*call.args[0].value), call.args[0].value->span,
+                   "The opcode passed to '" + name + "'");
+    for (std::size_t i = 1; i < call.args.size(); ++i)
+      inferExpr(*call.args[i].value);
+    return returnsScalar ? typeFloat(64) : typeArray(typeFloat(64));
+  }
+
   if (name == "f32s") {
     if (call.args.size() != 3) {
       builtinArityError(name, call, 3);

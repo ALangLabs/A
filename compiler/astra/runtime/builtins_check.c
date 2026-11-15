@@ -62,6 +62,14 @@ aval bi_input(uint64_t n, aval *argv) {
         fwrite(p, 1, (size_t)len, stdout);
     }
     fflush(stdout);
+    /* Inside a fiber, wait for stdin readability via the scheduler so
+       other fibers keep running; poll() first also preserves the
+       blocking semantics for interactive use. */
+#if A_FIBERS
+    if (a_fib_on()) {
+        while (a_fib_wait_fd(0, POLLIN, -1) == 0) {}
+    }
+#endif
     char buf[4096];
     if (!fgets(buf, sizeof(buf), stdin)) panicf("Input ended before a line could be read.");
     size_t len = strlen(buf);

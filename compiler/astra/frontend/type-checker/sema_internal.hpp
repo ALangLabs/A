@@ -122,6 +122,8 @@ inline bool isKnownBuiltin(const std::string& name) {
       "linalg_dot", "linalg_matvec", "linalg_matvec_t",
       "matmul", "softmax", "attention",
       "linalg_matmul", "linalg_softmax", "linalg_attention", "f32s",
+      "math_ew_un", "math_ew_bin", "math_ew_bin_scalar", "math_ew_reduce",
+      "fib_spawn", "fib_join", "fib_done", "fib_cancel",
       "list_dir", "remove_file", "create_dir",
       "remove_dir", "rename", "current_dir", "now", "sleep", "panic", "assert",
       "open", "close",

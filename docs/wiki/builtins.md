@@ -15,7 +15,7 @@ Boolean literals are the lowercase keywords `true` and `false` (not Python's
 `elif`, `while`, and `do`/`while` are expressions (see
 [syntax and types](syntax-and-types.md) and
 [statements and expressions](statements-and-expressions.md)).
-| Math | `abs`, `min`, `max`, `sum`, `pow`, `divmod` (returns `(quotient, remainder)` with floor-division semantics), `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int` |
+| Math | `abs`, `min`, `max`, `sum`, `pow`, `divmod` (returns `(quotient, remainder)` with floor-division semantics), `sqrt`, `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `exp`, `log`, `log2`, `log10`, `floor`, `ceil`, `round`, `trunc`, `random`, `random_int`. Internal kernels backing `std.math` ufuncs/reductions: `math.ew_un(opi, data)`, `math.ew_bin(opi, a, b)`, `math.ew_bin_scalar(opi, data, scalar, scalar_left)`, `math.ew_reduce(opi, data, skip_nan)` (builtins `math_ew_*`) |
 | Linear algebra | `dot(a, b)`, `matvec(x, w, bias, nin, nout)`, `matvec_t(x, w, bias, nout, nin)`; canonical names `linalg_dot`, `linalg_matvec`, `linalg_matvec_t` also work. ML kernels: `matmul(a, b, m, k, n)` (blocked/tiled dense matmul), `softmax(x)` (stable), `attention(q, k, v, nk, dk, dv)` (fused); canonical names `linalg_matmul`, `linalg_softmax`, `linalg_attention` also work. All are native `a_builtin` kernels with fused multiply-add hot loops. `f32s(data, byte_offset, count)` bulk-decodes `count` little-endian binary32 values from a `String`/`Bytes` buffer into `[f64]` — the fast path for binary weight files (safetensors) |
 | Collections | `map`, `filter`, `reduce`, `any`, `all`, `some`, `join`, `sorted`, `reversed`, `enumerate`, `zip`, `set`, `tuple`, `list`, `dict`, `bytes` (alias of `Bytes`), `range(n)`/`range(a, b[, step])`, plus `a..b` range literals. `map`/`filter` accept both `(fn, xs)` and `(xs, fn)`; `any(xs)`/`all(xs)` check truthiness with one arg or take a predicate as a second arg |
 | Option/Result | `Some(v)`, `Ok(v)`, `Err(e)` constructors; `None` literal |
@@ -113,3 +113,36 @@ and `net.recv_body` returns the binary half of an HTTP body as `Bytes`.
 
 Prefer `import std:<pkg>` for the ergonomic stdlib wrappers — see
 [stdlib](stdlib.md).
+
+## `async` module (auto-async fibers)
+
+The runtime runs `entry main` inside a cooperative fiber; blocking
+builtins yield to a `poll(2)` event loop (plus a worker pool for
+non-pollable calls) instead of blocking the OS thread. No syntax changes
+are needed — ordinary synchronous code gets async behavior underneath.
+
+- `async.spawn(fn, *args) -> handle` — run `fn` on a new fiber; returns an
+  opaque integer handle immediately.
+- `async.join(handle) -> result` — wait for the task and return its value.
+  Inside a fiber this is a cooperative wait; may only be called once per
+  handle.
+- `async.done(handle) -> bool` — non-blocking completion check.
+- `async.cancel(handle) -> handle` — currently a no-op (fibers are
+  cooperative; there is no preemption).
+- `async.sleep(ms)` — alias of `time.sleep` that yields inside fibers.
+
+Environment knobs: `A_ASYNC=0|off|no|false` disables fibers entirely
+(everything runs synchronously; `spawn` executes inline and returns -1),
+`A_FIB_STACK=<bytes>` sets the per-fiber stack (default 512 KiB),
+`A_BLOCK_THREADS=<n>` sizes the blocking-op pool (default 8).
+
+## Auto-parfor (automatic loop parallelization)
+
+Inside a function, `for i in range(n):` loops whose bodies provably only
+write disjoint state are automatically executed across fibers — no syntax
+changes. Eligibility (conservative): no break/continue/return/nested
+loops; writes only to body-local variables or `container[i] =` slots
+(indexed by the loop variable); no calls to order-sensitive builtins
+(print, input, fs/os mutation helpers, socket send/recv methods, etc.).
+User function calls are assumed free of hidden shared writes — the same
+contract as manual `async.spawn`. Disable with `A_PARFOR=0`.

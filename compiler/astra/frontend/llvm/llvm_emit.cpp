@@ -147,6 +147,17 @@ class LlvmEmitter {
   };
   std::vector<PendingLambda> lambdas_;
 
+  // Auto-parfor: an eligible `for i in range(...)` body is emitted once as
+  // a synthetic per-iteration function and driven by fiber spawn/join.
+  struct PendingParfor {
+    const ForStmt* stmt = nullptr;
+    int moduleId = -1;
+    std::string cname;
+    std::vector<std::string> capNames;  // env slot order (matches env_set)
+  };
+  std::vector<PendingParfor> parfors_;
+  int parforCounter_ = 0;
+
   // ---- raw-numeric safety analysis --------------------------------------
   // Per-function pre-pass proving that a numMode binding can never hold
   // flag==2 (a boxed aval in the payload slot): every write to the binding
@@ -229,6 +240,12 @@ class LlvmEmitter {
     std::string name = "%v" + std::to_string(allocaCounter_++);
     pendingAllocas_.push_back({name, ty});
     return name;
+  }
+  // Force an alloca's address to escape so LLVM cannot promote it to a
+  // register: the conservative GC only scans the stack, so any slot that
+  // must stay GC-visible across calls/loops needs an opaque use.
+  void pinSlot(const std::string& slot) {
+    emit("  call void asm sideeffect \"\", \"r\"(ptr " + slot + ")");
   }
   // aval of a small-int literal: inline encoding when in range.
   std::string avalIntLit(std::int64_t v) {
@@ -651,66 +668,93 @@ class LlvmEmitter {
       }
     }
   }
-  void bindFileModuleFromImport(const FromImportStmt* im) {
-    const Module& src = graph_.at(im->moduleId);
+  // Binds `bindName` to the decl `srcName` exported by module `srcId`,
+  // following FromImport re-export chains (mirrors Sema::resolveReexportedValue).
+  void bindFileModuleMember(int srcId, const std::string& srcName,
+                            const std::string& bindName, int depth) {
+    if (depth > 16 || srcId < 0 || srcId >= (int)graph_.modules.size()) return;
+    const Module& src = graph_.at(srcId);
     if (!src.program) return;
-    for (const auto& item : im->items) {
-      for (const StmtPtr& ss : src.program->statements) {
-        if (ss->kind == StmtKind::FnDecl) {
-          const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
-          if (fd->name != item.name) continue;
-          auto it = fns_.find(fd);
-          if (it != fns_.end()) {
+    bool bound = false;
+    for (const StmtPtr& ss : src.program->statements) {
+      if (ss->kind == StmtKind::FromImport) {
+        const FromImportStmt* ri = static_cast<const FromImportStmt*>(ss.get());
+        if (ri->nativeModule || ri->pythonModuleImport || ri->moduleId < 0) continue;
+        for (const auto& item : ri->items) {
+          // The name a module re-exports is item.alias (the local binding
+          // name); item.name is the name in the *source* module and must not
+          // match — `import sqrt as _usqrt` does not re-export "sqrt".
+          if (item.alias != srcName) continue;
+          bindFileModuleMember(ri->moduleId, item.name, bindName, depth + 1);
+          bound = true;
+          break;
+        }
+        if (bound) break;
+        continue;
+      }
+      if (ss->kind == StmtKind::FnDecl) {
+        const FnDecl* fd = static_cast<const FnDecl*>(ss.get());
+        if (fd->name != srcName) continue;
+        auto it = fns_.find(fd);
+        if (it != fns_.end()) {
+          LlBinding b;
+          b.kind = BKind::FnValue;
+          b.sym = it->second->globalVar;
+          b.fn = it->second;
+          scopes_.back()[bindName] = b;
+          bound = true;
+        }
+      } else if (ss->kind == StmtKind::StructDecl) {
+        const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
+        if (sd->name != srcName) continue;
+        auto it = structs_.find(sd->name);
+        if (it != structs_.end() && it->second->moduleId == src.id) {
+          LlBinding b;
+          b.kind = BKind::StructCtor;
+          b.sym = it->second->globalVar;
+          b.st = it->second;
+          scopes_.back()[bindName] = b;
+          bound = true;
+        }
+      } else if (ss->kind == StmtKind::Let || ss->kind == StmtKind::Assign) {
+        std::string vn;
+        if (ss->kind == StmtKind::Let)
+          vn = static_cast<const LetStmt*>(ss.get())->name;
+        else {
+          const AssignStmt* as = static_cast<const AssignStmt*>(ss.get());
+          if (as->target->kind != ExprKind::Ident) continue;
+          vn = static_cast<const IdentExpr*>(as->target.get())->name;
+        }
+        if (vn != srcName) continue;
+        auto it = topLevelGlobals_.find(std::to_string(src.id) + ":" + vn);
+        if (it != topLevelGlobals_.end()) {
+          LlBinding b;
+          b.kind = BKind::Global;
+          b.sym = it->second;
+          scopes_.back()[bindName] = b;
+          bound = true;
+        }
+      } else if (ss->kind == StmtKind::EnumDecl) {
+        const EnumDecl* ed = static_cast<const EnumDecl*>(ss.get());
+        for (const EnumVariant& v : ed->variants) {
+          if (v.name != srcName) continue;
+          auto it = enums_.find(std::to_string(src.id) + ":" + ed->name + "." + v.name);
+          if (it != enums_.end()) {
             LlBinding b;
-            b.kind = BKind::FnValue;
-            b.sym = it->second->globalVar;
-            b.fn = it->second;
-            scopes_.back()[item.alias] = b;
-          }
-        } else if (ss->kind == StmtKind::StructDecl) {
-          const StructDecl* sd = static_cast<const StructDecl*>(ss.get());
-          if (sd->name != item.name) continue;
-          auto it = structs_.find(sd->name);
-          if (it != structs_.end() && it->second->moduleId == src.id) {
-            LlBinding b;
-            b.kind = BKind::StructCtor;
-            b.sym = it->second->globalVar;
-            b.st = it->second;
-            scopes_.back()[item.alias] = b;
-          }
-        } else if (ss->kind == StmtKind::Let || ss->kind == StmtKind::Assign) {
-          std::string vn;
-          if (ss->kind == StmtKind::Let)
-            vn = static_cast<const LetStmt*>(ss.get())->name;
-          else {
-            const AssignStmt* as = static_cast<const AssignStmt*>(ss.get());
-            if (as->target->kind != ExprKind::Ident) continue;
-            vn = static_cast<const IdentExpr*>(as->target.get())->name;
-          }
-          if (vn != item.name) continue;
-          auto it = topLevelGlobals_.find(std::to_string(src.id) + ":" + vn);
-          if (it != topLevelGlobals_.end()) {
-            LlBinding b;
-            b.kind = BKind::Global;
-            b.sym = it->second;
-            scopes_.back()[item.alias] = b;
-          }
-        } else if (ss->kind == StmtKind::EnumDecl) {
-          const EnumDecl* ed = static_cast<const EnumDecl*>(ss.get());
-          for (const EnumVariant& v : ed->variants) {
-            if (v.name != item.name) continue;
-            auto it = enums_.find(std::to_string(src.id) + ":" + ed->name + "." + v.name);
-            if (it != enums_.end()) {
-              LlBinding b;
-              b.kind = BKind::EnumValue;
-              b.sym = it->second.globalVar;
-              b.en = &it->second;
-              scopes_.back()[item.alias] = b;
-            }
+            b.kind = BKind::EnumValue;
+            b.sym = it->second.globalVar;
+            b.en = &it->second;
+            scopes_.back()[bindName] = b;
+            bound = true;
           }
         }
       }
+      if (bound) break;
     }
+  }
+  void bindFileModuleFromImport(const FromImportStmt* im) {
+    for (const auto& item : im->items)
+      bindFileModuleMember(im->moduleId, item.name, item.alias, 0);
   }
   void bindModuleImports(int moduleId) {
     if (moduleId < 0) return;
@@ -863,6 +907,7 @@ declare i64 @a_dict_has(i64, i64)
 declare i64 @a_set_new()
 declare i64 @a_set_add(i64, i64)
 declare i64 @a_range_new(i64, i64, i64)
+declare i64 @a_range_bound(i64, i64)
 declare i64 @a_getitem(i64, i64)
 declare i64 @a_setitem(i64, i64, i64)
 declare i64 @a_slice(i64, i64, i64, i64)
@@ -896,6 +941,10 @@ declare i64 @a_match_fail(i64)
 declare void @a_frame_push(ptr, ptr, i32)
 declare void @a_frame_pop()
 declare void @a_runtime_init()
+declare i64 @a_fib_main(i64, i64, i64, ptr)
+declare void @a_fib_reap_all()
+declare i64 @a_fib_spawn_handle(i64, i64, ptr)
+declare i64 @a_fib_join_handle(i64)
 declare i32 @a_test_main(i64, ptr, ptr)
 @a_stmt_line = external global i32
 )LLVM";
@@ -2934,7 +2983,531 @@ oth:
     loopDeferDepth_.pop_back();
   }
 
+  // ---- auto-parfor -------------------------------------------------------
+  // Conservative eligibility for running a `for` body on per-iteration
+  // fibers. Requires: inside a function, iterable is the builtin range(),
+  // no control-flow escapes, writes only to body-locals or disjoint
+  // `container[i] =` slots, and no calls to order-sensitive builtins.
+  // A_PARFOR=0|off|no|false disables the transform entirely.
+  static bool parforEnabled() {
+    static bool en = [] {
+      const char* e = std::getenv("A_PARFOR");
+      if (!e) return true;
+      std::string v = e;
+      for (char& c : v) c = (char)std::tolower((unsigned char)c);
+      return !(v == "0" || v == "off" || v == "no" || v == "false");
+    }();
+    return en;
+  }
+
+  static bool pfDenyName(const std::string& n) {
+    // Order-sensitive or shared-state-mutating calls are unsafe to overlap.
+    // User functions are assumed free of hidden shared writes (same contract
+    // as manual async.spawn); pure reads (fs read, net recv inside helpers)
+    // stay allowed.
+    static const char* k[] = {
+        "print",     "println",   "eprint",   "eprintln", "printerr",
+        "panic",     "assert",    "assert_eq","input",    "exit",
+        "write_file","append_file","write_bytes","remove_file","remove_dir",
+        "create_dir","rename",   "system",   "popen",    "kill",
+        "exec",      "spawn",     "join",     "done",     "cancel",
+        "append",    "extend",    "insert",   "remove",   "pop",
+        "clear",     "update",    "add",      "discard",  "push",
+        "send",      "sendall",   "sendto",   "write",    "writeall",
+        "recv",      "recvfrom",  "accept",   "connect",  "bind", "listen"};
+    for (const char* d : k)
+      if (n == d) return true;
+    return false;
+  }
+
+  bool pfExprOk(const Expr* e) {
+    if (!e) return true;
+    switch (e->kind) {
+      case ExprKind::IntLit: case ExprKind::FloatLit: case ExprKind::BoolLit:
+      case ExprKind::CharLit: case ExprKind::StringLit: case ExprKind::Ident:
+        return true;
+      case ExprKind::Unary: return pfExprOk(static_cast<const UnaryExpr*>(e)->operand.get());
+      case ExprKind::Binary: {
+        const auto& b = *static_cast<const BinaryExpr*>(e);
+        return pfExprOk(b.lhs.get()) && pfExprOk(b.rhs.get());
+      }
+      case ExprKind::Call: {
+        const auto& c = *static_cast<const CallExpr*>(e);
+        // Deny known order-sensitive callees by simple name (ident or
+        // method field); everything else is assumed side-effect-safe.
+        if (c.callee->kind == ExprKind::Ident) {
+          if (pfDenyName(static_cast<const IdentExpr*>(c.callee.get())->name))
+            return false;
+        } else if (c.callee->kind == ExprKind::Field) {
+          if (pfDenyName(static_cast<const FieldExpr*>(c.callee.get())->field))
+            return false;
+          if (!pfExprOk(static_cast<const FieldExpr*>(c.callee.get())->object.get()))
+            return false;
+        } else if (!pfExprOk(c.callee.get())) {
+          return false;
+        }
+        for (const CallArg& a : c.args)
+          if (!pfExprOk(a.value.get())) return false;
+        return true;
+      }
+      case ExprKind::Index: {
+        const auto& x = *static_cast<const IndexExpr*>(e);
+        return pfExprOk(x.object.get()) && pfExprOk(x.index.get());
+      }
+      case ExprKind::Slice: {
+        const auto& x = *static_cast<const SliceExpr*>(e);
+        return pfExprOk(x.object.get()) && pfExprOk(x.start.get()) &&
+               pfExprOk(x.end.get()) && pfExprOk(x.step.get());
+      }
+      case ExprKind::Field: {
+        const auto& x = *static_cast<const FieldExpr*>(e);
+        return pfExprOk(x.object.get());
+      }
+      case ExprKind::SafeNav: {
+        const auto& x = *static_cast<const SafeNavExpr*>(e);
+        return pfExprOk(x.object.get());
+      }
+      case ExprKind::ArrayLit: {
+        for (const ExprPtr& el : static_cast<const ArrayLitExpr*>(e)->elements)
+          if (!pfExprOk(el.get())) return false;
+        return true;
+      }
+      case ExprKind::Tuple: {
+        for (const ExprPtr& el : static_cast<const TupleExpr*>(e)->elements)
+          if (!pfExprOk(el.get())) return false;
+        return true;
+      }
+      case ExprKind::MapLit: {
+        for (const auto& kv : static_cast<const MapLitExpr*>(e)->entries)
+          if (!pfExprOk(kv.first.get()) || !pfExprOk(kv.second.get())) return false;
+        return true;
+      }
+      case ExprKind::SetLit: {
+        for (const ExprPtr& el : static_cast<const SetLitExpr*>(e)->elements)
+          if (!pfExprOk(el.get())) return false;
+        return true;
+      }
+      case ExprKind::Range: {
+        const auto& x = *static_cast<const RangeExpr*>(e);
+        return pfExprOk(x.start.get()) && pfExprOk(x.end.get()) && pfExprOk(x.step.get());
+      }
+      case ExprKind::Ternary: {
+        const auto& x = *static_cast<const TernaryExpr*>(e);
+        return pfExprOk(x.cond.get()) && pfExprOk(x.thenValue.get()) && pfExprOk(x.elseValue.get());
+      }
+      case ExprKind::Comprehension: {
+        const auto& x = *static_cast<const ComprehensionExpr*>(e);
+        return pfExprOk(x.iterable.get()) && pfExprOk(x.element.get()) &&
+               (!x.condition || pfExprOk(x.condition.get()));
+      }
+      default:
+        // Lambda/Match/Try and anything unrecognized: stay sequential.
+        return false;
+    }
+  }
+
+  // True when `name` resolves to an outer-scope binding (would be a shared
+  // write under capture-by-value); false when unbound (body-local).
+  bool pfOuterBinding(const std::string& name) {
+    LlBinding* b = lookup(name);
+    return b != nullptr;
+  }
+
+  bool pfStmtOk(const Stmt* s, const std::string& loopVar) {
+    if (!s) return true;
+    switch (s->kind) {
+      case StmtKind::Let: {
+        const auto& l = *static_cast<const LetStmt*>(s);
+        return !l.init || pfExprOk(l.init.get());
+      }
+      case StmtKind::Destructure: {
+        const auto& d = *static_cast<const DestructureStmt*>(s);
+        return !d.value || pfExprOk(d.value.get());
+      }
+      case StmtKind::Assign: {
+        const auto& a = *static_cast<const AssignStmt*>(s);
+        const Expr* t = a.target.get();
+        if (t->kind == ExprKind::Ident) {
+          // Write to an outer binding = shared mutable state: unsafe.
+          if (pfOuterBinding(static_cast<const IdentExpr*>(t)->name)) return false;
+        } else if (t->kind == ExprKind::Index) {
+          const auto& ix = *static_cast<const IndexExpr*>(t);
+          bool disjoint = ix.index->kind == ExprKind::Ident &&
+                          static_cast<const IdentExpr*>(ix.index.get())->name == loopVar;
+          bool localBase = ix.object->kind == ExprKind::Ident &&
+                           !pfOuterBinding(static_cast<const IdentExpr*>(ix.object.get())->name);
+          if (!disjoint && !localBase) return false;
+          if (!pfExprOk(ix.object.get()) || !pfExprOk(ix.index.get())) return false;
+        } else {
+          return false;  // field/member/other targets: shared writes
+        }
+        return pfExprOk(a.value.get());
+      }
+      case StmtKind::Expr:
+        return pfExprOk(static_cast<const ExprStmt*>(s)->expr.get());
+      case StmtKind::If: {
+        const auto& f = *static_cast<const IfStmt*>(s);
+        for (const auto& br : f.branches) {
+          if (!pfExprOk(br.cond.get())) return false;
+          for (const StmtPtr& b : br.body)
+            if (!pfStmtOk(b.get(), loopVar)) return false;
+        }
+        for (const StmtPtr& b : f.elseBody)
+          if (!pfStmtOk(b.get(), loopVar)) return false;
+        return true;
+      }
+      default:
+        return false;  // Return/Break/Continue/Defer/loops/decls: sequential
+    }
+  }
+
+  bool parforEligible(const ForStmt& s) {
+    if (!parforEnabled() || !inFunctionBody_ || s.body.empty()) return false;
+    // Iterable must be the builtin range(...) call so the loop variable is
+    // a per-iteration integer index.
+    const Expr* it = s.iterable.get();
+    if (!it || it->kind != ExprKind::Call) return false;
+    const auto& call = *static_cast<const CallExpr*>(it);
+    if (call.callee->kind != ExprKind::Ident ||
+        static_cast<const IdentExpr*>(call.callee.get())->name != "range")
+      return false;
+    for (const StmtPtr& b : s.body)
+      if (!pfStmtOk(b.get(), s.var)) return false;
+    return true;
+  }
+
+  void emitForParfor(const ForStmt& s) {
+    // Capture visible Local/Param bindings into a closure env (same rule as
+    // evalLambda); the synthetic function re-binds them by index.
+    std::map<std::string, LlBinding> caps;
+    for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it)
+      for (auto& kv : *it)
+        if ((kv.second.kind == BKind::Local || kv.second.kind == BKind::Param) &&
+            !caps.count(kv.first))
+          caps[kv.first] = kv.second;
+    PendingParfor pf;
+    pf.stmt = &s;
+    pf.moduleId = curModuleId_;
+    pf.cname = "__a_pf_" + moduleTag(curModuleId_ < 0 ? 0 : curModuleId_) + "_" +
+               std::to_string(parforCounter_++);
+    for (auto& kv : caps) pf.capNames.push_back(kv.first);
+    parfors_.push_back(pf);
+
+    std::string env = callRt("a_closure_env_new", {std::to_string(caps.size())});
+    {
+      std::size_t i = 0;
+      for (auto& kv : caps)
+        callRt("a_env_set", {env, std::to_string(i++), bindingValue(kv.second)});
+    }
+    std::string fnval = fixFnonNew("", pf.cname, env, "<parfor>");
+    // fnval must live on the stack, not in a callee-saved register: the
+    // conservative GC only scans the stack, and spawned fibers dereference
+    // this closure for the whole loop. Spilling keeps it a valid root.
+    std::string fnSlot = alloca("i64");
+    emit("  store i64 " + fnval + ", ptr " + fnSlot);
+    pinSlot(fnSlot);
+
+    // Driver loop 1: per item spawn a fiber running the body with i bound.
+    std::string it = callRt("a_iter_new", {eval(s.iterable.get())});
+    std::string itSlot = alloca("i64");
+    emit("  store i64 " + it + ", ptr " + itSlot);
+    pinSlot(itSlot);
+    std::string itemSlot = alloca("i64");
+    pinSlot(itemSlot);
+    std::string hs = callRtA("a_list_new", "ip", {"0", "null"});
+    std::string hsSlot = alloca("i64");
+    emit("  store i64 " + hs + ", ptr " + hsSlot);
+    pinSlot(hsSlot);
+
+    std::string argSlot = alloca("i64");
+    pinSlot(argSlot);
+    std::string head = newLabel("pfh"), body = newLabel("pfb"), end = newLabel("pfe");
+    loopBreak_.push_back(end);
+    loopCont_.push_back(head);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    emit("  br label %" + head);
+    emit("  " + head + ":");
+    std::string itv = T(), outp = T(), nx = T(), t = T();
+    emit("  " + itv + " = load i64, ptr " + itSlot);
+    emit("  " + outp + " = getelementptr i64, ptr " + itemSlot + ", i64 0");
+    emit("  " + nx + " = call i64 @a_iter_next(i64 " + itv + ", ptr " + outp + ")");
+    emit("  " + t + " = icmp ne i64 " + nx + ", 0");
+    emit("  br i1 " + t + ", label %" + body + ", label %" + end);
+    emit("  " + body + ":");
+    pushScope();
+    deferStack_.emplace_back();
+    {
+      std::string iv = T();
+      emit("  " + iv + " = load i64, ptr " + itemSlot);
+      emit("  store i64 " + iv + ", ptr " + itemSlot);
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = itemSlot;
+      bind(s.var, b);
+      // args = [i]; spawn returns the handle aval. Reload fnval from its
+      // stack slot each iteration so the GC can always see the closure.
+      std::string fnv = T();
+      emit("  " + fnv + " = load i64, ptr " + fnSlot);
+      emit("  store i64 " + iv + ", ptr " + argSlot);
+      std::string h = callRtPtrArgs("a_fib_spawn_handle", fnv, "1", argSlot);
+      // Reload hs from its stack slot: the SSA value may live in a
+      // callee-saved register the conservative GC cannot scan.
+      std::string hsr = T();
+      emit("  " + hsr + " = load i64, ptr " + hsSlot);
+      callRt("a_list_append", {hsr, h});
+
+    }
+    emitDefers();
+    emit("  br label %" + head);
+    popScope();
+    emit("  " + end + ":");
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    loopDeferDepth_.pop_back();
+
+    // Driver loop 2: join every handle (order preserved; results discarded —
+    // effects were disjoint writes proven by parforEligible).
+    std::string hsr2 = T();
+    emit("  " + hsr2 + " = load i64, ptr " + hsSlot);
+    std::string it2 = callRt("a_iter_new", {hsr2});
+    std::string it2Slot = alloca("i64");
+    emit("  store i64 " + it2 + ", ptr " + it2Slot);
+    pinSlot(it2Slot);
+    std::string item2Slot = alloca("i64");
+    pinSlot(item2Slot);
+    std::string head2 = newLabel("pfj"), body2 = newLabel("pfjb"), end2 = newLabel("pfje");
+    loopBreak_.push_back(end2);
+    loopCont_.push_back(head2);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    emit("  br label %" + head2);
+    emit("  " + head2 + ":");
+    std::string itv2 = T(), outp2 = T(), nx2 = T(), t2 = T();
+    emit("  " + itv2 + " = load i64, ptr " + it2Slot);
+    emit("  " + outp2 + " = getelementptr i64, ptr " + item2Slot + ", i64 0");
+    emit("  " + nx2 + " = call i64 @a_iter_next(i64 " + itv2 + ", ptr " + outp2 + ")");
+    emit("  " + t2 + " = icmp ne i64 " + nx2 + ", 0");
+    emit("  br i1 " + t2 + ", label %" + body2 + ", label %" + end2);
+    emit("  " + body2 + ":");
+    pushScope();
+    deferStack_.emplace_back();
+    {
+      std::string hv = T();
+      emit("  " + hv + " = load i64, ptr " + item2Slot);
+      emit("  store i64 " + hv + ", ptr " + item2Slot);
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = item2Slot;
+      bind("__pf_h", b);
+      emit("  call i64 @a_fib_join_handle(i64 " + hv + ")");
+    }
+    emitDefers();
+    emit("  br label %" + head2);
+    popScope();
+    emit("  " + end2 + ":");
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    loopDeferDepth_.pop_back();
+  }
+
+  // Runtime call whose last argument is a pointer to an i64 slot.
+  std::string callRtPtrArgs(const std::string& name, const std::string& a0,
+                            const std::string& a1, const std::string& slot) {
+    std::string r = T();
+    emit("  " + r + " = call i64 @" + name + "(i64 " + a0 + ", i64 " + a1 +
+         ", ptr " + slot + ")");
+    return r;
+  }
+
+  // Conservative proof for the counted range-for below: returns true when
+  // `name` may be written inside `body` by anything other than ++/-- (those
+  // keep a numMode flag in {0,1}). Any `=`/op= assign to `name` could store
+  // a boxed aval (flag 2), so it disqualifies the unboxed binding. Writes
+  // are resolved lexically: let/destructure bindings and a nested
+  // `for name in ...` shadow `name` for their scope, which stops the scan.
+  bool forVarListUnsafe(const std::vector<StmtPtr>& body,
+                        const std::string& name) {
+    for (const StmtPtr& sp : body) {
+      const Stmt* s = sp.get();
+      if (!s) continue;
+      if (s->kind == StmtKind::Let &&
+          static_cast<const LetStmt*>(s)->name == name)
+        return false;  // `name` is shadowed for the rest of this block
+      if (s->kind == StmtKind::Destructure) {
+        for (const std::string& n :
+             static_cast<const DestructureStmt*>(s)->names)
+          if (n == name) return false;
+      }
+      if (forVarStmtUnsafe(s, name)) return true;
+    }
+    return false;
+  }
+  bool forVarStmtUnsafe(const Stmt* s, const std::string& name) {
+    if (!s) return false;
+    switch (s->kind) {
+      case StmtKind::Assign: {
+        const auto& a = *static_cast<const AssignStmt*>(s);
+        return a.target->kind == ExprKind::Ident &&
+               static_cast<const IdentExpr*>(a.target.get())->name == name;
+      }
+      case StmtKind::Defer:
+        return forVarStmtUnsafe(
+            static_cast<const DeferStmt*>(s)->body.get(), name);
+      case StmtKind::If: {
+        const auto& f = *static_cast<const IfStmt*>(s);
+        for (const auto& br : f.branches)
+          if (forVarListUnsafe(br.body, name)) return true;
+        return forVarListUnsafe(f.elseBody, name);
+      }
+      case StmtKind::While:
+        return forVarListUnsafe(static_cast<const WhileStmt*>(s)->body,
+                                name);
+      case StmtKind::DoWhile:
+        return forVarListUnsafe(static_cast<const DoWhileStmt*>(s)->body,
+                                name);
+      case StmtKind::Loop:
+        return forVarListUnsafe(static_cast<const LoopStmt*>(s)->body, name);
+      case StmtKind::For: {
+        const auto& f = *static_cast<const ForStmt*>(s);
+        // A nested `for name in ...` shadows `name` throughout its body.
+        return f.var != name && forVarListUnsafe(f.body, name);
+      }
+      default:
+        // Let/Destructure only bind (the list scan handles shadowing), Expr
+        // stmts can write locals only via ++/-- (neutral on a safe numMode
+        // binding), declarations have their own scopes, and
+        // Return/Break/Continue/Import write nothing.
+        return false;
+    }
+  }
+
+  // `for i in a..b[..s]:` lowers to a counted loop instead of the generic
+  // a_iter_* protocol. Mirrors ITAG_RANGE in a_iter_next exactly: bounds are
+  // evaluated once (a_range_bound applies the same expect_int64 checks as
+  // a_range_new), step 0 panics before the first iteration, cur advances
+  // from lo while (step>0 ? cur<hi : cur>hi) with overflow saturation to
+  // hi, and each yielded value is the int64 cur. The loop variable is bound
+  // as a numMode local so arithmetic in the body stays unboxed.
+  // Shared counted-loop body for `for i in a..b[..s]` and `for i in
+  // range(...)`: lo/hi/st are already-evaluated raw i64 bound values.
+  void emitCountedLoop(const ForStmt& s, const std::string& lo,
+                       const std::string& hi, const std::string& st) {
+    // a_range_new panics on a zero step before iterating.
+    std::string z = T(), zc = newLabel("frz"), zo = newLabel("frzo");
+    emit("  " + z + " = icmp eq i64 " + st + ", 0");
+    emit("  br i1 " + z + ", label %" + zc + ", label %" + zo);
+    emit("  " + zc + ":");
+    emit("  call i64 @a_panic_msg(ptr " +
+         cstrGlobal("range() step must be positive, found 0.", true) + ")");
+    emit("  unreachable");
+    emit("  " + zo + ":");
+
+    std::string cur = alloca("i64");
+    emit("  store i64 " + lo + ", ptr " + cur);
+    std::string vslot = alloca("i64"), vflag = alloca("i64");
+    const bool rawSafe = !forVarListUnsafe(s.body, s.var);
+    std::string sp = T();
+    emit("  " + sp + " = icmp sgt i64 " + st + ", 0");
+    std::string head = newLabel("frh"), body = newLabel("frb"),
+                incr = newLabel("fri"), end = newLabel("fre");
+    loopBreak_.push_back(end);
+    loopCont_.push_back(incr);
+    loopDeferDepth_.push_back((int)deferStack_.size());
+    emit("  br label %" + head);
+    emit("  " + head + ":");
+    std::string c = T();
+    emit("  " + c + " = load i64, ptr " + cur);
+    std::string lt = T(), gt = T(), more = T();
+    emit("  " + lt + " = icmp slt i64 " + c + ", " + hi);
+    emit("  " + gt + " = icmp sgt i64 " + c + ", " + hi);
+    emit("  " + more + " = select i1 " + sp + ", i1 " + lt + ", i1 " + gt);
+    emit("  br i1 " + more + ", label %" + body + ", label %" + end);
+    emit("  " + body + ":");
+    pushScope();
+    deferStack_.emplace_back();
+    emit("  store i64 " + c + ", ptr " + vslot);
+    emit("  store i64 0, ptr " + vflag);
+    {
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = vslot;
+      b.slotF = vflag;
+      b.numMode = 1;
+      b.rawSafe = rawSafe;
+      bind(s.var, b);
+    }
+    emitStmts(s.body);
+    emitDefers();
+    if (!term_) emit("  br label %" + incr);
+    term_ = false;
+    popScope();
+    emit("  " + incr + ":");
+    // Advance with the same saturation as ITAG_RANGE: on overflow cur is
+    // set to hi so the next check terminates. limP/limN wrap harmlessly —
+    // only the branch selected by the step sign is ever used.
+    std::string limP = T(), ovP = T(), sum = T(), nP = T();
+    emit("  " + limP + " = sub i64 9223372036854775807, " + st);
+    emit("  " + ovP + " = icmp sgt i64 " + c + ", " + limP);
+    emit("  " + sum + " = add i64 " + c + ", " + st);
+    emit("  " + nP + " = select i1 " + ovP + ", i64 " + hi + ", i64 " + sum);
+    std::string limN = T(), ovN = T(), nN = T(), nxt = T();
+    emit("  " + limN + " = sub i64 -9223372036854775808, " + st);
+    emit("  " + ovN + " = icmp slt i64 " + c + ", " + limN);
+    emit("  " + nN + " = select i1 " + ovN + ", i64 " + hi + ", i64 " + sum);
+    emit("  " + nxt + " = select i1 " + sp + ", i64 " + nP + ", i64 " + nN);
+    emit("  store i64 " + nxt + ", ptr " + cur);
+    emit("  br label %" + head);
+    emit("  " + end + ":");
+    loopBreak_.pop_back();
+    loopCont_.pop_back();
+    loopDeferDepth_.pop_back();
+  }
+
+  void emitForRange(const ForStmt& s) {
+    const auto& r = *static_cast<const RangeExpr*>(s.iterable.get());
+    std::string lo = callRt("a_range_bound", {eval(r.start.get()), "0"});
+    std::string hi = callRt("a_range_bound", {eval(r.end.get()), "0"});
+    std::string st = r.step
+                         ? callRt("a_range_bound", {eval(r.step.get()), "1"})
+                         : "1";
+    emitCountedLoop(s, lo, hi, st);
+  }
+
+  // True when `range` still resolves to the builtin (not user-shadowed)
+  // and the call is positional with 1..3 args — safe for the counted loop.
+  bool rangeCallBounds(const CallExpr& c, std::string& lo, std::string& hi,
+                       std::string& st) {
+    if (lookup("range")) return false;
+    if (c.args.empty() || c.args.size() > 3) return false;
+    for (const CallArg& a : c.args)
+      if (!a.name.empty()) return false;
+    const std::size_t na = c.args.size();
+    // Evaluation order matches bi_range: lo, hi, step (left to right).
+    lo = na >= 2 ? callRt("a_range_bound", {eval(c.args[0].value.get()), "0"})
+                 : "0";
+    hi = callRt("a_range_bound",
+                {eval(c.args[na >= 2 ? 1 : 0].value.get()), "0"});
+    st = na == 3 ? callRt("a_range_bound", {eval(c.args[2].value.get()), "1"})
+                 : "1";
+    return true;
+  }
+
   void emitFor(const ForStmt& s) {
+    if (parforEligible(s)) { emitForParfor(s); return; }
+    if (s.iterable && s.iterable->kind == ExprKind::Range) {
+      emitForRange(s);
+      return;
+    }
+    if (s.iterable && s.iterable->kind == ExprKind::Call) {
+      const auto& c = *static_cast<const CallExpr*>(s.iterable.get());
+      if (c.callee->kind == ExprKind::Ident &&
+          static_cast<const IdentExpr*>(c.callee.get())->name == "range") {
+        std::string lo, hi, st;
+        if (rangeCallBounds(c, lo, hi, st)) {
+          emitCountedLoop(s, lo, hi, st);
+          return;
+        }
+      }
+    }
     // it = a_iter_new(iterable); loop { next(it,&item) -> bind var; body }
     std::string it = callRt("a_iter_new", {eval(s.iterable.get())});
     std::string itSlot = alloca("i64");
@@ -5733,11 +6306,79 @@ oth:
     return r;
   }
 
+  // Emits the synthetic per-iteration body function for auto-parfor.
+  // Signature matches the uniform ABI: argv[0] = closure env, argv[1] =
+  // the loop variable; returns kNone (effects are disjoint writes).
+  void emitParforFn(const PendingParfor& pf) {
+    const ForStmt& x = *pf.stmt;
+    allocaCounter_ = 0;
+    pendingAllocas_.clear();
+    fn_ = std::ostringstream();
+    tmpCounter_ = 0;
+    resetGlobalScope(pf.moduleId);
+    pushScope();
+    bindModuleImports(pf.moduleId);
+    int savedModule = curModuleId_;
+    curModuleId_ = pf.moduleId;
+    // env = argv[0]
+    std::string envv = T();
+    emit("  " + envv + " = getelementptr i64, ptr %argv, i64 0");
+    std::string env = T();
+    emit("  " + env + " = load i64, ptr " + envv);
+    // Captures bound by env index (same order as env_set in emitForParfor).
+    for (std::size_t i = 0; i < pf.capNames.size(); ++i) {
+      LlBinding* cb = lookup(pf.capNames[i]);
+      // The capture may shadow a global of the same name; bind it as a
+      // fresh local regardless so body reads see the captured value.
+      std::string slot = alloca("i64");
+      std::string cv = callRt("a_env_get", {env, std::to_string(i)});
+      emit("  store i64 " + cv + ", ptr " + slot);
+      LlBinding b;
+      b.kind = BKind::Local;
+      b.slot = slot;
+      bind(pf.capNames[i], b);
+      (void)cb;
+    }
+    // Loop variable = argv[1].
+    {
+      std::string gv = T();
+      emit("  " + gv + " = getelementptr i64, ptr %argv, i64 1");
+      std::string iv = T();
+      emit("  " + iv + " = load i64, ptr " + gv);
+      std::string slot = alloca("i64");
+      emit("  store i64 " + iv + ", ptr " + slot);
+      LlBinding b;
+      b.kind = BKind::Param;
+      b.slot = slot;
+      bind(x.var, b);
+    }
+    deferStack_.emplace_back();
+    bool savedInFnBody = inFunctionBody_;
+    inFunctionBody_ = true;
+    emitStmts(x.body);
+    emitDefers();
+    inFunctionBody_ = savedInFnBody;
+    emit("  ret i64 " + kNone);
+    clearDeferFrames();
+    std::ostringstream head;
+    for (auto& kv : pendingAllocas_)
+      head << "  " << kv.first << " = alloca " << kv.second << "\n";
+    body_ << "define i64 @" << pf.cname << "(ptr %argv) {\n"
+          << head.str() << fn_.str() << "}\n\n";
+    scopes_.clear();
+    curModuleId_ = savedModule;
+  }
+
   void drainLambdas() {
     while (!failed_ && !lambdas_.empty()) {
       PendingLambda pl = lambdas_.back();
       lambdas_.pop_back();
       emitLambdaFn(pl);
+    }
+    while (!failed_ && !parfors_.empty()) {
+      PendingParfor pf = parfors_.back();
+      parfors_.pop_back();
+      emitParforFn(pf);
     }
   }
 
@@ -5750,6 +6391,8 @@ oth:
     resetGlobalScope(pl.moduleId);
     pushScope();
     bindModuleImports(pl.moduleId);
+    int savedModuleId = curModuleId_;
+    curModuleId_ = pl.moduleId;
     // env = argv[0] (closure env aval, not A_NONE).
     std::string envv = T();
     emit("  " + envv + " = load i64, ptr %argv");  // argv is ptr; load i64* ?
@@ -5813,6 +6456,7 @@ oth:
     body_ << "define i64 @" << pl.cname << "(ptr %argv) {\n"
           << head.str() << fn_.str() << "}\n\n";
     scopes_.clear();
+    curModuleId_ = savedModuleId;
   }
 
   std::string evalComprehension(const ComprehensionExpr& x) {
@@ -6458,7 +7102,49 @@ oth:
           << head.str() << fn_.str() << "}\n\n";
   }
 
+  /* Emits __a_main_body: module inits + the entry call, run inside a
+     fiber by a_fib_main so blocking builtins yield to the scheduler.
+     Self-contained emission state like emitModInit. */
+  void emitMainBody() {
+    allocaCounter_ = 0;
+    pendingAllocas_.clear();
+    fn_ = std::ostringstream();
+    tmpCounter_ = 0;
+    int savedModule = curModuleId_;
+    curModuleId_ = graph_.entry;
+    resetGlobalScope(graph_.entry);
+    pushScope();
+    deferStack_.emplace_back();
+    for (int mid : moduleOrder()) {
+      if (mid < 0 || mid >= (int)graph_.modules.size()) continue;
+      const Module& mod = graph_.at(mid);
+      if (!mod.program) continue;
+      if (mod.id != graph_.entry && mod.name == "prelude") continue;
+      callModInit(mid);
+    }
+    emitEntryCall();
+    /* Reap any fibers still alive at exit (detached spawns, done-but-
+       unjoined tasks): frees stacks/structs before process teardown. */
+    emit("  call void @a_fib_reap_all()");
+    if (!term_) {
+      emitDefers();
+      emit("  ret i64 " + kNone);
+    }
+    term_ = false;
+    clearDeferFrames();
+    curModuleId_ = savedModule;
+    scopes_.clear();
+    std::ostringstream head;
+    for (auto& kv : pendingAllocas_)
+      head << "  " << kv.first << " = alloca " << kv.second << "\n";
+    body_ << "define i64 @__a_main_body(ptr %argv) {\n"
+          << head.str() << fn_.str() << "}\n\n";
+  }
+
   void emitMain() {
+    /* Normal runs wrap modinits + entry in a fiber (auto-async); test
+       mode keeps the historical layout because a_test_main forks. */
+    if (!testMode_) emitMainBody();
     allocaCounter_ = 0;
     pendingAllocas_.clear();
     fn_ = std::ostringstream();
@@ -6492,18 +7178,23 @@ oth:
       std::string v = callRt("a_i64n", {std::to_string(kv.second.value)});
       emit("  store i64 " + v + ", ptr @" + kv.second.globalVar);
     }
-    // Module inits in graph order.
-    for (int mid : moduleOrder()) {
-      if (mid < 0 || mid >= (int)graph_.modules.size()) continue;
-      const Module& mod = graph_.at(mid);
-      if (!mod.program) continue;
-      if (mod.id != graph_.entry && mod.name == "prelude") continue;
-      callModInit(mid);
-    }
     if (testMode_) {
+      // Module inits in graph order.
+      for (int mid : moduleOrder()) {
+        if (mid < 0 || mid >= (int)graph_.modules.size()) continue;
+        const Module& mod = graph_.at(mid);
+        if (!mod.program) continue;
+        if (mod.id != graph_.entry && mod.name == "prelude") continue;
+        callModInit(mid);
+      }
       emitTestMain();
     } else {
-      emitEntryCall();
+      /* Run __a_main_body on a fiber: a_fib_main falls back to a direct
+         call when fibers are unavailable (A_ASYNC=0, Windows, TINYC). */
+      std::string fa = T();
+      emit("  " + fa + " = ptrtoint ptr @__a_main_body to i64");
+      emit("  " + T() + " = call i64 @a_fib_main(i64 " + fa +
+           ", i64 " + kNone + ", i64 0, ptr null)");
       emit("  ret i32 0");
     }
     clearDeferFrames();

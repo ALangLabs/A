@@ -11,6 +11,15 @@
  * (access, stat-on-error) return a sentinel instead. */
 #include "a_runtime_internal.h"
 
+#if A_FIBERS
+/* Blocking-op worker jobs for system()/popen() (defined at file end).
+   Job structs live on the calling fiber's stack while it is suspended. */
+typedef struct { const char *cmd; int rc; } OsSysJob;
+typedef struct { const char *cmd; char *buf; size_t len; int err; } OsPopenJob;
+static void *os_sys_job(void *p);
+static void *os_popen_job(void *p);
+#endif
+
 #if !defined(_WIN32)
 #include <pwd.h>
 #include <signal.h>
@@ -500,7 +509,18 @@ aval os_unsetenv(uint64_t n, aval *argv) {
 aval os_system(uint64_t n, aval *argv) {
     want_args("system", n, 1, 1);
     const char *cmd = str_of(argv[0], "command")->data;
-    int rc = system(cmd);
+    int rc;
+#if A_FIBERS
+    if (a_fib_on()) {
+        /* system() can block for minutes: run it on the blocking pool so
+           the scheduler keeps other fibers alive. */
+        OsSysJob j;
+        j.cmd = cmd; j.rc = -1;
+        a_fib_blocking(os_sys_job, &j);
+        rc = j.rc;
+    } else
+#endif
+    rc = system(cmd);
     /* Return the process exit code, not the raw wait(2) status word
      * (so "exit 3" yields 3, matching Python's os.system contract on
      * POSIX via WEXITSTATUS). */
@@ -683,6 +703,17 @@ aval os_disk_usage(uint64_t n, aval *argv) {
 aval os_popen(uint64_t n, aval *argv) {
     want_args("popen", n, 1, 1);
     const char *cmd = str_of(argv[0], "command")->data;
+#if A_FIBERS
+    if (a_fib_on()) {
+        OsPopenJob j;
+        j.cmd = cmd; j.buf = NULL; j.len = 0; j.err = 0;
+        a_fib_blocking(os_popen_job, &j);
+        if (j.err || !j.buf) panicf("os.popen: cannot run '%s'", cmd);
+        aval out = a_str_new(j.buf, (uint64_t)j.len);
+        free(j.buf);
+        return out;
+    }
+#endif
     FILE *p = popen(cmd, "r");
     if (!p) panicf("os.popen: cannot run '%s'", cmd);
     size_t cap = 4096, len = 0;
@@ -729,3 +760,43 @@ aval os_exit(uint64_t n, aval *argv) {
     exit(code);
     return A_NONE;
 }
+
+#if A_FIBERS
+/* ------------------------------------------------------------------ */
+/* blocking-pool workers (raw libc alloc ONLY — never xmalloc/a_gc_*)  */
+/* ------------------------------------------------------------------ */
+#undef free   /* libc free: worker allocations are raw malloc, not GC blocks */
+
+static void *os_sys_job(void *p) {
+    OsSysJob *j = (OsSysJob *)p;
+    j->rc = system(j->cmd);
+    return NULL;
+}
+
+static void *os_popen_job(void *p) {
+    OsPopenJob *j = (OsPopenJob *)p;
+    FILE *f = popen(j->cmd, "r");
+    if (!f) { j->err = 1; return NULL; }
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap);
+    if (!buf) { pclose(f); j->err = 1; return NULL; }
+    for (;;) {
+        if (len == cap) {
+            cap *= 2;
+            char *nb = (char *)realloc(buf, cap);
+            if (!nb) { free(buf); pclose(f); j->err = 1; return NULL; }
+            buf = nb;
+        }
+        size_t r = fread(buf + len, 1, cap - len, f);
+        len += r;
+        if (r == 0) break;
+    }
+    pclose(f);
+    j->buf = buf;
+    j->len = len;
+    j->err = 0;
+    return NULL;
+}
+
+#define free(p) a_gc_free(p)   /* restore the runtime macro */
+#endif

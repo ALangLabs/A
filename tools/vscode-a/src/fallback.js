@@ -8,6 +8,8 @@
 
 const vscode = require('vscode');
 const path = require('node:path');
+const fsp = require('node:fs/promises');
+const { execFile } = require('node:child_process');
 const { declarations, imports } = require('../language');
 const { STDLIB, KEYWORDS, BUILTINS, BUILTIN_SIGS } = require('../stdlib-data');
 const {
@@ -227,6 +229,50 @@ function fallbackHoverProvider() {
     };
 }
 
+// ------------------------------------------------------- formatting
+
+// `a fmt` reads a file from disk, so the unsaved buffer is staged to a
+// hidden .astra sibling, formatted, and the stdout becomes a full-document
+// edit. Returns null on any failure (syntax errors, missing compiler) --
+// formatting is best-effort and must never block saving.
+async function formatText(config, document) {
+    const dir = path.dirname(document.uri.fsPath) || config.cwd;
+    const tmp = path.join(dir, `.a-fmt-${process.pid}-${Date.now().toString(36)}.astra`);
+    const args = ['fmt'];
+    if (config.stdlib) args.push('--stdlib', config.stdlib);
+    for (const d of config.modulePaths) args.push('-I', d);
+    args.push(tmp);
+    try {
+        await fsp.writeFile(tmp, document.getText(), 'utf8');
+        const stdout = await new Promise((resolve, reject) => {
+            execFile(config.compiler, args, {
+                cwd: config.cwd, timeout: config.timeout, maxBuffer: 32 * 1024 * 1024,
+                encoding: 'utf8', windowsHide: true
+            }, (error, out, stderr) => {
+                if (error) reject(Object.assign(error, { stderr })); else resolve(out);
+            });
+        });
+        if (typeof stdout !== 'string' || !stdout.length) return null;
+        let text = stdout;
+        if (document.eol === vscode.EndOfLine.CRLF) text = text.replace(/\r?\n/g, '\r\n');
+        const full = new vscode.Range(document.positionAt(0), document.positionAt(document.getText().length));
+        return [new vscode.TextEdit(full, text)];
+    } catch {
+        return null;
+    } finally {
+        try { await fsp.unlink(tmp); } catch {}
+    }
+}
+
+function fallbackFormattingProvider() {
+    return {
+        provideDocumentFormattingEdits(document) {
+            if (!vscode.workspace.isTrusted || document.uri.scheme !== 'file') return null;
+            return formatText(settings(vscode, document.uri), document);
+        }
+    };
+}
+
 // ------------------------------------------------------- lifecycle wiring
 
 // env: { output, queue, checkDiagnostics, recheck, updateCheckStatus,
@@ -319,6 +365,7 @@ function createFallbackController(env) {
             }),
             vscode.languages.registerCompletionItemProvider(A_SELECTOR, fallbackCompletionProvider(), '.', '"', '(', ','),
             vscode.languages.registerHoverProvider(A_SELECTOR, fallbackHoverProvider()),
+            vscode.languages.registerDocumentFormattingEditProvider(A_SELECTOR, fallbackFormattingProvider()),
             vscode.workspace.onDidOpenTextDocument(doc => { if (isA(doc)) queue.schedule(settings(vscode, doc.uri), 0); }),
             vscode.workspace.onDidSaveTextDocument(doc => { if (isA(doc)) { declCache.clear(); queue.schedule(settings(vscode, doc.uri), 0); } }),
             vscode.workspace.onDidChangeTextDocument(event => { if (isA(event.document) && event.contentChanges.length) { declCache.clear(); queue.stale(cwdOf(event.document)); } }),

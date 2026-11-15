@@ -265,8 +265,15 @@ endif()
 foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
     get_filename_component(rt_c_name "${rt_c}" NAME)
     set(rt_obj "${ASTRA_BUILD}/obj/cc_rt_${rt_c_name}.o")
+    # math_ew.c ports A-side float formulas literally (mul-then-add, not
+    # fma); disable FP contraction so -O3 cannot fuse them into fma and
+    # change last-ulp results vs the A fallback paths.
+    set(rt_extra_flags "")
+    if(rt_c_name STREQUAL "math_ew.c" AND NOT MSVC)
+        list(APPEND rt_extra_flags -ffp-contract=off)
+    endif()
     add_custom_command(OUTPUT "${rt_obj}"
-        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS}
+        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
                 -c "${rt_c}" -o "${rt_obj}"
         DEPENDS "${rt_c}"
         COMMENT "system runtime ${rt_c_name}"
