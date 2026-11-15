@@ -859,49 +859,91 @@ ExprPtr Parser::parseCallOrIndexPostfix(ExprPtr base) {
   Span start = cur().span;
   expect(Tok::LBracket, "'['");
 
-  auto parseSliceTail = [&](std::unique_ptr<SliceExpr> slice) -> ExprPtr {
-    if (!check(Tok::RBracket)) {
-      if (check(Tok::DotDot)) {
-        fail(cur().span, "Expected a slice end before '..'.",
-             "Write start..end..step, e.g. items[0..10..2].");
-      }
-      slice->end = parseExpression(13);
-      if (match(Tok::DotDot)) {
-        if (check(Tok::RBracket)) {
-          fail(cur().span, "Expected a slice step after '..'.");
-        }
-        slice->step = parseExpression(13);
-        if (check(Tok::DotDot)) {
-          fail(cur().span, "A slice takes at most a start, end, and step.");
-        }
-      }
-    }
-    expect(Tok::RBracket, "']' after the slice");
-    slice->bracketSpan = Span::join(start, previousSpan());
-    slice->span = Span::join(slice->object->span, previousSpan());
-    return slice;
+  // Index components are separated by ','; a component is either a plain
+  // expression or a slice spec `start..end..step` / `start:end:step` where
+  // either separator ('..' or ':') may be used and any part may be omitted.
+  // `x[i]` keeps the historic IndexExpr shape; `x[i, j]` lowers to an
+  // IndexExpr whose index is a TupleExpr (slice parts become SliceSpecExpr).
+  auto isIndexSep = [](Tok k) { return k == Tok::DotDot || k == Tok::Colon; };
+  auto atComponentEnd = [&]() {
+    return check(Tok::Comma) || check(Tok::RBracket) || isIndexSep(cur().kind);
   };
 
-  if (match(Tok::DotDot)) {
-    auto slice = std::make_unique<SliceExpr>();
-    slice->object = std::move(base);
-    return parseSliceTail(std::move(slice));
+  std::vector<ExprPtr> comps;
+  bool sawComma = false;
+  while (true) {
+    Span compStart = cur().span;
+    ExprPtr first;
+    ExprPtr sStart, sEnd, sStep;
+    bool isSlice = false;
+    if (isIndexSep(cur().kind)) {
+      isSlice = true;
+      advance();
+    } else {
+      first = parseExpression(13);
+      if (isIndexSep(cur().kind)) {
+        isSlice = true;
+        sStart = std::move(first);
+        advance();
+      }
+    }
+    if (isSlice) {
+      if (!atComponentEnd()) sEnd = parseExpression(13);
+      if (isIndexSep(cur().kind)) {
+        advance();
+        if (!atComponentEnd()) sStep = parseExpression(13);
+        if (isIndexSep(cur().kind)) {
+          fail(cur().span, "An index slice takes at most a start, end, and step.",
+               "Write start..end..step, e.g. items[0..10..2].");
+        }
+      }
+      auto spec = std::make_unique<SliceSpecExpr>();
+      spec->span = Span::join(compStart, previousSpan());
+      spec->start = std::move(sStart);
+      spec->end = std::move(sEnd);
+      spec->step = std::move(sStep);
+      comps.push_back(std::move(spec));
+    } else {
+      comps.push_back(std::move(first));
+    }
+    if (!match(Tok::Comma)) break;
+    sawComma = true;
+    if (check(Tok::RBracket)) break;  // trailing comma: x[i,]
   }
-
-  auto first = parseExpression(13);
-  if (match(Tok::DotDot)) {
-    auto slice = std::make_unique<SliceExpr>();
-    slice->object = std::move(base);
-    slice->start = std::move(first);
-    return parseSliceTail(std::move(slice));
-  }
-
   expect(Tok::RBracket, "']' after the index");
+  Span endSpan = previousSpan();
+
+  if (comps.size() == 1 && !sawComma) {
+    ExprPtr only = std::move(comps[0]);
+    if (only->kind == ExprKind::SliceSpec) {
+      // Single slice component keeps the historic SliceExpr shape so
+      // `x[1..5]` (and now `x[1:5]`) behaves like other sliceable values.
+      SliceSpecExpr* sp = static_cast<SliceSpecExpr*>(only.get());
+      auto slice = std::make_unique<SliceExpr>();
+      slice->object = std::move(base);
+      slice->start = std::move(sp->start);
+      slice->end = std::move(sp->end);
+      slice->step = std::move(sp->step);
+      slice->bracketSpan = Span::join(start, endSpan);
+      slice->span = Span::join(slice->object->span, endSpan);
+      return slice;
+    }
+    auto index = std::make_unique<IndexExpr>();
+    index->object = std::move(base);
+    index->index = std::move(only);
+    index->bracketSpan = Span::join(start, endSpan);
+    index->span = Span::join(index->object->span, endSpan);
+    return index;
+  }
+
+  auto tup = std::make_unique<TupleExpr>();
+  tup->span = Span::join(comps.front()->span, comps.back()->span);
+  tup->elements = std::move(comps);
   auto index = std::make_unique<IndexExpr>();
   index->object = std::move(base);
-  index->index = std::move(first);
-  index->bracketSpan = Span::join(start, previousSpan());
-  index->span = Span::join(index->object->span, previousSpan());
+  index->index = std::move(tup);
+  index->bracketSpan = Span::join(start, endSpan);
+  index->span = Span::join(index->object->span, endSpan);
   return index;
 }
 

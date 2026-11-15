@@ -73,6 +73,294 @@ void pybuf_write(APyBuf *b, int64_t i, aval v) {
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* NDArray (std.math) multi-dimensional indexing                        */
+/*                                                                      */
+/* NDArray is a class instance (T_STRUCT) with `data: [f64]` and        */
+/* `shape: [i64]` fields. Bracket subscripts lower to this code:        */
+/*   x[i]          -> a_getitem(obj, i)          (single int index)      */
+/*   x[i, j, ...]  -> a_getitem(obj, (i, j, ...)) (tuple index)          */
+/*   x[a..b, i]    -> tuple element is a 3-list [lo, hi, step] with      */
+/*                    A_NONE for open bounds (slice spec)                */
+/*   x[a..b]       -> a_slice(obj, lo, hi, step)  (axis-0 slice)         */
+/* An all-integer full-rank spec returns the f64 element; anything else */
+/* returns a new NDArray (a copy — slices do not alias the source).     */
+/* ------------------------------------------------------------------ */
+
+static int64_t slice_step(aval v);
+
+typedef struct {
+    int is_slice;
+    int64_t idx;          /* integer component (raw, may be negative) */
+    aval lo, hi, st;      /* slice component bounds (A_NONE = open)   */
+} NdComp;
+
+static aval nd_field(aval obj, const char *name, uint64_t len) {
+    aval k = a_str_new(name, len);
+    return a_dict_get(obj, k, A_NONE);
+}
+
+static int nd_is_ndarray(aval obj) {
+    AObj *o = obj_of(obj);
+    if (!o || o->type != T_STRUCT) return 0;
+    aval nm = ((AStruct *)o)->name;
+    if (kind_of(nm) != K_STR) return 0;
+    uint64_t nl = 0;
+    const char *np = str_data(nm, &nl);
+    if (!np || nl != 7 || memcmp(np, "NDArray", 7) != 0) return 0;
+    aval data = nd_field(obj, "data", 4);
+    aval shape = nd_field(obj, "shape", 5);
+    AObj *d = obj_of(data);
+    AObj *s = obj_of(shape);
+    return d && d->type == T_LIST && s && s->type == T_LIST;
+}
+
+/* Parse an index spec into per-axis components. `spec` is either a
+   list/tuple of components or a single scalar index. Returns a malloc'd
+   array; *out_n receives the component count. */
+static NdComp *nd_parse_spec(aval spec, int64_t *out_n) {
+    int64_t n;
+    int single = 0;
+    int k = kind_of(spec);
+    if (k == K_LIST || k == K_TUPLE) {
+        AArr *a = (AArr *)obj_of(spec);
+        n = (int64_t)a->h.len;
+    } else {
+        n = 1;
+        single = 1;
+    }
+    NdComp *comps = (NdComp *)xmalloc((size_t)(n ? n : 1) * sizeof(NdComp));
+    for (int64_t i = 0; i < n; ++i) {
+        aval e = single ? spec : arr_elem((AArr *)obj_of(spec), (uint64_t)i);
+        comps[i].is_slice = 0;
+        comps[i].idx = 0;
+        comps[i].lo = comps[i].hi = comps[i].st = A_NONE;
+        if (kind_of(e) == K_LIST) {
+            AArr *sp = (AArr *)obj_of(e);
+            if (sp->h.len != 3)
+                panicf("unsupported NDArray index component (expected an "
+                       "integer or a start..end..step slice)");
+            comps[i].is_slice = 1;
+            comps[i].lo = arr_elem(sp, 0);
+            comps[i].hi = arr_elem(sp, 1);
+            comps[i].st = arr_elem(sp, 2);
+        } else {
+            comps[i].idx = expect_int64(e, "NDArray index");
+        }
+    }
+    *out_n = n;
+    return comps;
+}
+
+static int64_t nd_shape_at(AArr *shape, int64_t a) {
+    return expect_int64(arr_elem(shape, (uint64_t)a), "NDArray shape");
+}
+
+/* Resolve one axis to either a fixed index or a (start, step, count)
+   range. `kind` is 0 for fixed, 1 for range. */
+static void nd_resolve_axis(int64_t dim, const NdComp *c, int has_comp,
+                            int *kind, int64_t *fixed, int64_t *start,
+                            int64_t *step, int64_t *count) {
+    if (has_comp && !c->is_slice) {
+        *kind = 0;
+        *fixed = normalize_index(c->idx, (uint64_t)dim);
+        return;
+    }
+    *kind = 1;
+    aval lo = A_NONE, hi = A_NONE, stv = A_NONE;
+    if (has_comp && c->is_slice) {
+        lo = c->lo;
+        hi = c->hi;
+        stv = c->st;
+    }
+    int64_t st = a_is_none(stv) ? 1 : slice_step(stv);
+    int64_t s, e;
+    if (st > 0) {
+        s = slice_bound(lo, dim, 0, dim, 0);
+        e = slice_bound(hi, dim, 0, dim, dim);
+        *count = e > s ? (e - s + st - 1) / st : 0;
+    } else {
+        s = slice_bound(lo, dim, -1, dim - 1, dim - 1);
+        e = slice_bound(hi, dim, -1, dim - 1, -1);
+        *count = s > e ? (s - e - 1) / (-st) + 1 : 0;
+    }
+    *start = s;
+    *step = st;
+}
+
+static aval nd_getitem(aval obj, aval spec) {
+    aval data = nd_field(obj, "data", 4);
+    aval shape = nd_field(obj, "shape", 5);
+    AArr *darr = (AArr *)obj_of(data);
+    AArr *shp = (AArr *)obj_of(shape);
+    int64_t ndim = (int64_t)shp->h.len;
+
+    int64_t ncomp = 0;
+    NdComp *comps = nd_parse_spec(spec, &ncomp);
+    if (ncomp > ndim)
+        panicf("too many indices for %lld-dimensional NDArray",
+               (long long)ndim);
+
+    int64_t *stride = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                         sizeof(int64_t));
+    int64_t *dims = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                       sizeof(int64_t));
+    for (int64_t a = ndim - 1, st = 1; a >= 0; --a) {
+        dims[a] = nd_shape_at(shp, a);
+        stride[a] = st;
+        st *= dims[a];
+    }
+
+    /* All-integer full-rank index -> scalar element. */
+    int scalar = (ncomp == ndim);
+    for (int64_t a = 0; a < ndim && scalar; ++a) {
+        if (a < ncomp && comps[a].is_slice) scalar = 0;
+    }
+    if (scalar) {
+        int64_t off = 0;
+        for (int64_t a = 0; a < ndim; ++a)
+            off += normalize_index(comps[a].idx, (uint64_t)dims[a]) * stride[a];
+        free(comps);
+        free(stride);
+        free(dims);
+        return arr_elem(darr, (uint64_t)off);
+    }
+
+    /* General case: build the result shape and copy elements.
+       Per input axis: kind 0 = fixed index (axis dropped), kind 1 = range
+       (axis kept with `count` positions). Axes past ncomp are kept whole. */
+    int *kind = (int *)xmalloc((size_t)(ndim ? ndim : 1) * sizeof(int));
+    int64_t *fixed = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                        sizeof(int64_t));
+    int64_t *rstart = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                         sizeof(int64_t));
+    int64_t *rstep = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                        sizeof(int64_t));
+    int64_t *rcount = (int64_t *)xmalloc((size_t)(ndim ? ndim : 1) *
+                                         sizeof(int64_t));
+    int64_t outndim = 0;
+    int64_t base = 0;
+    for (int64_t a = 0; a < ndim; ++a) {
+        nd_resolve_axis(dims[a], a < ncomp ? &comps[a] : NULL, a < ncomp,
+                        &kind[a], &fixed[a], &rstart[a], &rstep[a],
+                        &rcount[a]);
+        if (kind[a] == 0) {
+            base += fixed[a] * stride[a];
+        } else {
+            ++outndim;
+        }
+    }
+
+    /* Map output axes (C-order) back to input axes. */
+    int64_t *oaxis = (int64_t *)xmalloc((size_t)(outndim ? outndim : 1) *
+                                        sizeof(int64_t));
+    int64_t *odim = (int64_t *)xmalloc((size_t)(outndim ? outndim : 1) *
+                                       sizeof(int64_t));
+    {
+        int64_t j = 0;
+        for (int64_t a = 0; a < ndim; ++a) {
+            if (kind[a] == 1) {
+                oaxis[j] = a;
+                odim[j] = rcount[a];
+                ++j;
+            }
+        }
+    }
+
+    int64_t total = 1;
+    for (int64_t j = 0; j < outndim; ++j) total *= odim[j];
+
+    AVec outv = { NULL, 0, 0 };
+    int64_t *coord = (int64_t *)xmalloc((size_t)(outndim ? outndim : 1) *
+                                        sizeof(int64_t));
+    for (int64_t p = 0; p < total; ++p) {
+        int64_t rem = p;
+        for (int64_t j = outndim - 1; j >= 0; --j) {
+            coord[j] = odim[j] ? rem % odim[j] : 0;
+            if (odim[j]) rem /= odim[j];
+        }
+        int64_t off = base;
+        for (int64_t j = 0; j < outndim; ++j) {
+            int64_t a = oaxis[j];
+            off += (rstart[a] + coord[j] * rstep[a]) * stride[a];
+        }
+        avec_push(&outv, arr_elem(darr, (uint64_t)off));
+    }
+
+    /* Result shape: one entry per kept axis. */
+    AVec shpv = { NULL, 0, 0 };
+    for (int64_t j = 0; j < outndim; ++j)
+        avec_push(&shpv, mkint_full(odim[j]));
+
+    aval outData = list_from_vec(outv.p, (uint64_t)outv.len, 0);
+    aval outShape = list_from_vec(shpv.p, (uint64_t)shpv.len, 0);
+    free(outv.p);
+    free(shpv.p);
+    free(coord);
+    free(oaxis);
+    free(odim);
+    free(rcount);
+    free(rstep);
+    free(rstart);
+    free(fixed);
+    free(kind);
+    free(comps);
+    free(stride);
+    free(dims);
+
+    AStruct *src = (AStruct *)obj_of(obj);
+    aval nobj = a_struct_new(src->name, src->methods, src->methodFns);
+    a_dict_set(nobj, a_str_new("data", 4), outData);
+    a_dict_set(nobj, a_str_new("shape", 5), outShape);
+    a_promote(nobj);
+    return nobj;
+}
+
+static aval nd_setitem(aval obj, aval spec, aval val) {
+    aval data = nd_field(obj, "data", 4);
+    aval shape = nd_field(obj, "shape", 5);
+    AArr *darr = (AArr *)obj_of(data);
+    AArr *shp = (AArr *)obj_of(shape);
+    int64_t ndim = (int64_t)shp->h.len;
+
+    int64_t ncomp = 0;
+    NdComp *comps = nd_parse_spec(spec, &ncomp);
+    if (ncomp != ndim)
+        panicf("NDArray assignment needs one integer index per axis "
+               "(%lld given, %lld dimensions)",
+               (long long)ncomp, (long long)ndim);
+    for (int64_t a = 0; a < ndim; ++a) {
+        if (comps[a].is_slice)
+            panicf("NDArray slice assignment is not supported");
+    }
+    int64_t st = 1;
+    int64_t off = 0;
+    for (int64_t a = ndim - 1; a >= 0; --a) {
+        int64_t dim = nd_shape_at(shp, a);
+        int64_t i = normalize_index(comps[a].idx, (uint64_t)dim);
+        off += i * st;
+        st *= dim;
+    }
+    /* Store a canonical f64 element, mirroring list assignment barriers. */
+    aval dv = mkdouble(num_to_double(val));
+    if (arr_packed(darr)) {
+        if (is_int_val(dv)) {
+            darr->iitems[off] = int_val_full(dv);
+        } else {
+            darr->flags |= ARR_F_NOMIX;
+            arr_ensure_aval(darr);
+            a_region_store(darr, dv);
+            darr->items[off] = dv;
+        }
+    } else {
+        if ((darr->flags & ARR_F_F64) && !a_is_double(dv)) arr_f64_unmark(darr);
+        a_region_store(darr, dv);
+        darr->items[off] = dv;
+    }
+    free(comps);
+    return val;
+}
+
 aval a_getitem(aval obj, aval idx) {
     AObj *oo = obj_of(obj);
     if (oo && oo->type == T_PYOBJ) return a_py_getitem(obj, idx);
@@ -81,6 +369,8 @@ aval a_getitem(aval obj, aval idx) {
         int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)b->count);
         return pybuf_read(b, i);
     }
+    if (oo && oo->type == T_STRUCT && nd_is_ndarray(obj))
+        return nd_getitem(obj, idx);
     switch (kind_of(obj)) {
         case K_STR: {
             AStr *s = astr_flat(obj);
@@ -134,6 +424,8 @@ aval a_getitem(aval obj, aval idx) {
 aval a_setitem(aval obj, aval idx, aval val) {
     AObj *so = obj_of(obj);
     if (so && so->type == T_PYOBJ) return a_py_setitem(obj, idx, val);
+    if (so && so->type == T_STRUCT && nd_is_ndarray(obj))
+        return nd_setitem(obj, idx, val);
     if (so && so->type == T_PYBUF) {
         APyBuf *b = (APyBuf *)so;
         int64_t i = normalize_index(expect_int64(idx, "index"), (uint64_t)b->count);
@@ -316,6 +608,15 @@ int64_t slice_bound(aval v, int64_t n, int64_t lower, int64_t upper,
 }
 
 aval a_slice(aval obj, aval lo, aval hi, aval step) {
+    AObj *so = obj_of(obj);
+    if (so && so->type == T_STRUCT && nd_is_ndarray(obj)) {
+        /* x[a..b] on an NDArray slices axis 0; route through the NDArray
+           indexer with a single slice spec [lo, hi, step]. */
+        aval inner[3] = { lo, hi, step };
+        aval specList = a_list_new(3, inner);
+        aval spec = a_list_new(1, &specList);
+        return nd_getitem(obj, spec);
+    }
     int k = kind_of(obj);
     if (k != K_STR && k != K_LIST && k != K_TUPLE && k != K_VIEW && k != K_BYTES)
         panicf("object of type '%s' is not sliceable", type_name_cstr(obj));

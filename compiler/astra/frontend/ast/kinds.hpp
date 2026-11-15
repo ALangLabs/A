@@ -31,6 +31,10 @@ enum class ExprKind : std::uint8_t {
   Try,
   MapLit,
   SetLit,
+  // Slice component inside a multi-index `x[a..b, i]`: start/end/step may be
+  // null (open bound). Only produced by the parser inside IndexExpr brackets;
+  // never a standalone value.
+  SliceSpec,
 };
 
 enum class StmtKind : std::uint8_t {

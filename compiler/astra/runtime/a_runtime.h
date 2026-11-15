@@ -512,6 +512,7 @@ aval a_call(aval fn, uint64_t n, aval *argv);   /* dispatch A-fn or builtin */
 /* Call-frame tracking for panic tracebacks: codegen emits a_frame_push()
    in each function prologue and a_frame_pop() before every return. */
 void a_frame_push(const char *name, const char *file, int line);
+void a_pin_slot(void *p);
 void a_frame_pop(void);
 /* Deterministic-region escape hatch: codegen emits a_promote(retval)
    before frame pop on value-returning paths so the returned object (and

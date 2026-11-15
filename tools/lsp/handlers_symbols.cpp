@@ -352,6 +352,13 @@ void LanguageServer::outlineExprSymbols(const Compilation& compilation, const st
       sub(e.step.get());
       return;
     }
+    case a::ExprKind::SliceSpec: {
+      const auto& e = static_cast<const a::SliceSpecExpr&>(*expr);
+      sub(e.start.get());
+      sub(e.end.get());
+      sub(e.step.get());
+      return;
+    }
     case a::ExprKind::Field:
       sub(static_cast<const a::FieldExpr&>(*expr).object.get());
       return;

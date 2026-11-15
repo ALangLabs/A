@@ -1,0 +1,55 @@
+# std.re GPT-2 pretokenizer check — ports demo/gpt2/tok.astra's `_cls`
+# byte-class pre-tokenizer conceptually onto std:re.
+#
+# The demo hand-rolls the GPT-2 regex
+#   's|'t|'re|'ve|'m|'ll|'d| ?\w+| ?\d+| ?[^\s\w]+|\s+(?!\S)|\s+
+# (with \p{L}/\p{N} approximated by its byte classes). Here we run the real
+# pattern through std:re and verify it reproduces the demo's split rules:
+#   * contractions ('s 't 're 've 'm 'll 'd) are single tokens
+#   * words/digits/punct keep one optional leading space
+#   * a whitespace run followed by text gives up its last char
+#     (\s+(?!\S) matches the run minus one, then \s+ takes the last char)
+#   * a whitespace run at end-of-string is kept whole
+# Run: ./build/a test stdlib/std/re/_check_gpt2.astra
+import std:re
+
+# The GPT-2 BPE pre-tokenization pattern (ASCII \w approximation).
+fn gpt2_pat():
+    return "'s|'t|'re|'ve|'m|'ll|'d| ?\\w+| ?\\d+| ?[^\\s\\w]+|\\s+(?!\\S)|\\s+"
+
+# pretok(s) -> array of pre-tokens, mirroring demo/gpt2 encode()'s scan.
+fn pretok(s):
+    p = re.compile(gpt2_pat())
+    out = []
+    for m in p.finditer(s):
+        out.append(m.group(0) ?? "")
+    return out
+
+fn assert_eq(a, b):
+    assert(a == b)
+
+fn test_pretok_basic():
+    assert_eq(pretok("Hello world, this is GPT-2!"),
+        ["Hello", " world", ",", " this", " is", " GPT", "-", "2", "!"])
+
+fn test_pretok_contractions():
+    # the leading-' contraction alternatives fire before ' ?\w+', and the
+    # optional leading space of ' ?\w+' attaches to the following word
+    assert_eq(pretok("it's you'll we're"),
+        ["it", "'s", " you", "'ll", " we", "'re"])
+
+fn test_pretok_whitespace_rule():
+    # "a  b   ": the "  " run before 'b' yields " " (\s+(?!\S)); the
+    # leftover " b" is then claimed whole by ' ?\w+' (leading space
+    # included). The trailing "   " run is kept whole by \s+(?!\S) since
+    # no non-space follows — same as the demo's `j = j - 1` give-up rule.
+    assert_eq(pretok("a  b   "), ["a", " ", " b", "   "])
+    # single spaces stay attached to the following word via ' ?\w+'
+    assert_eq(pretok("a b"), ["a", " b"])
+    # newline/tab runs behave like spaces (' ?' is a literal space only,
+    # so the second "\n" is taken by \s+ and 'y' starts its own token)
+    assert_eq(pretok("x\n\ny"), ["x", "\n", "\n", "y"])
+
+fn test_pretok_mixed():
+    assert_eq(pretok("GPT-2's 42!"),
+        ["GPT", "-", "2", "'s", " 42", "!"])

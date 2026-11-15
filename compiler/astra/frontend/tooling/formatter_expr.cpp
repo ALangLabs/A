@@ -41,12 +41,27 @@ std::string Formatter::exprText(const Expr& expr, int parentPrecedence, int inde
         return callText(static_cast<const CallExpr&>(expr), parentPrecedence, indent);
       case ExprKind::Index: {
         const auto& index = static_cast<const IndexExpr&>(expr);
-        return postfixWrap(exprText(*index.object, 17, indent) + "[" +
-                               exprText(*index.index, 0, indent) + "]",
+        // A tuple index is a multi-index `x[i, j]`: print the components
+        // without parentheses so slice specs (`x[1..5, j]`) reparse as
+        // SliceSpecExpr rather than RangeExpr.
+        std::string idxText;
+        if (index.index->kind == ExprKind::Tuple) {
+          const auto& tup = static_cast<const TupleExpr&>(*index.index);
+          for (std::size_t i = 0; i < tup.elements.size(); ++i) {
+            if (i) idxText += ", ";
+            idxText += exprText(*tup.elements[i], 0, indent);
+          }
+        } else {
+          idxText = exprText(*index.index, 0, indent);
+        }
+        return postfixWrap(exprText(*index.object, 17, indent) + "[" + idxText +
+                               "]",
                            parentPrecedence, 17);
       }
       case ExprKind::Slice:
         return sliceText(static_cast<const SliceExpr&>(expr), parentPrecedence, indent);
+      case ExprKind::SliceSpec:
+        return sliceSpecText(static_cast<const SliceSpecExpr&>(expr), parentPrecedence, indent);
       case ExprKind::Field: {
         const auto& field = static_cast<const FieldExpr&>(expr);
         return postfixWrap(exprText(*field.object, 17, indent) + "." + field.field,
@@ -237,6 +252,22 @@ std::string Formatter::rangeText(const RangeExpr& range, int parent, int indent)
     text += "..";
     if (range.end) text += exprText(*range.end, 9, indent);
     if (range.step) text += ".." + exprText(*range.step, 9, indent);
+    return postfixWrap(text, parent, 8);
+  }
+
+std::string Formatter::sliceSpecText(const SliceSpecExpr& spec, int parent, int indent) {
+    std::string text;
+    if (spec.start) text += exprText(*spec.start, 9, indent);
+    if (spec.end) {
+      text += ".." + exprText(*spec.end, 9, indent);
+      if (spec.step) text += ".." + exprText(*spec.step, 9, indent);
+    } else if (spec.step) {
+      // Empty end with a step prints as `a::step` / `::step` so the result
+      // reparses as a slice spec (a bare `..step` would not).
+      text += "::" + exprText(*spec.step, 9, indent);
+    } else {
+      text += "..";
+    }
     return postfixWrap(text, parent, 8);
   }
 

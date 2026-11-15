@@ -165,6 +165,11 @@ static void stack_guard_check(void) {
     }
 }
 
+/* Opaque escape for GC-visible stack slots: taking the slot's address in
+   an external call keeps LLVM from promoting the alloca to a register, so
+   the conservative GC can always see the aval stored there. */
+void a_pin_slot(void *p) { (void)p; }
+
 void a_frame_push(const char *name, const char *file, int line) {
     stack_guard_check();
     if (g_nframes == g_capframes) {

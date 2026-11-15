@@ -94,6 +94,13 @@ void Analyzer::useExpr(const Expr& expr) {
         if (slice.step) useExpr(*slice.step);
         return;
       }
+      case ExprKind::SliceSpec: {
+        const auto& spec = static_cast<const SliceSpecExpr&>(expr);
+        if (spec.start) useExpr(*spec.start);
+        if (spec.end) useExpr(*spec.end);
+        if (spec.step) useExpr(*spec.step);
+        return;
+      }
       case ExprKind::Field: {
         const auto& field = static_cast<const FieldExpr&>(expr);
         useExpr(*field.object);

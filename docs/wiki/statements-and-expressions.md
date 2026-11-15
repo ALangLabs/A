@@ -57,8 +57,12 @@ import ... / from ... import ...
 - Calls: `f(a, b)`, keyword args `Point(x=1, y=2)`, methods `s.strip()`,
   safe field access `maybe?.name` (see below).
 - Indexing/slicing: `xs[i]` (negative indices allowed), `xs[1..4]`,
-  `xs[0..10..2]`, `xs[-4..]`, `s[1..4]` — works on arrays, strings, and
-  tuples by position and on maps by key; sets cannot be indexed (use `in`).
+  `xs[0..10..2]`, `xs[-4..]`, `s[1..4]`, `s[1:4]` — works on arrays, strings,
+  and tuples by position and on maps by key; sets cannot be indexed (use
+  `in`). `x[a, b, ...]` is a multi-index equivalent to `x[(a, b, ...)]`;
+  on `std:math` NDArrays each component is an integer axis index or a slice
+  spec (`x[i, j]` → f64, `x[:, k]`/`x[1..5, :]` → NDArray copy), and
+  `x[a..b]` slices axis 0.
 - Field access `p.x`, optional chaining `u?.address?.city` and method calls
   `p?.get()`: `?.` requires an optional receiver; on `None` the whole
   expression yields `None`, otherwise the field/method runs. Method calls

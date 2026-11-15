@@ -30,6 +30,7 @@ TypePtr Sema::inferExprImpl(Expr& expr) {
   if (auto* node = dynamic_cast<CallExpr*>(&expr)) return inferCall(*node);
   if (auto* node = dynamic_cast<IndexExpr*>(&expr)) return inferIndex(*node);
   if (auto* node = dynamic_cast<SliceExpr*>(&expr)) return inferSlice(*node);
+  if (auto* node = dynamic_cast<SliceSpecExpr*>(&expr)) return inferSliceSpec(*node);
   if (auto* node = dynamic_cast<FieldExpr*>(&expr)) return inferField(*node);
   if (auto* node = dynamic_cast<SafeNavExpr*>(&expr)) return inferSafeNav(*node);
   if (auto* node = dynamic_cast<ArrayLitExpr*>(&expr)) return inferArrayLiteral(*node);

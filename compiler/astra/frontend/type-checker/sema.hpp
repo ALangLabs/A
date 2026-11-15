@@ -274,6 +274,7 @@ class Sema {
   TypePtr inferCall(CallExpr& expr);
   TypePtr inferIndex(IndexExpr& expr);
   TypePtr inferSlice(SliceExpr& expr);
+  TypePtr inferSliceSpec(SliceSpecExpr& expr);
   TypePtr inferField(FieldExpr& expr);
   TypePtr inferSafeNav(SafeNavExpr& expr);
   TypePtr inferArrayLiteral(ArrayLitExpr& expr);

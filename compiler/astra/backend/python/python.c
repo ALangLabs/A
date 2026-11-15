@@ -101,6 +101,7 @@ struct PyRt {
     PyObj (*PyNumber_Float)(PyObj);
     char *(*PyBytes_AsString)(PyObj);
     PySsize (*PyBytes_Size)(PyObj);
+    PyObj (*PyBytes_FromStringAndSize)(const char *, PySsize);
     PyObj (*PySet_New)(PyObj);
     int (*PySet_Add)(PyObj, PyObj);
     int (*PyObject_CheckBuffer)(PyObj);
@@ -190,6 +191,8 @@ static int py_fill(void *h) {
     A_PY_SYM(PyNumber_Float, "PyNumber_Float");
     A_PY_SYM(PyBytes_AsString, "PyBytes_AsString");
     A_PY_SYM(PyBytes_Size, "PyBytes_Size");
+    A_PY_SYM(PyBytes_FromStringAndSize, "PyBytes_FromStringAndSize");
+    A_PY_SYM(PyBytes_FromStringAndSize, "PyBytes_FromStringAndSize");
     A_PY_SYM(PySet_New, "PySet_New");
     A_PY_SYM(PySet_Add, "PySet_Add");
     A_PY_SYM(PyObject_CheckBuffer, "PyObject_CheckBuffer");
@@ -575,9 +578,19 @@ static aval py_to_aval(PyObj o) {
     } else if (py_is(o, g_py.t_bytes)) {
         char *s = g_py.PyBytes_AsString(o);
         PySsize len = g_py.PyBytes_Size(o);
-        return a_str_new(s ? s : "", len < 0 ? 0 : (uint64_t)len);
+        return a_bytes_from(s ? s : "", len < 0 ? 0 : (uint64_t)len);
     } else if (py_is(o, g_py.t_list) || py_is(o, g_py.t_tuple)) {
         int isTuple = py_is(o, g_py.t_tuple);
+        /* namedtuples and structseqs (sys.version_info, os.stat_result,
+           time.struct_time, ...) carry named fields — keep them opaque so
+           attribute access survives instead of deep-converting to a plain
+           A tuple that loses the field names. */
+        if (isTuple &&
+            (g_py.PyObject_HasAttrString(o, "_fields") ||
+             g_py.PyObject_HasAttrString(o, "n_fields"))) {
+            g_py.PyErr_Clear();
+            return py_wrap_borrowed(o);
+        }
         PySsize n = isTuple ? g_py.PyTuple_Size(o) : g_py.PyList_Size(o);
         if (n < 0) { g_py.PyErr_Clear(); n = 0; }
         aval *items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
@@ -705,6 +718,11 @@ static PyObj aval_to_py(aval v) {
                     if (rc < 0) { g_py.Py_DecRef(item); g_py.Py_DecRef(c); return NULL; }
                 }
                 return c;
+            }
+            case T_BYTES: {
+                ABytes *b = a_bytes_obj(v);
+                if (!b) return NULL;
+                return g_py.PyBytes_FromStringAndSize(b->data, (PySsize)b->h.len);
             }
             case T_SET: {
                 AArr *a = (AArr *)o;
@@ -1746,6 +1764,7 @@ aval bi_py_is_pyobject(uint64_t n, aval *argv) {
     AObj *o = obj_of(argv[0]);
     return bool_aval(o && o->type == T_PYOBJ);
 }
+
 
 aval bi_py_str_builtin(uint64_t n, aval *argv) { want_args("py.str", n, 1, 1); return a_py_str(argv[0]); }
 aval bi_py_repr_builtin(uint64_t n, aval *argv) { want_args("py.repr", n, 1, 1); return a_py_repr(argv[0]); }

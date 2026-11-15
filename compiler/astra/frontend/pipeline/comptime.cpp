@@ -237,6 +237,15 @@ ExprPtr cloneExpr(const Expr& e) {
       out->bracketSpan = src.bracketSpan;
       return out;
     }
+    case ExprKind::SliceSpec: {
+      const auto& src = static_cast<const SliceSpecExpr&>(e);
+      auto out = std::make_unique<SliceSpecExpr>();
+      out->span = src.span;
+      if (src.start) out->start = cloneExpr(*src.start);
+      if (src.end) out->end = cloneExpr(*src.end);
+      if (src.step) out->step = cloneExpr(*src.step);
+      return out;
+    }
     case ExprKind::Field: {
       const auto& src = static_cast<const FieldExpr&>(e);
       auto out = std::make_unique<FieldExpr>();
@@ -1216,6 +1225,13 @@ void substExprPtr(ExprPtr& e, const SubstBindings& bindings, const ShadowSet& sh
       if (x.step) substExprPtr(x.step, bindings, shadow);
       return;
     }
+    case ExprKind::SliceSpec: {
+      auto& x = static_cast<SliceSpecExpr&>(*e);
+      if (x.start) substExprPtr(x.start, bindings, shadow);
+      if (x.end) substExprPtr(x.end, bindings, shadow);
+      if (x.step) substExprPtr(x.step, bindings, shadow);
+      return;
+    }
     case ExprKind::Field: {
       substExprPtr(static_cast<FieldExpr&>(*e).object, bindings, shadow);
       return;
@@ -1834,6 +1850,13 @@ void Pass::walkExpr(ExprPtr& e, int moduleId, ShadowSet& bound) {
     case ExprKind::Slice: {
       auto& x = static_cast<SliceExpr&>(*e);
       walkExpr(x.object, moduleId, bound);
+      if (x.start) walkExpr(x.start, moduleId, bound);
+      if (x.end) walkExpr(x.end, moduleId, bound);
+      if (x.step) walkExpr(x.step, moduleId, bound);
+      return;
+    }
+    case ExprKind::SliceSpec: {
+      auto& x = static_cast<SliceSpecExpr&>(*e);
       if (x.start) walkExpr(x.start, moduleId, bound);
       if (x.end) walkExpr(x.end, moduleId, bound);
       if (x.step) walkExpr(x.step, moduleId, bound);

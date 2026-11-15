@@ -1,11 +1,45 @@
 #include "type-checker/sema_internal.hpp"
 
 namespace a {
+namespace {
+// std.math.NDArray is a struct { data: [f64], shape: [i64] }; bracket
+// subscripts on it (x[i], x[i, j], x[1..5, :]) lower to runtime NDArray
+// indexing on the boxed value, so the static type cannot express the
+// scalar-vs-subarray result — it is `any`.
+bool isNdarrayStruct(const TypePtr& t) {
+  return t && t->kind == TypeKind::Struct &&
+         shortName(t->structName) == "NDArray";
+}
+
+// True when `e` contains a SliceSpecExpr (a `a..b`/`a:b` index component)
+// anywhere inside a tuple index.
+bool exprHasSliceSpec(const Expr& e) {
+  if (e.kind == ExprKind::SliceSpec) return true;
+  if (e.kind == ExprKind::Tuple) {
+    for (const ExprPtr& el : static_cast<const TupleExpr&>(e).elements)
+      if (exprHasSliceSpec(*el)) return true;
+  }
+  return false;
+}
+}  // namespace
+
 TypePtr Sema::inferIndex(IndexExpr& expr) {
   TypePtr objectType = inferExpr(*expr.object);
   TypePtr indexType = inferExpr(*expr.index);
 
   TypePtr object = resolveType(objectType);
+  // Slice components (x[a..b, i]) only have meaning for NDArray; reject them
+  // up front for concrete non-NDArray types. Dynamic receivers defer to the
+  // runtime, which reports the same kind of error.
+  if (!isNdarrayStruct(object) &&
+      object->kind != TypeKind::Var && object->kind != TypeKind::Union &&
+      object->kind != TypeKind::Any && object->kind != TypeKind::Error &&
+      exprHasSliceSpec(*expr.index)) {
+    sink_.error(expr.index->span,
+                "Slice components in an index are only supported for NDArray.",
+                "Index with integers only, or slice a single axis with x[a..b].");
+    return typeError();
+  }
   if (object->kind == TypeKind::Map && !object->params.empty()) {
     if (!unify(indexType, object->elem)) {
       reportMismatch(indexType, object->elem, expr.index->span, "in the map key");
@@ -44,6 +78,22 @@ TypePtr Sema::inferIndex(IndexExpr& expr) {
   if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
       object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
+  }
+  if (isNdarrayStruct(object)) {
+    // Components: a plain index must be an integer; a tuple index
+    // (x[i, j, ...]) takes one component per axis — integers or slice
+    // specs (SliceSpecExpr parts are checked by inferSliceSpec).
+    if (auto* tup = dynamic_cast<TupleExpr*>(expr.index.get())) {
+      for (const ExprPtr& el : tup->elements) {
+        if (el->kind == ExprKind::SliceSpec) continue;  // checked already
+        TypePtr et = el->inferredType ? resolveType(el->inferredType)
+                                     : typeError();
+        requireInteger(et, el->span, "An NDArray index component");
+      }
+    } else {
+      requireInteger(indexType, expr.index->span, "The NDArray index");
+    }
+    return typeAny();
   }
   if (object->kind == TypeKind::Set) {
     sink_.error(expr.object->span, "A set cannot be indexed.",
@@ -85,6 +135,9 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
     }
     auto t = std::make_shared<Type>(); t->kind = TypeKind::Var; t->allowUnresolved = true; return typeArray(t);
   }
+  // x[a..b] on an NDArray slices axis 0 and yields another NDArray (the
+  // runtime produces a copy).
+  if (isNdarrayStruct(object)) return object;
   if (object->kind == TypeKind::Var || object->kind == TypeKind::Union ||
       object->kind == TypeKind::Any) {
     /* dynamic: inferred at runtime */ auto t=std::make_shared<Type>(); t->kind=TypeKind::Var; t->allowUnresolved=true; return t;
@@ -92,6 +145,25 @@ TypePtr Sema::inferSlice(SliceExpr& expr) {
   sink_.error(expr.object->span,
               "Values of type '" + typeName(object) + "' cannot be sliced.");
   return typeError();
+}
+
+TypePtr Sema::inferSliceSpec(SliceSpecExpr& expr) {
+  // A slice component inside a multi-index (x[a..b, i]); its bounds must be
+  // integers. The node is only meaningful within an IndexExpr on NDArray —
+  // inferIndex validates the receiver.
+  if (expr.start) {
+    TypePtr t = inferExpr(*expr.start);
+    requireInteger(t, expr.start->span, "The slice start");
+  }
+  if (expr.end) {
+    TypePtr t = inferExpr(*expr.end);
+    requireInteger(t, expr.end->span, "The slice end");
+  }
+  if (expr.step) {
+    TypePtr t = inferExpr(*expr.step);
+    requireInteger(t, expr.step->span, "The slice step");
+  }
+  return typeAny();
 }
 
 TypePtr Sema::inferField(FieldExpr& expr) {

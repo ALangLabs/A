@@ -101,6 +101,7 @@ class Formatter {
   std::string tupleText(const TupleExpr& tuple, int parent, int indent);
   std::string rangeText(const RangeExpr& range, int parent, int indent);
   std::string sliceText(const SliceExpr& slice, int parent, int indent);
+  std::string sliceSpecText(const SliceSpecExpr& spec, int parent, int indent);
   std::string lambdaText(const LambdaExpr& lambda, int parent, int indent);
   std::string patternText(const Pattern& pattern, int indent);
   std::string matchText(const MatchExpr& match, int parent, int indent);

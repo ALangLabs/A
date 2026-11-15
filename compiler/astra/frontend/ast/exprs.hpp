@@ -149,6 +149,13 @@ struct SliceExpr : Expr {
   Span bracketSpan;
 };
 
+struct SliceSpecExpr : Expr {
+  SliceSpecExpr() : Expr(ExprKind::SliceSpec) {}
+  ExprPtr start;  // may be null (open bound)
+  ExprPtr end;    // may be null
+  ExprPtr step;   // may be null (defaults to 1)
+};
+
 struct MapLitExpr : Expr {
   MapLitExpr() : Expr(ExprKind::MapLit) {}
   std::vector<std::pair<ExprPtr, ExprPtr>> entries;  // key -> value

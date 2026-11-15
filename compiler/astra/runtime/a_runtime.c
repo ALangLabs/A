@@ -170,7 +170,7 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
     /* batched matmul / batched vec-mat einsum (order matches
        A_BI_LINALG_BMM / A_BI_LINALG_EINSUM2) */
     { "linalg_bmm", bi_linalg_bmm },
-    { "linalg_einsum2", bi_linalg_einsum2 }
+    { "linalg_einsum2", bi_linalg_einsum2 },
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

@@ -245,7 +245,7 @@ class LlvmEmitter {
   // register: the conservative GC only scans the stack, so any slot that
   // must stay GC-visible across calls/loops needs an opaque use.
   void pinSlot(const std::string& slot) {
-    emit("  call void asm sideeffect \"\", \"r\"(ptr " + slot + ")");
+    emit("  call void @a_pin_slot(ptr " + slot + ")");
   }
   // aval of a small-int literal: inline encoding when in range.
   std::string avalIntLit(std::int64_t v) {
@@ -939,6 +939,7 @@ declare i64 @a_print_opts(i64, ptr, i64, i64, i64, i32)
 declare i64 @a_join_len(i64, i64)
 declare i64 @a_match_fail(i64)
 declare void @a_frame_push(ptr, ptr, i32)
+declare void @a_pin_slot(ptr)
 declare void @a_frame_pop()
 declare void @a_runtime_init()
 declare i64 @a_fib_main(i64, i64, i64, ptr)
@@ -3059,6 +3060,11 @@ oth:
         return pfExprOk(x.object.get()) && pfExprOk(x.start.get()) &&
                pfExprOk(x.end.get()) && pfExprOk(x.step.get());
       }
+      case ExprKind::SliceSpec: {
+        const auto& x = *static_cast<const SliceSpecExpr*>(e);
+        return pfExprOk(x.start.get()) && pfExprOk(x.end.get()) &&
+               pfExprOk(x.step.get());
+      }
       case ExprKind::Field: {
         const auto& x = *static_cast<const FieldExpr*>(e);
         return pfExprOk(x.object.get());
@@ -3599,6 +3605,21 @@ oth:
         std::string hi = x.end ? eval(x.end.get()) : kNone;
         std::string st = x.step ? eval(x.step.get()) : kNone;
         return callRt("a_slice", {eval(x.object.get()), lo, hi, st});
+      }
+      case ExprKind::SliceSpec: {
+        // Multi-index slice component: materialize as a 3-element list
+        // [start, end, step] with A_NONE for open bounds. Inside an index
+        // tuple the runtime NDArray indexer reads this shape; anywhere else
+        // sema has already rejected the program.
+        const auto& x = static_cast<const SliceSpecExpr&>(*e);
+        std::string lo = x.start ? eval(x.start.get()) : kNone;
+        std::string hi = x.end ? eval(x.end.get()) : kNone;
+        std::string st = x.step ? eval(x.step.get()) : kNone;
+        std::string av = argvArray(3);
+        argvStore(av, 0, lo);
+        argvStore(av, 1, hi);
+        argvStore(av, 2, st);
+        return callRtA("a_list_new", "ip", {"3", av});
       }
       case ExprKind::Field: return evalField(*static_cast<const FieldExpr*>(e));
       case ExprKind::SafeNav: return evalSafeNav(*static_cast<const SafeNavExpr*>(e));
