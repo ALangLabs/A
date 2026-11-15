@@ -405,6 +405,28 @@ LogicalResult ensureLLVMFuncDecl(ModuleOp module, llvm::StringRef name,
   return success();
 }
 
+/// Ensure `v` can be used as an operand of an llvm op created at `op`:
+/// llvm dialect ops require operands defined in the same region. When `v` is
+/// defined in an outer region (e.g. a `llvm.mlir.constant` hoisted to module
+/// level by canonicalize) and its def is ConstantLike, the def is cloned just
+/// before `op`. Other outside-region defs are rejected.
+LogicalResult ensureOperandInRegion(Operation *op, Value &v) {
+  if (v.getParentRegion() == op->getParentRegion())
+    return success();
+  auto res = llvm::dyn_cast<mlir::OpResult>(v);
+  Operation *def = res ? res.getOwner() : nullptr;
+  if (!def || !def->hasTrait<mlir::OpTrait::ConstantLike>()) {
+    op->emitError("a-lower-to-llvm: operand of type `")
+        << v.getType() << "` is defined outside the region and is not a "
+           "constant; cannot lower";
+    return failure();
+  }
+  OpBuilder b(op);
+  Operation *cloned = b.clone(*def);
+  v = cloned->getResult(res.getResultNumber());
+  return success();
+}
+
 /// Coerce `cond` to i1 for llvm.cond_br: integers wider than i1 are compared
 /// against zero; non-integers are passed through (the llvm.cond_br verifier
 /// will reject truly invalid types).
@@ -567,8 +589,16 @@ LogicalResult emitRuntimeCallOp(Operation *op, llvm::StringRef callee,
                                 op->getLoc())))
     return failure();
 
+  // Call operands must be defined in the same region as the llvm.call;
+  // re-materialize hoisted constants inside the function.
+  SmallVector<Value> regionArgs(callArgs.begin(), callArgs.end());
+  for (Value &arg : regionArgs) {
+    if (failed(ensureOperandInRegion(op, arg)))
+      return failure();
+  }
+
   OpBuilder b(op);
-  auto call = b.create<CallOp>(op->getLoc(), resultTypes, callee, callArgs);
+  auto call = b.create<CallOp>(op->getLoc(), resultTypes, callee, regionArgs);
   const unsigned n = std::min<unsigned>(op->getNumResults(), call.getNumResults());
   for (unsigned i = 0; i < n; ++i)
     op->getResult(i).replaceAllUsesWith(call->getResult(i));
@@ -580,6 +610,8 @@ LogicalResult emitRuntimeCallOp(Operation *op, llvm::StringRef callee,
 /// slot: i64 passes through, pointers are ptrtoint'd, anything else is an
 /// error (phase-1 boxed values are always i64).
 LogicalResult coerceToI64Aval(Operation *op, Value v, Value &out) {
+  if (failed(ensureOperandInRegion(op, v)))
+    return failure();
   Type t = v.getType();
   if (auto it = llvm::dyn_cast<IntegerType>(t)) {
     if (it.getWidth() == 64) {
@@ -812,8 +844,13 @@ LogicalResult lowerGep(Operation *op) {
                               "gep result")))
     return failure();
   OpBuilder b(op);
-  Value gep = emitGepI64(b, op->getLoc(), op->getOperand(0),
-                         op->getOperand(1));
+  Location loc = op->getLoc();
+  Value ptrOp = op->getOperand(0);
+  Value idxOp = op->getOperand(1);
+  if (failed(ensureOperandInRegion(op, ptrOp)) ||
+      failed(ensureOperandInRegion(op, idxOp)))
+    return failure();
+  Value gep = emitGepI64(b, loc, ptrOp, idxOp);
   if (gep.getType() != resTy) {
     // resTy should be !llvm.ptr; if the result type lowered differently,
     // keep the gep result anyway only when types match.
@@ -1093,12 +1130,16 @@ LogicalResult lowerAlloca(Operation *op) {
   Value size;
   if (!op->getOperands().empty()) {
     size = op->getOperand(0);
+    // llvm.alloca requires operands defined in the same region.
+    if (failed(ensureOperandInRegion(op, size)))
+      return failure();
   } else {
     size = b.create<ConstantOp>(loc, IntegerType::get(ctx, 64),
                                 b.getI64IntegerAttr(1));
   }
   unsigned align = getUnsignedAttrOrZero(op, "alignment");
-  b.create<AllocaOp>(loc, resTy, elemTy, size, align);
+  Value slot = b.create<AllocaOp>(loc, resTy, elemTy, size, align);
+  op->getResult(0).replaceAllUsesWith(slot);
   op->erase();
   return success();
 }
@@ -1113,8 +1154,12 @@ LogicalResult lowerLoad(Operation *op) {
                               "load result")))
     return failure();
   OpBuilder b(op);
-  b.create<LoadOp>(op->getLoc(), resTy, op->getOperand(0),
-                       getUnsignedAttrOrZero(op, "alignment"));
+  Value ptrOp = op->getOperand(0);
+  if (failed(ensureOperandInRegion(op, ptrOp)))
+    return failure();
+  Value loaded = b.create<LoadOp>(op->getLoc(), resTy, ptrOp,
+                                  getUnsignedAttrOrZero(op, "alignment"));
+  op->getResult(0).replaceAllUsesWith(loaded);
   op->erase();
   return success();
 }
@@ -1136,6 +1181,9 @@ LogicalResult lowerStore(Operation *op) {
     value = v1;
     addr = v0;
   }
+  if (failed(ensureOperandInRegion(op, value)) ||
+      failed(ensureOperandInRegion(op, addr)))
+    return failure();
   OpBuilder b(op);
   b.create<StoreOp>(op->getLoc(), value, addr,
                         getUnsignedAttrOrZero(op, "alignment"));
@@ -1154,6 +1202,8 @@ LogicalResult lowerReturn(Operation *op) {
     b.create<ReturnOp>(loc, ValueRange{none});
   } else if (op->getNumOperands() == 1) {
     Value v = op->getOperand(0);
+    if (failed(ensureOperandInRegion(op, v)))
+      return failure();
     auto it = llvm::dyn_cast<IntegerType>(v.getType());
     if (!it || it.getWidth() != 64) {
       op->emitError("a-lower-to-llvm: a.return operand has type `")

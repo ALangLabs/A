@@ -237,6 +237,16 @@ std::string absoluteModulePath(const std::string& path) {
   return ec ? path : abs.string();
 }
 
+// Moves every op out of `src`'s body into `dst`'s body (append order).
+void moveModuleOpsInto(mlir::ModuleOp dst, mlir::ModuleOp src) {
+  mlir::Block* dstBody = &dst.getBodyRegion().front();
+  mlir::Block* srcBody = &src.getBodyRegion().front();
+  while (!srcBody->empty()) {
+    mlir::Operation* op = &srcBody->front();
+    op->moveBefore(dstBody, dstBody->end());
+  }
+}
+
 // `<stem>.ambc` for unique stems, `<stem>-m<id>.ambc` for stems shared by
 // more than one module (see package.hpp "Per-module package layout").
 std::string moduleAmbcFileName(const Module& module, int stemCollisions) {
@@ -348,6 +358,33 @@ int precompilePackageModules(const std::string& packageDirOrFile,
       return kCErr;
     }
 
+    // Entry module only: merge the entry body's module-level support ops
+    // (literal globals, lambda/parfor helpers, auto-vivified globals)
+    // into its .ambc so the entry.mlir statements' symbol references
+    // resolve when the consumer links the per-module units.
+    // emitEntrySupportMLIR is deterministic with emitEntryBodyMLIR —
+    // both runs mint identical "__a_e" symbol names.
+    if (id == graph.entry) {
+      std::string supportText, supportError;
+      if (!emitEntrySupportMLIR(graph, *compiled.sema, supportText,
+                                supportError)) {
+        err << "error: entry-body support emission failed for '" << m.path
+            << "': " << supportError << "\n";
+        return kCErr;
+      }
+      if (!supportText.empty()) {
+        std::string supParseError;
+        mlir::OwningOpRef<mlir::ModuleOp> supportModule =
+            parseMlirText(ctx, supportText, supParseError);
+        if (!supportModule) {
+          err << "error: failed to parse entry-body support MLIR for '"
+              << m.path << "': " << supParseError << "\n";
+          return kCErr;
+        }
+        moveModuleOpsInto(*module, *supportModule);
+      }
+    }
+
     const std::string fileName =
         moduleAmbcFileName(m, stemCounts[stemOf(m.path)]);
     const fs::path outFile = outRoot / fileName;
@@ -360,6 +397,29 @@ int precompilePackageModules(const std::string& packageDirOrFile,
 
     ambcFiles[static_cast<std::size_t>(id)] = fileName;
     sourcePaths[static_cast<std::size_t>(id)] = absoluteModulePath(m.path);
+  }
+
+  // entry.mlir: the entry fn's body statements (no func wrapper), which
+  // the .ambc consumer splices verbatim into its synthesized
+  // __a_main_body after the __a_m<id>_init calls. Empty when the graph
+  // has no entry fn.
+  {
+    std::string entryBody, entryBodyError;
+    if (!emitEntryBodyMLIR(graph, *compiled.sema, entryBody, entryBodyError)) {
+      err << "error: entry-body emission failed: " << entryBodyError << "\n";
+      return kCErr;
+    }
+    std::ofstream entryFile(outRoot / "entry.mlir",
+                            std::ios::binary | std::ios::trunc);
+    if (!entryFile) {
+      err << "error: cannot write '" << (outRoot / "entry.mlir") << "'\n";
+      return kCErr;
+    }
+    entryFile << entryBody;
+    if (!entryFile) {
+      err << "error: failed writing '" << (outRoot / "entry.mlir") << "'\n";
+      return kCErr;
+    }
   }
 
   // ambc.index: `<ambc_file><TAB><absolute_source_path>` per line, the exact

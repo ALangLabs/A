@@ -3,30 +3,28 @@
 // exposed under the emitMLIRDialect entry point for the `a`-dialect pipeline.
 //
 // DIALECT STATUS (verified against `a mlir-opt`, MLIR 18 + this tree's
-// src/astra/mlir): the `a` dialect is currently NOT expressible in MLIR
-// text, so this emitter produces the llvm-dialect op stream — which is what
-// `a-lower-to-llvm` would emit anyway for every runtime call
-// (`a.runtime.call @a_*` lowers to `llvm.call @a_*` with the same signature).
-// Gaps discovered (all in src/astra/mlir, outside this file's ownership):
-//   * !a.aval/!a.ptr/... have NO text parser — ADialect has no parseType and
-//     useDefaultTypePrinterParser only handles `#a.ty<...>` attrs, so every
-//     `a.*` op requiring an `a` type/result is unparsable.
-//   * a.func and a.const have no custom assemblyFormat -> "custom op has no
-//     custom assembly form".
-//   * a.runtime.call's `callee` StrAttr hits "invalid kind of attribute"
-//     (parseCustomAttributeWithFallback -> ADialect::parseAttribute returns
-//     failure for builtin StringAttr).
-//   * cf.cond_br/cf.br parse but fail mlir-translate (no
-//     LLVMTranslationDialectInterface registered for cf in this build), so
-//     llvm.cond_br/llvm.br are kept.
-//   * a.store/a.load/a.gep/a.alloca/a.addressof additionally require !a.ptr
-//     operands, and a.store rejects i64 values (isBoxedOrPtr), which is
-//     incompatible with the emitter's raw-i64 aval domain.
-// Once the dialect grows text parsers (custom assemblyFormat on a.func/
-// a.const, a parseType for !a.*, a builtin-attr fallback in
-// ADialect::parseAttribute, cf->llvm translation registration), the mapping
-// is: llvm.func->a.func, llvm.call @a_*->a.runtime.call, A-fn calls->a.call,
-// llvm.return->a.return, constants->a.const, and the rest stays llvm.*.
+// src/astra/mlir): this emitter produces the llvm-dialect op stream with the
+// `a`-dialect ops that ARE text-expressible and semantics-preserving:
+//   * every `a_*` runtime call (helpers callI64/callI64T/callI32T/
+//     callVoidT, pin, frame push/pop, gc roots, a_runtime_init, a_fib_main,
+//     a_test_main) emits `a.runtime.call "sym"(args) {signature = ...} :
+//     (types) -> ret`. a-lower-to-llvm lowers it to `llvm.call @sym` with
+//     the same signature inferred from lowered operand/result types.
+//   * pointers that exclusively feed `a.runtime.call` pointer arguments
+//     (cstrPtr/stringLiteralAval/char-literal globals, %gr0 in emitMain)
+//     emit `a.addressof @g : !a.ptr` (lowers to llvm.mlir.addressof).
+// Everything else stays llvm.* on purpose:
+//   * a.func/a.return: the emitter's aval domain is raw i64 bit patterns;
+//     a.func param unpack produces !a.aval/typed results and canonicalize
+//     hoists llvm.mlir.constant out of a.func regions, breaking
+//     a-lower-to-llvm (constant defined outside region).
+//   * a.store/a.load/a.gep/a.alloca: verifiers require !a.ptr pointers and
+//     a.store requires !a.aval/!a.ptr values; the emitter stores raw i64.
+//   * a.const: result is always !a.aval; cannot feed i64 consumers.
+//   * a.call: callee type must match operand/result types; A-fn ABI is the
+//     packed argv pointer (callAFunction), which a.call cannot express.
+//   * llvm.mlir.global, llvm.mlir.constant, control flow, llvm.return, and
+//     addressof sites feeding llvm.load/store/ptrtoint stay llvm.*.
 //
 // Coverage (same as emitMLIR): entry points, plain `fn` declarations and
 // direct calls, let/assign/expr/return/if/while/do-while/for/loop/
@@ -302,7 +300,8 @@ class MlirDialectEmitter {
     return r;
   }
   void pin(const std::string& p) {
-    fn_ << "  llvm.call @a_pin_slot(" << p << ") : (!llvm.ptr) -> ()\n";
+    fn_ << "  a.runtime.call \"a_pin_slot\"(" << p
+        << ") {signature = \"(!llvm.ptr) -> ()\"} : (!llvm.ptr) -> ()\n";
   }
   std::string nullPtr() {
     std::string r = nv();
@@ -311,17 +310,25 @@ class MlirDialectEmitter {
   }
 
   // ---- calls -------------------------------------------------------------------
+  // `a.runtime.call` form: callee is the C symbol name (StrAttr); the
+  // `signature` attr documents the LLVM-level signature (lowering infers the
+  // call type from the already-lowered operand/result types).
+  std::string runtimeSig(const std::string& args, const std::string& ret) {
+    return "(" + args + ") -> " + ret;
+  }
+
   // all-i64 args -> i64 result
   std::string callI64(const std::string& sym, const std::vector<std::string>& args) {
     std::string r = nv();
-    std::string s = "  " + r + " = llvm.call @" + sym + "(";
+    std::string s = "  " + r + " = a.runtime.call \"" + sym + "\"(";
     std::string tys;
     for (size_t i = 0; i < args.size(); ++i) {
       if (i) { s += ", "; tys += ", "; }
       s += args[i];
       tys += "i64";
     }
-    s += ") : (" + tys + ") -> i64\n";
+    s += ") {signature = \"" + runtimeSig(tys, "i64")
+         + "\"} : (" + tys + ") -> i64\n";
     fn_ << s;
     return r;
   }
@@ -329,14 +336,15 @@ class MlirDialectEmitter {
   std::string callI64T(const std::string& sym,
                        const std::vector<std::pair<std::string, std::string>>& args) {
     std::string r = nv();
-    std::string s = "  " + r + " = llvm.call @" + sym + "(";
+    std::string s = "  " + r + " = a.runtime.call \"" + sym + "\"(";
     std::string tys;
     for (size_t i = 0; i < args.size(); ++i) {
       if (i) { s += ", "; tys += ", "; }
       s += args[i].second;
       tys += args[i].first;
     }
-    s += ") : (" + tys + ") -> i64\n";
+    s += ") {signature = \"" + runtimeSig(tys, "i64")
+         + "\"} : (" + tys + ") -> i64\n";
     fn_ << s;
     return r;
   }
@@ -344,28 +352,30 @@ class MlirDialectEmitter {
   std::string callI32T(const std::string& sym,
                        const std::vector<std::pair<std::string, std::string>>& args) {
     std::string r = nv();
-    std::string s = "  " + r + " = llvm.call @" + sym + "(";
+    std::string s = "  " + r + " = a.runtime.call \"" + sym + "\"(";
     std::string tys;
     for (size_t i = 0; i < args.size(); ++i) {
       if (i) { s += ", "; tys += ", "; }
       s += args[i].second;
       tys += args[i].first;
     }
-    s += ") : (" + tys + ") -> i32\n";
+    s += ") {signature = \"" + runtimeSig(tys, "i32")
+         + "\"} : (" + tys + ") -> i32\n";
     fn_ << s;
     return r;
   }
   // typed args -> void
   void callVoidT(const std::string& sym,
                  const std::vector<std::pair<std::string, std::string>>& args) {
-    std::string s = "  llvm.call @" + sym + "(";
+    std::string s = "  a.runtime.call \"" + sym + "\"(";
     std::string tys;
     for (size_t i = 0; i < args.size(); ++i) {
       if (i) { s += ", "; tys += ", "; }
       s += args[i].second;
       tys += args[i].first;
     }
-    s += ") : (" + tys + ") -> ()\n";
+    s += ") {signature = \"" + runtimeSig(tys, "()")
+         + "\"} : (" + tys + ") -> ()\n";
     fn_ << s;
   }
 
@@ -839,7 +849,8 @@ class MlirDialectEmitter {
     for (const std::string& sym : rootSyms_) {
       body_ << "  %r_" << sym << " = llvm.mlir.addressof @" << sym << " : !llvm.ptr\n";
       body_ << "  %v_" << sym << " = llvm.load %r_" << sym << " : !llvm.ptr -> i64\n";
-      body_ << "  llvm.call @a_gc_mark_aval(" << "%v_" << sym << ") : (i64) -> ()\n";
+      body_ << "  a.runtime.call \"a_gc_mark_aval\"(" << "%v_" << sym
+             << ") {signature = \"(i64) -> ()\"} : (i64) -> ()\n";
     }
     body_ << "  llvm.return\n}\n\n";
   }
@@ -916,11 +927,13 @@ class MlirDialectEmitter {
     std::string lp = nv();
     fn_ << "  " << lp << " = llvm.mlir.constant(" << curFnLine_
         << " : i32) : i32\n";
-    fn_ << "  llvm.call @a_frame_push(" << np << ", " << fp << ", " << lp
-        << ") : (!llvm.ptr, !llvm.ptr, i32) -> ()\n";
+    fn_ << "  a.runtime.call \"a_frame_push\"(" << np << ", " << fp << ", "
+        << lp << ") {signature = \"(!llvm.ptr, !llvm.ptr, i32) -> ()\"}"
+        << " : (!llvm.ptr, !llvm.ptr, i32) -> ()\n";
   }
   void emitFramePop() {
-    fn_ << "  llvm.call @a_frame_pop() : () -> ()\n";
+    fn_ << "  a.runtime.call \"a_frame_pop\"() {signature = \"() -> ()\"}"
+        << " : () -> ()\n";
   }
   void emitReturn(const std::string& v) {
     emitFramePop();
@@ -1082,11 +1095,13 @@ class MlirDialectEmitter {
     if (testMode_) { emitTestMain(); return; }
     body_ << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
     // a_runtime_init()
-    body_ << "  llvm.call @a_runtime_init() : () -> ()\n";
+    body_ << "  a.runtime.call \"a_runtime_init\"() {signature = \"() -> ()\"}"
+          << " : () -> ()\n";
     if (!rootSyms_.empty()) {
       // register GC root callback marking all module globals
-      body_ << "  %gr0 = llvm.mlir.addressof @__a_gc_root_mark : !llvm.ptr\n";
-      body_ << "  llvm.call @a_gc_add_root_cb(%gr0) : (!llvm.ptr) -> ()\n";
+      body_ << "  %gr0 = a.addressof @__a_gc_root_mark : !a.ptr\n";
+      body_ << "  a.runtime.call \"a_gc_add_root_cb\"(%gr0)"
+            << " {signature = \"(!llvm.ptr) -> ()\"} : (!llvm.ptr) -> ()\n";
     }
     // %fnp = ptrtoint addressof __a_main_body
     body_ << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
@@ -1094,7 +1109,8 @@ class MlirDialectEmitter {
     body_ << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
     body_ << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
     body_ << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
-    body_ << "  %r = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
+    body_ << "  %r = a.runtime.call \"a_fib_main\"(%fnp1, %cnone, %czero, %nullp)"
+             " {signature = \"(i64, i64, i64, !llvm.ptr) -> i64\"}"
              " : (i64, i64, i64, !llvm.ptr) -> i64\n";
     body_ << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
     body_ << "  llvm.return %c0 : i32\n";
@@ -1107,13 +1123,15 @@ class MlirDialectEmitter {
   // LlvmEmitter::emitTestMain.
   void emitTestMain() {
     body_ << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
-    body_ << "  llvm.call @a_runtime_init() : () -> ()\n";
+    body_ << "  a.runtime.call \"a_runtime_init\"() {signature = \"() -> ()\"}"
+          << " : () -> ()\n";
     body_ << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
     body_ << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
     body_ << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
     body_ << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
     body_ << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
-    body_ << "  %rinit = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
+    body_ << "  %rinit = a.runtime.call \"a_fib_main\"(%fnp1, %cnone, %czero, %nullp)"
+             " {signature = \"(i64, i64, i64, !llvm.ptr) -> i64\"}"
              " : (i64, i64, i64, !llvm.ptr) -> i64\n";
     std::vector<std::pair<std::string, std::string>> tests;  // (name, cname)
     for (auto& kv : fnDecls_) {
@@ -1157,7 +1175,8 @@ class MlirDialectEmitter {
             << " : !llvm.ptr, !llvm.ptr\n";
     }
     body_ << "  %tn = llvm.mlir.constant(" << n << " : i64) : i64\n";
-    body_ << "  %rc = llvm.call @a_test_main(%tn, %names, %fns)"
+    body_ << "  %rc = a.runtime.call \"a_test_main\"(%tn, %names, %fns)"
+             " {signature = \"(i64, !llvm.ptr, !llvm.ptr) -> i32\"}"
              " : (i64, !llvm.ptr, !llvm.ptr) -> i32\n";
     body_ << "  llvm.return %rc : i32\n}\n\n";
   }
@@ -1512,7 +1531,7 @@ class MlirDialectEmitter {
     pre_ << "  }\n";
     // in function: addressof + a_str_new(ptr, len)
     std::string r = nv();
-    fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+    fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
     return callI64T("a_str_new", {{"!llvm.ptr", r},
                                   {"i64", c64((std::int64_t)text.size())}});
   }
@@ -1564,7 +1583,7 @@ class MlirDialectEmitter {
         pre_ << "    llvm.return " << cur << " : !llvm.array<" << bytes.size() << " x i8>\n";
         pre_ << "  }\n";
         std::string r = nv();
-        fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+        fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
         return callI64T("a_char_new", {{"!llvm.ptr", r},
                                        {"i64", c64((std::int64_t)u8.size())}});
       }
@@ -2446,7 +2465,7 @@ class MlirDialectEmitter {
   }
 
   // NUL-terminated C string global for a_method names etc. Returns the
-  // global symbol; caller emits llvm.mlir.addressof in the function.
+  // global symbol; caller emits a.addressof in the function.
   std::string cstrGlobalSym(const std::string& text) {
     std::string bytes = text;
     bytes.push_back('\0');
@@ -2471,7 +2490,7 @@ class MlirDialectEmitter {
   std::string cstrPtr(const std::string& text) {
     std::string g = cstrGlobalSym(text);
     std::string r = nv();
-    fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+    fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
     return r;
   }
 

@@ -19,6 +19,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <regex>
 #include <set>
 #include <sstream>
 #include <string>
@@ -470,6 +471,50 @@ std::string synthesizeTailText(const AmbcMeta& meta,
   t << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
   t << "  llvm.return %c0 : i32\n";
   t << "}\n\n";
+
+  // Declare every external symbol `entryBodyMlir` references. The tail is
+  // parsed as a standalone module and llvm.call / llvm.mlir.addressof
+  // verify that callees/globals exist in scope at parse time; symbols
+  // already declared above (runtime sigs, __a_m<id>_init, __a_g_* roots)
+  // are skipped. Everything else gets a declaration that
+  // dedupLlvmFuncDecls/dedupLlvmGlobals replaces with the real definition
+  // after the splice — the same pattern the __a_m*_init and __a_g_*
+  // declarations already rely on. Func decls use the uniform A-function
+  // signature (!llvm.ptr) -> i64 (every user fn/method/ctor/lambda/
+  // parfor helper has it); literal/global symbols are recognised by
+  // their emitter prefixes. Emitted last inside `module { }` — op order
+  // is irrelevant to symbol resolution.
+  {
+    std::set<std::string> declared;
+    for (const auto& kv : kAmbcRuntimeSigs) declared.insert(kv.first);
+    for (int id : initOrder)
+      declared.insert("__a_m" + std::to_string(id) + "_init");
+    for (const std::string& sym : rootSyms) declared.insert(sym);
+    declared.insert("__a_main_body");
+    declared.insert("__a_gc_root_mark");
+    declared.insert("main");
+    static const std::regex refRe("@([A-Za-z_][A-Za-z0-9_]*)");
+    std::set<std::string> refs;
+    for (std::sregex_iterator it(entryBodyMlir.begin(), entryBodyMlir.end(),
+                                 refRe),
+         end;
+         it != end; ++it) {
+      refs.insert((*it)[1].str());
+    }
+    for (const std::string& sym : refs) {
+      if (declared.count(sym)) continue;
+      if (sym.rfind("__a_g_", 0) == 0 || sym.rfind("__a_str", 0) == 0 ||
+          sym.rfind("__a_chr", 0) == 0 || sym.rfind("__a_cstr", 0) == 0 ||
+          sym.rfind("__a_estr", 0) == 0 || sym.rfind("__a_echr", 0) == 0 ||
+          sym.rfind("__a_ecstr", 0) == 0) {
+        t << "llvm.mlir.global external @" << sym
+          << "(0 : i64) {addr_space = 0 : i32} : i64\n";
+      } else {
+        t << "llvm.func @" << sym << "(%argv: !llvm.ptr) -> i64\n";
+      }
+    }
+  }
+
   t << "}\n";
 
   (void)meta;

@@ -7,16 +7,16 @@ namespace a {
 struct ModuleGraph;
 struct SemaResult;
 
-// Emits the checked module graph as MLIR text intended for the `a` dialect
+// Emits the checked module graph as MLIR text for the `a`-dialect
 // pipeline (a mlir-opt / a-lower-to-llvm). Signature mirrors emitMLIR.
 //
-// IMPORTANT (dialect text-format status): the `a` dialect registered by
-// src/astra/mlir is NOT expressible in MLIR text today — see the gap list in
-// mlir_emit_ad.cpp. Until those gaps are closed this entry point emits the
-// llvm-dialect op stream (identical to emitMLIR), which parses under
-// `a mlir-opt` and lowers/links through the existing pipeline. Swapping in
-// real `a.*` ops later is a localized change inside the MlirDialectEmitter
-// helpers (c64/avalInt/callI64/callAFunction/emitReturn/...), not a redesign.
+// DIALECT STATUS: the emitter produces llvm-dialect ops plus the `a`
+// ops that are text-expressible and semantics-preserving —
+// `a.runtime.call` for every `a_*` runtime call and `a.addressof` for
+// string/cstr globals feeding those calls. The remaining ops stay
+// llvm.* because the `a` op verifiers require !a.aval/!a.ptr operands
+// that the emitter's raw-i64 aval domain cannot produce (see the gap
+// list in mlir_emit_ad.cpp).
 bool emitMLIRDialect(const ModuleGraph& graph, const SemaResult& sema,
                      std::string& out, std::string& error,
                      bool testMode = false, const std::string* testFilter = nullptr);

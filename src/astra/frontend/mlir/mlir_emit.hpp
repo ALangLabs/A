@@ -37,4 +37,32 @@ bool emitMLIR(const ModuleGraph& graph, const SemaResult& sema,
 // Expr::inferredType / FnDecl::moduleId annotations already present).
 bool emitModuleMLIR(const ModuleGraph& graph, const SemaResult& sema,
                     int moduleId, std::string& out, std::string& error);
+
+// Emits ONLY the entry function's body as MLIR text — the same statements
+// whole-graph emitMLIR inlines into __a_main_body (global inits already
+// live in per-module __a_m<id>_init fns, so this emits just the entry
+// portion: hoisted allocas first, then the entry statements, exactly as
+// emitMainBody produces them). The output is splice-ready: it is meant to
+// be inserted verbatim inside the consumer's synthesized __a_main_body
+// after the __a_m<id>_init calls. Used for per-module .ambc packages'
+// entry.mlir. Empty when the graph has no entry fn.
+//
+// Module-level artifacts the entry body creates (literal globals, lambda/
+// parfor helpers, auto-vivified globals) are NOT in `out`; they are
+// emitted under "__a_e"-flavored names (__a_estr*/__a_echr*/__a_ecstr*/
+// __a_elam_*/__a_epf_*) so they cannot collide with the per-module
+// __a_str/__a_chr/__a_cstr/__a_lam_/__a_pf_ counters (which restart per
+// module). Retrieve them with emitEntrySupportMLIR and merge into the
+// entry module's .ambc at precompile time.
+bool emitEntryBodyMLIR(const ModuleGraph& graph, const SemaResult& sema,
+                       std::string& out, std::string& error);
+
+// Companion to emitEntryBodyMLIR: the module-level ops the entry body
+// needs — private literal globals, auto-vivified __a_g_ globals, and
+// lambda/parfor helper function definitions — emitted as a standalone
+// `module { ... }` document for the precompile step to merge into the
+// entry module's .ambc before serialization. Deterministic: a second run
+// produces identical symbol names to the emitEntryBodyMLIR run.
+bool emitEntrySupportMLIR(const ModuleGraph& graph, const SemaResult& sema,
+                          std::string& out, std::string& error);
 }  // namespace a

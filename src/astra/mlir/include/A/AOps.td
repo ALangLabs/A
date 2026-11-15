@@ -73,7 +73,11 @@ def A_ConstKindAttr : I64EnumAttr<
 //              `!llvm.array<len x i8>` bytes, llvm.mlir.addressof, then
 //              llvm.call @a_str_new(!llvm.ptr, i64 len).
 //   none     : llvm.mlir.constant of the tagged-none aval (kAvalTag | 0x2).
-def AConstOp : A_Op<"const", [Pure, ConstantLike]> {
+// NOT ConstantLike/Pure: `a.const str` calls runtime a_str_new and even
+// int/float consts materialize avals — the canonicalizer would hoist
+// ConstantLike ops out of function bodies to module level, breaking
+// dominance for the lowering.
+def AConstOp : A_Op<"const"> {
   let summary = "A literal constant";
   let description = [{
     Materializes an A literal as a boxed `!a.aval`. The `kind` enum selects

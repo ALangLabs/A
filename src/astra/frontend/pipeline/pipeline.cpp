@@ -362,6 +362,18 @@ int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
 int ambcCompileToObject(const std::string& ambcPath, const std::string& arch,
                         int optLevel, const std::string& objPath,
                         std::ostream& err);
+// Per-module .ambc package directory -> object (src/astra/mlir/
+// ambc_modules.cpp): the newer Mojo-.mojoc layout — ambc.meta + one .ambc
+// per module, merged and lowered in-process. `entryBodyMlir` carries the
+// entry fn's body statements (entry.mlir inside the package dir); pass
+// "" when the package has no entry.mlir. `testMode` must be false (per-
+// module packages do not support `a test`). Weak fallback at the bottom
+// of this file covers no-MLIR builds.
+int ambcModulesCompileToObject(const std::string& pkgDir,
+                               const std::string& arch, int optLevel,
+                               const std::string& objPath,
+                               const std::string& entryBodyMlir,
+                               bool testMode, std::ostream& err);
 
 namespace {
 
@@ -1720,8 +1732,16 @@ std::string ambcPathFor(const std::string& sourcePath) {
 }
 
 // Returns 0 when `outBin` was produced, 1 on a handled failure, 2 when the
-// fast path does not apply (disabled, no sibling .ambc, incompatible
+// fast path does not apply (disabled, no sibling package, incompatible
 // package) and the caller should run the normal frontend pipeline.
+//
+// Package discovery for `foo.astra`: the sibling candidates are
+//   foo.ambc.d/ — per-module package DIRECTORY (written by
+//                `a precompile foo.astra -o foo.ambc.d`); the newer
+//                Mojo-.mojoc layout, preferred when present
+//   foo.ambc    — whole-graph single-file package (precompile default)
+// The per-module dir carries no entry fn body, so its entry.mlir supplies
+// the statements the consumer splices into __a_main_body.
 int ambcFastBuild(const std::string& sourcePath, const std::string& arch,
                   int optLevel, const std::string& outBin,
                   std::ostream& err) {
@@ -1729,10 +1749,32 @@ int ambcFastBuild(const std::string& sourcePath, const std::string& arch,
   const std::string ambc = ambcPathFor(sourcePath);
   if (ambc.empty()) return 2;
   std::error_code ec;
-  if (!std::filesystem::exists(ambc, ec) || ec) return 2;
+
+  const std::string pkgDir = ambc + ".d";
+  const bool perModule = std::filesystem::is_directory(pkgDir, ec);
+  ec.clear();
+  if (!perModule &&
+      (!std::filesystem::exists(ambc, ec) || ec)) {
+    return 2;
+  }
 
   std::string objPath = tempPath("llvm", "x.o");
-  int rc = ambcCompileToObject(ambc, arch, optLevel, objPath, err);
+  int rc;
+  if (perModule) {
+    std::string entryBody;
+    {
+      std::ifstream entryFile(pkgDir + "/entry.mlir", std::ios::binary);
+      if (entryFile) {
+        std::ostringstream buf;
+        buf << entryFile.rdbuf();
+        entryBody = buf.str();
+      }
+    }
+    rc = ambcModulesCompileToObject(pkgDir, arch, optLevel, objPath,
+                                    entryBody, false, err);
+  } else {
+    rc = ambcCompileToObject(ambc, arch, optLevel, objPath, err);
+  }
   if (rc == 0) {
     std::string runtimeC, runtimeDir;
     if (!findRuntime(arch, runtimeC, runtimeDir)) {
@@ -2369,6 +2411,17 @@ __attribute__((weak)) int ambcCompileToObject(
     const std::string& ambcPath, const std::string& arch, int optLevel,
     const std::string& objPath, std::ostream& err) {
   (void)ambcPath; (void)arch; (void)optLevel; (void)objPath;
+  err << "error: ambc backend: in-process MLIR backend unavailable "
+         "(built without MLIR dev files); unset A_AMBC\n";
+  return 1;
+}
+
+__attribute__((weak)) int ambcModulesCompileToObject(
+    const std::string& pkgDir, const std::string& arch, int optLevel,
+    const std::string& objPath, const std::string& entryBodyMlir,
+    bool testMode, std::ostream& err) {
+  (void)pkgDir; (void)arch; (void)optLevel; (void)objPath;
+  (void)entryBodyMlir; (void)testMode;
   err << "error: ambc backend: in-process MLIR backend unavailable "
          "(built without MLIR dev files); unset A_AMBC\n";
   return 1;

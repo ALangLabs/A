@@ -894,19 +894,30 @@ AForOp::getEntrySuccessorOperands(RegionBranchPoint point) {
 // args) or the parent.
 void AWhileOp::getSuccessorRegions(RegionBranchPoint point,
                                    SmallVectorImpl<RegionSuccessor> &regions) {
+  // scf.while-shaped control flow:
+  //   parent  -> before            (inits feed the before entry args)
+  //   before  -> after | results   (a.condition forwards operands[1:])
+  //   after   -> before            (a.yield operands feed the next iteration)
+  // Results are produced only by the `before -> parent` edge (condition
+  // false); `after` never exits directly.
+  if (getBefore().empty() || getAfter().empty())
+    return;
+  Block &beforeEntry = getBefore().front();
+  Block &afterEntry = getAfter().front();
   if (point.isParent()) {
-    regions.push_back(RegionSuccessor(&getBefore()));
-    regions.push_back(RegionSuccessor(getResults()));
+    regions.push_back(
+        RegionSuccessor(&getBefore(), beforeEntry.getArguments()));
     return;
   }
   if (point.getRegionOrNull() == &getBefore()) {
-    regions.push_back(RegionSuccessor(&getAfter()));
+    regions.push_back(
+        RegionSuccessor(&getAfter(), afterEntry.getArguments()));
     regions.push_back(RegionSuccessor(getResults()));
     return;
   }
   if (point.getRegionOrNull() == &getAfter()) {
-    regions.push_back(RegionSuccessor(&getBefore()));
-    regions.push_back(RegionSuccessor(getResults()));
+    regions.push_back(
+        RegionSuccessor(&getBefore(), beforeEntry.getArguments()));
     return;
   }
   llvm_unreachable("unknown region branch point");
