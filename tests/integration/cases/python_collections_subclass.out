@@ -1,0 +1,14 @@
+true
+Counter({'a': 2, 'b': 2, 'c': 1})
+[("a", 2), ("b", 2)]
+2 3
+true
+true
+true
+true
+5 true
+["x", "y"]
+3 0
+true
+OrderedDict({'a': 1, 'b': 2})
+1 2

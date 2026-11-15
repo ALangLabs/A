@@ -16,15 +16,12 @@ set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 # Modules in dependency order (each owns its CMakeLists.txt)
 add_subdirectory(compiler/astra)
 add_subdirectory(tools/lsp)
-# In-process JIT backend (Goose-style): the Astra (compiler/astra/)
-# compiles the C
-# emitter's output into memory for `a run`.
-include(cmake/libastra.cmake)
-# `a run`/`a build` link the staged libaruntime.a under build/astralib and the
-# run-cache fingerprints it — keep the staged runtime fresh whenever `a` is
-# rebuilt so `--target a` builds cannot serve binaries linked against a stale
-# runtime.
-add_dependencies(a astra_runtime)
+# Stage the A runtime (compiler/astra/runtime/*.c) into build/astralib as
+# libaruntime.a; `a run`/`a build` link it and the run-cache fingerprints it —
+# keep the staged runtime fresh whenever `a` is rebuilt so `--target a` builds
+# cannot serve binaries linked against a stale runtime.
+include(cmake/aruntime.cmake)
+add_dependencies(a aruntime)
 # Packaging
 include(GNUInstallDirs)
 install(TARGETS a RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

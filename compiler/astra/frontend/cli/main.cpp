@@ -74,8 +74,10 @@ void printUsage(std::ostream& os) {
      << "                    match the host OS — the LLVM backend cannot\n"
      << "                    cross OSes or arches; host target only)\n"
      << "  --native         force the native codegen backend (default)\n"
-     << "  --backend <b>    select backend: 'llvm' (default; 'asm'/'native'\n"
-     << "                    are accepted aliases)\n"
+     << "  --backend <b>    select backend: 'mlir-direct' (default; emits MLIR\n"
+     << "                    llvm dialect directly), 'llvm' (LLVM IR text),\n"
+     << "                    'mlir' (LLVM IR -> MLIR round-trip); 'asm'/'native'\n"
+     << "                    are accepted aliases for 'llvm')\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
@@ -110,7 +112,7 @@ struct Options {
   bool jsonOutput = false;
   bool optnone = false;
   bool native = false;
-  std::string backend = "llvm";
+  std::string backend = "mlir-direct";
   int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;

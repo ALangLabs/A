@@ -181,95 +181,14 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
               // (IA32 emulation / Rosetta-free 32-bit support).
               (arch == "i386" && hostArch() == "x86_64"));
   if (arch == "riscv32") {
-    err << "error: target 'riscv32' is not supported: astra only ships a "
-           "riscv64 backend; the runtime value model is 64-bit\n";
+    err << "error: target 'riscv32' is not supported: there is no riscv32 "
+           "backend; the runtime value model is 64-bit\n";
     return false;
   }
   // The LLVM backend is host-only: only the host arch on the host OS can
   // produce a runnable binary. resolveTarget still parses foreign arches
   // so `a build --target ...` can report a clean error downstream.
   return true;
-}
-
-// Locates the astra driver for `arch`/`os`: A_ASTRA_<ARCH>[_<OS>] override
-// (plus A_ASTRA for the host arch/os), then the binary staged with the
-// runtime (build/astra/astra-<arch>, or plain `astra` for the host arch/os),
-// then PATH. For a non-host OS (windows PE cross builds) only OS-specific
-// driver names are tried — falling back to the host-OS astra-<arch> would
-// silently produce the wrong object format.
-std::string findAstra(const std::string& arch, const std::string& os = "") {
-  std::string envName = "A_ASTRA_";
-  for (char c : arch) envName += (c == '-' ? '_' : (char)::toupper((unsigned char)c));
-  if (!os.empty() && os != hostOs()) {
-    envName += "_";
-    for (char c : os) envName += (c == '-' ? '_' : (char)::toupper((unsigned char)c));
-  }
-  if (const char* e = std::getenv(envName.c_str()); e && *e) return e;
-  if (os.empty() || os == hostOs()) {
-    if (arch == hostArch()) {
-      if (const char* e = std::getenv("A_ASTRA"); e && *e) return e;
-    }
-  }
-  std::vector<std::string> names;
-  if (!os.empty() && os != hostOs()) {
-    names.push_back("astra-" + arch + "-" + os);
-  } else {
-    names.push_back("astra-" + arch);
-    if (arch == hostArch()) names.push_back("astra");
-  }
-#ifdef _WIN32
-  for (auto& nm : names) nm += ".exe";
-  wchar_t wexe[MAX_PATH];
-  DWORD wn = GetModuleFileNameW(nullptr, wexe, MAX_PATH);
-  if (wn > 0 && wn < MAX_PATH) {
-    int n = WideCharToMultiByte(CP_UTF8, 0, wexe, (int)wn, nullptr, 0, nullptr, nullptr);
-    std::string exe((size_t)n, '\0');
-    WideCharToMultiByte(CP_UTF8, 0, wexe, (int)wn, exe.data(), n, nullptr, nullptr);
-    exe.resize((size_t)n);
-    std::string dir = exe;
-    auto pos = dir.find_last_of("/\\");
-    if (pos != std::string::npos) {
-      dir = dir.substr(0, pos);
-      for (const std::string& base : {dir, dir + "/astra", dir + "/astralib/..", dir + "/astralib"}) {
-        for (const auto& nm : names) {
-          std::string c = base + "/" + nm;
-          std::error_code ec;
-          if (std::filesystem::is_regular_file(c, ec)) return c;
-        }
-      }
-    }
-  }
-  // PATH search via SearchPath (handles .exe/PATHEXT).
-  for (const auto& nm : names) {
-    wchar_t wn2[MAX_PATH];
-    std::wstring wnm(nm.begin(), nm.end());
-    if (SearchPathW(nullptr, wnm.c_str(), L".exe", MAX_PATH, wn2, nullptr) > 0) {
-      int n = WideCharToMultiByte(CP_UTF8, 0, wn2, -1, nullptr, 0, nullptr, nullptr);
-      std::string c((size_t)n - 1, '\0');
-      WideCharToMultiByte(CP_UTF8, 0, wn2, -1, c.data(), n, nullptr, nullptr);
-      return c;
-    }
-  }
-  return names.front();  // let CreateProcess report the failure
-#else
-  const std::string self = exePath();
-  if (!self.empty()) {
-    std::string dir = self;
-    auto pos = dir.find_last_of('/');
-    if (pos != std::string::npos) {
-      dir = dir.substr(0, pos);
-      for (const std::string& base : {dir, dir + "/astra", dir + "/astralib/..", dir + "/astralib"}) {
-        for (const auto& nm : names) {
-          std::string c = base + "/" + nm;
-          std::error_code ec;
-          if (std::filesystem::is_regular_file(c, ec) && access(c.c_str(), X_OK) == 0) return c;
-        }
-      }
-    }
-  }
-  for (const auto& nm : names) if (access(nm.c_str(), X_OK) == 0) return nm;
-  return names.front();  // let execvp report the failure
-#endif
 }
 
 #ifdef _WIN32
@@ -373,9 +292,8 @@ std::string tempPath(const char* tag,const std::string& name=""){
 // A_NO_CACHE=1; override the directory with A_CACHE_DIR.
 
 // Forward declaration for findRuntime (defined below); run_cache::plan
-// needs the resolved astra/runtime paths.
-bool findRuntime(const std::string& arch, const std::string& os,
-                 std::string& astraBin, std::string& runtimeC,
+// needs the resolved runtime paths.
+bool findRuntime(const std::string& arch, std::string& runtimeC,
                  std::string& runtimeDir);
 
 // Central cache root shared by the run cache and the per-module object
@@ -618,8 +536,8 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
                  const std::string* testFilter = nullptr) {
   Plan p;
   if (!td.native || disabled()) return p;
-  std::string astraBin, runtimeC, runtimeDir;
-  if (!findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) return p;
+  std::string runtimeC, runtimeDir;
+  if (!findRuntime(td.arch, runtimeC, runtimeDir)) return p;
   std::uint64_t h = 1469598103934665603ULL;
   h = mixBytes(h, kVersion);
   h = mixBytes(h, td.arch);
@@ -630,15 +548,9 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   if (testMode) h = mixBytes(h, testFilter ? *testFilter : "");
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
-  h = mixFileStat(h, astraBin);
   {
     const std::string self = selfExePath();
     if (!self.empty()) h = mixFileStat(h, self);
-  }
-  // Library dir that astra links against, when staged.
-  for (const std::string& cand : {runtimeDir + "/libastra1.a",
-                                  runtimeDir + "/lib/libastra1.a"}) {
-    if (std::filesystem::exists(cand)) { h = mixFileStat(h, cand); break; }
   }
   h = mixBytes(h, runtimeDir);
   mixRuntimeSources(h, runtimeC);
@@ -838,8 +750,8 @@ inline std::string precheckKey(const std::string& path,
                                const TargetDesc& td,
                                int optimizationLevel) {
   if (!td.native || disabled()) return "";
-  std::string astraBin, runtimeC, runtimeDir;
-  if (!findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) return "";
+  std::string runtimeC, runtimeDir;
+  if (!findRuntime(td.arch, runtimeC, runtimeDir)) return "";
   std::uint64_t h = 1469598103934665603ULL;
   h = mixBytes(h, "pre2");
   h = mixBytes(h, kVersion);
@@ -854,7 +766,6 @@ inline std::string precheckKey(const std::string& path,
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
   h = mixBytes(h, source);
-  h = mixFileStat(h, astraBin);
   h = mixBytes(h, runtimeDir);
   PreScan ps{config, std::string(), {}, {}, h};
   ps.stdRoot = config.stdlibRoot.empty() ? defaultStdlibRoot()
@@ -1233,7 +1144,7 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
                            const std::string* testFilter,
                            const std::string* entrySource, int moduleId,
                            std::uint64_t sigh, const std::set<int>& deps) {
-  std::string astraBin, runtimeC, runtimeDir;
+  std::string runtimeC, runtimeDir;
   std::uint64_t h = 1469598103934665603ULL;
   h = run_cache::mixBytes(h, "unit1");
   h = run_cache::mixBytes(h, kVersion);
@@ -1243,15 +1154,10 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
   h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = run_cache::mixBytes(h, codegen ? codegen : "");
-  if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
-    h = run_cache::mixFileStat(h, astraBin);
+  if (findRuntime(td.arch, runtimeC, runtimeDir)) {
     h = run_cache::mixBytes(h, runtimeDir);
     run_cache::mixRuntimeSources(h, runtimeC);
     h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
-    for (const std::string& cand : {runtimeDir + "/libastra1.a",
-                                    runtimeDir + "/lib/libastra1.a"}) {
-      if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
-    }
   }
   {
     const std::string self = run_cache::selfExePath();
@@ -1279,7 +1185,7 @@ inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
   }
   return hex64(h);
 }
-// Shared per-build key inputs (Phase 3 perf): runtime/astra/compiler
+// Shared per-build key inputs (Phase 3 perf): runtime/compiler
 // identity and per-module sighashes/sources are computed once, not per unit.
 struct KeyContext {
   std::uint64_t runtimeBase = 0;
@@ -1306,16 +1212,11 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
   h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = run_cache::mixBytes(h, codegen ? codegen : "");
-  std::string astraBin, runtimeC, runtimeDir;
-  if (findRuntime(td.arch, td.os, astraBin, runtimeC, runtimeDir)) {
-    h = run_cache::mixFileStat(h, astraBin);
+  std::string runtimeC, runtimeDir;
+  if (findRuntime(td.arch, runtimeC, runtimeDir)) {
     h = run_cache::mixBytes(h, runtimeDir);
     run_cache::mixRuntimeSources(h, runtimeC);
     h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
-    for (const std::string& cand : {runtimeDir + "/libastra1.a",
-                                    runtimeDir + "/lib/libastra1.a"}) {
-      if (std::filesystem::exists(cand)) { h = run_cache::mixFileStat(h, cand); break; }
-    }
   }
   {
     const std::string self = run_cache::selfExePath();
@@ -1380,16 +1281,15 @@ inline std::string unitCachePath(const std::string& key) {
 }  // namespace objcache
 
 
-// Locates the A runtime C source (compiler/astra/runtime/a_runtime.c) that
-// is compiled/linked with the emitted source. Candidates: $A_RUNTIME_C, next
-// to the astra binary (staged astralib-<arch> copy), the source tree
-// relative to the astra binary (build/astra/astra-<arch> ->
-// ../../compiler/astra/runtime), and the cwd. The staged per-arch dir
-// (astralib-<arch>) is preferred; plain astralib only matches the host arch
-// because its libastra1.a is host-arch code.
-bool findRuntime(const std::string& arch, const std::string& os,
-                 std::string& astraBin, std::string& runtimeC, std::string& runtimeDir) {
-  astraBin = findAstra(arch, os);
+// Locates the staged A runtime directory containing a_runtime.c and
+// libaruntime.a (cmake/aruntime.cmake copies compiler/astra/runtime/*.c into
+// <bindir>/../astralib for installed layouts, or build/astralib in-tree).
+// Candidates: $A_RUNTIME_C, the astralib dirs relative to the `a` executable
+// and the cwd, then the compiler/astra/runtime source tree as a last resort
+// (libaruntime.a is then expected at compiler/astra/runtime/libaruntime.a or
+// one of the ../.. variants llvmBuild probes).
+bool findRuntime(const std::string& arch, std::string& runtimeC,
+                 std::string& runtimeDir) {
   std::vector<std::string> libnames;
   libnames.push_back("astralib-" + arch);
   if (arch == hostArch()) libnames.push_back("astralib");
@@ -1408,9 +1308,12 @@ bool findRuntime(const std::string& arch, const std::string& os,
     candidates.push_back(d + "/../../compiler/astra/runtime/a_runtime.c");
     candidates.push_back(d + "/../../../compiler/astra/runtime/a_runtime.c");
   };
-  auto slash = astraBin.find_last_of('/');
-  if (slash != std::string::npos) addDir(astraBin.substr(0, slash));
-  else addDir(".");
+  const std::string self = exePath();
+  if (!self.empty()) {
+    auto pos = self.find_last_of("/\\");
+    if (pos != std::string::npos) addDir(self.substr(0, pos));
+  }
+  addDir(".");
   for (const auto& ln : libnames) {
     candidates.push_back(ln + "/a_runtime.c");
     candidates.push_back("./" + ln + "/a_runtime.c");
@@ -1664,8 +1567,8 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
     return 1;
   }
   // Stage 3: link the object with the A runtime archive.
-  std::string astraBin, runtimeC, runtimeDir;
-  if (!findRuntime(arch, hostOs(), astraBin, runtimeC, runtimeDir)) {
+  std::string runtimeC, runtimeDir;
+  if (!findRuntime(arch, runtimeC, runtimeDir)) {
     err << "error: llvm backend: cannot locate A runtime (a_runtime.c)\n";
     cleanup();
     return 1;
@@ -1677,6 +1580,19 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
       "compiler/astra/runtime/libaruntime.a",
       "./compiler/astra/runtime/libaruntime.a",
   };
+  // The staged astralib dir sits next to the `a` binary's parent (bin/ ->
+  // ../astralib); cover it even when a_runtime.c resolved via the source
+  // tree fallback above.
+  {
+    const std::string self = exePath();
+    auto pos = self.find_last_of("/\\");
+    if (pos != std::string::npos) {
+      const std::string binDir = self.substr(0, pos);
+      rtCandidates.push_back(binDir + "/astralib/libaruntime.a");
+      rtCandidates.push_back(binDir + "/../astralib/libaruntime.a");
+      rtCandidates.push_back(binDir + "/../../astralib/libaruntime.a");
+    }
+  }
   std::string rtLib;
   for (const auto& c : rtCandidates) {
     std::error_code ec2;

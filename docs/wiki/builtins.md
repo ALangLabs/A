@@ -40,8 +40,8 @@ not thread-safe. All parallel paths produce bit-identical results to the
 serial loops. `a test` runs test functions in concurrent forked batches.
 Tuning/kill-switches: `A_PAR=0` disables the thread pool, `A_PAR_THREADS=N`
 sizes it, `A_TEST_JOBS=N` sizes the test batch (1 = serial). Parallelism
-requires the system-C runtime build (POSIX); astra-compiled and Windows
-runtimes always take the serial path.
+requires the POSIX system-C runtime build; the Windows
+runtime always takes the serial path.
 
 ## Native modules
 

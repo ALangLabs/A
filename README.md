@@ -3,7 +3,7 @@
 # A
 
 **A fast, batteries-included programming language and toolchain** — lexer, parser,
-type checker, ownership analysis, SSA optimizer, and a TinyCC-derived backend that
+type checker, ownership analysis, and an LLVM-based backend that
 compiles A straight to native machine code.
 
 [![CI](https://github.com/ALangLabs/A/actions/workflows/ci.yml/badge.svg)](https://github.com/ALangLabs/A/actions/workflows/ci.yml)
@@ -24,10 +24,9 @@ compiles A straight to native machine code.
   (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang` (host targets;
   cross-compile is not yet supported). A declined construct is a hard error
   — there is no fallback.
-- **Multi-target builds** — `a build --target <arch>` cross-compiles for
-  i386, ARM (ARMv7), AArch64 (`aarch64`/`arm64`) and RISC-V64 on the host OS,
-  given a matching target sysroot (see *Cross-compilation* below), plus the
-  bare-metal 16-bit `i8086` target.
+- **Multi-target builds** — `a build --target <arch>` accepts the host
+  arch/os only today; the LLVM backend cannot cross-compile (see
+  *Targets* below).
 - **Static type checking with inference** — Hindley-Milner-style unification,
   generics, traits, algebraic enums, optional/result types, and flow-sensitive
   narrowing (`if x != None`).
@@ -57,7 +56,7 @@ compiles A straight to native machine code.
 
 Prebuilt binaries are published on
 [GitHub Releases](https://github.com/ALangLabs/A/releases). The installers
-drop `a`, `a-lsp`, the Astra backend, and the stdlib under `~/.local`
+drop `a`, `a-lsp`, the staged runtime (`astralib/`), and the stdlib under `~/.local`
 (Linux/macOS) or `%LOCALAPPDATA%\Programs\A` (Windows), put them on `PATH`,
 and install the editor extension into every detected VS Code or fork
 (Cursor, Windsurf, VSCodium, …):
@@ -158,21 +157,19 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 ```mermaid
 flowchart LR
     src[".astra source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
-    fe --> s["x86-64 / per-arch asm"]
-    s --> astra["Astra backend<br/>(TinyCC fork)"]
-    rt["A runtime (C)<br/>aval values · collections · builtins"] --> astra
-    astra --> bin["native executable"]
+    fe --> ll["LLVM IR"]
+    ll --> tools["opt → llc → clang<br/>(system LLVM toolchain)"]
+    rt["A runtime (C)<br/>aval values · collections · builtins"] --> tools
+    tools --> bin["native executable"]
     bin --> out["stdout / exit code"]
 ```
 
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
   analysis, and the native code emitters
-  (`emitLLVM` -> LLVM IR -> opt/llc/clang
-  for `x86_64-windows`).
-- **`compiler/astra/backend/`** — **Astra**, a TinyCC fork: the `astra` driver,
-  the `libastra` library API, per-target code generators (x86-64, ARM, AArch64,
-  RISC-V, i386, C67x), ELF/Mach-O/COFF writers, and support libraries.
+  (`emitLLVM` -> LLVM IR -> `opt`/`llc`/`clang`, host targets only;
+  `cmake/aruntime.cmake` stages `compiler/astra/runtime/*.c` into
+  `build/astralib/libaruntime.a`, which every compiled program links).
 - **`compiler/astra/runtime/`** — the C runtime every A program links:
   NaN-boxed `aval` values, collections, builtins, and native modules
   (json, fs, net, arena, unsafe, python interop, terminal, time, intrinsics).
@@ -184,84 +181,30 @@ flowchart LR
 - **`tools/vscode-a/`** — VS Code extension with syntax highlighting,
   snippets, tasks, and the LSP client.
 
-## 🎯 Targets & cross-compilation
+## 🎯 Targets
 
-`a build --target <arch>` selects the output architecture (the OS always
-matches the host — Astra drivers are built per-OS and cannot cross
-operating systems):
+The LLVM backend is **host-only**: `a build`/`a run`/`a test`/`a repl`
+produce and execute binaries for the host architecture and OS
+(`x86_64` or `aarch64`/`arm64`). `a build --target <arch>` parses foreign
+targets but rejects them with a clear error — there is no cross-compile
+path and no per-arch assembler backend. RISC-V32, `i386`, `arm`, `riscv64`
+and the bare-metal `i8086` target are all unsupported; the hand-written
+`compiler/astra/runtime/i8086_runtime.s` subset remains in the tree for
+reference only.
 
-| Target | Backend | Status |
-|---|---|---|
-| `x86_64` (default) | x86-64 asm emitter → `astra` | native, fully tested |
-| `i386` | native i386 asm emitter → `astra-i386` | verified (runs natively on x86-64) |
-| `arm` (ARMv7 hard-float) | native ARM asm emitter → `astra-arm` | verified under qemu-armhf |
-| `aarch64` / `arm64` | native AArch64 asm emitter → `astra-arm64` | needs AArch64 sysroot |
-| `riscv64` | native RISC-V64 asm emitter → `astra-riscv64` | needs RISC-V64 sysroot |
-| `i8086` / `i86` / `i8088` | native i8086 asm emitter, bare metal → flat boot image | Linux hosts only; no libc/sysroot; `a run` via qemu-system-i386, `a test` unsupported |
-
-`a run`, `a test` and `a repl` execute natively and reject non-host
-targets — the one exception is `a run --target i8086` on Linux, which runs
-the boot image under QEMU (see below). Linking a cross binary requires the
-target C library: install the matching cross toolchain
-(e.g. `gcc-aarch64-linux-gnu`, `libc6-dev-i386`)
-or point `A_SYSROOT` / `A_SYSROOT_<ARCH>` at a sysroot root. Per-arch Astra
-drivers and staged lib dirs are produced by the build (`build/astra/astra-<arch>`,
-`build/astralib-<arch>/`); `A_ASTRA_<ARCH>` overrides the driver lookup.
-
-Not supported: RISC-V32 (no astra backend; the runtime value model is
-64-bit). 16-bit is `i8086` only — a bare-metal real-mode target (the
-emitted code uses 386+ operand-size prefixes despite the name) with no
-libc and no sysroot, built by the per-arch `astra-i8086` assembler/linker
-(asm-only; there is no i8086 C backend). `a build --target i8086 -o img`
-produces a flat boot image (`-oformat=binary`, entry at 0x7C00): sector 0
-contains an `int 13h` CHS loader (AH=08h drive geometry + AH=02h reads) that
-pulls the remaining 512-byte sectors to 0x7E00+, records the sector count at
-file offset 0x1F8, and stamps the 0x55AA signature; it then far-jumps to
-`_entry` at CS=0x1000. `print` writes to COM1 (0x3F8), program exit writes
-42 to port 0xF4 and halts. The hand-written runtime
-(`compiler/astra/runtime/i8086_runtime.s`) is a partial subset. It handles
-tagged-int arithmetic/comparisons, `print` of ints/strings/`none`/`true`/
-`false`, string literals and `+` concatenation, `len`/`str`/`int`/`bool`/
-`abs`/`range`/`repr`, `[]` indexing (including ranges like `xs[1..4]`),
-`if`/`while`/`for` over ints, and `fn(x) => …` lambdas called directly;
-other builtins are stubs returning `none`. Real-mode CS:IP is 16-bit, so
-`.text` must fit in a single 64 KiB code segment at 0x10000 — the emitter
-dead-strips unreachable functions to stay under it. The astra i8086 driver
-is built on Linux hosts only. Known gaps: method/attribute access
-(`s.upper()`, `d.get(…)`) and dict `d[k]` read-back are stubs that print
-nothing, string interpolation `"{expr}"` and programs that mix
-heap-allocated strings with further loops wedge the image until QEMU is
-killed, and tuple iteration is rejected at code generation. The runtime
-heap is a fixed 60 KiB bump arena with no collection, so keep programs
-small. Those claims were checked by running programs under
-`qemu-system-i386`.
-`a run --target i8086` builds
-the image and executes it under `qemu-system-i386` (COM1 on stdio,
-isa-debug-exit on port 0xF4); `a test`/`a repl` still reject it.
-`tests/integration/i8086_image.sh` is the automated harness — it builds an
-image and diffs serial output against an expected `.out` file. To run an
-image manually:
-`qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
-Windows is a supported host OS (x86-64 and arm64): the driver pipeline has
+Windows is a supported host OS (x86-64 and arm64): the pipeline's
 `_WIN32` ports (`CreateProcess`, `GetTempPath`, `GetModuleFileName` in
-`pipeline.cpp`), the Win64 MS-ABI native emitter covers `x86_64`, and the
-Windows astra drivers (`x86_64`, `i386`, `arm64`) link PE32+ executables —
-`a run`/`a test`/`a build` work, with `a test` taking the serial path (no
-fork-based batching) and the runtime's parallel pool disabled. Runtime
-caveats on Windows: TCP sockets work via Winsock2, but TLS/zlib stay
-unavailable (no `dlopen`), `import python:<pkg>` interop is stubbed out,
-and POSIX-only pieces like `terminal` raw mode degrade gracefully. The
-`i8086` target remains Linux-hosts-only, and Windows builds only the
-`x86_64`/`i386`/`arm64` astra drivers — no `arm`, `riscv64`, or `i8086`.
-Debian `*-cross`
-sysroots ship `libc.so`/`libm.so` linker scripts with absolute paths
-astra cannot resolve — rewrite the `GROUP` entries relative to the sysroot
-lib dir when setting one up.
+`pipeline.cpp`) produce and run PE32+ executables — `a run`/`a test`/
+`a build` work, with `a test` taking the serial path (no fork-based
+batching) and the runtime's parallel pool disabled. Runtime caveats on
+Windows: TCP sockets work via Winsock2, but TLS/zlib stay unavailable
+(no `dlopen`), `import python:<pkg>` interop is stubbed out, and
+POSIX-only pieces like `terminal` raw mode degrade gracefully.
 
-`tests/integration/cross_suite.sh <arch> <sysroot-env> <sysroot> [runner]`
-cross-compiles every runnable integration case for a target and diffs
-program output — verified 70/70 on i386 (native), arm, aarch64 and riscv64
-(under qemu-user).
+The staged runtime (`build/astralib/` in-tree, `<prefix>/astralib/` when
+installed) contains copies of `compiler/astra/runtime/*` plus the
+prebuilt `libaruntime.a` that `llvmBuild` links via `clang`; LLVM tools
+are located via `A_LLVM_OPT`/`A_LLVM_LLC`/`A_LLVM_CC` or PATH.
 
 ## 📚 Documentation
 

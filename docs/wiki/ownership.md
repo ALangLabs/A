@@ -74,9 +74,9 @@ stats, `A_GC_DEBUG=1` for stage markers.
   wrappers become unreachable. `Py_Finalize()` is called through an
   atexit handler at process exit; a bounded amount of CPython module
   state remains internal to that interpreter by design.
-- TinyCC-built runtimes with `A_RUNTIME_CC=off` are executable evidence for
-  the host path. ARM, AArch64, and RISC-V executable verdicts still require
-  matching target C-library sysroots.
+- The system-C runtime build (`libaruntime.a`, POSIX) is executable
+  evidence for the host path; other host OSes take their own runtime
+  configurations.
 - `copy()` is a deep copy with cycle preservation; cyclic structures
   are collected normally once unreachable.
 - Parallel regions (`A_PAR`) and GC worker threads are coordinated so

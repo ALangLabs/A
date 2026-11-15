@@ -7,9 +7,7 @@
 // literals (int/float/bool/char/string/array/tuple/map/set/range), unary and
 // binary operators through the boxed runtime slow paths, indexing, field
 // access, builtins via a_bi_call, top-level lets as globals.
-// Deferred (clear error): lambdas, match/try/comprehensions, safe-nav,
-// slices, destructure, defer, generics/comptime params, extern fns,
-// struct/enum/trait/impl decls, kwargs, test mode.
+// Deferred (clear error): extern fns, generics/comptime params.
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
@@ -39,6 +37,23 @@ std::int64_t avalIntEncode(std::int64_t v) {
   return (std::int64_t)(kAvalTag | (std::int64_t)p);
 }
 
+// filename stem of a module path: "lib/mathx.astra" -> "mathx",
+// "pkg/__init__.astra" -> "pkg" (mirrors LlvmEmitter::stemOf)
+std::string stemOf(const std::string& p) {
+  std::string s = p;
+  auto slash = s.find_last_of('/');
+  if (slash != std::string::npos) s = s.substr(slash + 1);
+  auto dot = s.find_last_of('.');
+  if (dot != std::string::npos) s = s.substr(0, dot);
+  if (s == "__init__") {
+    std::string d = p.substr(0, slash == std::string::npos ? 0 : slash);
+    auto s2 = d.find_last_of('/');
+    d = s2 == std::string::npos ? d : d.substr(s2 + 1);
+    return d;
+  }
+  return s;
+}
+
 struct MlBinding {
   std::string slot;   // alloca SSA name (a !llvm.ptr value)
   std::string dropFn; // cname of struct `drop` method, "" if none
@@ -46,8 +61,10 @@ struct MlBinding {
 
 class MlirEmitter {
  public:
-  MlirEmitter(const ModuleGraph& graph, const SemaResult& sema)
-      : graph_(graph), sema_(sema) {}
+  MlirEmitter(const ModuleGraph& graph, const SemaResult& sema,
+              bool testMode = false, const std::string& testFilter = "")
+      : graph_(graph), sema_(sema), testMode_(testMode),
+        testFilter_(testFilter) {}
 
   bool run(std::string& out, std::string& error) {
     (void)sema_;
@@ -60,6 +77,7 @@ class MlirEmitter {
     emitFunctions();
     emitStructCtors();
     emitMainBody();
+    emitGcRoots();
     emitMain();
     emitLambdas();  // drain last: lambdas may be created anywhere
     if (failed_) return false;
@@ -76,6 +94,9 @@ class MlirEmitter {
   std::ostringstream pre_;   // module { ... decls + globals
   std::ostringstream body_;  // llvm.func definitions (outside module? no—inside)
   std::ostringstream fn_;    // current function body
+  std::ostringstream fnAllocs_;  // hoisted entry-block allocas
+  std::string curFnName_, curFnFile_;
+  int curFnLine_ = 0;
 
   std::unordered_map<std::string, std::string> fnCnames_;
   std::unordered_map<std::string, std::string> globals_;
@@ -96,6 +117,10 @@ class MlirEmitter {
   int curModuleId_ = -1;  // module owning the code currently being emitted
   // moduleId -> exported local name -> (source moduleId, original name)
   std::map<int, std::map<std::string, std::pair<int, std::string>>> moduleReexports_;
+  // from-imported module-level values: local name -> (moduleId, member name);
+  // resolved lazily to a global symbol at use sites (covers `let`/implicit
+  // globals re-exported through __init__ chains)
+  std::unordered_map<std::string, std::pair<int, std::string>> moduleGlobalAliases_;
   // (moduleId, structName) -> ctor cname
   std::map<std::pair<int, std::string>, std::string> moduleStructCtors_;
   // python module aliases: local name -> python module path
@@ -141,6 +166,7 @@ class MlirEmitter {
     const LambdaExpr* expr;
     std::vector<std::string> captures;  // names, sorted
     std::string cname;
+    int moduleId = -1;
   };
   std::vector<PendingLambda> pendingLambdas_;
   int lamCounter_ = 0;
@@ -148,11 +174,14 @@ class MlirEmitter {
     const ForStmt* stmt;
     std::vector<std::string> capNames;
     std::string cname;
+    int moduleId = -1;
   };
   std::vector<PendingParfor> pendingParfors_;
   int parforCounter_ = 0;
   bool inFnBody_ = false;
   bool inUserFn_ = false;  // inside a user fn/lambda/parfor body (not main_body)
+  bool testMode_ = false;
+  std::string testFilter_;
 
   // current function state
   std::vector<std::map<std::string, MlBinding>> scopes_;
@@ -161,6 +190,7 @@ class MlirEmitter {
   std::vector<std::vector<std::pair<std::string, std::string>>> dropStack_;
   // struct display/full name -> MlStruct index for drop lookup
   std::unordered_map<std::string, size_t> structByName_;
+  std::vector<std::string> rootSyms_;  // global syms registered as GC roots
   std::unordered_map<std::int64_t, std::string> constCache_;
   int vCounter_ = 0;
   int labelCounter_ = 0;
@@ -215,18 +245,20 @@ class MlirEmitter {
 
   // ---- memory ------------------------------------------------------------------
   std::string allocaI64() {
-    std::string one = c64(1);
     std::string r = nv();
-    fn_ << "  " << r << " = llvm.alloca " << one
-        << " x !llvm.array<1 x i64> : (i64) -> !llvm.ptr\n";
+    std::string sz = nv();
+    fnAllocs_ << "  " << sz << " = llvm.mlir.constant(1 : i64) : i64\n";
+    fnAllocs_ << "  " << r << " = llvm.alloca " << sz
+              << " x !llvm.array<1 x i64> : (i64) -> !llvm.ptr\n";
     return r;
   }
   std::string allocaArr(int n) {
     int m = n > 0 ? n : 1;
-    std::string sz = c64(m);
     std::string r = nv();
-    fn_ << "  " << r << " = llvm.alloca " << sz
-        << " x !llvm.array<" << m << " x i64> : (i64) -> !llvm.ptr\n";
+    std::string sz = nv();
+    fnAllocs_ << "  " << sz << " = llvm.mlir.constant(" << m << " : i64) : i64\n";
+    fnAllocs_ << "  " << r << " = llvm.alloca " << sz
+              << " x !llvm.array<" << m << " x i64> : (i64) -> !llvm.ptr\n";
     return r;
   }
   std::string gepIdx(const std::string& p, const std::string& idx) {
@@ -406,9 +438,21 @@ class MlirEmitter {
     auto g = globals_.find(name);
     return g != globals_.end() ? g->second : "";
   }
-  // load a binding's current value (local slot or global)
+  // load a binding's current value (local slot, from-imported module global,
+  // or own-module global)
   std::string bindingValue(const std::string& name, bool& isGlobal) {
     if (MlBinding* b = lookup(name)) return load(b->slot);
+    auto mga = moduleGlobalAliases_.find(name);
+    if (mga != moduleGlobalAliases_.end()) {
+      auto rm = resolveModuleMember(graph_, mga->second.first, mga->second.second);
+      auto mg = moduleGlobals_.find({rm.first, rm.second});
+      if (mg != moduleGlobals_.end()) {
+        isGlobal = true;
+        std::string r = nv();
+        fn_ << "  " << r << " = llvm.mlir.addressof @" << mg->second << " : !llvm.ptr\n";
+        return load(r);
+      }
+    }
     std::string sym = globalSymFor(name);
     if (!sym.empty()) {
       isGlobal = true;
@@ -430,6 +474,7 @@ class MlirEmitter {
                 : "__a_g_" + name;
       if (curModuleId_ >= 0) moduleGlobals_[{curModuleId_, name}] = sym;
       globals_[name] = sym;
+      rootSyms_.push_back(sym);
       pre_ << "  llvm.mlir.global @" << sym << "(0 : i64) : i64\n";
     }
     {
@@ -440,10 +485,44 @@ class MlirEmitter {
   }
 
   // ---- module/function collection ----------------------------------------------
+  // integer literal (possibly unary-negated) for enum variant values
+  bool evalEnumLit(const Expr& e, std::int64_t& out) {
+    if (e.kind == ExprKind::IntLit) {
+      out = static_cast<const IntLitExpr&>(e).value;
+      return true;
+    }
+    if (e.kind == ExprKind::Unary) {
+      const UnaryExpr& u = static_cast<const UnaryExpr&>(e);
+      if (u.op == "-" && evalEnumLit(*u.operand, out)) { out = -out; return true; }
+      if (u.op == "+" && evalEnumLit(*u.operand, out)) return true;
+    }
+    return false;
+  }
+
+  // modules in dependency order (imports before importers), matching
+  // LlvmEmitter — top-level stmts/global inits must run in this order
+  std::vector<const Module*> orderedModules() {
+    std::vector<const Module*> out;
+    std::vector<char> seen(graph_.modules.size(), 0);
+    for (int id : graph_.order) {
+      if (id >= 0 && id < (int)graph_.modules.size() && !seen[id]) {
+        seen[id] = 1;
+        out.push_back(&graph_.at(id));
+      }
+    }
+    for (const Module& m : graph_.modules)
+      if (m.id >= 0 && m.id < (int)seen.size() && !seen[m.id]) {
+        seen[m.id] = 1;
+        out.push_back(&m);
+      }
+    return out;
+  }
+
   void collectTopLevel() {
     // Pre-pass: register every module's top-level fns so from-imports can
     // resolve members regardless of module visitation order.
-    for (const Module& mod : graph_.modules) {
+    for (const Module* mp : orderedModules()) {
+      const Module& mod = *mp;
       if (!mod.program) continue;
       for (const StmtPtr& s : mod.program->statements)
         if (s->kind == StmtKind::FnDecl) {
@@ -451,7 +530,8 @@ class MlirEmitter {
           if (!fn->isExtern) moduleFns_[{mod.id, fn->name}] = fn;
         }
     }
-    for (const Module& mod : graph_.modules) {
+    for (const Module* mp : orderedModules()) {
+      const Module& mod = *mp;
       if (!mod.program) continue;
       for (const StmtPtr& s : mod.program->statements) {
         if (s->kind == StmtKind::FnDecl) {
@@ -489,12 +569,15 @@ class MlirEmitter {
           // aModuleAliases_ via moduleId.
           if (!modName.empty() && nativeModuleSpec(modName)) {
             std::string alias = !im->alias.empty() ? im->alias
-                             : (!im->bareName.empty() ? im->bareName : modName);
+                             : (!im->bareName.empty() ? im->bareName
+                                                      : stemOf(im->path));
             nativeAliases_[alias] = modName;
             continue;
           }
           if (im->moduleId >= 0) {
-            std::string alias = !im->alias.empty() ? im->alias : im->bareName;
+            std::string alias = !im->alias.empty() ? im->alias
+                             : (!im->bareName.empty() ? im->bareName
+                                                      : stemOf(im->path));
             if (!alias.empty()) aModuleAliases_[alias] = im->moduleId;
           }
         } else if (s->kind == StmtKind::EnumDecl) {
@@ -505,14 +588,23 @@ class MlirEmitter {
             MlVariant mv;
             mv.tag = tag++;
             mv.algebraic = ed->isAlgebraic();
-            mv.value = v.value ? (std::int64_t)0 : next;  // auto-increment approx
+            if (v.value) {
+              std::int64_t ev = 0;
+              if (!evalEnumLit(*v.value, ev)) {
+                fail("enum variant value must be an integer literal");
+                return;
+              }
+              mv.value = ev;
+            } else {
+              mv.value = next;
+            }
             next = mv.value + 1;
             for (const FieldDecl& f : v.fields) mv.payloadFields.push_back(f.name);
             enumVariants_[ed->name + "." + v.name] = mv;
           }
         } else if (s->kind == StmtKind::StructDecl) {
           const StructDecl* sd = static_cast<const StructDecl*>(s.get());
-          if (sd->typeParams.empty()) {
+          {
             MlStruct ms;
             std::string disp = sd->name;
             std::size_t sep = disp.rfind("::");
@@ -570,6 +662,7 @@ class MlirEmitter {
               auto it = moduleFns_.find({fi->moduleId, item.name});
               if (getenv("A_DEBUG_MOD")) fprintf(stderr, "[mod] from-import mod=%d item=%s local=%s hit=%d\n", fi->moduleId, item.name.c_str(), local.c_str(), it!=moduleFns_.end()?1:0);
               if (it != moduleFns_.end()) aModuleFnAliases_[local] = it->second;
+              moduleGlobalAliases_[local] = {fi->moduleId, item.name};
               // re-export: this module exposes `local` -> (fi->moduleId, item.name)
               moduleReexports_[mod.id][local] = {fi->moduleId, item.name};
             }
@@ -656,15 +749,17 @@ class MlirEmitter {
         {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
         {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(i64) -> i64"},
         {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
-        {"a_frame_push", "(i64, i64, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
+        {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
         {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
         {"a_fib_main", "(i64, i64, i64, !llvm.ptr) -> i64"},
         {"a_fib_spawn_handle", "(i64, i64, !llvm.ptr) -> i64"},
         {"a_fib_join_handle", "(i64) -> i64"},
+        {"a_test_main", "(i64, !llvm.ptr, !llvm.ptr) -> i32"},
         {"a_printv", "(i64, !llvm.ptr) -> ()"},
         {"a_eprintv", "(i64, !llvm.ptr) -> ()"},
         {"a_println", "(i64) -> ()"}, {"a_sleep", "(i64) -> ()"},
         {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
+        {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
     };
     for (const auto& kv : sigs) {
       std::string sig = kv.second;
@@ -696,19 +791,43 @@ class MlirEmitter {
   }
 
   void emitGlobals() {
+    rootSyms_.clear();
     std::vector<std::string> syms;
     for (const auto& kv : globals_) syms.push_back(kv.second);
     for (const auto& kv : moduleGlobals_) syms.push_back(kv.second);
     std::sort(syms.begin(), syms.end());
     syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
+    rootSyms_ = syms;
     for (const std::string& sym : syms)
       pre_ << "  llvm.mlir.global @" << sym << "(0 : i64) : i64\n";
+  }
+
+  // GC roots: dedup and emit the marker fn (defined before main so the
+  // registration call in main can reference it).
+  void emitGcRoots() {
+    std::sort(rootSyms_.begin(), rootSyms_.end());
+    rootSyms_.erase(std::unique(rootSyms_.begin(), rootSyms_.end()),
+                    rootSyms_.end());
+    if (rootSyms_.empty()) return;
+    body_ << "llvm.func @__a_gc_root_mark() -> () {\n";
+    for (const std::string& sym : rootSyms_) {
+      body_ << "  %r_" << sym << " = llvm.mlir.addressof @" << sym << " : !llvm.ptr\n";
+      body_ << "  %v_" << sym << " = llvm.load %r_" << sym << " : !llvm.ptr -> i64\n";
+      body_ << "  llvm.call @a_gc_mark_aval(" << "%v_" << sym << ") : (i64) -> ()\n";
+    }
+    body_ << "  llvm.return\n}\n\n";
   }
 
   // ---- functions ------------------------------------------------------------------
   void beginFunction(const std::string& sym, const FnDecl* fn) {
     curModuleId_ = fn->moduleId;
+    curFnName_ = (fn && !fn->name.empty()) ? fn->name : sym;
+    curFnFile_ = (fn && fn->moduleId >= 0 &&
+                  fn->moduleId < (int)graph_.modules.size())
+                     ? graph_.at(fn->moduleId).path : "";
+    curFnLine_ = (fn && fn->span.line > 0) ? fn->span.line : 0;
     fn_.str("");
+    fnAllocs_.str("");
     constCache_.clear();
     vCounter_ = 0;
     labelCounter_ = 0;
@@ -755,6 +874,7 @@ class MlirEmitter {
       fn_ << "^" << ldm << ":\n";
       terminated_ = false;
     }
+    emitFramePush();
   }
   // Emits a copy of the deferred stmts (LIFO). Does NOT clear: every return
   // site needs its own copy; the registry lives for the whole function.
@@ -762,15 +882,50 @@ class MlirEmitter {
     for (auto it = pendingDefers_.rbegin(); it != pendingDefers_.rend(); ++it)
       emitStmt(**it);
   }
+  // call-frame tracking for panic tracebacks + stack-overflow detection
+  // (mirrors LlvmEmitter::emitFramePush/emitFramePop).
+  void emitFramePush() {
+    std::string np = cstrPtr(curFnName_);
+    std::string fp = cstrPtr(curFnFile_);
+    std::string lp = nv();
+    fn_ << "  " << lp << " = llvm.mlir.constant(" << curFnLine_
+        << " : i32) : i32\n";
+    fn_ << "  llvm.call @a_frame_push(" << np << ", " << fp << ", " << lp
+        << ") : (!llvm.ptr, !llvm.ptr, i32) -> ()\n";
+  }
+  void emitFramePop() {
+    fn_ << "  llvm.call @a_frame_pop() : () -> ()\n";
+  }
+  void emitReturn(const std::string& v) {
+    emitFramePop();
+    fn_ << "  llvm.return " << v << " : i64\n";
+  }
+
   void endFunction() {
     if (!terminated_) {
       emitPendingDefers();
       emitAllDrops();
       std::string k = c64(kAvalTag | 0x2);
-      fn_ << "  llvm.return " << k << " : i64\n";
+      emitReturn(k);
     }
     fn_ << "}\n\n";
-    body_ << fn_.str();
+    flushFunction();
+  }
+
+  // splice hoisted allocas into the entry block (right after the func
+  // header) — allocas emitted mid-loop would allocate fresh stack every
+  // iteration since their address escapes into runtime calls.
+  void flushFunction() {
+    std::string body = fn_.str();
+    std::string allocs = fnAllocs_.str();
+    if (!allocs.empty()) {
+      auto nl = body.find('\n');
+      if (nl != std::string::npos)
+        body.insert(nl + 1, allocs);
+      else
+        body += allocs;
+    }
+    body_ << body;
   }
 
   void emitFunctions() {
@@ -851,9 +1006,9 @@ class MlirEmitter {
         callI64("a_dict_set", {obj, ks, fv});
       }
       callI64("a_promote", {obj});
-      fn_ << "  llvm.return " << obj << " : i64\n";
+      emitReturn(obj);
       fn_ << "}\n\n";
-      body_ << fn_.str();
+      flushFunction();
       if (failed_) return;
     }
   }
@@ -886,18 +1041,27 @@ class MlirEmitter {
       curModuleId_ = savedMod;
       if (failed_) return;
     }
-    if (entry_) {
+    // test mode runs module inits only; entry body is skipped (mirrors
+    // LlvmEmitter, where emitMainBody is not emitted under a_test_main).
+    if (entry_ && !testMode_) {
       bool svf = inFnBody_; inFnBody_ = true;
+      int svm = curModuleId_; curModuleId_ = entry_->moduleId;
       emitStatements(entry_->body);
-      inFnBody_ = svf;
+      curModuleId_ = svm; inFnBody_ = svf;
     }
     endFunction();
   }
 
   void emitMain() {
+    if (testMode_) { emitTestMain(); return; }
     body_ << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
     // a_runtime_init()
     body_ << "  llvm.call @a_runtime_init() : () -> ()\n";
+    if (!rootSyms_.empty()) {
+      // register GC root callback marking all module globals
+      body_ << "  %gr0 = llvm.mlir.addressof @__a_gc_root_mark : !llvm.ptr\n";
+      body_ << "  llvm.call @a_gc_add_root_cb(%gr0) : (!llvm.ptr) -> ()\n";
+    }
     // %fnp = ptrtoint addressof __a_main_body
     body_ << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
     body_ << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
@@ -909,6 +1073,67 @@ class MlirEmitter {
     body_ << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
     body_ << "  llvm.return %c0 : i32\n";
     body_ << "}\n\n";
+  }
+
+  // Test-mode main: run module inits (via __a_main_body on a fiber, same as
+  // normal mode), then hand the entry module's `test_*` fns to the runtime
+  // harness a_test_main, which forks a child per test. Mirrors
+  // LlvmEmitter::emitTestMain.
+  void emitTestMain() {
+    body_ << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
+    body_ << "  llvm.call @a_runtime_init() : () -> ()\n";
+    body_ << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
+    body_ << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
+    body_ << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
+    body_ << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
+    body_ << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
+    body_ << "  %rinit = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
+             " : (i64, i64, i64, !llvm.ptr) -> i64\n";
+    std::vector<std::pair<std::string, std::string>> tests;  // (name, cname)
+    for (auto& kv : fnDecls_) {
+      const FnDecl* fn = kv.first;
+      if (fn->moduleId != graph_.entry) continue;
+      if (fn->name.rfind("test_", 0) != 0) continue;
+      if (!testFilter_.empty() &&
+          fn->name.find(testFilter_) == std::string::npos)
+        continue;
+      auto cit = fnDeclCnames_.find(fn);
+      if (cit != fnDeclCnames_.end())
+        tests.push_back({fn->name, cit->second});
+    }
+    std::sort(tests.begin(), tests.end());
+    if (tests.empty()) {
+      body_ << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
+      body_ << "  llvm.return %c0 : i32\n}\n\n";
+      return;
+    }
+    int n = (int)tests.size();
+    // names/fns as stack arrays of !llvm.ptr (char* / fn-ptr elements).
+    body_ << "  %tone = llvm.mlir.constant(1 : i64) : i64\n";
+    body_ << "  %names = llvm.alloca %tone x !llvm.array<" << n
+          << " x !llvm.ptr> : (i64) -> !llvm.ptr\n";
+    body_ << "  %fns = llvm.alloca %tone x !llvm.array<" << n
+          << " x !llvm.ptr> : (i64) -> !llvm.ptr\n";
+    for (int i = 0; i < n; ++i) {
+      std::string idx = "%ti" + std::to_string(i);
+      body_ << "  " << idx << " = llvm.mlir.constant(" << i << " : i64) : i64\n";
+      std::string g = cstrGlobalSym(tests[i].first);
+      body_ << "  %tn" << i << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+      body_ << "  %tnp" << i << " = llvm.getelementptr %names[" << idx
+            << "] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n";
+      body_ << "  llvm.store %tn" << i << ", %tnp" << i
+            << " : !llvm.ptr, !llvm.ptr\n";
+      body_ << "  %tf" << i << " = llvm.mlir.addressof @" << tests[i].second
+            << " : !llvm.ptr\n";
+      body_ << "  %tfp" << i << " = llvm.getelementptr %fns[" << idx
+            << "] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n";
+      body_ << "  llvm.store %tf" << i << ", %tfp" << i
+            << " : !llvm.ptr, !llvm.ptr\n";
+    }
+    body_ << "  %tn = llvm.mlir.constant(" << n << " : i64) : i64\n";
+    body_ << "  %rc = llvm.call @a_test_main(%tn, %names, %fns)"
+             " : (i64, !llvm.ptr, !llvm.ptr) -> i32\n";
+    body_ << "  llvm.return %rc : i32\n}\n\n";
   }
 
   // ---- statements ------------------------------------------------------------------
@@ -943,7 +1168,7 @@ class MlirEmitter {
         std::string v = rs.value ? evalExpr(*rs.value) : c64(kAvalTag | 0x2);
         emitPendingDefers();
         emitAllDrops();
-        fn_ << "  llvm.return " << v << " : i64\n";
+        emitReturn(v);
         terminated_ = true;
         break;
       }
@@ -1081,6 +1306,20 @@ class MlirEmitter {
       callI64("a_setitem", {evalExpr(*ix.object), evalExpr(*ix.index), v});
     } else if (t.kind == ExprKind::Field) {
       const FieldExpr& fx = static_cast<const FieldExpr&>(t);
+      // module-global store: mod.name = v (mod is an A-module alias)
+      if (fx.object->kind == ExprKind::Ident) {
+        const IdentExpr& oid = static_cast<const IdentExpr&>(*fx.object);
+        auto ma = aModuleAliases_.find(oid.name);
+        if (ma != aModuleAliases_.end()) {
+          std::string gsym = moduleGlobalSym(ma->second, fx.field);
+          if (!gsym.empty()) {
+            std::string r = nv();
+            fn_ << "  " << r << " = llvm.mlir.addressof @" << gsym << " : !llvm.ptr\n";
+            store(r, v);
+            return;
+          }
+        }
+      }
       std::string obj = evalExpr(*fx.object);
       std::string namev = cstrPtr(fx.field);
       callI64T("a_setattr", {{"i64", obj}, {"!llvm.ptr", namev}, {"i64", v}});
@@ -1158,6 +1397,7 @@ class MlirEmitter {
     pushScope();
     emitStatements(dw.body);
     popScope();
+    if (!terminated_) fn_ << "  llvm.br ^" << lcond << "\n";
     fn_ << "^" << lcond << ":\n";
     terminated_ = false;
     std::string c = evalExpr(*dw.cond);
@@ -1328,6 +1568,11 @@ class MlirEmitter {
         if (dc != kDConsts.end()) return avalDbl(dc->second);
         auto ic = kIConsts.find(id.name);
         if (ic != kIConsts.end()) return avalInt(ic->second);
+        // locals/globals shadow same-named functions in other modules
+        // (fnCnames_ is keyed by bare name across the whole module graph)
+        bool isG = false;
+        std::string bv = bindingValue(id.name, isG);
+        if (!bv.empty()) return bv;
         // named function used as a value -> fnon(ptrtoint(@fn), env=None, name)
         auto fc = fnCnames_.find(id.name);
         if (fc != fnCnames_.end()) {
@@ -1354,13 +1599,11 @@ class MlirEmitter {
           if (iid >= 0)
             return callBuiltin(iid, {stringLiteralAval(pa->second)});
         }
-        bool isG = false;
-        std::string v = bindingValue(id.name, isG);
-        if (v.empty()) {
+        if (bv.empty()) {
           failAt("unbound name '" + id.name + "'", &e);
           return "";
         }
-        return v;
+        return bv;
       }
       case ExprKind::Unary: return evalUnary(static_cast<const UnaryExpr&>(e));
       case ExprKind::Binary: return evalBinary(static_cast<const BinaryExpr&>(e));
@@ -1504,7 +1747,7 @@ class MlirEmitter {
     terminated_ = false;
     emitPendingDefers();
     callI64("a_promote", {t});
-    fn_ << "  llvm.return " << t << " : i64\n";
+    emitReturn(t);
     fn_ << "^" << lok << ":\n";
     terminated_ = false;
     return t;
@@ -1793,6 +2036,7 @@ class MlirEmitter {
     pl.expr = &x;
     pl.cname = "__a_lam_" + std::to_string(lamCounter_++);
     for (auto& kv : caps) pl.captures.push_back(kv.first);
+    pl.moduleId = curModuleId_;
     pendingLambdas_.push_back(pl);
     std::string env = callI64("a_closure_env_new", {c64((std::int64_t)pl.captures.size())});
     for (size_t i = 0; i < pl.captures.size(); ++i) {
@@ -1825,7 +2069,7 @@ class MlirEmitter {
   bool pfOuterBinding(const std::string& name) {
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it)
       if (it->count(name)) return true;
-    return globals_.count(name) || fnCnames_.count(name);
+    return !globalSymFor(name).empty() || fnCnames_.count(name);
   }
   bool pfExprOk(const Expr* e) {
     if (!e) return true;
@@ -1962,6 +2206,7 @@ class MlirEmitter {
     pf.stmt = &s;
     pf.cname = "__a_pf_" + std::to_string(parforCounter_++);
     for (auto& kv : caps) pf.capNames.push_back(kv.first);
+    pf.moduleId = curModuleId_;
     pendingParfors_.push_back(pf);
 
     std::string env = callI64("a_closure_env_new", {c64((std::int64_t)caps.size())});
@@ -2066,6 +2311,7 @@ class MlirEmitter {
   void emitParforFn(const PendingParfor& pf) {
     const ForStmt& x = *pf.stmt;
     FnDecl dummy;
+    dummy.moduleId = pf.moduleId;
     beginFunction(pf.cname, &dummy);
     // env = argv[0]
     std::string env = load(gepIdx("%argv", c64(0)));
@@ -2081,9 +2327,9 @@ class MlirEmitter {
     inFnBody_ = false; inUserFn_ = false;
     emitPendingDefers();
     std::string kn = c64(kAvalTag | 0x2);
-    fn_ << "  llvm.return " << kn << " : i64\n";
+    emitReturn(kn);
     fn_ << "}\n\n";
-    body_ << fn_.str();
+    flushFunction();
   }
 
   void emitLambdas() {
@@ -2092,6 +2338,7 @@ class MlirEmitter {
       pendingLambdas_.pop_back();
       const LambdaExpr& x = *pl.expr;
       FnDecl dummy;
+      dummy.moduleId = pl.moduleId;
       beginFunction(pl.cname, &dummy);
       // env = argv[0]
       std::string env = load(gepIdx("%argv", c64(0)));
@@ -2106,9 +2353,9 @@ class MlirEmitter {
         bindLocal(x.params[i].name, v);
       }
       std::string rv = evalExpr(*x.body);
-      fn_ << "  llvm.return " << rv << " : i64\n";
+      emitReturn(rv);
       fn_ << "}\n\n";
-      body_ << fn_.str();
+      flushFunction();
     }
     while (!failed_ && !pendingParfors_.empty()) {
       PendingParfor pf = pendingParfors_.back();
@@ -2636,6 +2883,14 @@ class MlirEmitter {
     return "";
   }
 
+  // `mod.name` -> global symbol when the member is a module-level let/assign
+  // global (possibly re-exported); "" otherwise.
+  std::string moduleGlobalSym(int moduleId, const std::string& name) {
+    auto rm = resolveModuleMember(graph_, moduleId, name);
+    auto g = moduleGlobals_.find({rm.first, rm.second});
+    return g != moduleGlobals_.end() ? g->second : "";
+  }
+
   std::string evalCall(const CallExpr& c) {
     // cast<T>(x) / x as T: compile-time annotation, runtime identity
     if (c.callee->kind == ExprKind::Ident &&
@@ -2692,15 +2947,16 @@ class MlirEmitter {
         int bid = builtinRuntimeId(ba->second);
         if (bid >= 0) return callBuiltin(bid, evalArgs());
       }
+      // locals/globals shadow same-named fns from other modules
+      bool isG = false;
+      std::string fv = bindingValue(id.name, isG);
+      if (!fv.empty()) return callValue(fv, evalArgs());
       auto fn = fnCnames_.find(id.name);
       if (fn != fnCnames_.end()) {
         auto fit = fnByCname_.find(fn->second);
         return callAFunction(fn->second,
             fit != fnByCname_.end() ? evalFnArgs(fit->second, c) : evalArgs());
       }
-      bool isG = false;
-      std::string fv = bindingValue(id.name, isG);
-      if (!fv.empty()) return callValue(fv, evalArgs());
       auto sc = structCtors_.find(id.name);
       if (sc != structCtors_.end()) {
         if (!hasKw) return callAFunction(sc->second, evalArgs());
@@ -2823,12 +3079,7 @@ class MlirEmitter {
 bool emitMLIR(const ModuleGraph& graph, const SemaResult& sema,
               std::string& out, std::string& error, bool testMode,
               const std::string* testFilter) {
-  (void)testFilter;
-  if (testMode) {
-    error = "mlir backend: test mode is not supported yet";
-    return false;
-  }
-  MlirEmitter emitter(graph, sema);
+  MlirEmitter emitter(graph, sema, testMode, testFilter ? *testFilter : "");
   return emitter.run(out, error);
 }
 

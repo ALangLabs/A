@@ -52,52 +52,20 @@ faster dev builds).
   runtime thread pool is disabled. Winsock2 provides plain TCP, but TLS
   and zlib stay unavailable (no `dlopen`), `import python:<pkg>` interop
   is stubbed out, and POSIX-only facilities (e.g. `terminal` raw mode)
-  degrade. `i8086` is Linux-hosts-only.
-- **Linux / macOS**: full feature set, including `i8086` (Linux only),
-  Python interop, TLS/zlib, and the parallel runtime/test paths.
+  degrade.
+- **Linux / macOS**: full feature set, including Python interop, TLS/zlib,
+  and the parallel runtime/test paths.
 
 ### `i8086` bare-metal target
 
-`--target i8086` (aliases `i86`, `8086`, `8088`) emits a flat real-mode
-boot image instead of an executable — no libc, no sysroot, no `a test`;
-`a run` executes the image under qemu-system-i386. Details:
+Unsupported. The LLVM backend is host-only and there is no longer a
+per-arch assembler backend, so `--target i8086` (aliases `i86`, `8086`,
+`8088`) is rejected like every other non-host target. The hand-written
+runtime subset remains in `compiler/astra/runtime/i8086_runtime.s` for
+reference, and `tests/integration/i8086_image.sh` is inert.
 
-- The output is a BIOS boot sector at 0x7C00 with an `int 13h` CHS loader
-  (AH=08h drive geometry + AH=02h reads) that pulls the remaining sectors
-  (image padded to 512-byte sectors, 0x55AA signature, sector count at
-  file offset 0x1F8) to 0x7E00+, then far-jumps to `_entry` at CS=0x1000.
-- The emitted code uses 386+ operand-size prefixes in real mode. Real-mode
-  CS:IP is 16-bit, so `.text` must fit a single 64 KiB segment at
-  0x10000; the emitter dead-strips unreachable functions to stay under it.
-- Runtime is the hand-written subset in
-  `compiler/astra/runtime/i8086_runtime.s`. It handles tagged-int
-  (boxed-int) arithmetic and comparisons, decimal `print` of
-  ints/strings/`none`/`true`/`false`, string literals + `+` concat,
-  `len`/`str`/`int`/`bool`/`abs`/`range`/`repr`, `[]` indexing (including
-  range subscripts like `xs[1..4]`), bitwise ops, `**`, `while`/`if`/`for`
-  over ints, and `fn(x) => …` lambdas called directly. `print` writes to
-  COM1 (0x3F8); remaining builtins (`a_getattr`/`a_method`/`a_slice`/
-  string interpolation/`a_test_main`, …) are stubs returning `none`.
-- Known gaps: method/attribute access (`s.upper()`, `d.get(…)`) and dict
-  `d[k]` read-back print nothing (stubs returning `none`); string
-  interpolation `"{expr}"` and programs that mix heap-allocated strings
-  with further loops wedge the image (kill the QEMU run, or use a shorter
-  `timeout`); tuple iteration is rejected at code generation. The heap is a
-  fixed 60 KiB bump arena with no collection, so keep images small.
-  These were checked by actually running programs under
-  `qemu-system-i386`, not only by compiling them.
-- Program exit writes 42 to port 0xF4 and halts. `a run --target i8086`
-  wraps `qemu-system-i386 -serial stdio -device isa-debug-exit`;
-  `tests/integration/i8086_image.sh <path-to-a> <source.astra> [expected.out]`
-  builds an image and diffs the serial output against `expected.out`. Manual run:
-  `qemu-system-i386 -drive format=raw,file=img -serial stdio -device isa-debug-exit,iobase=0xf4 -display none -no-reboot`
-- The `astra-i8086` driver is built on Linux hosts only. The astra i8086
-  backend is assembler-only, so if the native emitter declines a program
-  the build fails at the astra step (there is no C fallback on any target).
-
-Environment: `A_STDLIB`, `A_ASTRA`, `A_ASTRA_<ARCH>`, `A_RUNTIME_C`,
-`A_RUNTIME_CC_<ARCH>` (cross C compiler used at cmake time to build the
-runtime archives; e.g. `A_RUNTIME_CC_ARM64=aarch64-linux-gnu-gcc`),
+Environment: `A_STDLIB`, `A_RUNTIME_C` (path to a_runtime.c overriding the
+staged-runtime lookup),
 `A_TARGET`, `A_LLVM_CC`/`A_LLVM_OPT`/`A_LLVM_LLC`, `A_DEBUG_SRC`,
 `A_JOBS`,
 `A_GC` (`0` disables the garbage collector), `A_GC_STATS` (`1` prints

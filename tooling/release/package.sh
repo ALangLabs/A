@@ -2,8 +2,8 @@
 # Assemble a redistributable A toolchain payload from an existing build tree.
 #
 # The payload mirrors what the `a` driver discovers at run time:
-#   <root>/bin/a, a-lsp, astra, astra-<arch>...   (frontend + backend drivers)
-#   <root>/astralib/, astralib-<arch>/...          (staged runtime sources + libs)
+#   <root>/bin/a, a-lsp                            (frontend binaries)
+#   <root>/astralib/                                (staged runtime sources + libaruntime.a)
 #   <root>/stdlib/                                (standard library sources)
 #
 # usage: package.sh <build-dir> <dist-dir> [platform]
@@ -36,15 +36,11 @@ done
 [ -f "$root/bin/a" ] || [ -f "$root/bin/a.exe" ] || {
   echo "package: no 'a' binary found in $BUILD_DIR" >&2; exit 1; }
 
-# Astra backend drivers (host arch + every cross arch built for this OS).
-shopt -s nullglob
-for drv in "$BUILD_DIR"/astra/astra*; do
-  [ -f "$drv" ] && cp "$drv" "$root/bin/"
-done
-
-# Staged per-arch runtime directories (runtime C sources + libastra1.a +
-# libaruntime.a + headers) — `a run`/`a build` need these next to the prefix.
-for lib in "$BUILD_DIR"/astralib*; do
+# Staged runtime directory (runtime C sources + libaruntime.a + headers) —
+# `a run`/`a build` need it next to the prefix. cmake/aruntime.cmake produces
+# build/astralib; only the host-arch stage exists (the LLVM backend is
+# host-only).
+for lib in "$BUILD_DIR"/astralib; do
   [ -d "$lib" ] && cp -R "$lib" "$root/"
 done
 

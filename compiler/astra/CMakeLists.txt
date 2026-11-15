@@ -1,6 +1,6 @@
-# Astra toolchain support targets. The Astra fork itself is built by
-# cmake/libastra.cmake (libastra + the `astra` driver + staged astralib/); this file
-# covers the C++ pieces that live alongside it.
+# Astra toolchain support targets: the C++ frontend support library and
+# the in-process runtime archive. The staged libaruntime.a that `a run`/
+# `a build` link is produced by the top-level cmake/aruntime.cmake.
 
 # C++ runtime support library (Value, utf8/format, file io) used by the
 # frontend; lives next to the C runtime modules in runtime/.

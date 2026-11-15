@@ -1,0 +1,27 @@
+# py.buffer() exposes the CPython buffer protocol (PEP 3118) as a
+# zero-copy A view: indexing/len/iteration/item assignment hit the
+# exporter's memory directly.
+import python:array
+import python:builtins
+import std:py
+
+# array.array: signed 32-bit elements
+a = array.array("i", [1, 2, 3, 4])
+v = py.buffer(a)
+print(py.buffer_info(v))
+print(len(v), v[0], v[3])
+v[0] = 99
+print(a[0])
+
+# bytearray via memoryview: u8 elements, writable
+ba = builtins.bytearray([65, 66, 67])
+mv = py.buffer(builtins.memoryview(ba))
+print(len(mv), mv[0], mv[1], mv[2])
+mv[0] = 90
+print(ba[0])
+
+# iteration sums the raw elements
+s = 0
+for x in v:
+    s = s + x
+print(s)

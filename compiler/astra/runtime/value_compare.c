@@ -138,11 +138,18 @@ static int values_equal_body(aval a, aval b) {
         }
         return 1;
     }
+    /* Mixed Python/A equality: `pyobj == [1, 2]` / `pystr == "x"` go
+       through CPython rich comparison with the A side converted. Must run
+       before the ka != kb bail-out since T_PYOBJ is K_OTHER. */
+    {
+        AObj *pa = obj_of(a), *pb = obj_of(b);
+        int aPy = pa && pa->type == T_PYOBJ;
+        int bPy = pb && pb->type == T_PYOBJ;
+        if (aPy || bPy) return a_py_equals_mixed(a, b);
+    }
     if (ka != kb) return 0;
     if (ka == K_OTHER) {
         AObj *oa = obj_of(a), *ob = obj_of(b);
-        if (oa && ob && oa->type == T_PYOBJ && ob->type == T_PYOBJ)
-            return a_py_equals(a, b);
         if (oa && ob && oa->type == T_PYBUF && ob->type == T_PYBUF) {
             APyBuf *x = (APyBuf *)oa, *y = (APyBuf *)ob;
             if (x->count != y->count || x->kind != y->kind ||
