@@ -412,9 +412,16 @@ TypePtr Sema::inferLambda(LambdaExpr& expr) {
 }
 
 void Sema::checkLambdaAgainst(LambdaExpr& expr, TypePtr expected) {
+  // Called instead of inferExpr (see checkArgAgainst), so record the node's
+  // type here to keep Expr::inferredType / exprTypes_ populated for every
+  // checked expression.
+  auto recordType = [&expr, this](TypePtr type) {
+    expr.inferredType = resolveType(type);
+    exprTypes_[&expr] = type;
+  };
   TypePtr fn = resolveType(expected);
   if (fn->kind != TypeKind::Function) {
-    inferLambda(expr);
+    recordType(inferLambda(expr));
     return;
   }
   if (expr.params.size() != fn->params.size()) {
@@ -422,7 +429,7 @@ void Sema::checkLambdaAgainst(LambdaExpr& expr, TypePtr expected) {
                 "This lambda declares " + std::to_string(expr.params.size()) +
                     " parameter(s), but the expected function type takes " +
                     std::to_string(fn->params.size()) + ".");
-    inferLambda(expr);
+    recordType(inferLambda(expr));
     return;
   }
 
@@ -444,6 +451,9 @@ void Sema::checkLambdaAgainst(LambdaExpr& expr, TypePtr expected) {
     reportMismatch(bodyType, fn->ret, expr.body->span, "in the lambda result");
   }
   popScope();
+  // Params were declared with fn->params and the body unified with fn->ret,
+  // so the lambda's type is the expected function type.
+  recordType(fn);
 }
 
 void Sema::checkArgAgainst(Expr& expr, TypePtr expected, const std::string& context) {

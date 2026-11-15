@@ -68,6 +68,7 @@ set(A_MLIR_CORE_SOURCES
     dialect/ATypes.cpp
     passes/ALowerToLLVM.cpp
     passes/ALowerTyped.cpp
+    passes/ACanonicalize.cpp
 )
 
 # Frontend-coupled sources: only meaningful when the frontend exists.

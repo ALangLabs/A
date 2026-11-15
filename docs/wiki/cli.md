@@ -30,10 +30,16 @@ faster dev builds).
 - `--no-color` — plain diagnostics.
 - `--native` — execution backend for `run`/`test`/`repl` (the only
   backend; there is no interpreter). Codegen lowers the checked AST to
-  MLIR's llvm dialect and translates it to LLVM IR (`mlir-translate`),
-  then compiles with `opt`/`llc`/`clang`. The direct LLVM-IR emitter is
-  still reachable for debugging via the `A_BACKEND=llvm` environment
-  variable — it is not exposed as a CLI flag.
+  MLIR's llvm dialect and compiles it **in-process** by default
+  (parse -> canonicalize -> LLVM IR -> `llvm::PassBuilder` opt ->
+  `TargetMachine` -> `.o` -> clang link with `libaruntime.a`). The
+  `mlir-translate`/`opt`/`llc` subprocess chain remains as an escape
+  hatch: `A_BACKEND=subprocess` (aliases `mlir-subprocess`,
+  `llvm-subprocess`, `tools`) or `A_MLIR_NATIVE=0`. `A_BACKEND=llvm` is
+  a legacy driver knob, not a CLI flag. On non-Windows hosts a sibling
+  `.ambc`/`.ambc.d` package written by `a precompile` is used
+  automatically (`A_AMBC=0` disables); packages do not track dependency
+  changes, so re-run `a precompile` after editing any imported module.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.astra --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single
@@ -42,9 +48,11 @@ faster dev builds).
   no tests match anywhere.
 - `--target <arch>` — the LLVM backend is host-only: the host arch is
   the only supported target today (`x86_64`, `aarch64`/`arm64`);
-  non-host targets are rejected with a clear error. A lowers to LLVM IR
-  (`frontend/llvm/`), then `opt -O<n>` → `llc -filetype=obj` → `clang`
-  links against `libaruntime.a` (tools found via `A_LLVM_OPT`/`A_LLVM_LLC`/
+  non-host targets are rejected with a clear error. A lowers to MLIR's
+  llvm dialect (`frontend/mlir/`), compiled in-process by default and
+  linked against `libaruntime.a` via `clang` (the subprocess fallback
+  uses `mlir-translate` + `opt -O<n>` → `llc -filetype=obj` → `clang`,
+  tools found via `A_MLIR_TRANSLATE`/`A_LLVM_OPT`/`A_LLVM_LLC`/
   `A_LLVM_CC` or PATH). `a run` executes natively; `a test`/`a repl`
   require the host target.
 

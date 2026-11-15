@@ -295,3 +295,33 @@ void a_region_store(void *container, aval child) {
     if (a_gc_region_escape(container, g_region_depth))
         a_promote(child);
 }
+
+/* Raw-store barrier for codegen that emits llvm.store directly into a
+   heap object's aval-typed field instead of calling a runtime setter
+   (typed-ABI phase 2). `container` is the container's aval (its payload
+   is the registered object header pointer, same value a_region_store
+   callers pass as AArr/ADict/AEnv). `slot` must point at the
+   just-written aval; the value is fetched here so the emitter does not
+   need a second SSA copy of it.
+
+   Scalar typed fields (i64/f64/bool/char/vector) never hold A object
+   pointers and need NO barrier call at all. Applying this helper to a
+   raw scalar slot is still SAFE -- a non-pointer bit pattern simply
+   fails a_is_ptr, and a pointer-looking pattern promotes one object
+   conservatively (retention, never corruption). */
+void a_region_barrier(aval container, aval *slot) {
+    if (!regions_on() || !slot || !a_is_ptr(container)) return;
+    a_region_store(obj_of(container), *slot);
+}
+
+/* Bulk variant for raw stores that fill n consecutive aval slots
+   (e.g. typed-array element init emitted as llvm.memset/memcpy followed
+   by element stores, or SROA-sunk aggregate fields). One escape check
+   per element keeps semantics identical to calling a_region_store per
+   store; non-pointer avals early-out inside a_region_store. */
+void a_region_barrier_range(aval container, aval *slots, uint64_t n) {
+    if (!regions_on() || !slots || !n || !a_is_ptr(container)) return;
+    void *c = obj_of(container);
+    for (uint64_t i = 0; i < n; ++i)
+        a_region_store(c, slots[i]);
+}

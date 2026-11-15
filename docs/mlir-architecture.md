@@ -13,6 +13,54 @@ subprocesses" to a Mojo/KGEN-style architecture:
 plus Mojo-`.mojoc`-style bytecode packaging: checked modules serialize to MLIR
 bytecode (`.ambc`) so imports/precompiled packages skip re-parse+sema.
 
+## Status (as of this doc)
+
+Implemented and exercised by `tests/mlir/` (`a mlir-opt` golden suite):
+
+- **`a` dialect + text round-trip**: DONE. Ops/types in
+  `src/astra/mlir/dialect/` (`ADialect`, `AOps`, `ATypes`); `a mlir-opt`
+  parses and prints MLIR text round-trip (`a_ops_roundtrip`,
+  `a_ops_struct`, `typed_ops`, `typed_unbox` cases).
+- **`a` -> `llvm` lowering**: DONE — all 23 ops lowered
+  (`a-lower-to-llvm` pass in `src/astra/mlir/passes/ALowerToLLVM.cpp`),
+  including `a.struct.getfield`/`a.struct.setfield` via the per-op `field`
+  StrAttr (lowered to `a_getattr`/`a_setattr` runtime calls with
+  materialized `__a_cstr<N>` name globals) and i1/`!a.bool` ABI values
+  (tagged-aval encoding). `a.for`/`a.while`/`a.condition` region
+  rebuilding is heap-safe (in-place successor retargeting).
+- **`a-canonicalize` pass**: DONE — folds `to_aval`/`from_aval` round-trips,
+  `from_aval(a.const int)` chains, identity `to_aval`, and `a.gep` with a
+  constant-zero index; wired before the lowering passes.
+- **Typed values M1 (boxing)**: DONE — `a.to_aval`/`a.from_aval` boxing for
+  i64/f64/i1 scalars via `a-lower-typed` (`ALowerTyped.cpp`), including
+  SingleBlock-region-safe `from_aval` lowering through synthesized
+  `__a_from_aval_*` helpers. **M2 (unboxed typed values)**: in progress —
+  see `docs/mlir-typed-values-design.md`.
+- **Pass pipeline**: canonicalize/CSE/mem2reg/SROA + custom lowering passes
+  wired in `src/astra/mlir/pipeline.cpp`; `a mlir-opt` accepts mlir-opt-style
+  pass lists.
+- **Per-module `.ambc` packages**: DONE. `a precompile <pkg> -o <dir>`
+  writes `<dir>/<mod>.ambc` + `ambc.meta`; consumed by default on
+  non-Windows (`A_AMBC=0` disables; `ambc_modules.cpp`). Single-file
+  `foo.ambc` sibling packages also work; `a test` uses the per-module
+  layout (`ambcModulesCompileToObject` synthesizes the `a_test_main`
+  harness and applies the compile-time `--filter` substring). NOTE:
+  packages do not track
+  dependency mtimes — re-run `a precompile` after changing ANY imported
+  module or `a run`/`a build` will silently link the stale package.
+- **In-process LLVM bridge**: implemented in
+  `src/astra/mlir/codegen.cpp`/`native.cpp` (parse llvm-dialect text ->
+  LLVM IR -> `llvm::PassBuilder` -> `TargetMachine` -> `.o`) and is the
+  DEFAULT on non-Windows hosts.
+- **Defaults**: the in-process MLIR path is the default for
+  `a build`/`a run`; the subprocess pipeline
+  (`mlir-translate`/`opt`/`llc`/`clang`) remains as the escape hatch via
+  `A_MLIR_NATIVE=0` or `A_BACKEND=subprocess` (aliases
+  `mlir-subprocess`/`llvm-subprocess`/`tools`). `A_BACKEND=mlir-native`
+  (or `native`) selects it explicitly. Windows and no-MLIR builds always
+  use the subprocess path. `a check`/`a fmt`/`a doc`/LSP never touch
+  either backend.
+
 ## Environment facts (verified)
 
 - MLIR 18 dev is installed: headers `/usr/lib/llvm-18/include/mlir`,
@@ -71,8 +119,9 @@ package (parse + sema only, like `mojo precompile`).
   `g++ -std=c++20 -fsyntax-only` against MLIR headers
   (`-I/usr/lib/llvm-18/include -I/usr/lib/llvm-18/include/mlir/IR` etc.) or a
   private build dir `build-<name>` if you must configure.
-- Keep `emitMLIR` (text path) and the `llvm_emit.cpp` fallback intact; new
-  paths are additive, gated by env `A_MLIR_NATIVE=1` until integration.
+- Keep `emitMLIR` (text path) and the `llvm_emit.cpp` fallback intact; the
+  in-process paths are now the default on non-Windows — `A_MLIR_NATIVE=0`
+  or `A_BACKEND=subprocess` and `A_AMBC=0` are the escape hatches.
 - Namespace `a`, C++20, no warnings (CI = Werror).
 - MLIR 18 API: use `mlir::` dialect registration, `PassManager`,
   `BytecodeWriter`/`BytecodeReader`, `translateModuleToLLVMIR`,

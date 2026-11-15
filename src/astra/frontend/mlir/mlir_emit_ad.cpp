@@ -34,6 +34,7 @@
 // Deferred (clear error): extern fns, generics/comptime params.
 #include <algorithm>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <memory>
@@ -81,6 +82,23 @@ std::string stemOf(const std::string& p) {
 struct MlBinding {
   std::string slot;   // alloca SSA name (a !llvm.ptr value)
   std::string dropFn; // cname of struct `drop` method, "" if none
+  // "aval" (default): slot holds a raw i64 aval word. Otherwise the MLIR
+  // scalar type of the unboxed value stored in the slot ("i64"/"f64"/"i1");
+  // only produced when A_MLIR_TYPED=1 and Sema proves a scalar binding.
+  std::string type = "aval";
+};
+
+// Typed scalar SSA value produced by evalExprT (A_MLIR_TYPED=1 only).
+// kind == "aval": `name` is a raw i64 aval word (phase-1 representation).
+// kind == "i64"/"f64"/"i1": `name` is an unboxed MLIR scalar of that type.
+// isConst marks literal/constant-folded values so boxToAval can re-emit the
+// cheap aval constant encoding instead of the range-checked box sequence.
+struct TypedVal {
+  std::string name;
+  std::string kind = "aval";
+  bool isConst = false;
+  std::int64_t iConst = 0;
+  double fConst = 0.0;
 };
 
 class MlirDialectEmitter {
@@ -88,7 +106,10 @@ class MlirDialectEmitter {
   MlirDialectEmitter(const ModuleGraph& graph, const SemaResult& sema,
               bool testMode = false, const std::string& testFilter = "")
       : graph_(graph), sema_(sema), testMode_(testMode),
-        testFilter_(testFilter) {}
+        testFilter_(testFilter) {
+    const char* t = std::getenv("A_MLIR_TYPED");
+    typed_ = t && t[0] == '1';
+  }
 
   bool run(std::string& out, std::string& error) {
     (void)sema_;
@@ -204,6 +225,17 @@ class MlirDialectEmitter {
   int parforCounter_ = 0;
   bool inFnBody_ = false;
   bool inUserFn_ = false;  // inside a user fn/lambda/parfor body (not main_body)
+  // A_MLIR_TYPED=1: emit unboxed i64/f64/i1 scalars for Sema-proven Int/
+  // Float/Bool exprs instead of always aval-encoding. Read once here; when
+  // off every typed path below is skipped and output is unchanged.
+  bool typed_ = false;
+  // Per-function assign-kind safety scan for typed bindings: bitmask of the
+  // scalar kinds (`scalarKindBit`) seen in AssignStmt values targeting each
+  // name anywhere in the function body. A binding may only be typed when
+  // every recorded assign kind equals the binding kind (unannotated A
+  // bindings rebind freely, so `x = 5; x = "s"` must stay aval).
+  std::unordered_map<std::string, int> assignKindMask_;
+  bool assignScanPending_ = false;
   bool testMode_ = false;
   std::string testFilter_;
 
@@ -474,33 +506,22 @@ class MlirDialectEmitter {
     auto g = globals_.find(name);
     return g != globals_.end() ? g->second : "";
   }
-  // load a binding's current value (local slot, from-imported module global,
-  // or own-module global)
+  // load a binding's current value as an aval i64 word. Typed bindings are
+  // loaded unboxed then re-boxed (boxToAval), so every existing aval
+  // consumer stays correct.
   std::string bindingValue(const std::string& name, bool& isGlobal) {
-    if (MlBinding* b = lookup(name)) return load(b->slot);
-    auto mga = moduleGlobalAliases_.find(name);
-    if (mga != moduleGlobalAliases_.end()) {
-      auto rm = resolveModuleMember(graph_, mga->second.first, mga->second.second);
-      auto mg = moduleGlobals_.find({rm.first, rm.second});
-      if (mg != moduleGlobals_.end()) {
-        isGlobal = true;
-        std::string r = nv();
-        fn_ << "  " << r << " = llvm.mlir.addressof @" << mg->second << " : !llvm.ptr\n";
-        return load(r);
-      }
-    }
-    std::string sym = globalSymFor(name);
-    if (!sym.empty()) {
-      isGlobal = true;
-      std::string r = nv();
-      fn_ << "  " << r << " = llvm.mlir.addressof @" << sym << " : !llvm.ptr\n";
-      return load(r);
-    }
-    isGlobal = false;
-    return "";
+    TypedVal tv = bindingValueT(name, isGlobal);
+    return tv.kind == "aval" ? tv.name : boxToAval(tv);
   }
+  // store an aval i64 word into a binding; typed bindings decode it back to
+  // their scalar kind first (unchecked: Sema + the assign-kind scan prove
+  // the dynamic type).
   void storeBinding(const std::string& name, const std::string& val) {
-    if (MlBinding* b = lookup(name)) { store(b->slot, val); return; }
+    if (MlBinding* b = lookup(name)) {
+      if (b->type != "aval") { storeTypedFromAval(*b, val); return; }
+      store(b->slot, val);
+      return;
+    }
     std::string sym = globalSymFor(name);
     if (sym.empty()) {
       // auto-vivify: treat first write to an unbound name as a new global
@@ -824,6 +845,11 @@ class MlirDialectEmitter {
       if (ret != "()") decl += " -> " + ret;
       pre_ << decl << "\n";
     }
+    if (typed_) {
+      // aval -> f64 decode for typed float slots (core_util.c num_to_double:
+      // int avals convert, double avals bitcast, else panic).
+      pre_ << "  llvm.func @num_to_double(%a0: i64) -> f64\n";
+    }
   }
 
   void emitGlobals() {
@@ -873,6 +899,9 @@ class MlirDialectEmitter {
     contLabels_.clear();
     pendingDefers_.clear();
     terminated_ = false;
+    // typed-binding safety scan runs on the first emitStatements of this fn
+    assignScanPending_ = true;
+    assignKindMask_.clear();
     // nullPtr uses a function-local cache; reset by scoping it per call site
     pushScope();
     fn_ << "llvm.func @" << sym << "(%argv: !llvm.ptr) -> i64 {\n";
@@ -1183,6 +1212,13 @@ class MlirDialectEmitter {
 
   // ---- statements ------------------------------------------------------------------
   void emitStatements(const std::vector<StmtPtr>& stmts) {
+    // First call after beginFunction sees the whole body: record every
+    // AssignStmt value kind per name so bindLocalT can prove a typed slot
+    // is never overwritten by an incompatible (rebound) value.
+    if (assignScanPending_) {
+      assignScanPending_ = false;
+      scanAssignKinds(stmts);
+    }
     for (const StmtPtr& s : stmts) {
       if (terminated_) return;
       emitStmt(*s);
@@ -1194,7 +1230,7 @@ class MlirDialectEmitter {
     switch (s.kind) {
       case StmtKind::Let: {
         const LetStmt& ls = static_cast<const LetStmt&>(s);
-        if (ls.init) bindLocal(ls.name, evalExpr(*ls.init));
+        if (ls.init) bindLocalT(ls.name, evalExprT(*ls.init));
         else bindLocal(ls.name, c64(kAvalTag | 0x2));
         break;
       }
@@ -1283,6 +1319,27 @@ class MlirDialectEmitter {
     const Expr& t = *as.target;
     if (as.binop != BinOp::Invalid) {
       // compound assign: target = target <op> value
+      // typed fast path: unboxed scalar binding op unboxed scalar value
+      if (t.kind == ExprKind::Ident && typed_) {
+        const std::string& an = static_cast<const IdentExpr&>(t).name;
+        if (MlBinding* tb = lookup(an); tb && tb->type != "aval") {
+          bool isG = false;
+          TypedVal curT = bindingValueT(an, isG);
+          TypedVal rhsT = evalExprT(*as.value);
+          if (curT.kind != "aval" && curT.kind == rhsT.kind) {
+            TypedVal res = typedBinOp(as.binop, curT, rhsT, curT.kind);
+            if (!res.kind.empty()) {
+              MlBinding* old = lookup(an);
+              if (old && !old->dropFn.empty()) emitDropAt(old->slot, old->dropFn);
+              storeBindingT(an, res);
+              std::string df = dropFnForExpr(as.value.get());
+              if (df.empty() && old) old->dropFn = "";
+              if (!df.empty() && old) { old->dropFn = df; recordDrop(old->slot, df); }
+              return;
+            }
+          }
+        }
+      }
       std::string cur;
       if (t.kind == ExprKind::Ident) {
         bool isG = false;
@@ -1324,16 +1381,19 @@ class MlirDialectEmitter {
       return;
     }
     // plain "="
-    std::string v = evalExpr(*as.value);
+    TypedVal tv = evalExprT(*as.value);
     if (t.kind == ExprKind::Ident) {
       const std::string& an = static_cast<const IdentExpr&>(t).name;
       // bare `x = ...` inside a user fn binds a local (not a global)
-      if (inUserFn_ && !lookup(an) && globalSymFor(an).empty())
-        bindLocal(an, v);
+      bool firstBind = inUserFn_ && !lookup(an) && globalSymFor(an).empty();
+      if (firstBind) bindLocalT(an, tv);
       MlBinding* old = lookup(an);
       bool hadDrop = old && !old->dropFn.empty();
       if (hadDrop) emitDropAt(old->slot, old->dropFn);
-      storeBinding(an, v);
+      // firstBind already stored the value in bindLocalT; storing again
+      // would re-emit the box sequence for typed values. When typed_ is off
+      // keep the original double-store so output stays byte-identical.
+      if (!firstBind || !typed_) storeBindingT(an, tv);
       std::string df = dropFnForExpr(as.value.get());
       if (MlBinding* nb = lookup(an)) {
         nb->dropFn = df;
@@ -1348,7 +1408,8 @@ class MlirDialectEmitter {
       }
     } else if (t.kind == ExprKind::Index) {
       const IndexExpr& ix = static_cast<const IndexExpr&>(t);
-      callI64("a_setitem", {evalExpr(*ix.object), evalExpr(*ix.index), v});
+      callI64("a_setitem", {evalExpr(*ix.object), evalExpr(*ix.index),
+                            boxToAval(tv)});
     } else if (t.kind == ExprKind::Field) {
       const FieldExpr& fx = static_cast<const FieldExpr&>(t);
       // module-global store: mod.name = v (mod is an A-module alias)
@@ -1360,14 +1421,14 @@ class MlirDialectEmitter {
           if (!gsym.empty()) {
             std::string r = nv();
             fn_ << "  " << r << " = llvm.mlir.addressof @" << gsym << " : !llvm.ptr\n";
-            store(r, v);
+            store(r, boxToAval(tv));
             return;
           }
         }
       }
       std::string obj = evalExpr(*fx.object);
       std::string namev = cstrPtr(fx.field);
-      callI64T("a_setattr", {{"i64", obj}, {"!llvm.ptr", namev}, {"i64", v}});
+      callI64T("a_setattr", {{"i64", obj}, {"!llvm.ptr", namev}, {"i64", boxToAval(tv)}});
     } else {
       fail("assignment target not supported");
     }
@@ -1382,8 +1443,8 @@ class MlirDialectEmitter {
       const auto& br = is.branches[i];
       bool last = (i + 1 == is.branches.size());
       std::string lbody = nl(), lnext = nl();
-      std::string c = evalExpr(*br.cond);
-      std::string b = truthyI1(c);
+      TypedVal ctv = evalExprT(*br.cond);
+      std::string b = truthyT(ctv);
       fn_ << "  llvm.cond_br " << b << ", ^" << lbody << ", ^" << lnext << "\n";
       fn_ << "^" << lbody << ":\n";
       terminated_ = false;
@@ -1417,8 +1478,8 @@ class MlirDialectEmitter {
     fn_ << "  llvm.br ^" << lcond << "\n";
     fn_ << "^" << lcond << ":\n";
     terminated_ = false;
-    std::string c = evalExpr(*ws.cond);
-    std::string b = truthyI1(c);
+    TypedVal wtv = evalExprT(*ws.cond);
+    std::string b = truthyT(wtv);
     fn_ << "  llvm.cond_br " << b << ", ^" << lbody << ", ^" << lafter << "\n";
     fn_ << "^" << lbody << ":\n";
     terminated_ = false;
@@ -1445,8 +1506,8 @@ class MlirDialectEmitter {
     if (!terminated_) fn_ << "  llvm.br ^" << lcond << "\n";
     fn_ << "^" << lcond << ":\n";
     terminated_ = false;
-    std::string c = evalExpr(*dw.cond);
-    std::string b = truthyI1(c);
+    TypedVal dtv = evalExprT(*dw.cond);
+    std::string b = truthyT(dtv);
     fn_ << "  llvm.cond_br " << b << ", ^" << lbody << ", ^" << lafter << "\n";
     fn_ << "^" << lafter << ":\n";
     terminated_ = false;
@@ -1536,7 +1597,10 @@ class MlirDialectEmitter {
                                   {"i64", c64((std::int64_t)text.size())}});
   }
 
-  std::string evalExpr(const Expr& e) {
+  // aval-producing expression evaluator (phase-1 representation). All
+  // recursive uses go through the evalExpr wrapper, which routes typed
+  // subexpressions through evalExprT and re-boxes them at this boundary.
+  std::string evalExprImpl(const Expr& e) {
     if (failed_) return "";
     switch (e.kind) {
       case ExprKind::IntLit:
@@ -1775,6 +1839,99 @@ class MlirDialectEmitter {
     }
   }
 
+  // ---- typed expression evaluation (A_MLIR_TYPED) ------------------------------
+  // evalExprT returns the expression's value either as a raw i64 aval word
+  // (kind "aval") or as an unboxed i64/f64/i1 scalar. evalExpr is the
+  // compatibility wrapper every pre-existing call site uses: it boxes any
+  // typed result back to an aval word, so all legacy consumers (runtime
+  // calls, argv packing, returns, stores into aval slots) keep working.
+  std::string evalExpr(const Expr& e) {
+    TypedVal tv = evalExprT(e);
+    return boxToAval(tv);
+  }
+
+  TypedVal evalExprT(const Expr& e) {
+    if (failed_) return {"", "aval"};
+    if (!typed_) return {evalExprImpl(e), "aval"};
+    switch (e.kind) {
+      case ExprKind::IntLit:
+        return {"", "i64", true,
+                static_cast<const IntLitExpr&>(e).value, 0.0};
+      case ExprKind::FloatLit:
+        return {"", "f64", true, 0,
+                static_cast<const FloatLitExpr&>(e).value};
+      case ExprKind::BoolLit:
+        return {"", "i1", true,
+                static_cast<const BoolLitExpr&>(e).value ? 1 : 0, 0.0};
+      case ExprKind::Ident: {
+        const IdentExpr& id = static_cast<const IdentExpr&>(e);
+        if (MlBinding* b = lookup(id.name)) {
+          if (b->type != "aval") return loadTypedVal(*b);
+        }
+        return {evalExprImpl(e), "aval"};
+      }
+      case ExprKind::Unary:
+        return evalUnaryT(static_cast<const UnaryExpr&>(e));
+      case ExprKind::Binary:
+        return evalBinaryT(static_cast<const BinaryExpr&>(e));
+      default:
+        return {evalExprImpl(e), "aval"};
+    }
+  }
+
+  TypedVal evalUnaryT(const UnaryExpr& u) {
+    // postfix ++/--, prefix ++/--, and `!` (Option unwrap) stay on the aval
+    // path; `not`/`-`/`~` on proven scalars get native ops.
+    if (u.postfix || u.op == "++" || u.op == "--" || u.op == "!")
+      return {evalExprImpl(u), "aval"};
+    TypedVal tv = evalExprT(*u.operand);
+    if (u.op == "not" && tv.kind == "i1") {
+      if (tv.isConst) return {"", "i1", true, tv.iConst ? 0 : 1, 0.0};
+      std::string f = ci1(false);
+      return {icmp("eq", tvalSSA(tv), f, "i1"), "i1"};
+    }
+    if (u.op == "-" && tv.kind == "i64") {
+      if (tv.isConst) {
+        // -INT64_MIN promotes to double at runtime; keep the aval path.
+        if (tv.iConst == INT64_MIN) return {evalExprImpl(u), "aval"};
+        return {"", "i64", true, -tv.iConst, 0.0};
+      }
+      std::string z = c64(0);
+      return {llvm2("sub", z, tvalSSA(tv), "i64"), "i64"};
+    }
+    if (u.op == "-" && tv.kind == "f64") {
+      if (tv.isConst) return {"", "f64", true, 0, -tv.fConst};
+      return {llvm1("fneg", tvalSSA(tv), "f64"), "f64"};
+    }
+    if (u.op == "~" && tv.kind == "i64") {
+      if (tv.isConst) return {"", "i64", true, ~tv.iConst, 0.0};
+      return {llvm2("xor", tvalSSA(tv), c64(-1), "i64"), "i64"};
+    }
+    return {evalExprImpl(u), "aval"};
+  }
+
+  TypedVal evalBinaryT(const BinaryExpr& b) {
+    // Short-circuit logic, `??`, container membership/range, and the ops
+    // with non-trivial runtime semantics (/, //, %, **) stay on the aval
+    // path; everything else tries typed scalar ops on same-kind operands.
+    if (b.op == "and" || b.op == "&&" || b.binop == BinOp::And ||
+        b.op == "or" || b.op == "||" || b.binop == BinOp::Or ||
+        b.binop == BinOp::Coalesce || b.binop == BinOp::In ||
+        b.binop == BinOp::NotIn || b.binop == BinOp::Range ||
+        b.binop == BinOp::Div || b.binop == BinOp::FloorDiv ||
+        b.binop == BinOp::Mod || b.binop == BinOp::Pow)
+      return {evalBinary(b), "aval"};
+    TypedVal lt = evalExprT(*b.lhs);
+    TypedVal rt = evalExprT(*b.rhs);
+    if (lt.kind != "aval" && lt.kind == rt.kind) {
+      TypedVal r = typedBinOp(b.binop, lt, rt, lt.kind);
+      if (!r.kind.empty()) return r;
+    }
+    // mixed/aval operands: box and use the runtime slow op (identical to
+    // the untyped path).
+    return {emitBinOp(b.binop, boxToAval(lt), boxToAval(rt), b.opSpan), "aval"};
+  }
+
   // `expr?`: a_try_result normalizes; a_is_propagate detects Err/None that
   // must early-return from the enclosing function (after defers), mirroring
   // LlvmEmitter::evalTry.
@@ -1934,8 +2091,8 @@ class MlirDialectEmitter {
       terminated_ = false;
       pushScope();
       if (arm.guard) {
-        std::string gv = evalExpr(*arm.guard);
-        std::string gb = truthyI1(gv);
+        TypedVal gtv = evalExprT(*arm.guard);
+        std::string gb = truthyT(gtv);
         std::string ldo = nl(), lskip = nl();
         fn_ << "  llvm.cond_br " << gb << ", ^" << ldo << ", ^" << lskip << "\n";
         fn_ << "^" << ldo << ":\n";
@@ -2441,8 +2598,8 @@ class MlirDialectEmitter {
     // optional filter
     bool doAppend = true;
     if (cp.condition) {
-      std::string cv = evalExpr(*cp.condition);
-      std::string cb = truthyI1(cv);
+      TypedVal ctv = evalExprT(*cp.condition);
+      std::string cb = truthyT(ctv);
       std::string lskip = nl(), lapp = nl();
       fn_ << "  llvm.cond_br " << cb << ", ^" << lapp << ", ^" << lskip << "\n";
       fn_ << "^" << lskip << ":\n";
@@ -2805,6 +2962,465 @@ class MlirDialectEmitter {
     { std::string z = c64(0);
       fn_ << "  " << r << " = llvm.icmp \"ne\" " << t << ", " << z << " : i64\n"; }
     return r;
+  }
+
+  // ---- typed scalars (A_MLIR_TYPED=1) -----------------------------------------
+  // Unboxed i64/f64/i1 values flow only inside evalExprT-produced expression
+  // trees and typed local slots. Every legacy aval consumer goes through
+  // boxToAval (typed -> raw i64 aval word); every aval producer feeding a
+  // typed slot goes through unboxFromAval. NOTE: `a.to_aval`/`a.from_aval`
+  // are deliberately NOT emitted: their !a.aval result/operand type cannot
+  // feed the i64-pinned llvm.store/load/return/argv consumers of this
+  // emitter at MLIR text level, and `a.from_aval` inside SingleBlock regions
+  // (llvm.func bodies) requires an already-i64 operand (ALowerTyped.cpp).
+  // The inline sequences below replicate ALowerTyped's emitBoxI64/
+  // emitBoxFloat/emitBoxBool1 bit-for-bit.
+
+  // Sema scalar type -> MLIR scalar kind ("" = not an M1 scalar). All int
+  // widths map to i64: Sema's i32/uN annotations are not range-enforced at
+  // runtime (the aval payload is a full i64), so narrowing would corrupt.
+  static std::string scalarKindOfT(TypePtr t) {
+    if (!t) return "";
+    t = resolveType(t);
+    if (!t) return "";
+    switch (t->kind) {
+      case TypeKind::Int: return "i64";
+      case TypeKind::Float: return "f64";
+      case TypeKind::Bool: return "i1";
+      default: return "";
+    }
+  }
+  static std::string scalarKindOfE(const Expr* e) {
+    return e ? scalarKindOfT(e->inferredType) : "";
+  }
+  static int scalarKindBit(const std::string& kind) {
+    if (kind == "i64") return 1;
+    if (kind == "f64") return 2;
+    if (kind == "i1") return 4;
+    return 8;  // aval/unknown/other
+  }
+
+  std::string ci1(bool b) {
+    std::string r = nv();
+    fn_ << "  " << r << " = llvm.mlir.constant(" << (b ? 1 : 0) << " : i1) : i1\n";
+    return r;
+  }
+  // f64 constant via i64 bitcast: exact for nan/inf/-0.0, no float-parser
+  // edge cases.
+  std::string emitF64Const(double d) {
+    std::uint64_t u;
+    std::memcpy(&u, &d, 8);
+    std::string i = c64((std::int64_t)u);
+    std::string r = nv();
+    fn_ << "  " << r << " = llvm.bitcast " << i << " : i64 to f64\n";
+    return r;
+  }
+  std::string f64Zero() { return emitF64Const(0.0); }
+
+  // Materialize a TypedVal as an SSA name of its kind (consts emitted lazily).
+  std::string tvalSSA(const TypedVal& v) {
+    if (!v.isConst) return v.name;
+    if (v.kind == "i64") return c64(v.iConst);
+    if (v.kind == "f64") return emitF64Const(v.fConst);
+    if (v.kind == "i1") return ci1(v.iConst != 0);
+    return v.name;
+  }
+
+  // typed scalar -> raw i64 aval word (the phase-1 boxed representation).
+  std::string boxToAval(const TypedVal& v) {
+    if (v.kind == "aval" || v.name.empty() && !v.isConst) return v.name;
+    if (v.isConst) {
+      if (v.kind == "i64") return avalInt(v.iConst);
+      if (v.kind == "f64") return avalDbl(v.fConst);
+      if (v.kind == "i1") return avalBool(v.iConst != 0);
+      return v.name;
+    }
+    if (v.kind == "i64") {
+      // emitBoxI64: inline tag encoding in [-2^46, 2^46), else @a_i64n.
+      std::string nlim = c64(-kInlineLim), plim = c64(kInlineLim);
+      std::string lo = nv(), hi = nv(), inR = nv();
+      fn_ << "  " << lo << " = llvm.icmp \"sge\" " << v.name << ", " << nlim << " : i64\n";
+      fn_ << "  " << hi << " = llvm.icmp \"slt\" " << v.name << ", " << plim << " : i64\n";
+      fn_ << "  " << inR << " = llvm.and " << lo << ", " << hi << " : i1\n";
+      std::string one = c64(1), shl = nv(), pay = nv(), mask = nv(), tag = nv(), enc = nv();
+      fn_ << "  " << shl << " = llvm.shl " << v.name << ", " << one << " : i64\n";
+      fn_ << "  " << pay << " = llvm.or " << shl << ", " << one << " : i64\n";
+      fn_ << "  " << mask << " = llvm.mlir.constant(281474976710655 : i64) : i64\n";
+      pay = nv();
+      fn_ << "  " << pay << " = llvm.and " << pay << ", " << mask << " : i64\n";
+      fn_ << "  " << tag << " = llvm.mlir.constant(" << kAvalTag << " : i64) : i64\n";
+      enc = nv();
+      fn_ << "  " << enc << " = llvm.or " << tag << ", " << pay << " : i64\n";
+      std::string boxed = callI64("a_i64n", {v.name});
+      std::string r = nv();
+      fn_ << "  " << r << " = llvm.select " << inR << ", " << enc << ", " << boxed << " : i1, i64\n";
+      return r;
+    }
+    if (v.kind == "f64") {
+      // NaN canonicalization (runtime mkdouble) then bitcast to i64.
+      std::string isNaN = nv();
+      fn_ << "  " << isNaN << " = llvm.fcmp \"uno\" " << v.name << ", " << v.name << " : f64\n";
+      std::string nanBits = c64((std::int64_t)0x7FF8000000000000ULL);
+      std::string nanI = nv(), canon = nv(), sel = nv(), r = nv();
+      fn_ << "  " << nanI << " = llvm.bitcast " << nanBits << " : i64 to f64\n";
+      fn_ << "  " << sel << " = llvm.select " << isNaN << ", " << nanI << ", " << v.name << " : i1, f64\n";
+      fn_ << "  " << r << " = llvm.bitcast " << sel << " : f64 to i64\n";
+      return r;
+    }
+    if (v.kind == "i1") {
+      // select(A_TRUE, A_FALSE) on (v == true)
+      std::string t = ci1(true);
+      std::string isT = nv();
+      fn_ << "  " << isT << " = llvm.icmp \"eq\" " << v.name << ", " << t << " : i1\n";
+      std::string tv = c64(kAvalTag + 6), fv = c64(kAvalTag + 4), r = nv();
+      fn_ << "  " << r << " = llvm.select " << isT << ", " << tv << ", " << fv << " : i1, i64\n";
+      return r;
+    }
+    return v.name;
+  }
+
+  // aval i64 word -> typed scalar (unchecked ABI unpack; only emitted where
+  // Sema proved the dynamic type, mirroring a.from_aval's contract).
+  TypedVal unboxFromAval(const std::string& aval, const std::string& kind) {
+    if (kind == "i64") return {callI64("a_int_full", {aval}), "i64"};
+    if (kind == "f64") {
+      std::string r = nv();
+      fn_ << "  " << r << " = a.runtime.call \"num_to_double\"(" << aval
+          << ") {signature = \"(i64) -> f64\"} : (i64) -> f64\n";
+      return {r, "f64"};
+    }
+    if (kind == "i1") {
+      // bool aval is exactly A_TRUE/A_FALSE.
+      std::string at = c64(kAvalTag + 6), r = nv();
+      fn_ << "  " << r << " = llvm.icmp \"eq\" " << aval << ", " << at << " : i64\n";
+      return {r, "i1"};
+    }
+    return {aval, "aval"};
+  }
+
+  // ---- typed local slots -------------------------------------------------------
+  std::string allocaF64() {
+    std::string r = nv();
+    std::string sz = nv();
+    fnAllocs_ << "  " << sz << " = llvm.mlir.constant(1 : i64) : i64\n";
+    fnAllocs_ << "  " << r << " = llvm.alloca " << sz
+              << " x !llvm.array<1 x f64> : (i64) -> !llvm.ptr\n";
+    return r;
+  }
+  std::string loadTy(const std::string& p, const std::string& ty) {
+    std::string r = nv();
+    fn_ << "  " << r << " = llvm.load " << p << " : !llvm.ptr -> " << ty << "\n";
+    return r;
+  }
+  void storeTy(const std::string& p, const std::string& v, const std::string& ty) {
+    fn_ << "  llvm.store " << v << ", " << p << " : " << ty << ", !llvm.ptr\n";
+  }
+  // load a typed binding's slot as a TypedVal ("i1" slots store i64 0/1).
+  TypedVal loadTypedVal(const MlBinding& b) {
+    if (b.type == "f64") return {loadTy(b.slot, "f64"), "f64"};
+    if (b.type == "i1") {
+      std::string w = loadTy(b.slot, "i64"), r = nv();
+      fn_ << "  " << r << " = llvm.trunc " << w << " : i64 to i1\n";
+      return {r, "i1"};
+    }
+    return {loadTy(b.slot, "i64"), "i64"};
+  }
+  void storeTypedVal(const MlBinding& b, const TypedVal& v) {
+    if (b.type == "f64") { storeTy(b.slot, tvalSSA(v), "f64"); return; }
+    if (b.type == "i1") {
+      // i1 -> i64 slot (zext; consts store 0/1 directly)
+      if (v.isConst) { storeTy(b.slot, c64(v.iConst != 0 ? 1 : 0), "i64"); return; }
+      std::string w = nv();
+      fn_ << "  " << w << " = llvm.zext " << v.name << " : i1 to i64\n";
+      storeTy(b.slot, w, "i64");
+      return;
+    }
+    storeTy(b.slot, tvalSSA(v), "i64");
+  }
+  // store an aval i64 word into a typed slot (decode; unchecked per Sema).
+  void storeTypedFromAval(const MlBinding& b, const std::string& aval) {
+    storeTypedVal(b, unboxFromAval(aval, b.type));
+  }
+
+  // may `name` get a typed binding of `kind`? Requires every AssignStmt
+  // value targeting `name` in this function to have the same scalar kind.
+  bool canTypeBind(const std::string& name, const std::string& kind) {
+    auto it = assignKindMask_.find(name);
+    if (it == assignKindMask_.end()) return true;
+    return it->second == scalarKindBit(kind);
+  }
+  void noteAssignKind(const std::string& name, TypePtr t) {
+    assignKindMask_[name] |= scalarKindBit(scalarKindOfT(t));
+  }
+  void scanStmtAssigns(const Stmt& s) {
+    switch (s.kind) {
+      case StmtKind::Assign: {
+        const AssignStmt& as = static_cast<const AssignStmt&>(s);
+        if (as.target->kind == ExprKind::Ident && as.value)
+          noteAssignKind(static_cast<const IdentExpr*>(as.target.get())->name,
+                         as.value->inferredType);
+        break;
+      }
+      case StmtKind::If: {
+        const IfStmt& is = static_cast<const IfStmt&>(s);
+        for (const auto& br : is.branches) scanAssignKinds(br.body);
+        scanAssignKinds(is.elseBody);
+        break;
+      }
+      case StmtKind::While:
+        scanAssignKinds(static_cast<const WhileStmt&>(s).body); break;
+      case StmtKind::DoWhile:
+        scanAssignKinds(static_cast<const DoWhileStmt&>(s).body); break;
+      case StmtKind::For:
+        scanAssignKinds(static_cast<const ForStmt&>(s).body); break;
+      case StmtKind::Loop:
+        scanAssignKinds(static_cast<const LoopStmt&>(s).body); break;
+      case StmtKind::Defer: {
+        const DeferStmt& ds = static_cast<const DeferStmt&>(s);
+        if (ds.body) scanStmtAssigns(*ds.body);
+        break;
+      }
+      default: break;
+    }
+  }
+  void scanAssignKinds(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& s : stmts) if (s) scanStmtAssigns(*s);
+  }
+
+  // typed-aware binding producers/consumers
+  void bindLocalT(const std::string& name, const TypedVal& tv) {
+    if (typed_ && tv.kind != "aval" && canTypeBind(name, tv.kind)) {
+      MlBinding b;
+      b.type = tv.kind;
+      if (tv.kind == "f64") b.slot = allocaF64();
+      else b.slot = allocaI64();  // i64 and i1 (i1 stored as i64 0/1)
+      storeTypedVal(b, tv);
+      scopes_.back()[name] = b;
+      return;
+    }
+    bindLocal(name, boxToAval(tv));
+  }
+  // TypedVal view of a binding (typed slot -> typed load; everything else
+  // aval). Globals/module members are always aval.
+  TypedVal bindingValueT(const std::string& name, bool& isGlobal) {
+    if (MlBinding* b = lookup(name)) {
+      isGlobal = false;
+      if (b->type == "aval") return {load(b->slot), "aval"};
+      return loadTypedVal(*b);
+    }
+    // reuse the aval global-resolution tail of bindingValue
+    auto mga = moduleGlobalAliases_.find(name);
+    if (mga != moduleGlobalAliases_.end()) {
+      auto rm = resolveModuleMember(graph_, mga->second.first, mga->second.second);
+      auto mg = moduleGlobals_.find({rm.first, rm.second});
+      if (mg != moduleGlobals_.end()) {
+        isGlobal = true;
+        std::string r = nv();
+        fn_ << "  " << r << " = llvm.mlir.addressof @" << mg->second << " : !llvm.ptr\n";
+        return {load(r), "aval"};
+      }
+    }
+    std::string sym = globalSymFor(name);
+    if (!sym.empty()) {
+      isGlobal = true;
+      std::string r = nv();
+      fn_ << "  " << r << " = llvm.mlir.addressof @" << sym << " : !llvm.ptr\n";
+      return {load(r), "aval"};
+    }
+    isGlobal = false;
+    return {"", "aval"};
+  }
+  void storeBindingT(const std::string& name, const TypedVal& tv) {
+    if (MlBinding* b = lookup(name)) {
+      if (b->type == "aval") { store(b->slot, boxToAval(tv)); return; }
+      storeTypedVal(*b, tv);
+      return;
+    }
+    storeBinding(name, boxToAval(tv));
+  }
+
+  // truthiness of a TypedVal -> i1 (for if/while/&& conditions)
+  std::string truthyT(const TypedVal& v) {
+    if (v.kind == "i1") return tvalSSA(v);
+    if (v.kind == "i64") {
+      std::string s = tvalSSA(v), z = c64(0), r = nv();
+      fn_ << "  " << r << " = llvm.icmp \"ne\" " << s << ", " << z << " : i64\n";
+      return r;
+    }
+    if (v.kind == "f64") {
+      std::string s = tvalSSA(v), z = f64Zero(), r = nv();
+      fn_ << "  " << r << " = llvm.fcmp \"une\" " << s << ", " << z << " : f64\n";
+      return r;
+    }
+    return truthyI1(v.name);
+  }
+
+  // ---- typed constant folding --------------------------------------------------
+  static bool foldI64BinOp(BinOp op, std::int64_t a, std::int64_t b,
+                           std::int64_t& out, bool& isBool) {
+    isBool = false;
+    switch (op) {
+      case BinOp::Add:
+        if (__builtin_add_overflow(a, b, &out)) return false; return true;
+      case BinOp::Sub:
+        if (__builtin_sub_overflow(a, b, &out)) return false; return true;
+      case BinOp::Mul:
+        if (__builtin_mul_overflow(a, b, &out)) return false; return true;
+      case BinOp::BitAnd: out = a & b; return true;
+      case BinOp::BitOr: out = a | b; return true;
+      case BinOp::BitXor: out = a ^ b; return true;
+      case BinOp::Shl:
+        if (b < 0 || b > 63) return false;
+        out = (std::int64_t)((std::uint64_t)a << b); return true;
+      case BinOp::Shr:
+        if (b < 0 || b > 63) return false;
+        out = a >> b; return true;  // arithmetic (matches a_shr_slow)
+      case BinOp::Eq: out = a == b; isBool = true; return true;
+      case BinOp::Ne: out = a != b; isBool = true; return true;
+      case BinOp::Lt: out = a < b; isBool = true; return true;
+      case BinOp::Le: out = a <= b; isBool = true; return true;
+      case BinOp::Gt: out = a > b; isBool = true; return true;
+      case BinOp::Ge: out = a >= b; isBool = true; return true;
+      default: return false;
+    }
+  }
+  static bool foldF64BinOp(BinOp op, double a, double b, double& out, bool& isBool) {
+    isBool = false;
+    switch (op) {
+      case BinOp::Add: out = a + b; return true;
+      case BinOp::Sub: out = a - b; return true;
+      case BinOp::Mul: out = a * b; return true;
+      case BinOp::Eq: out = a == b; isBool = true; return true;
+      case BinOp::Ne: out = a != b; isBool = true; return true;
+      case BinOp::Lt: out = a < b; isBool = true; return true;
+      case BinOp::Le: out = a <= b; isBool = true; return true;
+      case BinOp::Gt: out = a > b; isBool = true; return true;
+      case BinOp::Ge: out = a >= b; isBool = true; return true;
+      default: return false;
+    }
+  }
+  TypedVal foldI64Cmp(BinOp op, std::int64_t a, std::int64_t b) {
+    bool isB; std::int64_t o;
+    foldI64BinOp(op, a, b, o, isB);
+    return {"", "i1", true, o != 0, 0.0};
+  }
+  TypedVal foldF64Cmp(BinOp op, double a, double b) {
+    bool isB; double o;
+    foldF64BinOp(op, a, b, o, isB);
+    return {"", "i1", true, o != 0.0 ? 1 : 0, 0.0};
+  }
+
+  // emit `r = llvm.<op> l, r2 : ty` helpers
+  std::string llvm2(const char* op, const std::string& l, const std::string& r,
+                    const std::string& ty) {
+    std::string res = nv();
+    fn_ << "  " << res << " = llvm." << op << " " << l << ", " << r << " : " << ty << "\n";
+    return res;
+  }
+  std::string llvm1(const char* op, const std::string& a, const std::string& ty) {
+    std::string res = nv();
+    fn_ << "  " << res << " = llvm." << op << " " << a << " : " << ty << "\n";
+    return res;
+  }
+  std::string icmp(const char* pred, const std::string& l, const std::string& r,
+                   const std::string& ty) {
+    std::string res = nv();
+    fn_ << "  " << res << " = llvm.icmp \"" << pred << "\" " << l << ", " << r
+        << " : " << ty << "\n";
+    return res;
+  }
+  std::string fcmp(const char* pred, const std::string& l, const std::string& r) {
+    std::string res = nv();
+    fn_ << "  " << res << " = llvm.fcmp \"" << pred << "\" " << l << ", " << r << " : f64\n";
+    return res;
+  }
+
+  // typed binary operator on two same-kind scalar TypedVals; returns "" when
+  // the op must stay on the aval runtime path (caller falls back).
+  // `lt`/`rt` are the operand TypedVals; `kind` is their shared kind.
+  TypedVal typedBinOp(BinOp op, const TypedVal& lt, const TypedVal& rt,
+                      const std::string& kind) {
+    // constant folding first (overflow/out-of-range -> aval path, which keeps
+    // the runtime's promote-to-double / panic semantics for those cases)
+    if (lt.isConst && rt.isConst) {
+      if (kind == "i64") {
+        if (op == BinOp::Eq || op == BinOp::Ne || op == BinOp::Lt ||
+            op == BinOp::Le || op == BinOp::Gt || op == BinOp::Ge)
+          return foldI64Cmp(op, lt.iConst, rt.iConst);
+        std::int64_t o; bool isB;
+        if (foldI64BinOp(op, lt.iConst, rt.iConst, o, isB))
+          return {"", kind, true, o, 0.0};
+        return {"", "", false, 0, 0.0};  // signal: fall back
+      }
+      if (kind == "f64") {
+        if (op == BinOp::Eq || op == BinOp::Ne || op == BinOp::Lt ||
+            op == BinOp::Le || op == BinOp::Gt || op == BinOp::Ge)
+          return foldF64Cmp(op, lt.fConst, rt.fConst);
+        double o; bool isB;
+        if (foldF64BinOp(op, lt.fConst, rt.fConst, o, isB))
+          return {"", "f64", true, 0, o};
+        return {"", "", false, 0, 0.0};
+      }
+      if (kind == "i1") {
+        bool a = lt.iConst != 0, b = rt.iConst != 0, o = false;
+        if (op == BinOp::BitAnd) o = a && b;
+        else if (op == BinOp::BitOr) o = a || b;
+        else if (op == BinOp::BitXor) o = a != b;
+        else if (op == BinOp::Eq) o = a == b;
+        else if (op == BinOp::Ne) o = a != b;
+        else return {"", "", false, 0, 0.0};
+        return {"", "i1", true, o ? 1 : 0, 0.0};
+      }
+    }
+
+    std::string l = tvalSSA(lt), r = tvalSSA(rt);
+    switch (op) {
+      case BinOp::Add:
+        if (kind == "i64") return {llvm2("add", l, r, "i64"), "i64"};
+        if (kind == "f64") return {llvm2("fadd", l, r, "f64"), "f64"};
+        break;
+      case BinOp::Sub:
+        if (kind == "i64") return {llvm2("sub", l, r, "i64"), "i64"};
+        if (kind == "f64") return {llvm2("fsub", l, r, "f64"), "f64"};
+        break;
+      case BinOp::Mul:
+        if (kind == "i64") return {llvm2("mul", l, r, "i64"), "i64"};
+        if (kind == "f64") return {llvm2("fmul", l, r, "f64"), "f64"};
+        break;
+      case BinOp::BitAnd:
+        if (kind == "i64" || kind == "i1") return {llvm2("and", l, r, kind), kind};
+        break;
+      case BinOp::BitOr:
+        if (kind == "i64" || kind == "i1") return {llvm2("or", l, r, kind), kind};
+        break;
+      case BinOp::BitXor:
+        if (kind == "i64" || kind == "i1") return {llvm2("xor", l, r, kind), kind};
+        break;
+      case BinOp::Shl:
+        if (kind == "i64") return {llvm2("shl", l, r, "i64"), "i64"};
+        break;
+      case BinOp::Shr:
+        if (kind == "i64") return {llvm2("ashr", l, r, "i64"), "i64"};  // arithmetic
+        break;
+      case BinOp::Eq: case BinOp::Ne: case BinOp::Lt:
+      case BinOp::Le: case BinOp::Gt: case BinOp::Ge: {
+        const char* ip = nullptr, *fp = nullptr;
+        switch (op) {
+          case BinOp::Eq: ip = "eq"; fp = "oeq"; break;
+          case BinOp::Ne: ip = "ne"; fp = "une"; break;
+          case BinOp::Lt: ip = "slt"; fp = "olt"; break;
+          case BinOp::Le: ip = "sle"; fp = "ole"; break;
+          case BinOp::Gt: ip = "sgt"; fp = "ogt"; break;
+          case BinOp::Ge: ip = "sge"; fp = "oge"; break;
+          default: break;
+        }
+        if (kind == "i64" || kind == "i1") return {icmp(ip, l, r, kind), "i1"};
+        if (kind == "f64") return {fcmp(fp, l, r), "i1"};
+        break;
+      }
+      default: break;
+    }
+    return {"", "", false, 0, 0.0};  // fall back to aval runtime path
   }
 
   // Eval call args packed for a specific FnDecl: positional order, kwargs

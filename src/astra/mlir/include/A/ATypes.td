@@ -83,6 +83,8 @@ def AStruct : AType<"AStruct", "struct"> {
     are still boxed `!a.aval` heap objects (runtime dict-backed); this type
     exists so signatures and metadata can refer to the nominal type. Phase 2
     will attach field layout information.
+    Field names are NOT stored on this type; they are carried per-access by
+    the optional `field` StrAttr on `a.struct.getfield`/`a.struct.setfield`.
   }];
 
   let parameters = (ins StringRefParameter<>:$name);

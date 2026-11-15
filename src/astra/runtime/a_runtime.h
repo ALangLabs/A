@@ -519,6 +519,14 @@ void a_frame_pop(void);
    everything it transitively references) survives the region sweep.
    No-op when regions are disabled (A_REGIONS=0) or GC is off. */
 void a_promote(aval v);
+/* Raw-store region barrier for codegen that emits direct stores into
+   heap-object aval fields (typed ABI): call AFTER the store with the
+   slot address (or use a_region_barrier_range for n consecutive aval
+   slots). Unboxed scalar fields (i64/f64/bool/char) never hold A object
+   pointers — emit no barrier for them. No-op when regions are disabled
+   (A_REGIONS=0) or GC is off. */
+void a_region_barrier(aval container, aval *slot);
+void a_region_barrier_range(aval container, aval *slots, uint64_t n);
 
 /* Source line of the statement currently executing; the x86-64 asm emitter
    stores it before each statement so `<module>` frames (which push line 0)

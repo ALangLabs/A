@@ -731,6 +731,8 @@ def AFibMainOp : A_Op<"fib.main"> {
 
 // `a.struct.getfield` reads field `index` of the struct value `obj`.
 // `struct_type`, when present, pins the nominal `!a.struct<"Name">`.
+// `field`, when present, is the source-level field name (StrAttr); the
+// positional `index` operand remains required for phase-2 GEP lowering.
 //
 // Lowering (phase 1): llvm.call @a_getattr(i64 obj, !llvm.ptr name) -> i64,
 // where `name` is materialized as a private C-string global. Phase 2: direct
@@ -745,6 +747,7 @@ def AStructGetFieldOp : A_Op<"struct.getfield"> {
   let arguments = (ins
     AVAL:$obj,
     I64:$index,
+    OptionalAttr<StrAttr>:$field,
     OptionalAttr<TypeAttrOf<AStruct>>:$struct_type);
   let results = (outs AVAL:$result);
 
@@ -760,6 +763,8 @@ def AStructGetFieldOp : A_Op<"struct.getfield"> {
 
 // `a.struct.setfield` writes `value` into field `index` of `obj` and returns
 // the (possibly re-boxed) struct. Wraps `a_setattr`.
+// `field`, when present, is the source-level field name (StrAttr); see
+// `a.struct.getfield` for details.
 //
 // Lowering (phase 1): llvm.call @a_setattr(i64 obj, !llvm.ptr name, i64 v)
 // -> i64. Phase 2: GEP+store on the unboxed struct.
@@ -774,6 +779,7 @@ def AStructSetFieldOp : A_Op<"struct.setfield"> {
     AVAL:$obj,
     I64:$index,
     AVAL:$value,
+    OptionalAttr<StrAttr>:$field,
     OptionalAttr<TypeAttrOf<AStruct>>:$struct_type);
   let results = (outs AVAL:$result);
 

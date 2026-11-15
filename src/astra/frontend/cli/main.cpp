@@ -84,7 +84,17 @@ void printUsage(std::ostream& os) {
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
-     << "  -V, --version    print version\n";
+     << "  -V, --version    print version\n"
+     << "\n"
+     << "Environment:\n"
+     << "  A_BACKEND=mlir-native|native     in-process MLIR backend (default)\n"
+     << "  A_BACKEND=subprocess|mlir-subprocess|llvm-subprocess|tools\n"
+     << "                           mlir-translate/opt/llc/clang subprocess path\n"
+     << "  A_MLIR_NATIVE=0    same as A_BACKEND=subprocess (also =off/no/false)\n"
+     << "  A_AMBC=0           disable .ambc precompiled-package fast path\n"
+     << "                     (default on; re-run 'a precompile' after\n"
+     << "                     changing any imported module — packages do\n"
+     << "                     not track dependency changes)\n";
 }
 
 bool isTerminal() {

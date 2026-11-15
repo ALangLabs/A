@@ -25,6 +25,17 @@
 // The checked mid-expression narrowing op (`a.unbox<T>`) is deferred to a
 // later milestone.
 //
+// Region awareness: `a.from_aval`'s inline decode splits the enclosing block
+// (tag check -> decode/slow -> merge), which is illegal inside regions whose
+// parent op carries the SingleBlock trait (a.for/a.while bodies). There the
+// op lowers to `llvm.call @__a_from_aval_{i64,f64,i1}(i64)` -- synthesized
+// once per module, each containing the same branchy decode -- so the call
+// site stays a single block. `a.to_aval` is already straight-line (selects +
+// an optional @a_i64n call) and needs no special handling. Operands defined
+// outside the enclosing function (e.g. constants canonicalize hoists to
+// module level) are cloned into the op's region first, since llvm dialect
+// ops may not reference values outside their function.
+//
 //===----------------------------------------------------------------------===//
 
 #include "ALowerTyped.hpp"
@@ -37,6 +48,7 @@
 #include "mlir/Dialect/LLVMIR/LLVMIntrinsicOps.h.inc"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/DialectRegistry.h"
+#include "mlir/IR/OpDefinition.h"
 #include "mlir/IR/SymbolTable.h"
 #include "mlir/IR/Visitors.h"
 #include "llvm/ADT/SmallVector.h"
@@ -66,6 +78,7 @@ using mlir::LLVM::LLVMFuncOp;
 using mlir::LLVM::LLVMFunctionType;
 using mlir::LLVM::LShrOp;
 using mlir::LLVM::OrOp;
+using mlir::LLVM::ReturnOp;
 using mlir::LLVM::SExtOp;
 using mlir::LLVM::SelectOp;
 using mlir::LLVM::ShlOp;
@@ -210,15 +223,53 @@ LogicalResult emitBoxI64(Operation *op, Value v64, bool isUnsigned, Value &out) 
 }
 
 /// Lower `a.to_aval` for an integer operand: extend to i64 then box.
-LogicalResult lowerToAvalInt(mlir::a::AToAvalOp op, IntegerType intTy,
-                             Value &out) {
+/// Return the function-like scope of `op`: the ancestor op that sits
+/// directly inside the module body (e.g. the `a.func`/`llvm.func` containing
+/// `op`), or nullptr when `op` is at module level. Two values share a scope
+/// iff their defs live in the same function.
+Operation *functionScopeOf(Operation *op) {
+  Operation *cur = op;
+  while (Operation *parent = cur->getParentOp()) {
+    if (parent->getParentOp() &&
+        mlir::isa<ModuleOp>(parent->getParentOp()))
+      return parent;
+    cur = parent;
+  }
+  return nullptr;
+}
+
+/// LLVM-dialect ops emitted by this pass may not reference values defined
+/// outside their enclosing function (e.g. `arith.constant`s that
+/// canonicalize hoists to module level). When `v`'s def lives in a different
+/// function scope than `op`, clone the def just before `op` and return the
+/// clone in `v`. Non-constant outside-scope defs are rejected.
+LogicalResult localizeOperand(Operation *op, Value &v) {
+  auto res = llvm::dyn_cast<mlir::OpResult>(v);
+  if (!res)
+    return success();  // block arguments are always region-local
+  Operation *def = res.getOwner();
+  if (functionScopeOf(def) == functionScopeOf(op))
+    return success();
+  if (!def->hasTrait<mlir::OpTrait::ConstantLike>()) {
+    op->emitError("a-lower-typed: operand defined outside the function is "
+                   "not a constant; cannot lower inside a nested region");
+    return failure();
+  }
+  OpBuilder b(op);
+  Operation *cloned = b.clone(*def);
+  v = cloned->getResult(res.getResultNumber());
+  return success();
+}
+
+LogicalResult lowerToAvalInt(mlir::a::AToAvalOp op, Value value,
+                             IntegerType intTy, Value &out) {
   OpBuilder b(op);
   Location loc = op->getLoc();
   mlir::MLIRContext *ctx = op->getContext();
   unsigned width = intTy.getWidth();
   bool isUnsigned = op.getUvalue().has_value();
 
-  Value v = op.getValue();
+  Value v = value;
   if (width == 64) {
     return emitBoxI64(op, v, isUnsigned, out);
   }
@@ -237,14 +288,14 @@ LogicalResult lowerToAvalInt(mlir::a::AToAvalOp op, IntegerType intTy,
 /// canonicalize NaN (mirroring runtime `mkdouble`: any NaN becomes the quiet
 /// NaN 0x7FF8000000000000 so it cannot collide with the aval tag space),
 /// then bitcast to i64 -- the aval double payload is the raw f64 bit pattern.
-LogicalResult lowerToAvalFloat(mlir::a::AToAvalOp op, Type floatTy,
-                               Value &out) {
+LogicalResult lowerToAvalFloat(mlir::a::AToAvalOp op, Value value,
+                               Type floatTy, Value &out) {
   OpBuilder b(op);
   Location loc = op->getLoc();
   mlir::MLIRContext *ctx = op->getContext();
   Type f64Ty = mlir::Float64Type::get(ctx);
 
-  Value v = op.getValue();
+  Value v = value;
   unsigned width = cast<mlir::FloatType>(floatTy).getWidth();
   Value f64v;
   if (width == 64) {
@@ -268,12 +319,13 @@ LogicalResult lowerToAvalFloat(mlir::a::AToAvalOp op, Type floatTy,
 }
 
 /// Lower `a.to_aval` for an i1 (bool) operand: select A_TRUE/A_FALSE.
-LogicalResult lowerToAvalBool(mlir::a::AToAvalOp op, Value &out) {
+LogicalResult lowerToAvalBool(mlir::a::AToAvalOp op, Value value,
+                               Value &out) {
   OpBuilder b(op);
   Location loc = op->getLoc();
   mlir::MLIRContext *ctx = op->getContext();
   Type i64 = i64Ty(ctx);
-  Value isTrue = emitICmpEq(b, loc, op.getValue(),
+  Value isTrue = emitICmpEq(b, loc, value,
                             b.create<ConstantOp>(loc, i1Ty(ctx), 1));
   Value t = emitI64Const(b, loc, (std::int64_t)kAvalTrue);
   Value f = emitI64Const(b, loc, (std::int64_t)kAvalFalse);
@@ -283,11 +335,14 @@ LogicalResult lowerToAvalBool(mlir::a::AToAvalOp op, Value &out) {
 
 LogicalResult lowerToAval(mlir::a::AToAvalOp op) {
   Value out;
-  Type srcTy = op.getValue().getType();
+  Value operand = op.getValue();
+  if (failed(localizeOperand(op, operand)))
+    return failure();
+  Type srcTy = operand.getType();
   // Already boxed: `a.to_aval` on `!a.aval` is the identity (the verifier
   // admits it; the canonicalizer folds the pair away when it can).
   if (mlir::isa<mlir::a::AVALType>(srcTy)) {
-    out = op.getValue();
+    out = operand;
     op.getResult().replaceAllUsesWith(out);
     op.erase();
     return success();
@@ -295,12 +350,12 @@ LogicalResult lowerToAval(mlir::a::AToAvalOp op) {
   LogicalResult res = success();
   if (auto intTy = mlir::dyn_cast<IntegerType>(srcTy)) {
     if (intTy.getWidth() == 1) {
-      res = lowerToAvalBool(op, out);
+      res = lowerToAvalBool(op, operand, out);
     } else {
-      res = lowerToAvalInt(op, intTy, out);
+      res = lowerToAvalInt(op, operand, intTy, out);
     }
   } else if (mlir::isa<mlir::FloatType>(srcTy)) {
-    res = lowerToAvalFloat(op, srcTy, out);
+    res = lowerToAvalFloat(op, operand, srcTy, out);
   } else {
     op.emitError("a-lower-typed: unsupported a.to_aval operand type `")
         << srcTy << "`";
@@ -332,14 +387,21 @@ struct AvalCheck {
 };
 
 /// Emit the tag check for `aval` (already the i64 word) and split control
-/// flow into orig -> {decode -> merge, else}. `boxedIntPath` selects the
-/// int slow path (call @a_int_full on tag mismatch) over llvm.trap.
+/// flow at `splitIt` in `block` into orig -> {decode -> merge, else}.
+/// `b` must be positioned at `splitIt`: the check ops are emitted there and
+/// remain in `orig`, while `splitIt` and everything after it move to the
+/// continuation (`merge`). `boxedIntPath` selects the int slow path (call
+/// @a_int_full on tag mismatch) over llvm.trap.
 /// Returns false on bad kind.
-LogicalResult emitAvalTagCheckPrelude(Operation *op, Value v64, int kind,
-                                      AvalCheck &chk, bool boxedIntPath = false) {
-  OpBuilder b(op);
-  Location loc = op->getLoc();
-  mlir::MLIRContext *ctx = op->getContext();
+///
+/// NOTE: this splits `block`, so it is illegal inside regions whose parent
+/// op carries the SingleBlock trait (a.for/a.while bodies); callers must
+/// route those cases through ensureFromAvalHelper instead.
+LogicalResult emitAvalTagCheckPrelude(OpBuilder &b, Location loc, Block *block,
+                                      Block::iterator splitIt, Value v64,
+                                      int kind, AvalCheck &chk,
+                                      bool boxedIntPath = false) {
+  mlir::MLIRContext *ctx = loc.getContext();
   Type i64 = i64Ty(ctx);
   Type i1 = i1Ty(ctx);
 
@@ -368,10 +430,10 @@ LogicalResult emitAvalTagCheckPrelude(Operation *op, Value v64, int kind,
     ok = b.create<OrOp>(loc, i1, isT, isF);
   }
 
-  // Split the block at `op`: ops before it (the check) stay in `orig`,
-  // `op` and everything after move to `cont`.
-  Block *orig = op->getBlock();
-  Block *cont = orig->splitBlock(op->getIterator());
+  // Split the block at `splitIt`: ops before it (the check) stay in `orig`,
+  // `splitIt` and everything after move to `cont`.
+  Block *orig = block;
+  Block *cont = orig->splitBlock(splitIt);
   Block *decodeBB = new Block;
   Block *elseBB = new Block;
   Block *mergeBB = cont;  // reuse the continuation as the merge block
@@ -418,27 +480,18 @@ Value emitDecodeInlineInt(OpBuilder &b, Location loc, Value v) {
   return b.create<SExtOp>(loc, i64, narrow);
 }
 
-LogicalResult lowerFromAvalInt(mlir::a::AFromAvalOp op, IntegerType intTy,
-                               Value &out) {
-  OpBuilder b(op);
-  Location loc = op->getLoc();
-  mlir::MLIRContext *ctx = op->getContext();
+/// Fill `chk.decode` (and `chk.slow`, the boxed-int path) with the decode of
+/// `chk.aval`, append the decoded i64 as an argument to `chk.merge`, and set
+/// `out` to the value usable at the top of the merge block (the merge block
+/// argument, narrowed to `intTy` when narrower than i64).
+LogicalResult emitFromAvalIntDecode(Operation *ctxOp, Location loc,
+                                    IntegerType intTy, AvalCheck &chk,
+                                    Value &out) {
+  mlir::MLIRContext *ctx = loc.getContext();
   unsigned width = intTy.getWidth();
 
-  if (width > 64) {
-    op.emitError("a-lower-typed: cannot unbox aval to i")
-        << width << " (wider than i64)";
-    return failure();
-  }
-
-  AvalCheck chk;
-  if (failed(emitAvalTagCheckPrelude(op, op.getValue(), 0, chk,
-                                     /*boxedIntPath=*/true)))
-    return failure();
-
-  // Decode in chk.decode; the decoded i64 is passed to the merge block
-  // through a block argument so it dominates all continuation uses. The
-  // merge block has a single i64 argument fed by both predecessors.
+  // The decoded i64 is passed to the merge block through a block argument so
+  // it dominates all continuation uses; both predecessors feed it.
   chk.merge->addArgument(i64Ty(ctx), loc);
   {
     OpBuilder db = OpBuilder::atBlockBegin(chk.decode);
@@ -448,7 +501,7 @@ LogicalResult lowerFromAvalInt(mlir::a::AFromAvalOp op, IntegerType intTy,
   {
     // Heap-boxed int (T_INT64): @a_int_full unboxes inline and boxed ints
     // and panics on anything else.
-    if (failed(ensureRuntimeI64Decl(op, "a_int_full")))
+    if (failed(ensureRuntimeI64Decl(ctxOp, "a_int_full")))
       return failure();
     OpBuilder sb = OpBuilder::atBlockBegin(chk.slow);
     Value full = emitRuntimeI64CallAt(sb, loc, "a_int_full", chk.aval);
@@ -468,18 +521,14 @@ LogicalResult lowerFromAvalInt(mlir::a::AFromAvalOp op, IntegerType intTy,
   return success();
 }
 
-LogicalResult lowerFromAvalFloat(mlir::a::AFromAvalOp op, Type floatTy,
-                                 Value &out) {
-  Location loc = op->getLoc();
-  mlir::MLIRContext *ctx = op->getContext();
-
-  AvalCheck chk;
-  if (failed(emitAvalTagCheckPrelude(op, op.getValue(), 1, chk)))
-    return failure();
-
+/// Float variant of emitFromAvalIntDecode: untagged aval word is the f64 bit
+/// pattern, narrowed/widened to `floatTy` inside the decode block.
+LogicalResult emitFromAvalFloatDecode(Location loc, mlir::MLIRContext *ctx,
+                                      AvalCheck &chk, Type floatTy, Value &out) {
   OpBuilder db = OpBuilder::atBlockBegin(chk.decode);
   // Untagged aval word IS the f64 bit pattern.
-  Value f64v = db.create<BitcastOp>(loc, mlir::Float64Type::get(ctx), chk.aval);
+  Value f64v =
+      db.create<BitcastOp>(loc, mlir::Float64Type::get(ctx), chk.aval);
   unsigned width = cast<mlir::FloatType>(floatTy).getWidth();
   Value decoded = f64v;
   if (width == 64) {
@@ -500,16 +549,11 @@ LogicalResult lowerFromAvalFloat(mlir::a::AFromAvalOp op, Type floatTy,
   return success();
 }
 
-LogicalResult lowerFromAvalBool(mlir::a::AFromAvalOp op, Value &out) {
-  OpBuilder b(op);
-  Location loc = op->getLoc();
-  mlir::MLIRContext *ctx = op->getContext();
+/// Bool variant of emitFromAvalIntDecode: selects 1/0 on the exact
+/// A_TRUE/A_FALSE constants the tag check already restricted to.
+LogicalResult emitFromAvalBoolDecode(Location loc, mlir::MLIRContext *ctx,
+                                     AvalCheck &chk, Value &out) {
   Type i1 = i1Ty(ctx);
-
-  AvalCheck chk;
-  if (failed(emitAvalTagCheckPrelude(op, op.getValue(), 2, chk)))
-    return failure();
-
   OpBuilder db = OpBuilder::atBlockBegin(chk.decode);
   // v == A_TRUE ? 1 : 0  (the tag check already restricted to the two
   // constants, so this select is exact).
@@ -526,18 +570,233 @@ LogicalResult lowerFromAvalBool(mlir::a::AFromAvalOp op, Value &out) {
   return success();
 }
 
+LogicalResult lowerFromAvalInt(mlir::a::AFromAvalOp op, Value aval,
+                               IntegerType intTy, Value &out) {
+  unsigned width = intTy.getWidth();
+
+  if (width > 64) {
+    op.emitError("a-lower-typed: cannot unbox aval to i")
+        << width << " (wider than i64)";
+    return failure();
+  }
+
+  Location loc = op->getLoc();
+  AvalCheck chk;
+  OpBuilder b(op);
+  if (failed(emitAvalTagCheckPrelude(b, loc, op->getBlock(), op->getIterator(),
+                                     aval, 0, chk,
+                                     /*boxedIntPath=*/true)))
+    return failure();
+  return emitFromAvalIntDecode(op, loc, intTy, chk, out);
+}
+
+LogicalResult lowerFromAvalFloat(mlir::a::AFromAvalOp op, Value aval,
+                                 Type floatTy, Value &out) {
+  Location loc = op->getLoc();
+  mlir::MLIRContext *ctx = op->getContext();
+
+  AvalCheck chk;
+  OpBuilder b(op);
+  if (failed(emitAvalTagCheckPrelude(b, loc, op->getBlock(), op->getIterator(),
+                                     aval, 1, chk)))
+    return failure();
+  return emitFromAvalFloatDecode(loc, ctx, chk, floatTy, out);
+}
+
+LogicalResult lowerFromAvalBool(mlir::a::AFromAvalOp op, Value aval,
+                                Value &out) {
+  Location loc = op->getLoc();
+  mlir::MLIRContext *ctx = op->getContext();
+
+  AvalCheck chk;
+  OpBuilder b(op);
+  if (failed(emitAvalTagCheckPrelude(b, loc, op->getBlock(), op->getIterator(),
+                                     aval, 2, chk)))
+    return failure();
+  return emitFromAvalBoolDecode(loc, ctx, chk, out);
+}
+
+//===----------------------------------------------------------------------===//
+// a.from_aval inside SingleBlock regions (a.for/a.while bodies)
+//===----------------------------------------------------------------------===//
+
+/// Ensure an `llvm.func @<name>(i64) -> <resTy>` exists whose body performs
+/// the branchy aval decode for `kind` (0=int->i64, 1=float->f64, 2=bool->i1)
+/// on its i64 parameter. Used when `a.from_aval` sits inside a SingleBlock
+/// region (a.for/a.while bodies) where the inline lowering's block splits
+/// are illegal; the call site stays a single block.
+LogicalResult ensureFromAvalHelper(Operation *ctxOp, int kind,
+                                   LLVMFuncOp &fnOut) {
+  llvm::StringRef name;
+  Type resTy;
+  mlir::MLIRContext *ctx = ctxOp->getContext();
+  Type i64 = i64Ty(ctx);
+  switch (kind) {
+  case 0:
+    name = "__a_from_aval_i64";
+    resTy = i64;
+    break;
+  case 1:
+    name = "__a_from_aval_f64";
+    resTy = mlir::Float64Type::get(ctx);
+    break;
+  case 2:
+    name = "__a_from_aval_i1";
+    resTy = i1Ty(ctx);
+    break;
+  default:
+    return failure();
+  }
+
+  ModuleOp module = ctxOp->getParentOfType<ModuleOp>();
+  if (!module) {
+    ctxOp->emitError("a-lower-typed: op outside of a module");
+    return failure();
+  }
+  if (auto *existing = mlir::SymbolTable::lookupSymbolIn(
+          module.getOperation(), name)) {
+    fnOut = mlir::dyn_cast<LLVMFuncOp>(existing);
+    return success();
+  }
+
+  Location loc = ctxOp->getLoc();
+  OpBuilder mb(module.getOperation());
+  mb.setInsertionPointToStart(&module.getBodyRegion().front());
+  auto funcTy = LLVMFunctionType::get(resTy, ArrayRef<Type>{i64});
+  fnOut = mb.create<LLVMFuncOp>(loc, name, funcTy);
+
+  Block *entry = new Block;
+  entry->addArgument(i64, loc);
+  fnOut.getBody().push_back(entry);
+  Value aval = entry->getArgument(0);
+
+  // Same branchy decode as the inline path, but the continuation (`merge`)
+  // is a fresh block terminated by llvm.return instead of reusing the
+  // split continuation.
+  AvalCheck chk;
+  OpBuilder eb = OpBuilder::atBlockEnd(entry);
+  if (failed(emitAvalTagCheckPrelude(eb, loc, entry, entry->end(), aval, kind,
+                                     chk, /*boxedIntPath=*/kind == 0)))
+    return failure();
+  Value out;
+  LogicalResult res = success();
+  switch (kind) {
+  case 0:
+    res = emitFromAvalIntDecode(ctxOp, loc, i64Ty(ctx), chk, out);
+    break;
+  case 1:
+    res = emitFromAvalFloatDecode(loc, ctx, chk, mlir::Float64Type::get(ctx),
+                                  out);
+    break;
+  default:
+    res = emitFromAvalBoolDecode(loc, ctx, chk, out);
+    break;
+  }
+  if (failed(res))
+    return res;
+  OpBuilder rb = OpBuilder::atBlockEnd(chk.merge);
+  rb.create<ReturnOp>(loc, ValueRange{out});
+  return success();
+}
+
+/// Lower `a.from_aval` when it sits inside a region whose parent op requires
+/// a single block (SingleBlock trait: a.for/a.while bodies). The tag-check
+/// decode needs multiple blocks, so emit an `llvm.call` to a synthesized
+/// `__a_from_aval_*` llvm.func containing the branchy decode; the call site
+/// remains a single block.
+LogicalResult lowerFromAvalInRegion(mlir::a::AFromAvalOp op, Value aval) {
+  Location loc = op->getLoc();
+  mlir::MLIRContext *ctx = op->getContext();
+  Type dstTy = op.getResult().getType();
+
+  int kind;
+  Type canonTy;
+  if (auto intTy = mlir::dyn_cast<IntegerType>(dstTy)) {
+    unsigned w = intTy.getWidth();
+    if (w == 1) {
+      kind = 2;
+      canonTy = i1Ty(ctx);
+    } else if (w <= 64) {
+      kind = 0;
+      canonTy = i64Ty(ctx);
+    } else {
+      op.emitError("a-lower-typed: cannot unbox aval to i")
+          << w << " (wider than i64)";
+      return failure();
+    }
+  } else if (mlir::isa<mlir::FloatType>(dstTy)) {
+    kind = 1;
+    canonTy = mlir::Float64Type::get(ctx);
+  } else {
+    op.emitError("a-lower-typed: unsupported a.from_aval result type `")
+        << dstTy << "`";
+    return failure();
+  }
+
+  // The helper ABI takes the aval word as a raw i64; a still-boxed !a.aval
+  // operand cannot be passed to llvm.call (same limitation as the inline
+  // path, which feeds llvm.and/icmp directly).
+  if (!mlir::isa<IntegerType>(aval.getType())) {
+    op.emitError(
+        "a-lower-typed: a.from_aval operand inside a single-block region "
+        "must already be lowered to i64");
+    return failure();
+  }
+
+  LLVMFuncOp fn;
+  if (failed(ensureFromAvalHelper(op, kind, fn)))
+    return failure();
+
+  OpBuilder b(op);
+  auto call = b.create<CallOp>(loc, SmallVector<Type>{canonTy}, fn.getName(),
+                               ValueRange{aval});
+  Value out = call.getResult();
+
+  // Narrow/widen the canonical decoded value (i64/f64/i1) to dstTy.
+  if (canonTy != dstTy) {
+    if (auto intTy = mlir::dyn_cast<IntegerType>(dstTy)) {
+      out = b.create<TruncOp>(loc, intTy, out);
+    } else {
+      unsigned w = cast<mlir::FloatType>(dstTy).getWidth();
+      if (w < 64) {
+        out = b.create<FPTruncOp>(loc, dstTy, out);
+      } else {
+        out = b.create<FPExtOp>(loc, dstTy, out);
+      }
+    }
+  }
+  op.getResult().replaceAllUsesWith(out);
+  op.erase();
+  return success();
+}
+
 LogicalResult lowerFromAval(mlir::a::AFromAvalOp op) {
+  Value aval = op.getValue();
+  if (failed(localizeOperand(op, aval)))
+    return failure();
+
+  // The block-splitting decode is only illegal when the block being split
+  // belongs to a region of an op with the SingleBlock trait (a.for/a.while
+  // bodies). Check the immediate region owner only: ancestor SingleBlock
+  // ops (e.g. builtin.module) constrain their own region's block count, not
+  // blocks nested inside other ops' regions.
+  mlir::Region *region = op->getBlock()->getParent();
+  Operation *regionParent = region ? region->getParentOp() : nullptr;
+  if (regionParent &&
+      regionParent->hasTrait<mlir::OpTrait::SingleBlock>())
+    return lowerFromAvalInRegion(op, aval);
+
   Value out;
   Type dstTy = op.getResult().getType();
   LogicalResult res = success();
   if (auto intTy = mlir::dyn_cast<IntegerType>(dstTy)) {
     if (intTy.getWidth() == 1) {
-      res = lowerFromAvalBool(op, out);
+      res = lowerFromAvalBool(op, aval, out);
     } else {
-      res = lowerFromAvalInt(op, intTy, out);
+      res = lowerFromAvalInt(op, aval, intTy, out);
     }
   } else if (mlir::isa<mlir::FloatType>(dstTy)) {
-    res = lowerFromAvalFloat(op, dstTy, out);
+    res = lowerFromAvalFloat(op, aval, dstTy, out);
   } else {
     op.emitError("a-lower-typed: unsupported a.from_aval result type `")
         << dstTy << "`";

@@ -917,6 +917,8 @@ void a_region_enter(const char *name);
 void a_region_leave(void);
 void a_region_note_obj(void *p);
 void a_region_store(void *container, aval child);
+void a_region_barrier(aval container, aval *slot);
+void a_region_barrier_range(aval container, aval *slots, uint64_t n);
 void a_promote(aval v);
 int  a_gc_regionable(void *p);
 int  a_gc_track_region(void *p, uint32_t depth);

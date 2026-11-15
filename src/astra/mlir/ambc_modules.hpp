@@ -35,10 +35,13 @@
 // fn as a regular function body). Without it the merged module links but the
 // program does nothing after module init.
 //
-// `a test` mode is NOT supported in v1: per-module `.ambc` carries no
-// testFilter and the test_* harness needs `a_test_main` name/fn tables that
-// cannot be recovered reliably from mangled symbols. Passing testMode=true
-// returns a clean error.
+// `a test` mode IS supported: the consumer scans the merged module for the
+// emitter's per-module test-fn symbols (`__a_f_m<id>_test_*_<seq>` llvm.func
+// definitions owned by the entry module) and synthesizes the
+// a_test_main(name, fnptr) harness tail that whole-graph emitTestMain emits.
+// testFilter is applied at COMPILE time by the emitter (a_test_main takes no
+// filter argument), so the consumer applies the same substring predicate
+// over the recovered test names; pass "" for unfiltered `a test`.
 //
 //===----------------------------------------------------------------------===//
 
@@ -69,7 +72,8 @@ struct AmbcModules {
   /// destruction erases `module` while the context is still alive.
   std::unique_ptr<mlir::MLIRContext> context;
   /// The merged module: all per-module ops + synthesized runtime decls,
-  /// __a_main_body, __a_gc_root_mark and main.
+  /// __a_main_body, __a_gc_root_mark and main (or the a_test_main harness
+  /// `main` when loaded with testMode=true).
   mlir::OwningOpRef<mlir::ModuleOp> module;
   /// Module ids in ambc.meta `init_order` (the __a_m<id>_init call order).
   std::vector<int> initOrder;
@@ -86,25 +90,37 @@ struct AmbcModules {
 /// the ENTRY-BODY LIMITATION note above). May be empty for packages whose
 /// entry module has no entry fn.
 ///
-/// `testMode`: `a test` is unsupported (see header note); pass false. If
-/// true, returns 1 with a clean diagnostic.
+/// `testMode`: synthesize the `a test` tail (a_test_main harness over the
+/// entry module's `test_*` fns) instead of the normal `main` trampoline, and
+/// skip the `entryBodyMlir` splice (whole-graph emitMainBody drops the entry
+/// body under test mode too — module inits still run via __a_main_body).
+///
+/// `testFilter`: compile-time filter, mirroring emitMLIR's testFilter —
+/// only `test_*` fns whose recovered source name contains the substring are
+/// registered with a_test_main ("" = all tests). There is NO runtime
+/// filtering: a_test_main receives the final name/fnptr tables.
 ///
 /// Returns 0 on success and fills `pkg`; returns 1 on failure with `err`.
 int ambcModulesLoad(const std::string& pkgDir,
                     const std::string& entryBodyMlir, bool testMode,
-                    AmbcModules& pkg, std::ostream& err);
+                    AmbcModules& pkg, std::ostream& err,
+                    const std::string& testFilter = "");
 
 /// Convenience: load + lower + emit object in one call.
 ///   arch     - target arch/triple; "" / "host" selects the host default.
 ///   optLevel - 0..3, mirroring `opt -O<n>`.
-///   entryBodyMlir - see ambcModulesLoad.
-///   testMode - see ambcModulesLoad (must be false in v1).
+///   entryBodyMlir - see ambcModulesLoad (ignored when testMode).
+///   testMode - see ambcModulesLoad.
+///   testFilter - see ambcModulesLoad (default "" = unfiltered `a test`).
+/// Both trailing parameters are defaulted so the existing call signature
+/// (and the pipeline.cpp weak fallback stub) stays source-compatible.
 /// Returns 0 on success, 1 on failure (diagnostic on `err`).
 int ambcModulesCompileToObject(const std::string& pkgDir,
                                const std::string& arch, int optLevel,
                                const std::string& objPath,
                                const std::string& entryBodyMlir,
-                               bool testMode, std::ostream& err);
+                               bool testMode, std::ostream& err,
+                               const std::string& testFilter = "");
 
 } // namespace a
 

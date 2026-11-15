@@ -27,8 +27,11 @@
 //      a.if             : legacy sketch op kept for compatibility; the landed
 //                        dialect has no a.if (structured flow is a.for/
 //                        a.while/a.condition/a.yield -> emitError in phase 1).
-//      a.struct.getfield/setfield : emitError -- !a.struct<"Name"> carries no
-//                        field-name table and the runtime takes a C string.
+//      a.struct.getfield/setfield : with a `field` StrAttr, lowers to
+//                        llvm.call @a_getattr/@a_setattr with a private
+//                        `__a_cstr<N>` NUL-terminated global for the field
+//                        name. Without `field` (index-only) -> emitError:
+//                        the runtime has no index-based accessor.
 //
 // INTEGRATION POINT: ops are matched by name string (lowerOp()). Once the
 // generated dialect headers are wired into the build, replace the string
@@ -55,6 +58,7 @@
 #include "mlir/Pass/Pass.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringMap.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/raw_ostream.h"
 
@@ -62,6 +66,7 @@
 #include <cstdint>
 #include <cstring>
 #include <string>
+#include <vector>
 
 namespace a {
 namespace {
@@ -90,6 +95,7 @@ using mlir::LLVM::LLVMScalableVectorType;
 using mlir::LLVM::LLVMPointerType;
 using mlir::LLVM::PtrToIntOp;
 using mlir::LLVM::ReturnOp;
+using mlir::LLVM::SelectOp;
 using mlir::LLVM::StoreOp;
 using mlir::LLVM::LLVMVoidType;
 using mlir::LLVM::UndefOp;
@@ -220,6 +226,10 @@ constexpr std::int64_t kInlineLim = INT64_C(1) << 46;
 constexpr std::uint64_t kAvalPayloadMask = 0x0000FFFFFFFFFFFFULL;
 constexpr std::int64_t kAvalNone = kAvalTag | 0x2;
 constexpr std::int64_t kAvalNaNCanon = 9221120237041090560LL;
+// Aval bool small constants (a_runtime.h A_TRUE/A_FALSE). Used when an
+// unboxed i1/!a.bool crosses the boxed argv ABI boundary.
+constexpr std::int64_t kAvalTrue = kAvalTag | 0x6;
+constexpr std::int64_t kAvalFalse = kAvalTag | 0x4;
 
 /// Tagged inline-int aval encoding (a_mkint for |v| < 2^46).
 std::int64_t avalIntEncode(std::int64_t v) {
@@ -253,6 +263,14 @@ void emitStoreI64(OpBuilder &b, Location loc, Value addr, Value val,
                   unsigned align = 0) {
   b.create<StoreOp>(loc, val, addr, align);
 }
+
+// Defined below; used by lowerFunc (bool ABI) and the struct-field cstr
+// globals respectively.
+Value emitAvalBoolBox(OpBuilder &b, Location loc, Value i1v);
+Value emitAvalBoolUnbox(OpBuilder &b, Location loc, Value avalI64);
+void emitByteArrayGlobal(ModuleOp module, Location loc,
+                         llvm::StringRef gname,
+                         llvm::ArrayRef<std::uint8_t> bytes);
 
 //===----------------------------------------------------------------------===//
 // Region / block helpers
@@ -294,10 +312,17 @@ LogicalResult rebuildRegionWithLoweredArgTypes(
     oldToNew[oldBB] = newBB;
   }
 
-  // Pass 2: retarget terminator successors at the new blocks, then drop the
-  // old (now empty) blocks.
+  // Pass 2: retarget terminator successors at the new blocks in place, then
+  // drop the old (now empty) blocks. Rewriting the successor BlockOperand via
+  // setSuccessor avoids rebuilding the op: operands (including forwarded
+  // successor operands) and attributes are preserved verbatim.
+  //
+  // Retargeting must complete for EVERY new block before ANY old block is
+  // erased: an old block that is still a successor target of a not-yet-
+  // retargeted terminator would be freed while a BlockOperand still
+  // references it (DenseMap order makes this a coin flip -> heap corruption).
   for (auto &[oldBB, newBB] : oldToNew) {
-    for (Operation &op : llvm::make_early_inc_range(newBB->getOperations())) {
+    for (Operation &op : newBB->getOperations()) {
       if (op.getNumSuccessors() == 0)
         continue;
       if (op.getNumRegions() != 0) {
@@ -306,23 +331,19 @@ LogicalResult rebuildRegionWithLoweredArgTypes(
             "region is not supported");
         return failure();
       }
-      OperationState state(op.getLoc(), op.getName());
-      state.addOperands(op.getOperands());
-      state.addTypes(op.getResultTypes());
-      state.addAttributes(op.getAttrs());
-      for (Block *succ : op.getSuccessors()) {
+      for (unsigned i = 0; i < op.getNumSuccessors(); ++i) {
+        Block *succ = op.getSuccessor(i);
         auto it = oldToNew.find(succ);
         if (it == oldToNew.end()) {
           op.emitError(
               "a-lower-to-llvm: branch target escapes the lowered region");
           return failure();
         }
-        state.addSuccessors(it->second);
+        op.setSuccessor(it->second, i);
       }
-      Operation *newOp = Operation::create(state);
-      newOp->moveBefore(&op);
-      op.erase();
     }
+  }
+  for (auto &[oldBB, newBB] : oldToNew) {
     oldBB->erase();
   }
   return success();
@@ -558,12 +579,17 @@ LogicalResult lowerFunc(Operation *op) {
     if (llvm::isa<LLVMPointerType>(lt)) {
       v = pb.create<IntToPtrOp>(aloc, lt, raw);
     } else if (auto it = llvm::dyn_cast<IntegerType>(lt)) {
-      if (it.getWidth() != 64) {
+      if (it.getWidth() == 1) {
+        // !a.bool / i1 parameter: the argv slot carries the aval bool word
+        // (A_TRUE/A_FALSE); decode to raw i1 for the body.
+        v = emitAvalBoolUnbox(pb, aloc, raw);
+      } else if (it.getWidth() != 64) {
         op->emitError("a-lower-to-llvm: a.func `")
             << nameAttr.getValue() << "` parameter " << i
             << " lowers to unsupported type `" << lt << "`";
         return failure();
       }
+      // i64 aval payloads pass through unchanged.
     } else {
       op->emitError("a-lower-to-llvm: a.func `")
           << nameAttr.getValue() << "` parameter " << i
@@ -613,9 +639,38 @@ LogicalResult emitRuntimeCallOp(Operation *op, llvm::StringRef callee,
   return success();
 }
 
+/// Box a raw i1 bool as the aval bool word (A_TRUE/A_FALSE) for an argv
+/// slot. `!a.bool`/`i1` values cross the boxed ABI in this tagged form so
+/// they round-trip through a.to_aval/a.from_aval unchanged.
+Value emitAvalBoolBox(OpBuilder &b, Location loc, Value i1v) {
+  MLIRContext *ctx = loc.getContext();
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Value t = b.create<ConstantOp>(loc, i64Ty,
+                                 mlir::IntegerAttr::get(i64Ty, kAvalTrue));
+  Value f = b.create<ConstantOp>(loc, i64Ty,
+                                 mlir::IntegerAttr::get(i64Ty, kAvalFalse));
+  return b.create<SelectOp>(loc, i64Ty, i1v, t, f);
+}
+
+/// Decode an aval bool word (i64) back to raw i1: true iff it equals
+/// A_TRUE (A_FALSE and any other word decode to false; callers that need a
+/// trap use a.from_aval instead).
+Value emitAvalBoolUnbox(OpBuilder &b, Location loc, Value avalI64) {
+  MLIRContext *ctx = loc.getContext();
+  Type i1Ty = IntegerType::get(ctx, 1);
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Value t = b.create<ConstantOp>(loc, i64Ty,
+                                 mlir::IntegerAttr::get(i64Ty, kAvalTrue));
+  return b.create<ICmpOp>(
+      loc, i1Ty,
+      mlir::LLVM::ICmpPredicateAttr::get(ctx, mlir::LLVM::ICmpPredicate::eq),
+      avalI64, t);
+}
+
 /// Lower an operand value to the i64 aval payload expected inside an argv
-/// slot: i64 passes through, pointers are ptrtoint'd, anything else is an
-/// error (phase-1 boxed values are always i64).
+/// slot: i64 passes through, pointers are ptrtoint'd, i1 is boxed as the
+/// aval bool word, anything else is an error (phase-1 boxed values are
+/// always i64).
 LogicalResult coerceToI64Aval(Operation *op, Value v, Value &out) {
   if (failed(ensureOperandInRegion(op, v)))
     return failure();
@@ -623,6 +678,13 @@ LogicalResult coerceToI64Aval(Operation *op, Value v, Value &out) {
   if (auto it = llvm::dyn_cast<IntegerType>(t)) {
     if (it.getWidth() == 64) {
       out = v;
+      return success();
+    }
+    if (it.getWidth() == 1) {
+      // !a.bool / i1 param or argument: box as the tagged aval bool word so
+      // the callee's i1 unpack (icmp eq A_TRUE) recovers it exactly.
+      OpBuilder b(op);
+      out = emitAvalBoolBox(b, op->getLoc(), v);
       return success();
     }
   } else if (llvm::isa<LLVMPointerType>(t)) {
@@ -702,7 +764,10 @@ LogicalResult lowerACall(Operation *op) {
       r = b.create<IntToPtrOp>(loc, lt, r);
     } else {
       auto it = llvm::dyn_cast<IntegerType>(lt);
-      if (!it || it.getWidth() != 64) {
+      if (it && it.getWidth() == 1) {
+        // !a.bool / i1 result: decode the aval bool word to raw i1.
+        r = emitAvalBoolUnbox(b, loc, r);
+      } else if (!it || it.getWidth() != 64) {
         op->emitError("a-lower-to-llvm: a.call `")
             << callee << "` result lowers to unsupported type `" << lt << "`";
         return failure();
@@ -837,6 +902,148 @@ LogicalResult lowerArraySet(Operation *op) {
 }
 
 //===----------------------------------------------------------------------===//
+// a.struct.getfield / a.struct.setfield -> a_getattr / a_setattr
+//
+// The ops carry an optional `field` StrAttr naming the field. When present we
+// lower to the runtime calls
+//   a_getattr(i64 obj, !llvm.ptr name) -> i64
+//   a_setattr(i64 obj, !llvm.ptr name, i64 v) -> i64
+// where `name` is a private NUL-terminated `!llvm.array<N x i8>` global
+// (`__a_cstr<N>`, deduplicated by field-name string). When `field` is absent
+// the op is index-only and stays unsupported: the runtime has no
+// index-based accessor and !a.struct<"Name"> carries no field table.
+//===----------------------------------------------------------------------===//
+
+/// Cache mapping field-name text -> `__a_cstr<N>` global symbol, so repeated
+/// accesses to the same field share one private global per module run.
+using CStrGlobalCache = llvm::StringMap<std::string>;
+
+/// Return the symbol name of a private NUL-terminated cstr global holding
+/// `text`, creating it at module top level on first use.
+std::string getOrCreateCStrGlobal(Operation *op, llvm::StringRef text,
+                                  CStrGlobalCache &cache) {
+  auto it = cache.find(text);
+  if (it != cache.end())
+    return it->second;
+
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  Location loc = op->getLoc();
+
+  static std::atomic<unsigned> cstrGlobalCounter{0};
+  std::string gname;
+  do {
+    gname = "__a_cstr" + std::to_string(cstrGlobalCounter.fetch_add(1));
+  } while (mlir::SymbolTable::lookupSymbolIn(module.getOperation(), gname));
+
+  std::vector<std::uint8_t> bytes(text.size() + 1);
+  for (std::size_t i = 0; i < text.size(); ++i)
+    bytes[i] = (std::uint8_t)text[i];
+  bytes[text.size()] = 0;
+  emitByteArrayGlobal(module, loc, gname, bytes);
+
+  cache[text] = gname;
+  return gname;
+}
+
+/// Read the optional `field` StrAttr; emits an error and returns false when
+/// absent or empty (index-only access is unsupported).
+bool requireFieldAttr(Operation *op, llvm::StringRef &field) {
+  auto sa = op->getAttrOfType<StringAttr>("field");
+  if (!sa || sa.getValue().empty()) {
+    op->emitError("a-lower-to-llvm: `")
+        << op->getName().getStringRef()
+        << "` requires a non-empty `field` attribute; index-only struct "
+           "access is unsupported (the runtime takes a field name)";
+    return false;
+  }
+  field = sa.getValue();
+  return true;
+}
+
+/// Shared lowering for a.struct.getfield/setfield. `isSet` selects the
+/// a_setattr 3-arg call; otherwise a_getattr 2-arg.
+LogicalResult lowerStructField(Operation *op, CStrGlobalCache &cstrs,
+                               bool isSet) {
+  llvm::StringRef field;
+  if (!requireFieldAttr(op, field))
+    return failure();
+
+  MLIRContext *ctx = op->getContext();
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Type ptrTy = LLVMPointerType::get(ctx);
+  Location loc = op->getLoc();
+  ModuleOp module = op->getParentOfType<ModuleOp>();
+  if (!module) {
+    op->emitError("a-lower-to-llvm: struct field access outside of a module");
+    return failure();
+  }
+
+  // Operand sanity: getfield(obj,index), setfield(obj,index,value). The
+  // runtime keys on the field name, so `index` is carried but unused.
+  const unsigned nOps = isSet ? 3 : 2;
+  if (op->getNumOperands() != nOps || op->getNumResults() != 1) {
+    op->emitError("a-lower-to-llvm: malformed `")
+        << op->getName().getStringRef() << "`";
+    return failure();
+  }
+
+  // Result must be the boxed i64 aval payload.
+  Type resTy;
+  if (failed(lowerTypeOrError(op, op->getResult(0).getType(), resTy,
+                              "struct field result")))
+    return failure();
+  auto resInt = llvm::dyn_cast<IntegerType>(resTy);
+  if (!resInt || resInt.getWidth() != 64) {
+    op->emitError("a-lower-to-llvm: `")
+        << op->getName().getStringRef()
+        << "` result lowers to `" << resTy << "`; expected i64 aval payload";
+    return failure();
+  }
+
+  // Pack operands into the i64 aval ABI (obj always; value for setfield).
+  Value obj;
+  if (failed(coerceToI64Aval(op, op->getOperand(0), obj)))
+    return failure();
+
+  OpBuilder b(op);
+  std::string gname = getOrCreateCStrGlobal(op, field, cstrs);
+  Value namePtr = b.create<AddressOfOp>(loc, ptrTy, gname);
+
+  SmallVector<Type> resTypes{i64Ty};
+  SmallVector<Value> callArgs;
+  if (isSet) {
+    Value val;
+    if (failed(coerceToI64Aval(op, op->getOperand(2), val)))
+      return failure();
+    if (failed(ensureLLVMFuncDecl(module, "a_setattr",
+                                  SmallVector<Type>{i64Ty, ptrTy, i64Ty},
+                                  resTypes, loc)))
+      return failure();
+    callArgs = {obj, namePtr, val};
+    auto call = b.create<CallOp>(loc, resTypes, "a_setattr", callArgs);
+    op->getResult(0).replaceAllUsesWith(call->getResult(0));
+  } else {
+    if (failed(ensureLLVMFuncDecl(module, "a_getattr",
+                                  SmallVector<Type>{i64Ty, ptrTy}, resTypes,
+                                  loc)))
+      return failure();
+    callArgs = {obj, namePtr};
+    auto call = b.create<CallOp>(loc, resTypes, "a_getattr", callArgs);
+    op->getResult(0).replaceAllUsesWith(call->getResult(0));
+  }
+  op->erase();
+  return success();
+}
+
+LogicalResult lowerStructGetField(Operation *op, CStrGlobalCache &cstrs) {
+  return lowerStructField(op, cstrs, /*isSet=*/false);
+}
+
+LogicalResult lowerStructSetField(Operation *op, CStrGlobalCache &cstrs) {
+  return lowerStructField(op, cstrs, /*isSet=*/true);
+}
+
+//===----------------------------------------------------------------------===//
 // a.gep / a.addressof
 //===----------------------------------------------------------------------===//
 
@@ -948,6 +1155,40 @@ LogicalResult emitI64NCall(Operation *op, Value v, Value &out) {
 
 /// `a.const "str" {str = "..."}` -> private `!llvm.array<len+1 x i8>` global
 /// + `llvm.mlir.addressof` + `a_str_new(ptr, len)`.
+/// Emit a private `!llvm.array<N x i8>` global at module top level holding
+/// `bytes` verbatim (caller includes any trailing NUL). The initializer is a
+/// region (undef + llvm.insertvalue chain + llvm.return), matching what
+/// mlir_emit.cpp prints for string/cstr literals.
+void emitByteArrayGlobal(ModuleOp module, Location loc, llvm::StringRef gname,
+                         llvm::ArrayRef<std::uint8_t> bytes) {
+  MLIRContext *ctx = module.getContext();
+  Type i8Ty = IntegerType::get(ctx, 8);
+  Type arrTy = LLVMArrayType::get(ctx, i8Ty, (int64_t)bytes.size());
+  OpBuilder mb(module.getOperation());
+  mb.setInsertionPointToStart(&module.getBodyRegion().front());
+  auto global = mb.create<GlobalOp>(loc, arrTy, /*isConstant=*/true,
+                                    mlir::LLVM::Linkage::Private, gname,
+                                    mlir::Attribute());
+  Region &init = global.getInitializer();
+  Block *bb = init.empty() ? nullptr : &init.front();
+  if (!bb) {
+    bb = new Block;
+    init.push_back(bb);
+  }
+  // Fresh initializer: drop any ops the builder pre-populated (e.g. an
+  // implicit terminator) before emitting ours.
+  bb->getOperations().clear();
+  OpBuilder ib = OpBuilder::atBlockEnd(bb);
+  Value acc = ib.create<UndefOp>(loc, arrTy);
+  for (std::size_t i = 0; i < bytes.size(); ++i) {
+    Value cv = ib.create<ConstantOp>(loc, i8Ty,
+                                     mlir::IntegerAttr::get(i8Ty, bytes[i]));
+    acc = ib.create<InsertValueOp>(loc, arrTy, acc, cv,
+                                   llvm::ArrayRef<int64_t>{(int64_t)i});
+  }
+  ib.create<ReturnOp>(loc, ValueRange{acc});
+}
+
 ///
 /// The global initializer is a region (undef + llvm.insertvalue chain +
 /// llvm.return), matching what mlir_emit.cpp prints for string literals.
@@ -960,7 +1201,6 @@ LogicalResult lowerConstStr(Operation *op, llvm::StringRef text,
   }
   MLIRContext *ctx = op->getContext();
   Location loc = op->getLoc();
-  Type i8Ty = IntegerType::get(ctx, 8);
   Type i64Ty = IntegerType::get(ctx, 64);
   Type ptrTy = LLVMPointerType::get(ctx);
   const std::size_t len = text.size();
@@ -973,35 +1213,13 @@ LogicalResult lowerConstStr(Operation *op, llvm::StringRef text,
     gname = "__a_str" + std::to_string(strGlobalCounter.fetch_add(1));
   } while (mlir::SymbolTable::lookupSymbolIn(module.getOperation(), gname));
 
-  Type arrTy = LLVMArrayType::get(ctx, i8Ty, (int64_t)total);
-
   // Emit the global at module top level.
   {
-    OpBuilder mb(module.getOperation());
-    mb.setInsertionPointToStart(&module.getBodyRegion().front());
-    auto global = mb.create<GlobalOp>(loc, arrTy, /*isConstant=*/true,
-                                      mlir::LLVM::Linkage::Private, gname,
-                                      mlir::Attribute());
-    // Build the initializer region: undef -> insertvalue bytes -> return.
-    Region &init = global.getInitializer();
-    Block *bb = init.empty() ? nullptr : &init.front();
-    if (!bb) {
-      bb = new Block;
-      init.push_back(bb);
-    }
-    // Fresh initializer: drop any ops the builder pre-populated (e.g. an
-    // implicit terminator) before emitting ours.
-    bb->getOperations().clear();
-    OpBuilder ib = OpBuilder::atBlockEnd(bb);
-    Value acc = ib.create<UndefOp>(loc, arrTy);
-    for (std::size_t i = 0; i < total; ++i) {
-      std::int64_t byte = (i < len) ? (std::int64_t)(unsigned char)text[i] : 0;
-      Value cv = ib.create<ConstantOp>(loc, i8Ty,
-                                       mlir::IntegerAttr::get(i8Ty, byte));
-      acc = ib.create<InsertValueOp>(loc, arrTy, acc, cv,
-                                      llvm::ArrayRef<int64_t>{(int64_t)i});
-    }
-    ib.create<ReturnOp>(loc, ValueRange{acc});
+    std::vector<std::uint8_t> bytes(total);
+    for (std::size_t i = 0; i < len; ++i)
+      bytes[i] = (std::uint8_t)text[i];
+    bytes[len] = 0;
+    emitByteArrayGlobal(module, loc, gname, bytes);
   }
 
   // In the function: addressof + a_str_new(ptr, len).
@@ -1212,7 +1430,11 @@ LogicalResult lowerReturn(Operation *op) {
     if (failed(ensureOperandInRegion(op, v)))
       return failure();
     auto it = llvm::dyn_cast<IntegerType>(v.getType());
-    if (!it || it.getWidth() != 64) {
+    if (it && it.getWidth() == 1) {
+      // !a.bool / i1 return value: box as the aval bool word so the i64
+      // llvm.func result stays a valid aval payload.
+      v = emitAvalBoolBox(b, loc, v);
+    } else if (!it || it.getWidth() != 64) {
       op->emitError("a-lower-to-llvm: a.return operand has type `")
           << v.getType() << "`; expected i64 aval payload";
       return failure();
@@ -1694,7 +1916,7 @@ LogicalResult lowerWhile(Operation *op) {
 // Pass driver
 //===----------------------------------------------------------------------===//
 
-LogicalResult lowerOp(Operation *op) {
+LogicalResult lowerOp(Operation *op, CStrGlobalCache &cstrs) {
   llvm::StringRef name = op->getName().getStringRef();
   // Only touch ops in the `a` dialect.
   if (op->getDialect() == nullptr ||
@@ -1731,6 +1953,10 @@ LogicalResult lowerOp(Operation *op) {
     return lowerArrayGet(op);
   if (name == "a.array.set")
     return lowerArraySet(op);
+  if (name == "a.struct.getfield")
+    return lowerStructGetField(op, cstrs);
+  if (name == "a.struct.setfield")
+    return lowerStructSetField(op, cstrs);
   if (name == "a.if")
     return lowerIf(op);  // legacy sketch op; not in the landed dialect
   if (name == "a.for")
@@ -1744,9 +1970,6 @@ LogicalResult lowerOp(Operation *op) {
   }
 
   // Phase-1 unsupported ops: fail gracefully.
-  //   a.struct.getfield / a.struct.setfield - need a field-name table that
-  //     !a.struct<"Name"> does not carry; runtime a_getattr/a_setattr take
-  //     a C string, not an index.
   op->emitError("a-lower-to-llvm: unsupported `a` dialect op `")
       << name << "`";
   return failure();
@@ -1772,8 +1995,8 @@ void ALowerToLLVMPass::getDependentDialects(
 void ALowerToLLVMPass::runOnOperation() {
   ModuleOp module = getOperation();
 
-  // Pre-pass: rebuild region block-argument types for a.for/a.while/a.if so
-  // that ops nested inside those regions see lowered (i64/llvm) types when
+  // Pre-pass: rebuild region block-argument types for a.for/a.while/a.if/a.func
+  // so that ops nested inside those regions see lowered (i64/llvm) types when
   // they are processed in the main post-order loop below.
   module.walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
     if (op->getDialect() == nullptr ||
@@ -1816,11 +2039,9 @@ void ALowerToLLVMPass::runOnOperation() {
     return mlir::WalkResult::advance();
   });
 
+  CStrGlobalCache cstrGlobals;
   for (Operation *op : aOps) {
-    // An op may have been erased as part of an ancestor's lowering -- but
-    // ancestors are processed after descendants in post-order, and lowering
-    // never erases collected descendants, so every op here is still live.
-    if (failed(lowerOp(op)))
+    if (failed(lowerOp(op, cstrGlobals)))
       signalPassFailure();
   }
 }

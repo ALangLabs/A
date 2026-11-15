@@ -2,6 +2,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/integration/run_tests.sh")
   add_test(NAME language-suite
     COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/integration/run_tests.sh $<TARGET_FILE:a>)
 endif()
+add_test(NAME mlir-tests
+  COMMAND ${CMAKE_CURRENT_SOURCE_DIR}/mlir/run_tests.sh $<TARGET_FILE:a>)
 add_executable(a-tooling-tests tooling/tooling_tests.cpp)
 target_link_libraries(a-tooling-tests PRIVATE a_tooling)
 add_test(NAME tooling-tests COMMAND a-tooling-tests)

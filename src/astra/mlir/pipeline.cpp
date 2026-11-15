@@ -6,6 +6,7 @@
 
 #include "pipeline.hpp"
 
+#include "passes/ACanonicalize.hpp"
 #include "passes/ALowerToLLVM.hpp"
 #include "passes/ALowerTyped.hpp"
 
@@ -53,6 +54,7 @@ void registerAllDialects(mlir::MLIRContext &ctx) {
 
 void registerAPasses() {
   static bool registered = [] {
+    mlir::registerPass([] { return createACanonicalizePass(); });
     mlir::registerPass([] { return createALowerTypedPass(); });
     mlir::registerPass([] { return createALowerToLLVMPass(); });
     return true;
@@ -77,6 +79,9 @@ void buildAOptPipeline(mlir::PassManager &pm, int optLevel,
 
   if (emitLlvmDialect) {
     registerAPasses();
+    // Fold a-dialect boxing round-trips and constant chains before the
+    // lowering passes consume them.
+    pm.addPass(createACanonicalizePass());
     // a-lower-typed must run first: it consumes the M1 boxing ops
     // (a.to_aval/a.from_aval) into raw llvm dialect ops, and lowers any
     // remaining typed scalar results the a-lower-to-llvm boxed ABI cannot

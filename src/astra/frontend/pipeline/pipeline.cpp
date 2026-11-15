@@ -366,14 +366,21 @@ int ambcCompileToObject(const std::string& ambcPath, const std::string& arch,
 // ambc_modules.cpp): the newer Mojo-.mojoc layout — ambc.meta + one .ambc
 // per module, merged and lowered in-process. `entryBodyMlir` carries the
 // entry fn's body statements (entry.mlir inside the package dir); pass
-// "" when the package has no entry.mlir. `testMode` must be false (per-
-// module packages do not support `a test`). Weak fallback at the bottom
-// of this file covers no-MLIR builds.
+// "" when the package has no entry.mlir or when testMode is set.
+// `testMode` builds the a_test_main harness instead of the entry body;
+// `testFilter` is the compile-time substring filter ("" = all tests).
+// Weak fallback at the bottom of this file covers no-MLIR builds.
 int ambcModulesCompileToObject(const std::string& pkgDir,
                                const std::string& arch, int optLevel,
                                const std::string& objPath,
                                const std::string& entryBodyMlir,
-                               bool testMode, std::ostream& err);
+                               bool testMode, std::ostream& err,
+                               const std::string& testFilter = "");
+// Defined only when a_mlir_core is built with MLIR dev files
+// (src/astra/mlir/codegen.cpp). Weak probe: resolves to nullptr in the stub
+// build, letting the env gates below detect backend availability instead of
+// hitting the weak error stubs at the bottom of this file.
+__attribute__((weak)) void initMLIRBackend();
 
 namespace {
 
@@ -590,6 +597,8 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
     h = mixBytes(h, be ? be : "");
     const char* nm = std::getenv("A_MLIR_NATIVE");
     h = mixBytes(h, nm ? nm : "");
+    const char* ambc = std::getenv("A_AMBC");
+    h = mixBytes(h, ambc ? ambc : "");
   }
   {
     const std::string self = selfExePath();
@@ -811,6 +820,8 @@ inline std::string precheckKey(const std::string& path,
     h = mixBytes(h, be ? be : "");
     const char* nm = std::getenv("A_MLIR_NATIVE");
     h = mixBytes(h, nm ? nm : "");
+    const char* ambc = std::getenv("A_AMBC");
+    h = mixBytes(h, ambc ? ambc : "");
   }
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
@@ -1649,20 +1660,41 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
 }
 
 // ---- In-process MLIR backend (src/astra/mlir) ------------------------------
-// A_MLIR_NATIVE=1 (or A_BACKEND=mlir-native) replaces the
-// mlir-translate/opt/llc subprocess chain with the in-process bridge:
-// parse the emitted llvm-dialect text -> canonicalize/CSE -> translate to
-// LLVM IR -> LLVM opt pipeline -> TargetMachine -> .o, then the same clang
-// link step. Host-only like the subprocess path; Windows is excluded.
+// The in-process bridge is the DEFAULT on non-Windows hosts: parse the
+// emitted llvm-dialect text -> canonicalize/CSE -> translate to LLVM IR ->
+// LLVM opt pipeline -> TargetMachine -> .o, then the same clang link step.
+// Escape hatches back to the mlir-translate/opt/llc/clang subprocess chain:
+//   A_MLIR_NATIVE=0            (or =off/no/false)
+//   A_BACKEND=subprocess       (aliases: mlir-subprocess, llvm-subprocess, tools)
+// A_BACKEND=mlir-native (or =native) keeps the in-process path explicitly;
+// A_BACKEND=llvm is a driver-level legacy knob and does not affect this gate.
+// Builds without MLIR dev files (a_mlir_core stub) always take the subprocess
+// path regardless of env.
+
+bool envFlagDisabled(const char* name) {
+  const char* v = std::getenv(name);
+  if (!v || !*v) return false;
+  const std::string s = lowerStr(v);
+  return s == "0" || s == "off" || s == "no" || s == "false";
+}
+
+// True when a_mlir_core contributed its strong MLIR-backed definitions.
+bool mlirCoreLinked() { return &initMLIRBackend != nullptr; }
 
 bool nativeMlirEnabled() {
 #ifdef _WIN32
   return false;
 #else
-  if (const char* v = std::getenv("A_MLIR_NATIVE"); v && *v == '1') return true;
-  if (const char* v = std::getenv("A_BACKEND");
-      v && lowerStr(v) == "mlir-native") return true;
-  return false;
+  if (!mlirCoreLinked()) return false;
+  if (envFlagDisabled("A_MLIR_NATIVE")) return false;
+  if (const char* v = std::getenv("A_BACKEND"); v && *v) {
+    const std::string s = lowerStr(v);
+    if (s == "subprocess" || s == "mlir-subprocess" ||
+        s == "llvm-subprocess" || s == "tools")
+      return false;
+    if (s == "mlir-native" || s == "native") return true;
+  }
+  return true;
 #endif
 }
 
@@ -1705,20 +1737,24 @@ int nativeMlirBuild(const std::string& mlirText, const std::string& arch,
 }
 
 // ---- .ambc bytecode fast path ----------------------------------------------
-// A_AMBC=1: a sibling `<name>.ambc` (written by `a precompile`) is compiled
-// directly to an object and linked — parse/comptime/sema/emit are all
-// skipped, the Mojo `.mojoc` model. The package embeds the whole checked
-// module graph, so it is only as fresh as the last `a precompile`; the
-// format-version + producer check in bytecodeIsCompatible rejects packages
-// built by a different compiler/MLIR, but NOT stale dependencies — users
-// must re-run `a precompile` after changing any imported module.
+// DEFAULT on non-Windows (A_AMBC=0 disables): a sibling `<name>.ambc` (or
+// `<name>.ambc.d/` per-module package dir, written by `a precompile`) is
+// compiled directly to an object and linked — parse/comptime/sema/emit are
+// all skipped, the Mojo `.mojoc` model. When no compatible package exists
+// ambcFastBuild returns 2 and the normal pipeline runs, so the default is
+// safe. The package embeds the whole checked module graph and the format
+// version + producer check in bytecodeIsCompatible rejects packages built
+// by a different compiler/MLIR, but NOT stale dependencies: the package does
+// not record dep mtimes, so re-run `a precompile` after changing ANY
+// imported module or the fast path will silently link the old code.
+// Requires the MLIR-backed a_mlir_core (stub builds fall through).
 
 bool ambcEnabled() {
 #ifdef _WIN32
   return false;
 #else
-  if (const char* v = std::getenv("A_AMBC"); v && *v == '1') return true;
-  return false;
+  if (!mlirCoreLinked()) return false;
+  return !envFlagDisabled("A_AMBC");
 #endif
 }
 
@@ -1981,7 +2017,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
     }
   }
   // .ambc fast path: sibling precompiled package -> object -> link -> run,
-  // skipping the frontend entirely (A_AMBC=1).
+  // skipping the frontend entirely (default on; A_AMBC=0 disables).
   if (td.native) {
     const std::string runPath = tempPath("bin");
     int arc = ambcFastBuild(path, td.arch, config.optimizationLevel, runPath, err);
@@ -2066,6 +2102,51 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     }
     if(sink.hasErrors()){ sink.flush(err,config.useColor); return kCErr; }
   }
+  // .ambc test path (default on; A_AMBC=0 disables): a sibling per-module
+  // package `<name>.ambc.d/` compiles straight to a test-harness binary,
+  // skipping emit/compile. Only the per-module layout supports test mode
+  // (the consumer synthesizes the a_test_main tail and applies the
+  // compile-time filter); whole-graph .ambc and missing packages fall
+  // through to the normal path. The frontend checks above already ran,
+  // so --filter validation and test_* param rejection still apply.
+  if (ambcEnabled()) {
+    const std::string ambc = ambcPathFor(path);
+    if (!ambc.empty()) {
+      const std::string pkgDir = ambc + ".d";
+      std::error_code ec;
+      if (std::filesystem::is_directory(pkgDir, ec)) {
+        std::string objPath = tempPath("llvm", "x.o");
+        int rc = ambcModulesCompileToObject(pkgDir, td.arch,
+                                            config.optimizationLevel, objPath,
+                                            "", /*testMode=*/true, err,
+                                            config.testFilter);
+        if (rc == 0) {
+          const std::string runPath = tempPath("bin");
+          std::string runtimeC, runtimeDir;
+          rc = 1;
+          if (!findRuntime(td.arch, runtimeC, runtimeDir)) {
+            err << "error: mlir backend: cannot locate A runtime (a_runtime.c)\n";
+          } else {
+            const std::string rtLib = findRuntimeLib(td.arch, runtimeDir);
+            if (rtLib.empty()) {
+              err << "error: mlir backend: cannot locate libaruntime.a\n";
+            } else {
+              rc = linkWithRuntime(objPath, runPath, rtLib, err);
+            }
+          }
+          std::filesystem::remove(objPath, ec);
+          if (rc == 0) {
+            int hit = runBinary(runPath);
+            std::filesystem::remove(runPath, ec);
+            return hit < 0 ? kCErr : hit;
+          }
+          return kCErr;
+        }
+        std::filesystem::remove(objPath, ec);
+        return kCErr;
+      }
+    }
+  }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
                        config.testFilter.empty()?nullptr:&config.testFilter, config.jobs,
                        config.backend);
@@ -2096,8 +2177,9 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     }
   }
   std::string src; if(!readAll(path,src,err)) return kNoIn;
-  // .ambc fast path (A_AMBC=1): compile the sibling precompiled package
-  // straight to the output binary, skipping the frontend. Target is
+  // .ambc fast path (default on; A_AMBC=0 disables): compile the sibling
+  // precompiled package straight to the output binary, skipping the
+  // frontend. Target is
   // resolved early here only for the ambc attempt; the normal path
   // re-resolves it below as before.
   if (ambcEnabled()) {
@@ -2395,15 +2477,17 @@ int testPath(const std::string& path, const PipelineConfig& config, std::istream
 // ---- In-process MLIR backend fallbacks -------------------------------------
 // When MLIR dev files were absent at configure time, a_mlir_core is not
 // linked (or contributes only the CLI stubs), so these weak definitions
-// provide the symbols the A_MLIR_NATIVE-gated call sites reference. The
-// strong definitions in src/astra/mlir/{native,codegen}.cpp always win when
-// present.
+// provide the symbols the native/ambc call sites reference. The strong
+// definitions in src/astra/mlir/{native,codegen,ambc,ambc_modules}.cpp
+// always win when present; mlirCoreLinked() keeps these stubs unreachable
+// in normal flows (they remain as a link-time safety net).
 __attribute__((weak)) int nativeCompileMlirTextToObject(
     const std::string& mlirText, const std::string& arch, int optLevel,
     const std::string& objPath, std::ostream& err) {
   (void)mlirText; (void)arch; (void)optLevel; (void)objPath;
   err << "error: mlir backend: in-process MLIR backend unavailable "
-         "(built without MLIR dev files); unset A_MLIR_NATIVE\n";
+         "(built without MLIR dev files); set A_MLIR_NATIVE=0 to use the "
+         "subprocess toolchain\n";
   return 1;
 }
 
@@ -2412,18 +2496,20 @@ __attribute__((weak)) int ambcCompileToObject(
     const std::string& objPath, std::ostream& err) {
   (void)ambcPath; (void)arch; (void)optLevel; (void)objPath;
   err << "error: ambc backend: in-process MLIR backend unavailable "
-         "(built without MLIR dev files); unset A_AMBC\n";
+         "(built without MLIR dev files); set A_AMBC=0 to disable the "
+         "precompiled-package fast path\n";
   return 1;
 }
 
 __attribute__((weak)) int ambcModulesCompileToObject(
     const std::string& pkgDir, const std::string& arch, int optLevel,
     const std::string& objPath, const std::string& entryBodyMlir,
-    bool testMode, std::ostream& err) {
+    bool testMode, std::ostream& err, const std::string& testFilter) {
   (void)pkgDir; (void)arch; (void)optLevel; (void)objPath;
-  (void)entryBodyMlir; (void)testMode;
+  (void)entryBodyMlir; (void)testMode; (void)testFilter;
   err << "error: ambc backend: in-process MLIR backend unavailable "
-         "(built without MLIR dev files); unset A_AMBC\n";
+         "(built without MLIR dev files); set A_AMBC=0 to disable the "
+         "precompiled-package fast path\n";
   return 1;
 }
 
@@ -2433,7 +2519,8 @@ __attribute__((weak)) int linkWithRuntime(const std::string& objPath,
                                           std::ostream& err) {
   (void)objPath; (void)outputPath; (void)runtimeLib;
   err << "error: mlir backend: in-process MLIR backend unavailable "
-         "(built without MLIR dev files); unset A_MLIR_NATIVE\n";
+         "(built without MLIR dev files); set A_MLIR_NATIVE=0 to use the "
+         "subprocess toolchain\n";
   return 1;
 }
 }

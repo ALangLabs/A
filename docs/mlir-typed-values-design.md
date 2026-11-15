@@ -210,8 +210,10 @@ op count in real code; struct field access is second.
 
 ## 6. Migration path (each step independently shippable)
 
-Gate every step on `A_MLIR_TYPED=1` (alongside existing `A_MLIR_NATIVE=1`)
-until integration; `emitMLIR` text path and llvm fallback stay intact.
+Gate every step on `A_MLIR_TYPED=1` (the in-process backend gated by
+`A_MLIR_NATIVE` is already the default on non-Windows; `A_MLIR_NATIVE=0`
+selects the subprocess path) until integration; `emitMLIR` text path and
+llvm fallback stay intact.
 
 - **M1 - Scalar unboxing at expr level.** Add `mlirTypeOf(TypePtr)` mapper
   (Int/Float/Bool/Char/Vector -> native; rest -> `!a.aval`). In the `a`-dialect

@@ -157,9 +157,9 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 ```mermaid
 flowchart LR
     src[".astra source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
-    fe --> mlir["MLIR (llvm dialect)<br/>mlir-direct backend"]
-    mlir --> ll["LLVM IR<br/>(mlir-translate)"]
-    ll --> tools["opt → llc → clang<br/>(system LLVM toolchain)"]
+    fe --> mlir["MLIR (llvm dialect)<br/>in-process backend (default)"]
+    mlir --> ll["LLVM IR<br/>(in-process opt + TargetMachine)"]
+    ll --> tools[".o -> clang link<br/>+ libaruntime.a"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> tools
     tools --> bin["native executable"]
     bin --> out["stdout / exit code"]
@@ -168,11 +168,24 @@ flowchart LR
 - **`src/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
   analysis, and the native code emitters
-  (`emitMLIR` -> MLIR llvm dialect -> `mlir-translate` -> LLVM IR ->
-  `opt`/`llc`/`clang`, host targets only; `emitLLVM` remains as the
-  `A_BACKEND=llvm` debug fallback;
+  (`emitMLIR` -> MLIR llvm dialect, compiled **in-process** by default:
+  parse -> LLVM IR -> `llvm::PassBuilder` opt -> `TargetMachine` -> `.o`
+  -> `clang` link with `libaruntime.a`, host targets only; the
+  `mlir-translate`/`opt`/`llc`/`clang` subprocess chain remains via
+  `A_BACKEND=subprocess` or `A_MLIR_NATIVE=0`; a sibling `.ambc`
+  precompiled package (`a precompile`) is consumed automatically on
+  non-Windows, `A_AMBC=0` disables — re-run `a precompile` after
+  changing any imported module since packages don't track deps;
+  `emitLLVM` remains as the `A_BACKEND=llvm` debug fallback;
   `cmake/aruntime.cmake` stages `src/astra/runtime/*.c` into
   `build/astralib/libaruntime.a`, which every compiled program links).
+- **`src/astra/mlir/`** *(in progress)* — the Mojo/KGEN-style in-process
+  MLIR backend: the `a` dialect, lowering passes, `.ambc` bytecode
+  packaging (`a precompile`, `A_AMBC=1`), and an opt-in in-process
+  LLVM bridge (`A_MLIR_NATIVE=1` / `A_BACKEND=mlir-native`) that replaces
+  the `mlir-translate`/`opt`/`llc` subprocess chain. Debug entry point:
+  `a mlir-opt <file.mlir|file.ambc>`; golden tests in `tests/mlir/`.
+  See `docs/mlir-architecture.md`.
 - **`src/astra/runtime/`** — the C runtime every A program links:
   NaN-boxed `aval` values, collections, builtins, and native modules
   (json, fs, net, arena, unsafe, python interop, terminal, time, intrinsics).

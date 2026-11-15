@@ -781,6 +781,9 @@ LogicalResult AStructGetFieldOp::verify() {
   if (!isa<IntegerType>(getIndex().getType()) ||
       cast<IntegerType>(getIndex().getType()).getWidth() != 64)
     return emitOpError() << "field index must be i64";
+  if (auto field = getFieldAttr())
+    if (field.getValue().empty())
+      return emitOpError() << "field name must be non-empty when present";
   if (auto ty = getStructTypeAttr())
     if (!isa<AStructType>(ty.getValue()))
       return emitOpError() << "struct_type must be an !a.struct type";
@@ -795,6 +798,9 @@ LogicalResult AStructSetFieldOp::verify() {
     return emitOpError() << "field index must be i64";
   if (!isa<AVALType>(getValue().getType()))
     return emitOpError() << "value must be !a.aval";
+  if (auto field = getFieldAttr())
+    if (field.getValue().empty())
+      return emitOpError() << "field name must be non-empty when present";
   if (auto ty = getStructTypeAttr())
     if (!isa<AStructType>(ty.getValue()))
       return emitOpError() << "struct_type must be an !a.struct type";

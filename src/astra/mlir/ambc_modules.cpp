@@ -392,7 +392,10 @@ void dedupLlvmGlobals(mlir::ModuleOp module) {
 std::string synthesizeTailText(const AmbcMeta& meta,
                                const std::vector<int>& initOrder,
                                const std::string& entryBodyMlir,
-                               mlir::ModuleOp module) {
+                               mlir::ModuleOp module, bool testMode,
+                               const std::string& testFilter,
+                               std::vector<std::string>* testNameSyms,
+                               std::vector<std::string>* testFnSyms) {
   std::ostringstream t;
   t << "module {\n";
 
@@ -405,6 +408,8 @@ std::string synthesizeTailText(const AmbcMeta& meta,
   //    Declare each __a_m<id>_init first: the tail parses in isolation, so
   //    calls need an in-scope declaration even though the merged module
   //    already carries the definitions.
+  //    Under testMode the entry body is skipped — mirroring whole-graph
+  //    emitMainBody, which drops the entry portion when testMode_ is set.
   for (int id : initOrder) {
     t << "llvm.func @__a_m" << id << "_init(%a0: !llvm.ptr) -> i64\n";
   }
@@ -416,7 +421,7 @@ std::string synthesizeTailText(const AmbcMeta& meta,
     std::string r = nv();
     t << "  " << r << " = llvm.call @" << sym << "(%argv) : (!llvm.ptr) -> i64\n";
   }
-  if (!entryBodyMlir.empty()) {
+  if (!testMode && !entryBodyMlir.empty()) {
     t << entryBodyMlir;
     if (entryBodyMlir.back() != '\n') t << "\n";
   }
@@ -454,34 +459,153 @@ std::string synthesizeTailText(const AmbcMeta& meta,
     t << "  llvm.return\n}\n\n";
   }
 
-  // 4. main (whole-graph emitMain, non-test mode).
-  t << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
-  t << "  llvm.call @a_runtime_init() : () -> ()\n";
-  if (!rootSyms.empty()) {
-    t << "  %gr0 = llvm.mlir.addressof @__a_gc_root_mark : !llvm.ptr\n";
-    t << "  llvm.call @a_gc_add_root_cb(%gr0) : (!llvm.ptr) -> ()\n";
+  // 4. main: non-test mode emits the a_fib_main trampoline (whole-graph
+  //    emitMain); test mode emits the a_test_main harness (whole-graph
+  //    emitTestMain): run module inits on a fiber, then register the entry
+  //    module's `test_*` fns with the runtime harness.
+  if (!testMode) {
+    t << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
+    t << "  llvm.call @a_runtime_init() : () -> ()\n";
+    if (!rootSyms.empty()) {
+      t << "  %gr0 = llvm.mlir.addressof @__a_gc_root_mark : !llvm.ptr\n";
+      t << "  llvm.call @a_gc_add_root_cb(%gr0) : (!llvm.ptr) -> ()\n";
+    }
+    t << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
+    t << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
+    t << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
+    t << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
+    t << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
+    t << "  %r = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
+          " : (i64, i64, i64, !llvm.ptr) -> i64\n";
+    t << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
+    t << "  llvm.return %c0 : i32\n";
+    t << "}\n\n";
+  } else {
+    // Discover test fns: per-module units name them
+    // `__a_f_m<moduleId>_<test_name>_<seq>` (MlirEmitter::collectTopLevel,
+    // mlir_emit.cpp ~line 715); only definitions owned by the ENTRY module
+    // are registered (whole-graph emitTestMain filters fn->moduleId ==
+    // graph_.entry). The trailing `_<seq>` is digits; the recovered
+    // `test_name` may itself contain underscores, so strip only the LAST
+    // `_<digits>` segment.
+    struct TestFn { std::string name; std::string sym; std::string nameGlobal; };
+    std::vector<TestFn> tests;
+    static const std::regex testFnRe(
+        "^__a_f_m([0-9]+)_(.+)_([0-9]+)$");
+    for (mlir::LLVM::LLVMFuncOp fn : module.getOps<mlir::LLVM::LLVMFuncOp>()) {
+      if (fn.getBody().empty()) continue;  // declarations only
+      std::string sym = fn.getSymName().str();
+      std::smatch m;
+      if (!std::regex_match(sym, m, testFnRe)) continue;
+      int modId = -1;
+      try { modId = std::stoi(m[1].str()); } catch (...) {}
+      if (modId != meta.entry) continue;
+      std::string name = m[2].str();
+      if (name.rfind("test_", 0) != 0) continue;
+      // Same predicate as the emitter: substring match on the source name.
+      if (!testFilter.empty() && name.find(testFilter) == std::string::npos)
+        continue;
+      tests.push_back({name, sym, {}});
+    }
+    std::sort(tests.begin(), tests.end(),
+              [](const TestFn& a, const TestFn& b) { return a.name < b.name; });
+
+    // One NUL-terminated name global per test, emitted at module scope
+    // before `main` (mirrors whole-graph emitTestMain's __a_cstr<N>
+    // globals). `__a_tcstr` cannot collide with the per-module
+    // `__a_cstr<N>` counters — but uniquify against the merged symbol
+    // table anyway for safety. Private linkage keeps them out of
+    // dedupLlvmGlobals (which only sees `__a_g_*`-style externals).
+    if (!tests.empty()) {
+      int g = 0;
+      for (TestFn& tf : tests) {
+        std::string cand;
+        do {
+          cand = "__a_tcstr" + std::to_string(g++);
+        } while (mlir::SymbolTable::lookupNearestSymbolFrom(
+                     module, mlir::StringAttr::get(module.getContext(),
+                                                  cand)));
+        tf.nameGlobal = cand;
+        if (testNameSyms) testNameSyms->push_back(cand);
+        if (testFnSyms) testFnSyms->push_back(tf.sym);
+        // The tail parses standalone: `main`'s llvm.mlir.addressof on the
+        // test fn requires an in-scope llvm.func declaration. Emit one
+        // (uniform A-fn signature); dedupLlvmFuncDecls keeps the module's
+        // real definition after the splice — same pattern as the
+        // __a_m*_init decls.
+        t << "llvm.func @" << tf.sym << "(%argv: !llvm.ptr) -> i64\n";
+        // MLIR string attribute: escape '\' and '"'; append \00 for the
+        // C NUL terminator. Array length = bytes incl. terminator.
+        std::string lit;
+        for (char ch : tf.name) {
+          if (ch == '\\' || ch == '"') lit += '\\';
+          lit += ch;
+        }
+        lit += "\\00";
+        t << "llvm.mlir.global private constant @" << cand << "(\"" << lit
+          << "\") : !llvm.array<" << (tf.name.size() + 1)
+          << " x i8>\n\n";
+      }
+    }
+
+    t << "llvm.func @main(%argc: i32, %argv0: !llvm.ptr) -> i32 {\n";
+    t << "  llvm.call @a_runtime_init() : () -> ()\n";
+    // Module inits on a fiber — same as whole-graph emitTestMain. The
+    // entry body is NOT run (emitMainBody skips it under test mode).
+    t << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
+    t << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
+    t << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
+    t << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
+    t << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
+    t << "  %rinit = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
+          " : (i64, i64, i64, !llvm.ptr) -> i64\n";
+    if (tests.empty()) {
+      // Mirrors emitTestMain: no tests -> return 0 (the pipeline's
+      // no-matching-filter diagnostic happens before compile, on the
+      // source path; a stale/empty package just runs nothing).
+      t << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
+      t << "  llvm.return %c0 : i32\n}\n\n";
+    } else {
+      const int n = (int)tests.size();
+      // names/fns as stack arrays of !llvm.ptr (char* / fn-ptr elements).
+      t << "  %tone = llvm.mlir.constant(1 : i64) : i64\n";
+      t << "  %names = llvm.alloca %tone x !llvm.array<" << n
+        << " x !llvm.ptr> : (i64) -> !llvm.ptr\n";
+      t << "  %fns = llvm.alloca %tone x !llvm.array<" << n
+        << " x !llvm.ptr> : (i64) -> !llvm.ptr\n";
+      for (int i = 0; i < n; ++i) {
+        std::string idx = "%ti" + std::to_string(i);
+        t << "  " << idx << " = llvm.mlir.constant(" << i << " : i64) : i64\n";
+        t << "  %tn" << i << " = llvm.mlir.addressof @" << tests[i].nameGlobal
+          << " : !llvm.ptr\n";
+        t << "  %tnp" << i << " = llvm.getelementptr %names[" << idx
+          << "] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n";
+        t << "  llvm.store %tn" << i << ", %tnp" << i
+          << " : !llvm.ptr, !llvm.ptr\n";
+        t << "  %tf" << i << " = llvm.mlir.addressof @" << tests[i].sym
+          << " : !llvm.ptr\n";
+        t << "  %tfp" << i << " = llvm.getelementptr %fns[" << idx
+          << "] : (!llvm.ptr, i64) -> !llvm.ptr, i64\n";
+        t << "  llvm.store %tf" << i << ", %tfp" << i
+          << " : !llvm.ptr, !llvm.ptr\n";
+      }
+      t << "  %tn = llvm.mlir.constant(" << n << " : i64) : i64\n";
+      t << "  %rc = llvm.call @a_test_main(%tn, %names, %fns)"
+           " : (i64, !llvm.ptr, !llvm.ptr) -> i32\n";
+      t << "  llvm.return %rc : i32\n}\n\n";
+    }
   }
-  t << "  %fnp0 = llvm.mlir.addressof @__a_main_body : !llvm.ptr\n";
-  t << "  %fnp1 = llvm.ptrtoint %fnp0 : !llvm.ptr to i64\n";
-  t << "  %cnone = llvm.mlir.constant(-281474976710654 : i64) : i64\n";
-  t << "  %czero = llvm.mlir.constant(0 : i64) : i64\n";
-  t << "  %nullp = llvm.mlir.zero : !llvm.ptr\n";
-  t << "  %r = llvm.call @a_fib_main(%fnp1, %cnone, %czero, %nullp)"
-        " : (i64, i64, i64, !llvm.ptr) -> i64\n";
-  t << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
-  t << "  llvm.return %c0 : i32\n";
-  t << "}\n\n";
 
   // Declare every external symbol `entryBodyMlir` references. The tail is
   // parsed as a standalone module and llvm.call / llvm.mlir.addressof
   // verify that callees/globals exist in scope at parse time; symbols
-  // already declared above (runtime sigs, __a_m<id>_init, __a_g_* roots)
-  // are skipped. Everything else gets a declaration that
-  // dedupLlvmFuncDecls/dedupLlvmGlobals replaces with the real definition
-  // after the splice — the same pattern the __a_m*_init and __a_g_*
-  // declarations already rely on. Func decls use the uniform A-function
-  // signature (!llvm.ptr) -> i64 (every user fn/method/ctor/lambda/
-  // parfor helper has it); literal/global symbols are recognised by
+  // already declared above (runtime sigs, __a_m<id>_init, __a_g_* roots,
+  // __a_tcstr* test-name globals) are skipped. Everything else gets a
+  // declaration that dedupLlvmFuncDecls/dedupLlvmGlobals replaces with the
+  // real definition after the splice — the same pattern the __a_m*_init
+  // and __a_g_* declarations already rely on. Func decls use the uniform
+  // A-function signature (!llvm.ptr) -> i64 (every user fn/method/ctor/
+  // lambda/parfor helper has it); literal/global symbols are recognised by
   // their emitter prefixes. Emitted last inside `module { }` — op order
   // is irrelevant to symbol resolution.
   {
@@ -493,6 +617,15 @@ std::string synthesizeTailText(const AmbcMeta& meta,
     declared.insert("__a_main_body");
     declared.insert("__a_gc_root_mark");
     declared.insert("main");
+    // Test-name globals (__a_tcstr*) and test fn decls are defined in
+    // the tail itself; mark them declared so a same-named ref can't
+    // spawn a duplicate decl.
+    if (testNameSyms) {
+      for (const std::string& sym : *testNameSyms) declared.insert(sym);
+    }
+    if (testFnSyms) {
+      for (const std::string& sym : *testFnSyms) declared.insert(sym);
+    }
     static const std::regex refRe("@([A-Za-z_][A-Za-z0-9_]*)");
     std::set<std::string> refs;
     for (std::sregex_iterator it(entryBodyMlir.begin(), entryBodyMlir.end(),
@@ -517,7 +650,6 @@ std::string synthesizeTailText(const AmbcMeta& meta,
 
   t << "}\n";
 
-  (void)meta;
   return t.str();
 }
 
@@ -525,14 +657,8 @@ std::string synthesizeTailText(const AmbcMeta& meta,
 
 int ambcModulesLoad(const std::string& pkgDir,
                     const std::string& entryBodyMlir, bool testMode,
-                    AmbcModules& pkg, std::ostream& err) {
-  if (testMode) {
-    err << "error: per-module .ambc packages do not support `a test` "
-           "(testFilter is not recorded in ambc.meta); build a whole-graph "
-           ".ambc or compile from source instead\n";
-    return 1;
-  }
-
+                    AmbcModules& pkg, std::ostream& err,
+                    const std::string& testFilter) {
   fs::path dir(pkgDir);
   AmbcMeta meta;
   if (!parseAmbcMeta(dir, meta, err)) return 1;
@@ -607,9 +733,14 @@ int ambcModulesLoad(const std::string& pkgDir,
   }
 
   // Synthesize + parse the global tail into the same context, then splice
-  // its ops into the merged module.
-  std::string tailText =
-      synthesizeTailText(meta, initOrder, entryBodyMlir, anchor);
+  // its ops into the merged module. testNameSyms collects the __a_tcstr*
+  // globals the test tail defines so the tail's own decl pass can mark
+  // them (they are not yet in `anchor` when synthesizeTailText runs).
+  std::vector<std::string> testNameSyms;
+  std::vector<std::string> testFnSyms;
+  std::string tailText = synthesizeTailText(meta, initOrder, entryBodyMlir,
+                                          anchor, testMode, testFilter,
+                                          &testNameSyms, &testFnSyms);
   if (const char* dbg = std::getenv("A_AMBC_DEBUG_TAIL")) {
     if (*dbg) {
       llvm::errs() << "===TAIL===\n" << tailText << "===END===\n";
@@ -645,9 +776,11 @@ int ambcModulesCompileToObject(const std::string& pkgDir,
                                const std::string& arch, int optLevel,
                                const std::string& objPath,
                                const std::string& entryBodyMlir,
-                               bool testMode, std::ostream& err) {
+                               bool testMode, std::ostream& err,
+                               const std::string& testFilter) {
   AmbcModules pkg;
-  if (ambcModulesLoad(pkgDir, entryBodyMlir, testMode, pkg, err) != 0) {
+  if (ambcModulesLoad(pkgDir, entryBodyMlir, testMode, pkg, err,
+                      testFilter) != 0) {
     return 1;
   }
 

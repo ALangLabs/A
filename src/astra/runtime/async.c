@@ -348,6 +348,16 @@ static void fib_trampoline(int idx) {
     /* unreachable */
 }
 
+/* Promote every aval escaping into a fiber: the fiber can outlive the
+   spawning frame's region, and a_region_leave bulk-frees unmarked young
+   objects regardless of reachability. Scalars early-out inside a_promote. */
+static void fib_promote_argv(aval fnval, aval env, uint64_t n, aval *args) {
+    a_promote(fnval);
+    a_promote(env);
+    if (!args) return;
+    for (uint64_t i = 0; i < n; ++i) a_promote(args[i]);
+}
+
 /* Spawn a fiber running an A function value with n args (a_call ABI). */
 AFib *a_fib_spawn_fn(aval fnval, uint64_t n, aval *args) {
     if (!fib_enabled()) return NULL;
@@ -357,6 +367,7 @@ AFib *a_fib_spawn_fn(aval fnval, uint64_t n, aval *args) {
     f->nargs = n;
     /* env slot unused for fnval calls but keep argv layout uniform */
     fib_fill_argv(f, A_NONE, n, args);
+    fib_promote_argv(fnval, A_NONE, n, args);
     fib_setup_ctx(f);
     return f;
 }
@@ -370,6 +381,8 @@ AFib *a_fib_spawn_raw(uint64_t entry, aval env, uint64_t n, aval *args) {
     f->raw_env = env;
     f->nargs = n;
     fib_fill_argv(f, env, n, args);
+    /* raw entry is a code pointer, not a GC object: only env/args promote */
+    fib_promote_argv(A_NONE, env, n, args);
     fib_setup_ctx(f);
     return f;
 }
