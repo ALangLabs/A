@@ -131,22 +131,12 @@ std::string joinPassArgs(const std::vector<std::string> &args) {
   return pipeline;
 }
 
-// mlir-opt accepts bare pass names like `cse canonicalize`; when the joined
-// pipeline is not rooted at an operation this wraps it in the module op so
-// parsePassPipeline can consume it.
+// mlir-opt accepts bare pass names like `cse canonicalize`; pm is an
+// OpPassManager anchored at any-op, so top-level bare pass names are valid
+// pipeline elements and pass through unchanged. Wrapping them in
+// `builtin.module(...)` would look for builtin.module ops nested BELOW the
+// root — the root itself is never matched, silently running nothing.
 std::string normalizePipelineText(std::string pipeline) {
-  // Already fully rooted (e.g. "builtin.module(...)" or contains parens on
-  // an op name). A comma-joined list of rooted pipelines is not valid MLIR
-  // pipeline syntax, so this only supports a single rooted argument; bare
-  // names are wrapped below.
-  if (pipeline.find('(') != std::string::npos &&
-      pipeline.find(',') == std::string::npos)
-    return pipeline;
-  // Bare pass names: wrap the whole comma-separated list as
-  // `builtin.module(cse,canonicalize)`. If the list mixes rooted and bare
-  // elements the parser will reject it, which is the correct diagnostic.
-  if (pipeline.find('(') == std::string::npos)
-    return "builtin.module(" + pipeline + ")";
   return pipeline;
 }
 

@@ -13,7 +13,9 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/DialectImplementation.h"
 #include "mlir/IR/Matchers.h"
+#include "mlir/IR/OpImplementation.h"
 #include "mlir/IR/SymbolTable.h"
+#include "mlir/Interfaces/FunctionImplementation.h"
 #include "mlir/Interfaces/FunctionInterfaces.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -112,8 +114,43 @@ LogicalResult AFuncOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
-// a.call
+// a.func custom assembly (func.func-style)
+//
+//   a.func @name(%arg0: !a.aval, %arg1: i64) -> !a.aval {attrs} { body }
+//
+// The signature prints the function-type input/output types; argument names
+// are included only when the body is present (they are the entry block
+// argument names). sym_name and function_type are consumed by the format;
+// sym_visibility/arg_attrs/res_attrs stay in the attribute dict.
 //===----------------------------------------------------------------------===//
+
+void AFuncOp::print(::mlir::OpAsmPrinter &p) {
+  // Delegate to the shared function-op printer: emits the visibility
+  // keyword, `@name`, the `(args) -> results` signature (with `%argN`
+  // names when a body is present), the `attributes {}` dict, and the body
+  // region with entry-block args bound to the signature.
+  ::mlir::function_interface_impl::printFunctionOp(
+      p, ::mlir::FunctionOpInterface(getOperation()),
+      /*isVariadic=*/false, "function_type",
+      ::mlir::StringAttr::get(getContext(), "arg_attrs"),
+      ::mlir::StringAttr::get(getContext(), "res_attrs"));
+}
+
+::mlir::ParseResult AFuncOp::parse(::mlir::OpAsmParser &parser,
+                                   ::mlir::OperationState &result) {
+  return ::mlir::function_interface_impl::parseFunctionOp(
+      parser, result, /*allowVariadic=*/false,
+      ::mlir::StringAttr::get(result.getContext(), "function_type"),
+      [](mlir::Builder &builder, llvm::ArrayRef<mlir::Type> inputs,
+         llvm::ArrayRef<mlir::Type> results,
+         mlir::function_interface_impl::VariadicFlag,
+         std::string &) -> mlir::Type {
+        return mlir::FunctionType::get(builder.getContext(), inputs,
+                                       results);
+      },
+      ::mlir::StringAttr::get(result.getContext(), "arg_attrs"),
+      ::mlir::StringAttr::get(result.getContext(), "res_attrs"));
+}
 
 LogicalResult ACallOp::verify() {
   // Resolve the callee symbol to its CallableOpInterface to compare
@@ -240,6 +277,273 @@ LogicalResult AYieldOp::verify() {
                             "a.while";
   }
   return emitOpError() << "a.yield must be nested in a.for or a.while";
+}
+
+//===----------------------------------------------------------------------===//
+// a.for custom assembly (scf.for-style)
+//
+//   %r = a.for %lo to %hi step %st iter_args(%a, %b) : index to index
+//     step index, !a.aval, !a.aval -> !a.aval, !a.aval { ^bb0(...): ... }
+//
+// iter_args are bare operand values; the carried names are the body block
+// arguments. Result types equal the iter_args types (enforced by verify).
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Parse the `:` `type` `to` `type` `step` `type` signature prefix shared by
+/// `a.for` (init types follow as a comma-separated list; results via `->`).
+/// Returns the three bound types via `boundTys`.
+ParseResult parseBoundsSignature(::mlir::OpAsmParser &parser,
+                                 ::llvm::SmallVectorImpl<::mlir::Type> &boundTys) {
+  for (unsigned i = 0; i < 3; ++i) {
+    ::mlir::Type ty;
+    if (failed(parser.parseType(ty)))
+      return failure();
+    boundTys.push_back(ty);
+    if (i == 0) {
+      if (failed(parser.parseKeyword("to")))
+        return failure();
+    } else if (i == 1) {
+      if (failed(parser.parseKeyword("step")))
+        return failure();
+    }
+    // After the step type, init types are separated by commas handled by
+    // the caller.
+  }
+  return success();
+}
+
+} // namespace
+
+void AForOp::print(::mlir::OpAsmPrinter &p) {
+  auto &os = p.getStream();
+  p.printOperand(getLowerBound());
+  os << " to ";
+  p.printOperand(getUpperBound());
+  os << " step ";
+  p.printOperand(getStep());
+  auto initArgs = getInitArgs();
+  if (!initArgs.empty()) {
+    os << " iter_args(";
+    p.printOperands(initArgs);
+    os << ")";
+  }
+  os << " : " << getLowerBound().getType() << " to "
+     << getUpperBound().getType() << " step " << getStep().getType();
+  for (Value init : initArgs)
+    os << ", " << init.getType();
+  // Result types always match the init arg types; print them for clarity.
+  auto results = getResults();
+  if (!results.empty()) {
+    os << " -> ";
+    bool first = true;
+    for (OpResult r : results) {
+      if (!first)
+        os << ", ";
+      first = false;
+      p.printType(r.getType());
+    }
+  }
+  p.printRegion(getBody());
+  // Attributes print after the region with the `attributes` keyword (the
+  // func.func/scf.while convention) so the region's `{` is never confused
+  // with an attribute dictionary during parsing.
+  p.printOptionalAttrDictWithKeyword(getOperation()->getAttrs());
+}
+
+::mlir::ParseResult AForOp::parse(::mlir::OpAsmParser &parser,
+                                  ::mlir::OperationState &result) {
+  ::mlir::SmallVector<::mlir::OpAsmParser::UnresolvedOperand> operands;
+  if (failed(parser.parseOperand(operands.emplace_back())))
+    return failure();
+  if (failed(parser.parseKeyword("to")))
+    return failure();
+  if (failed(parser.parseOperand(operands.emplace_back())))
+    return failure();
+  if (failed(parser.parseKeyword("step")))
+    return failure();
+  if (failed(parser.parseOperand(operands.emplace_back())))
+    return failure();
+
+  // Optional `iter_args(operands...)`.
+  if (succeeded(parser.parseOptionalKeyword("iter_args"))) {
+    if (failed(parser.parseLParen()))
+      return failure();
+    if (failed(parser.parseOptionalRParen())) {
+      while (true) {
+        if (failed(parser.parseOperand(operands.emplace_back())))
+          return failure();
+        if (succeeded(parser.parseOptionalRParen()))
+          break;
+        if (failed(parser.parseComma()))
+          return failure();
+      }
+    }
+  }
+
+  // `:` then bound types, then `, type` for each iter_arg.
+  if (failed(parser.parseColon()))
+    return failure();
+  ::mlir::SmallVector<::mlir::Type> boundTys, initTypes, resultTypes;
+  if (failed(parseBoundsSignature(parser, boundTys)))
+    return failure();
+  unsigned nInit = operands.size() - 3;
+  while (initTypes.size() < nInit) {
+    if (failed(parser.parseComma()))
+      return failure();
+    ::mlir::Type ty;
+    if (failed(parser.parseType(ty)))
+      return failure();
+    initTypes.push_back(ty);
+  }
+  // Optional `-> type, ...` results; defaults to the init types since the
+  // verifier requires results == iter_arg types.
+  if (failed(parser.parseOptionalArrowTypeList(resultTypes)))
+    return failure();
+  if (resultTypes.empty())
+    resultTypes = initTypes;
+  else if (resultTypes.size() != nInit)
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected ")
+           << nInit << " result types, got " << resultTypes.size();
+
+  // Resolve operands: the three bounds are `index`, iter_args take the
+  // parsed init types.
+  ::mlir::SmallVector<::mlir::Type> operandTypes(boundTys.begin(),
+                                               boundTys.end());
+  operandTypes.append(initTypes.begin(), initTypes.end());
+  ::mlir::SmallVector<::mlir::Value> values;
+  if (failed(parser.resolveOperands(
+          operands, operandTypes, parser.getCurrentLocation(), values)))
+    return failure();
+
+  result.addOperands(values);
+  result.addTypes(resultTypes);
+
+  // Region entry args: induction var (index) + one per iter_arg. Passing
+  // them to parseRegion types the entry block; the text supplies names.
+  ::mlir::SmallVector<::mlir::OpAsmParser::Argument> regionArgs;
+  {
+    ::mlir::OpAsmParser::Argument ivArg;
+    ivArg.type = ::mlir::IndexType::get(parser.getBuilder().getContext());
+    regionArgs.push_back(ivArg);
+    for (::mlir::Type ty : initTypes) {
+      ::mlir::OpAsmParser::Argument a;
+      a.type = ty;
+      regionArgs.push_back(a);
+    }
+  }
+  auto body = std::make_unique<::mlir::Region>();
+  if (failed(parser.parseRegion(*body, regionArgs)))
+    return failure();
+  result.addRegion(std::move(body));
+  // `attributes { ... }` may follow the region.
+  ::mlir::NamedAttrList attrs;
+  if (failed(parser.parseOptionalAttrDictWithKeyword(attrs)))
+    return failure();
+  result.addAttributes(attrs);
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// a.while custom assembly (scf.while-style)
+//
+//   %r = a.while (%init, ...) : (!a.aval, ...) -> !a.aval, ... {
+//     ^bb0(...): ... a.condition(%c) (%x : !a.aval) } do {
+//     ^bb0(...): ... a.yield %next : !a.aval }
+//===----------------------------------------------------------------------===//
+
+void AWhileOp::print(::mlir::OpAsmPrinter &p) {
+  auto &os = p.getStream();
+  auto inits = getInits();
+  os << "(";
+  p.printOperands(inits);
+  os << ") : (";
+  bool firstTy = true;
+  for (Value v : inits) {
+    if (!firstTy)
+      os << ", ";
+    firstTy = false;
+    p.printType(v.getType());
+  }
+  os << ")";
+  auto results = getResults();
+  if (!results.empty()) {
+    os << " -> ";
+    bool first = true;
+    for (OpResult r : results) {
+      if (!first)
+        os << ", ";
+      first = false;
+      p.printType(r.getType());
+    }
+  }
+  os << " ";
+  p.printRegion(getBefore());
+  os << " do ";
+  p.printRegion(getAfter());
+  p.printOptionalAttrDictWithKeyword(getOperation()->getAttrs());
+}
+
+::mlir::ParseResult AWhileOp::parse(::mlir::OpAsmParser &parser,
+                                    ::mlir::OperationState &result) {
+  // `(` operand-list `)` `:` `(` type-list `)` [`->` type-list]
+  ::mlir::SmallVector<::mlir::OpAsmParser::UnresolvedOperand> operands;
+  ::mlir::SmallVector<::mlir::Type> initTypes, resultTypes;
+  if (failed(parser.parseLParen()))
+    return failure();
+  if (failed(parser.parseOperandList(operands)))
+    return failure();
+  if (failed(parser.parseRParen()))
+    return failure();
+  if (failed(parser.parseColon()))
+    return failure();
+  if (failed(parser.parseLParen()))
+    return failure();
+  if (failed(parser.parseTypeList(initTypes)))
+    return failure();
+  if (failed(parser.parseRParen()))
+    return failure();
+  if (operands.size() != initTypes.size())
+    return parser.emitError(parser.getCurrentLocation(),
+                            "expected ")
+           << initTypes.size() << " init types for " << operands.size()
+           << " operands";
+  if (failed(parser.parseOptionalArrowTypeList(resultTypes)))
+    return failure();
+
+  ::mlir::SmallVector<::mlir::Value> values;
+  if (failed(parser.resolveOperands(operands, initTypes,
+                                    parser.getCurrentLocation(), values)))
+    return failure();
+  result.addOperands(values);
+  result.addTypes(resultTypes);
+
+  // Region entry args: `before` takes the init operand types; `after` takes
+  // the types `a.condition` forwards (parsed from its block args in text).
+  ::mlir::SmallVector<::mlir::OpAsmParser::Argument> beforeArgs;
+  for (::mlir::Type ty : initTypes) {
+    ::mlir::OpAsmParser::Argument a;
+    a.type = ty;
+    beforeArgs.push_back(a);
+  }
+  auto before = std::make_unique<::mlir::Region>();
+  if (failed(parser.parseRegion(*before, beforeArgs)))
+    return failure();
+  if (failed(parser.parseKeyword("do")))
+    return failure();
+  auto after = std::make_unique<::mlir::Region>();
+  if (failed(parser.parseRegion(*after)))
+    return failure();
+  result.addRegion(std::move(before));
+  result.addRegion(std::move(after));
+  // `attributes { ... }` may follow the regions.
+  ::mlir::NamedAttrList attrs;
+  if (failed(parser.parseOptionalAttrDictWithKeyword(attrs)))
+    return failure();
+  result.addAttributes(attrs);
+  return success();
 }
 
 //===----------------------------------------------------------------------===//
@@ -562,7 +866,13 @@ void AForOp::getSuccessorRegions(RegionBranchPoint point,
   // Like `scf.for`: both the body region and the parent operation (zero-trip
   // exit / loop exit) are successors. From the body, `a.yield` either loops
   // back into the body or exits to the parent results.
-  regions.push_back(RegionSuccessor(&getBody()));
+  // The body's first block argument is the induction variable, which the
+  // loop produces itself; only the iter_arg block arguments are fed by the
+  // init operands.
+  Block::BlockArgListType bodyInputs = getBody().empty()
+      ? Block::BlockArgListType()
+      : getBody().front().getArguments().drop_front(1);
+  regions.push_back(RegionSuccessor(&getBody(), bodyInputs));
   // A null region marks the parent operation as the successor.
   regions.push_back(RegionSuccessor(getResults()));
 }

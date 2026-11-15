@@ -89,6 +89,15 @@ def AConstOp : A_Op<"const", [Pure, ConstantLike]> {
     OptionalAttr<StrAttr>:$str);
   let results = (outs AVAL:$result);
 
+  // `a.const int {ivalue = 5 : i64} -> !a.aval`
+  // `a.const float {fvalue = 1.5 : f64} -> !a.aval`
+  // `a.const bool {ivalue = 1 : i64} -> !a.aval`
+  // `a.const str {str = "hello"} -> !a.aval`
+  // `a.const none -> !a.aval`
+  // `kind` prints/parses as its symbolic enum spelling (int/float/bool/str/
+  // none); the payload attributes stay in the attribute dict.
+  let assemblyFormat = "$kind attr-dict `->` type(results)";
+
   let hasVerifier = 1;
 }
 
@@ -125,6 +134,17 @@ def AFuncOp : A_Op<"func", [FunctionOpInterface, OpAsmOpInterface]> {
   // NOTE: generic assembly format is used for phase 1 (attrs incl.
   // function_type/sym_name print in the attr-dict). A func.func-style custom
   // format can be added later without changing the op signature.
+  //
+  // Custom func.func-style assembly (implemented in AOps.cpp):
+  //   a.func @name(%arg0: !a.aval, %arg1: i64) -> !a.aval, i64
+  //       {sym_visibility = "public", ...} {
+  //     ...
+  //   }
+  // Arg names are printed only when the body is present (they come from the
+  // entry block arguments); external declarations print bare types. The
+  // attribute dict carries sym_visibility/arg_attrs/res_attrs; sym_name and
+  // function_type are consumed by the signature itself.
+  let hasCustomAssemblyFormat = 1;
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
@@ -366,6 +386,19 @@ def AForOp : A_Op<"for",
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$body);
 
+  // Custom assembly (implemented in AOps.cpp) because the iter_args and
+  // result type lists are optional and would otherwise leave stray separators:
+  //
+  //   %r = a.for %lo to %hi step %st iter_args(%a, %b) : index to index
+  //     step index, !a.aval, !a.aval -> !a.aval, !a.aval { ^bb0(%iv: index,
+  //     %a2: !a.aval, %b2: !a.aval): ... a.yield %next : !a.aval, !a.aval }
+  //
+  // Unlike scf.for the iter_args are printed as bare values (no
+  // `name = value` bindings); the loop-carried names live on the body
+  // region's block arguments. The `->` clause shares the init_args group
+  // because result types always match the iter_args types.
+  let hasCustomAssemblyFormat = 1;
+
   let hasVerifier = 1;
 
   let extraClassDeclaration = [{
@@ -414,6 +447,15 @@ def AWhileOp : A_Op<"while",
   let arguments = (ins Variadic<AnyType>:$inits);
   let results = (outs Variadic<AnyType>:$results);
   let regions = (region SizedRegion<1>:$before, SizedRegion<1>:$after);
+
+  // Custom assembly (implemented in AOps.cpp), mirroring scf.while:
+  //
+  //   %r = a.while (%a, %b) : (!a.aval, !a.aval) -> !a.aval, !a.aval
+  //     { ^bb0(%a2: !a.aval, %b2: !a.aval): ... a.condition(%c) (%x : !a.aval) }
+  //     do { ^bb0(%x2: !a.aval): ... a.yield %next : !a.aval }
+  //
+  // Init values print without `name =` bindings (names live on block args).
+  let hasCustomAssemblyFormat = 1;
 
   let hasVerifier = 1;
 
@@ -588,9 +630,13 @@ def ARuntimeCallOp : A_Op<"runtime.call"> {
     Variadic<AnyType>:$operands);
   let results = (outs Variadic<AnyType>);
 
+  // `signature` stays in the attribute dict: a bare `:`-prefixed optional
+  // clause here would greedily consume the functional-type colon that
+  // follows, making the op unparsable. Printed form:
+  //   a.runtime.call "a_add_slow"(%a, %b) {signature = "(i64, i64) -> i64"}
+  //     : (!a.aval, !a.aval) -> !a.aval
   let assemblyFormat = [{
     $callee `(` $operands `)` attr-dict
-    (`:` $signature^)?
     `:` functional-type($operands, results)
   }];
 
@@ -698,10 +744,11 @@ def AStructGetFieldOp : A_Op<"struct.getfield"> {
     OptionalAttr<TypeAttrOf<AStruct>>:$struct_type);
   let results = (outs AVAL:$result);
 
+  // `struct_type` stays in the attribute dict: a bare `:`-prefixed optional
+  // clause would greedily consume the operand-type colon that follows.
   let assemblyFormat = [{
     $obj `[` $index `]` attr-dict
-    (`:` $struct_type^)? `:` type($obj) `,` type($index)
-    `->` type(results)
+    `:` type($obj) `,` type($index) `->` type(results)
   }];
 
   let hasVerifier = 1;
@@ -726,10 +773,11 @@ def AStructSetFieldOp : A_Op<"struct.setfield"> {
     OptionalAttr<TypeAttrOf<AStruct>>:$struct_type);
   let results = (outs AVAL:$result);
 
+  // `struct_type` stays in the attribute dict (see a.struct.getfield).
   let assemblyFormat = [{
     $obj `[` $index `]` `=` $value attr-dict
-    (`:` $struct_type^)? `:` type($obj) `,` type($index) `,`
-    type($value) `->` type(results)
+    `:` type($obj) `,` type($index) `,` type($value)
+    `->` type(results)
   }];
 
   let hasVerifier = 1;
@@ -752,10 +800,10 @@ def AArrayGetOp : A_Op<"array.get"> {
     OptionalAttr<TypeAttrOf<AArray>>:$array_type);
   let results = (outs AVAL:$result);
 
+  // `array_type` stays in the attribute dict (see a.struct.getfield).
   let assemblyFormat = [{
     $array `[` $index `]` attr-dict
-    (`:` $array_type^)? `:` type($array) `,` type($index)
-    `->` type(results)
+    `:` type($array) `,` type($index) `->` type(results)
   }];
 
   let hasVerifier = 1;
@@ -779,10 +827,11 @@ def AArraySetOp : A_Op<"array.set"> {
     OptionalAttr<TypeAttrOf<AArray>>:$array_type);
   let results = (outs AVAL:$result);
 
+  // `array_type` stays in the attribute dict (see a.struct.getfield).
   let assemblyFormat = [{
     $array `[` $index `]` `=` $value attr-dict
-    (`:` $array_type^)? `:` type($array) `,` type($index) `,`
-    type($value) `->` type(results)
+    `:` type($array) `,` type($index) `,` type($value)
+    `->` type(results)
   }];
 
   let hasVerifier = 1;

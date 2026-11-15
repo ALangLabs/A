@@ -400,8 +400,8 @@ bool isPerModuleOutputPath(const std::string& outPath) {
       (outPath.back() == '/' || outPath.back() == '\\')) {
     return true;
   }
-  if (outPath.size() >= 6 &&
-      outPath.compare(outPath.size() - 6, 6, ".ambc.d") == 0) {
+  if (outPath.size() >= 7 &&
+      outPath.compare(outPath.size() - 7, 7, ".ambc.d") == 0) {
     return true;
   }
   std::error_code ec;
