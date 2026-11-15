@@ -1,6 +1,6 @@
 // Direct MLIR backend (A -> .mlir llvm dialect -> mlir-translate -> .ll ->
 // opt/llc/clang -> machine code). Mojo-style path: the frontend emits MLIR
-// directly instead of hand-writing LLVM IR tePLACEHOLDER_NO_MATCHt.
+// directly instead of hand-writing LLVM IR text.
 //
 // MVP coverage: entry points, plain `fn` declarations and direct calls,
 // let/assign/expr/return/if/while/do-while/for/loop/break/continue,
