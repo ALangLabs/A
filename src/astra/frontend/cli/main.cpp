@@ -12,6 +12,11 @@
 #include "driver/driver.hpp"
 #include "driver/version.hpp"
 #include "exe_path.hpp"
+// src/astra/mlir/: `a precompile` (.ambc packaging) and `a mlir-opt`
+// (pass-pipeline driver). Both live in a_mlir_core; stubs report a clean
+// error when MLIR dev files were absent at configure time.
+#include "mlir/driver.hpp"
+#include "mlir/package.hpp"
 
 namespace {
 
@@ -49,6 +54,8 @@ void printUsage(std::ostream& os) {
      << "  test [path]      run fn test_*() in a file, or discover tests in a dir/codebase (default: .); --filter <substr> selects by name\n"
      << "  fmt <file.astra>     format source (stdout; -w to write)\n"
      << "  doc <file.astra>     generate documentation (markdown; --json)\n"
+     << "  precompile <file.astra|dir>  write MLIR bytecode package (.ambc)\n"
+     << "  mlir-opt <file.mlir|file.ambc>  run the MLIR pass pipeline (debug)\n"
      << "  version          print version\n"
      << "  help             show this message\n"
      << "\n"
@@ -298,6 +305,24 @@ int main(int argc, char** argv) {
   const std::string exePath = a::exePath();
   if (!exePath.empty()) ::setenv("A_A_BIN", exePath.c_str(), 1);
 #endif
+  // `a precompile` and `a mlir-opt` own their argument parsing (they accept
+  // mlir-opt-style pass lists / -o forms that parseOptions would reject), so
+  // dispatch them before the generic option parser runs.
+  if (argc > 1) {
+    const std::string sub = argv[1];
+    if (sub == "precompile") {
+      return a::runPrecompileCli(argc, argv, std::cout, std::cerr);
+    }
+    if (sub == "mlir-opt") {
+      // runMlirOptCli expects argv[0] == program and the args AFTER the
+      // subcommand name; rebuild a shifted argv.
+      std::vector<char*> shifted;
+      shifted.push_back(argv[0]);
+      for (int i = 2; i < argc; ++i) shifted.push_back(argv[i]);
+      shifted.push_back(nullptr);
+      return a::runMlirOptCli(argc - 1, shifted.data(), std::cout, std::cerr);
+    }
+  }
   Options options;
   if (!parseOptions(argc, argv, options, std::cerr)) return kExitUsage;
   a::DriverConfig config;

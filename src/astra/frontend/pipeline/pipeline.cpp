@@ -341,6 +341,23 @@ inline std::string absCachePath(const std::string& path) {
 std::string findLLVMTool(const char* envName,
                          std::initializer_list<const char*> names);
 
+}  // namespace
+
+// In-process MLIR backend entry points (src/astra/mlir/{native,codegen}.cpp).
+// Weak fallback definitions live at the bottom of this file so the frontend
+// links and reports a clean error when MLIR dev files were absent at
+// configure time; the strong definitions win whenever a_mlir_core is linked.
+// These declarations must live outside the anonymous namespace: the real
+// definitions are external symbols.
+int nativeCompileMlirTextToObject(const std::string& mlirText,
+                                  const std::string& arch, int optLevel,
+                                  const std::string& objPath,
+                                  std::ostream& err);
+int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
+                    const std::string& runtimeLib, std::ostream& err);
+
+namespace {
+
 namespace run_cache {
 
 inline std::uint64_t mixBytes(std::uint64_t h, const std::string& s) {
@@ -547,6 +564,14 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
   if (testMode) h = mixBytes(h, testFilter ? *testFilter : "");
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
+  // Backend selection changes the produced binary path (in-process MLIR
+  // vs subprocess toolchain), so it must key the cache.
+  {
+    const char* be = std::getenv("A_BACKEND");
+    h = mixBytes(h, be ? be : "");
+    const char* nm = std::getenv("A_MLIR_NATIVE");
+    h = mixBytes(h, nm ? nm : "");
+  }
   {
     const std::string self = selfExePath();
     if (!self.empty()) h = mixFileStat(h, self);
@@ -762,6 +787,12 @@ inline std::string precheckKey(const std::string& path,
   h = mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
   const char* codegen = std::getenv("A_CODEGEN");
   h = mixBytes(h, codegen ? codegen : "");
+  {
+    const char* be = std::getenv("A_BACKEND");
+    h = mixBytes(h, be ? be : "");
+    const char* nm = std::getenv("A_MLIR_NATIVE");
+    h = mixBytes(h, nm ? nm : "");
+  }
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
   h = mixBytes(h, source);
@@ -1423,11 +1454,41 @@ std::string llvmOptFlag(int level) {
 }
 // opt -O<n> -S in.ll -o opt.ll  ->  llc -O<n> -filetype=obj opt.ll -o out.o
 //   ->  clang out.o libaruntime.a -o out -lm -lpthread [-ldl].
-// Returns 0 on success; the failing stage's diagnostics go to err (the
-// tools' own stderr is inherited).
-static std::string& mlirDirectLlPath() {
-  static std::string p;
-  return p;
+
+// Locates the staged libaruntime.a for a resolved runtime dir. Mirrors the
+// probe order llvmBuild used inline: runtimeDir itself, its parents, then
+// the same dirs relative to the `a` executable (covers <bindir>/../astralib
+// install layouts and build/astralib in-tree).
+std::string findRuntimeLib(const std::string& arch,
+                           const std::string& runtimeDirArg) {
+  std::string runtimeC, rtDirCheck;
+  const std::string runtimeDir =
+      runtimeDirArg.empty()
+          ? (findRuntime(arch, runtimeC, rtDirCheck) ? rtDirCheck : "")
+          : runtimeDirArg;
+  if (runtimeDir.empty()) return "";
+  std::vector<std::string> rtCandidates = {
+      runtimeDir + "/libaruntime.a",
+      runtimeDir + "/../libaruntime.a",
+      runtimeDir + "/../../libaruntime.a",
+      "src/astra/runtime/libaruntime.a",
+      "./src/astra/runtime/libaruntime.a",
+  };
+  {
+    const std::string self = exePath();
+    auto pos = self.find_last_of("/\\");
+    if (pos != std::string::npos) {
+      const std::string binDir = self.substr(0, pos);
+      rtCandidates.push_back(binDir + "/astralib/libaruntime.a");
+      rtCandidates.push_back(binDir + "/../astralib/libaruntime.a");
+      rtCandidates.push_back(binDir + "/../../astralib/libaruntime.a");
+    }
+  }
+  for (const auto& c : rtCandidates) {
+    std::error_code ec2;
+    if (std::filesystem::exists(c, ec2)) return c;
+  }
+  return "";
 }
 
 // Direct-MLIR path: translate emitted .mlir (llvm dialect) to .ll for the
@@ -1522,31 +1583,7 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
     cleanup();
     return 1;
   }
-  std::vector<std::string> rtCandidates = {
-      runtimeDir + "/libaruntime.a",
-      runtimeDir + "/../libaruntime.a",
-      runtimeDir + "/../../libaruntime.a",
-      "src/astra/runtime/libaruntime.a",
-      "./src/astra/runtime/libaruntime.a",
-  };
-  // The staged astralib dir sits next to the `a` binary's parent (bin/ ->
-  // ../astralib); cover it even when a_runtime.c resolved via the source
-  // tree fallback above.
-  {
-    const std::string self = exePath();
-    auto pos = self.find_last_of("/\\");
-    if (pos != std::string::npos) {
-      const std::string binDir = self.substr(0, pos);
-      rtCandidates.push_back(binDir + "/astralib/libaruntime.a");
-      rtCandidates.push_back(binDir + "/../astralib/libaruntime.a");
-      rtCandidates.push_back(binDir + "/../../astralib/libaruntime.a");
-    }
-  }
-  std::string rtLib;
-  for (const auto& c : rtCandidates) {
-    std::error_code ec2;
-    if (std::filesystem::exists(c, ec2)) { rtLib = c; break; }
-  }
+  const std::string rtLib = findRuntimeLib(arch, runtimeDir);
   if (rtLib.empty()) {
     err << "error: llvm backend: cannot locate libaruntime.a\n";
     cleanup();
@@ -1590,6 +1627,62 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
   if (rc != 0) err << "error: llvm backend: clang link failed\n";
   return rc == 0 ? 0 : 1;
 #endif
+}
+
+// ---- In-process MLIR backend (src/astra/mlir) ------------------------------
+// A_MLIR_NATIVE=1 (or A_BACKEND=mlir-native) replaces the
+// mlir-translate/opt/llc subprocess chain with the in-process bridge:
+// parse the emitted llvm-dialect text -> canonicalize/CSE -> translate to
+// LLVM IR -> LLVM opt pipeline -> TargetMachine -> .o, then the same clang
+// link step. Host-only like the subprocess path; Windows is excluded.
+
+bool nativeMlirEnabled() {
+#ifdef _WIN32
+  return false;
+#else
+  if (const char* v = std::getenv("A_MLIR_NATIVE"); v && *v == '1') return true;
+  if (const char* v = std::getenv("A_BACKEND");
+      v && lowerStr(v) == "mlir-native") return true;
+  return false;
+#endif
+}
+
+// Emits the checked graph to MLIR text (emitMLIR). Returns false on failure.
+bool emitMlirText(CompiledModule& m, bool testMode,
+                  const std::string* testFilter, std::string& mlirText,
+                  std::ostream& err) {
+  std::string llError;
+  if (!emitMLIR(*m.graph, *m.sema, mlirText, llError, testMode, testFilter)) {
+    err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
+    return false;
+  }
+  return true;
+}
+
+// mlir text -> .o -> link -> runPath. Returns 0 on success.
+int nativeMlirBuild(const std::string& mlirText, const std::string& arch,
+                    int optLevel, const std::string& runPath,
+                    std::ostream& err) {
+  std::string objPath = tempPath("llvm", "x.o");
+  int rc = nativeCompileMlirTextToObject(mlirText, arch, optLevel, objPath, err);
+  if (rc == 0) {
+    std::string runtimeC, runtimeDir;
+    if (!findRuntime(arch, runtimeC, runtimeDir)) {
+      err << "error: mlir backend: cannot locate A runtime (a_runtime.c)\n";
+      rc = 1;
+    } else {
+      const std::string rtLib = findRuntimeLib(arch, runtimeDir);
+      if (rtLib.empty()) {
+        err << "error: mlir backend: cannot locate libaruntime.a\n";
+        rc = 1;
+      } else {
+        rc = linkWithRuntime(objPath, runPath, rtLib, err);
+      }
+    }
+  }
+  std::error_code ec;
+  std::filesystem::remove(objPath, ec);
+  return rc == 0 ? 0 : 1;
 }
 
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
@@ -1636,73 +1729,91 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
     err << "td.native=" << td->native << " arch=" << td->arch
         << " host=" << hostArch() << "\n";
   {
-    std::string llSource, llError;
+    std::string llSource;
+    const bool useNative = nativeMlirEnabled();
     {
-      if (!emitMLIR(*m.graph, *m.sema, llSource, llError, testMode,
-                    testFilter)) {
-        err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
+      if (!emitMlirText(m, testMode, testFilter, llSource, err)) return kCErr;
+      std::string llPath;
+      std::string runPath;
+      if (useNative) {
+        // In-process path: mlir text -> canonicalize -> LLVM IR -> opt ->
+        // .o -> clang link. No intermediate .mlir/.ll files.
+        runPath = (keepBin && !keepBin->empty()) ? *keepBin : "";
+        if (runPath.empty() && cache.active) {
+          // On a cache miss compile to a temp name in the cache dir so the
+          // rename below is atomic and same-filesystem.
+          std::error_code ec;
+          std::string cdir =
+              std::filesystem::path(cache.file).parent_path().string();
+          std::filesystem::create_directories(cdir, ec);
+          runPath = cdir + "/tmp-" + std::to_string(::getpid()) + "-" +
+                    std::to_string(::rand());
+        }
+        if (runPath.empty()) runPath = tempPath("bin");
+        int nrc = nativeMlirBuild(llSource, td->arch, optimizationLevel,
+                                  runPath, err);
+        llSource.clear();
+        if (nrc != 0) {
+          std::error_code ec;
+          std::filesystem::remove(runPath, ec);
+          return kCErr;
+        }
+      } else {
+        std::string mlirPath = stageSrc(llSource, ".mlir", err);
+        if (mlirPath.empty()) return kCErr;
+        std::string llPath2 = mlirToLl(mlirPath, err);
+        std::error_code ec2; std::filesystem::remove(mlirPath, ec2);
+        if (llPath2.empty()) return kCErr;
+        llSource.clear();
+        llPath = llPath2;
+      }
+      if (std::getenv("A_LLVM_DEBUG"))
+        err << "llvm-emit: ok\n";
+      if (!useNative) {
+        if (llPath.empty()) return kCErr;
+      }
+      std::string tmpBin = tempPath("bin");
+      if (runPath.empty()) runPath = tmpBin;
+      // On a cache miss compile to a temp name in the cache dir so the rename
+      // below is atomic and same-filesystem.
+      if (cache.active && !useNative) {
+        std::error_code ec;
+        std::string cdir = std::filesystem::path(cache.file).parent_path().string();
+        std::filesystem::create_directories(cdir, ec);
+        runPath = cdir + "/tmp-" +
+                  std::to_string(::getpid()) + "-" + std::to_string(::rand());
+      }
+      int rc;
+      if (useNative) {
+        rc = 0;  // nativeMlirBuild already produced runPath
+      } else {
+        rc = llvmBuild(td->arch, llPath, runPath, optimizationLevel, err);
+      }
+      if (rc != 0 && std::getenv("A_LLVM_DEBUG"))
+        err << "llvm-cc failed; kept " << llPath << "\n";
+      else if (!useNative) {
+        std::error_code ec;
+        std::filesystem::remove(llPath, ec);
+      }
+      if (cache.active && rc == 0) {
+        std::error_code ec2;
+        std::filesystem::rename(runPath, cache.file, ec2);
+        if (!ec2) runPath = cache.file;
+      }
+      std::error_code ec;
+      if (rc != 0) {
+        std::filesystem::remove(runPath, ec);
         return kCErr;
       }
-      std::string mlirPath = stageSrc(llSource, ".mlir", err);
-      if (mlirPath.empty()) return kCErr;
-      std::string llPath2 = mlirToLl(mlirPath, err);
-      std::error_code ec2; std::filesystem::remove(mlirPath, ec2);
-      if (llPath2.empty()) return kCErr;
-      llSource.clear();
-      // reuse the llvmBuild path below via a temp .ll stage
-      // (llPath2 is already a file path, not source text)
-      // -> handled by flag below
-      // Simplest: write path into a static and jump to build.
-      // We instead restructure: set llSource empty marker.
-      // (see mlirDirectLlPath static)
-      mlirDirectLlPath() = llPath2;
+      rc = runBinary(runPath);
+      // Delete only temp artifacts; a filled cache entry must stay.
+      if (cache.active && runPath == cache.file) {
+        // keep
+      } else if (!keepBin) {
+        std::filesystem::remove(runPath, ec);
+      }
+      return rc < 0 ? kCErr : rc;
     }
-    if (std::getenv("A_LLVM_DEBUG"))
-      err << "llvm-emit: ok\n";
-    std::string llPath;
-    if (!mlirDirectLlPath().empty()) {
-      llPath = mlirDirectLlPath();
-      mlirDirectLlPath().clear();
-    } else {
-      llPath = stageSrc(llSource, ".ll", err);
-    }
-    if (llPath.empty()) return kCErr;
-    std::string tmpBin = tempPath("bin");
-    std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
-    // On a cache miss compile to a temp name in the cache dir so the rename
-    // below is atomic and same-filesystem.
-    if (cache.active) {
-      std::error_code ec;
-      std::string cdir = std::filesystem::path(cache.file).parent_path().string();
-      std::filesystem::create_directories(cdir, ec);
-      runPath = cdir + "/tmp-" +
-                std::to_string(::getpid()) + "-" + std::to_string(::rand());
-    }
-    int rc = llvmBuild(td->arch, llPath, runPath, optimizationLevel, err);
-    if (rc != 0 && std::getenv("A_LLVM_DEBUG"))
-      err << "llvm-cc failed; kept " << llPath << "\n";
-    else {
-      std::error_code ec;
-      std::filesystem::remove(llPath, ec);
-    }
-    if (cache.active && rc == 0) {
-      std::error_code ec2;
-      std::filesystem::rename(runPath, cache.file, ec2);
-      if (!ec2) runPath = cache.file;
-    }
-    std::error_code ec;
-    if (rc != 0) {
-      std::filesystem::remove(runPath, ec);
-      return kCErr;
-    }
-    rc = runBinary(runPath);
-    // Delete only temp artifacts; a filled cache entry must stay.
-    if (cache.active && runPath == cache.file) {
-      // keep
-    } else if (!keepBin) {
-      std::filesystem::remove(runPath, ec);
-    }
-    return rc < 0 ? kCErr : rc;
   }
 }
 }
@@ -1879,13 +1990,51 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
         << " (target '" << td.arch << "' != host '" << hostArch() << "')\n";
     return kCErr;
   }
-  std::string llSource, llError;
+  if (nativeMlirEnabled()) {
+    // In-process path: mlir text -> LLVM IR -> opt -> .o -> link.
+    std::string mlirText;
+    if (!emitMlirText(m, false, nullptr, mlirText, err)) return kCErr;
+    std::string objPath = tempPath("llvm", "x.o");
+    int nrc = nativeCompileMlirTextToObject(
+        mlirText, td.arch, config.optimizationLevel, objPath, err);
+    mlirText.clear();
+    if (nrc == 0) {
+      std::string runtimeC, runtimeDir;
+      if (!findRuntime(td.arch, runtimeC, runtimeDir)) {
+        err << "error: mlir backend: cannot locate A runtime (a_runtime.c)\n";
+        nrc = 1;
+      } else {
+        const std::string rtLib = findRuntimeLib(td.arch, runtimeDir);
+        if (rtLib.empty()) {
+          err << "error: mlir backend: cannot locate libaruntime.a\n";
+          nrc = 1;
+        } else {
+          // Link to a sibling temp then rename so a failed link never
+          // leaves a partial binary at the requested output path.
+          const std::string tmpOut = tempPath("bin");
+          nrc = linkWithRuntime(objPath, tmpOut, rtLib, err);
+          if (nrc == 0) {
+            std::error_code ec;
+            std::filesystem::rename(tmpOut, outputPath, ec);
+            if (ec) {
+              err << "error: mlir backend: cannot move '" << tmpOut << "' to '"
+                  << outputPath << "': " << ec.message() << "\n";
+              std::filesystem::remove(tmpOut, ec);
+              nrc = 1;
+            }
+          }
+        }
+      }
+    }
+    std::error_code ec;
+    std::filesystem::remove(objPath, ec);
+    if (nrc != 0) return kCErr;
+    return 0;
+  }
+  std::string llSource;
   std::string directLl;
   {
-    if (!emitMLIR(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
-      err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
-      return kCErr;
-    }
+    if (!emitMlirText(m, false, nullptr, llSource, err)) return kCErr;
     std::string mlirPath = stageSrc(llSource, ".mlir", err);
     if (mlirPath.empty()) return kCErr;
     directLl = mlirToLl(mlirPath, err);
@@ -2091,5 +2240,30 @@ int testPath(const std::string& path, const PipelineConfig& config, std::istream
   }
   out << "\n";
   return (totalFailed==0 && fileErrors==0) ? kOk : kCErr;
+}
+
+// ---- In-process MLIR backend fallbacks -------------------------------------
+// When MLIR dev files were absent at configure time, a_mlir_core is not
+// linked (or contributes only the CLI stubs), so these weak definitions
+// provide the symbols the A_MLIR_NATIVE-gated call sites reference. The
+// strong definitions in src/astra/mlir/{native,codegen}.cpp always win when
+// present.
+__attribute__((weak)) int nativeCompileMlirTextToObject(
+    const std::string& mlirText, const std::string& arch, int optLevel,
+    const std::string& objPath, std::ostream& err) {
+  (void)mlirText; (void)arch; (void)optLevel; (void)objPath;
+  err << "error: mlir backend: in-process MLIR backend unavailable "
+         "(built without MLIR dev files); unset A_MLIR_NATIVE\n";
+  return 1;
+}
+
+__attribute__((weak)) int linkWithRuntime(const std::string& objPath,
+                                          const std::string& outputPath,
+                                          const std::string& runtimeLib,
+                                          std::ostream& err) {
+  (void)objPath; (void)outputPath; (void)runtimeLib;
+  err << "error: mlir backend: in-process MLIR backend unavailable "
+         "(built without MLIR dev files); unset A_MLIR_NATIVE\n";
+  return 1;
 }
 }

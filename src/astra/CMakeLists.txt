@@ -8,3 +8,7 @@ add_subdirectory(runtime)
 
 # C++ frontend (lex/parse/sema/IR/pipeline), formerly compiler/stages/.
 add_subdirectory(frontend)
+
+# In-process MLIR infrastructure (a dialect, passes, bytecode, native
+# LLVM backend). Optional: builds a stub when MLIR dev files are absent.
+add_subdirectory(mlir)

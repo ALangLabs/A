@@ -1,2 +1,7 @@
 add_executable(a main.cpp)
-target_link_libraries(a PRIVATE a_driver a_vm_runtime)
+# a::mlir_core provides `a precompile`/`a mlir-opt` and the optional
+# in-process MLIR backend used by the pipeline (A_MLIR_NATIVE=1). Its public
+# include dir exposes src/astra/mlir/ so "mlir/driver.hpp" resolves; without
+# MLIR dev files it still provides the stub CLI entry points.
+target_include_directories(a PRIVATE ${CMAKE_SOURCE_DIR}/src/astra/mlir)
+target_link_libraries(a PRIVATE a_driver a_vm_runtime a::mlir_core)
