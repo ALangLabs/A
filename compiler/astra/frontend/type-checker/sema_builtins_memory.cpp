@@ -13,11 +13,13 @@ TypePtr Sema::checkBuiltinMemory(const std::string& name, CallExpr& call) {
   else if (name == "attention") linalg = "linalg_attention";
 
   if (linalg == "linalg_dot" || linalg == "linalg_matvec" || linalg == "linalg_matvec_t" ||
-      linalg == "linalg_matmul" || linalg == "linalg_softmax" || linalg == "linalg_attention") {
+      linalg == "linalg_matmul" || linalg == "linalg_softmax" || linalg == "linalg_attention" ||
+      name == "linalg_bmm" || name == "linalg_einsum2") {
     std::size_t expected = 5;
     if (linalg == "linalg_dot") expected = 2;
     else if (linalg == "linalg_softmax") expected = 1;
     else if (linalg == "linalg_attention") expected = 6;
+    else if (name == "linalg_bmm" || name == "linalg_einsum2") expected = 6;
     if (call.args.size() != expected) {
       builtinArityError(name, call, expected);
       inferCallArgTypes(call);

@@ -115,6 +115,7 @@ inline int builtinRuntimeId(const std::string& name) {
       {"fib_spawn", 275}, {"fib_join", 276}, {"fib_done", 277}, {"fib_cancel", 278},
       {"math_ew_un", 279}, {"math_ew_bin", 280},
       {"math_ew_bin_scalar", 281}, {"math_ew_reduce", 282},
+      {"linalg_bmm", 283}, {"linalg_einsum2", 284},
       {"os_getegid", 242}, {"os_getlogin", 243}, {"os_cpu_count", 244},
       {"os_uname", 245}, {"os_stat", 246}, {"os_lstat", 247},
       {"os_access", 248}, {"os_chmod", 249}, {"os_symlink", 250},

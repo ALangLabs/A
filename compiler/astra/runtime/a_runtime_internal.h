@@ -742,6 +742,8 @@ aval bi_linalg_dot(uint64_t n, aval *argv);
 aval bi_linalg_matvec(uint64_t n, aval *argv);
 aval bi_linalg_matvec_t(uint64_t n, aval *argv);
 aval bi_linalg_matmul(uint64_t n, aval *argv);
+aval bi_linalg_bmm(uint64_t n, aval *argv);
+aval bi_linalg_einsum2(uint64_t n, aval *argv);
 aval bi_linalg_softmax(uint64_t n, aval *argv);
 aval bi_linalg_attention(uint64_t n, aval *argv);
 aval bi_f32s(uint64_t n, aval *argv);

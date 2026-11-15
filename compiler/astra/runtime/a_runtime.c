@@ -166,7 +166,11 @@ static const struct { const char *name; a_builtin_fn fn; } g_builtins[A_BI_COUNT
        A_BI_MATH_EW_* enum) */
     { "math_ew_un", bi_math_ew_un }, { "math_ew_bin", bi_math_ew_bin },
     { "math_ew_bin_scalar", bi_math_ew_bin_scalar },
-    { "math_ew_reduce", bi_math_ew_reduce }
+    { "math_ew_reduce", bi_math_ew_reduce },
+    /* batched matmul / batched vec-mat einsum (order matches
+       A_BI_LINALG_BMM / A_BI_LINALG_EINSUM2) */
+    { "linalg_bmm", bi_linalg_bmm },
+    { "linalg_einsum2", bi_linalg_einsum2 }
 };
 
 static aval g_builtin_objs[A_BI_COUNT];

@@ -1,0 +1,183 @@
+# Check for einsum / batched matmul / keepdims — run: ./build/a run _check_einsum.astra
+import std:core
+import std:math
+
+fn _maxdiff(x, y) -> f64:
+    d = 0.0
+    n = len(x.data)
+    if len(y.data) < n:
+        n = len(y.data)
+    for i in 0..n:
+        v = x.data[i] - y.data[i]
+        if v < 0:
+            v = -v
+        if v > d:
+            d = v
+    return d
+
+fn _assert_close(x, y, tol: f64, msg: str):
+    d = _maxdiff(x, y)
+    if d >= tol:
+        core.panic(msg + " (maxdiff=" + str(d) + ")")
+
+fn _shape_eq(s1, s2) -> bool:
+    if len(s1) != len(s2):
+        return false
+    for i in 0..len(s1):
+        if s1[i] != s2[i]:
+            return false
+    return true
+
+# deterministic fill: data[i] = sin(i*0.7) + 0.01*i
+fn _fill(n: i64) -> [f64]:
+    d = []
+    for i in 0..n:
+        d.append(math.sin(i * 0.7) + 0.01 * i)
+    return d
+
+# --- batched matmul vs per-batch 2-D matmul ------------------------------------
+
+fn test_bmm():
+    B = 3
+    m = 2
+    k = 4
+    n = 3
+    a = math.ndarray(_fill(B * m * k), [B, m, k])
+    b = math.ndarray(_fill(B * k * n), [B, k, n])
+    c = math.matmul(a, b)
+    if not _shape_eq(c.shape, [B, m, n]):
+        core.panic("bmm shape")
+    # reference: per-batch matmul on reshaped views
+    for bb in 0..B:
+        ad = []
+        bd = []
+        for i in 0..m * k:
+            ad.append(a.data[bb * m * k + i])
+        for i in 0..k * n:
+            bd.append(b.data[bb * k * n + i])
+        cr = math.matmul(math.ndarray(ad, [m, k]), math.ndarray(bd, [k, n]))
+        got = []
+        want = []
+        for i in 0..m * n:
+            got.append(c.data[bb * m * n + i])
+            want.append(cr.data[i])
+        _assert_close(math.ndarray(got, [m, n]), math.ndarray(want, [m, n]), 1e-9, "bmm batch")
+
+# --- einsum attention patterns -------------------------------------------------
+
+fn test_einsum_attention():
+    h = 3
+    d = 4
+    t = 5
+    q = math.ndarray(_fill(h * d), [h, d])
+    kk = math.ndarray(_fill(h * t * d), [h, t, d])
+    # "hd,htd->ht": out[h,t] = sum_d q[h,d]*k[h,t,d]
+    s = math.einsum("hd,htd->ht", q, kk)
+    if not _shape_eq(s.shape, [h, t]):
+        core.panic("einsum hd,htd->ht shape: " + str(s.shape))
+    # reference
+    ref = []
+    for hh in 0..h:
+        for tt in 0..t:
+            acc = 0.0
+            for dd in 0..d:
+                acc = acc + q.data[hh * d + dd] * kk.data[(hh * t + tt) * d + dd]
+            ref.append(acc)
+    _assert_close(s, math.ndarray(ref, [h, t]), 1e-9, "einsum hd,htd->ht")
+    # "ht,htd->hd": out[h,d] = sum_t p[h,t]*k[h,t,d]
+    p = math.ndarray(_fill(h * t), [h, t])
+    o = math.einsum("ht,htd->hd", p, kk)
+    if not _shape_eq(o.shape, [h, d]):
+        core.panic("einsum ht,htd->hd shape")
+    ref2 = []
+    for hh in 0..h:
+        for dd in 0..d:
+            acc = 0.0
+            for tt in 0..t:
+                acc = acc + p.data[hh * t + tt] * kk.data[(hh * t + tt) * d + dd]
+            ref2.append(acc)
+    _assert_close(o, math.ndarray(ref2, [h, d]), 1e-9, "einsum ht,htd->hd")
+
+# --- generic 2-operand einsum --------------------------------------------------
+
+fn test_einsum_generic():
+    # "ij,jk->ik" == matmul
+    a = math.ndarray(_fill(6), [2, 3])
+    b = math.ndarray(_fill(12), [3, 4])
+    e = math.einsum("ij,jk->ik", a, b)
+    _assert_close(e, math.matmul(a, b), 1e-9, "einsum ij,jk->ik")
+    # "ij,jk->ki" permuted output
+    e2 = math.einsum("ij,jk->ki", a, b)
+    et = math.transpose(math.matmul(a, b))
+    _assert_close(e2, et, 1e-9, "einsum ij,jk->ki")
+    # outer product "i,j->ij"
+    u = math.ndarray(_fill(3), [3])
+    v = math.ndarray(_fill(2), [2])
+    eo = math.einsum("i,j->ij", u, v)
+    want = []
+    for i in 0..3:
+        for j in 0..2:
+            want.append(u.data[i] * v.data[j])
+    _assert_close(eo, math.ndarray(want, [3, 2]), 1e-12, "einsum i,j->ij")
+    # batched "bij,bjk->bik" == matmul
+    B = 2
+    ab = math.ndarray(_fill(B * 2 * 3), [B, 2, 3])
+    bb = math.ndarray(_fill(B * 3 * 2), [B, 3, 2])
+    eb = math.einsum("bij,bjk->bik", ab, bb)
+    _assert_close(eb, math.matmul(ab, bb), 1e-9, "einsum bij,bjk->bik")
+    # private reduce "ij,j->i": out[i] = sum_j a[i,j]*b[j]
+    a2 = math.ndarray(_fill(6), [2, 3])
+    b2 = math.ndarray(_fill(3), [3])
+    ep = math.einsum("ij,j->i", a2, b2)
+    wantp = []
+    for i in 0..2:
+        acc = 0.0
+        for j in 0..3:
+            acc = acc + a2.data[i * 3 + j] * b2.data[j]
+        wantp.append(acc)
+    _assert_close(ep, math.ndarray(wantp, [2]), 1e-9, "einsum ij,j->i")
+    # full contraction "i,i->" -> scalar
+    es = math.einsum("i,i->", u, math.ndarray(_fill(3), [3]))
+    acc = 0.0
+    for i in 0..3:
+        acc = acc + u.data[i] * math.ndarray(_fill(3), [3]).data[i]
+    if abs(es.data[0] - acc) > 1e-9:
+        core.panic("einsum i,i-> scalar")
+    # scalar operand ",ij->ij"
+    esc = math.einsum(",ij->ij", math.ndarray([2.0], []), a)
+    _assert_close(esc, math.multiply_scalar(math.ndarray(_fill(6), [2, 3]), 2.0), 1e-12, "einsum scalar")
+
+# --- keepdims reductions --------------------------------------------------------
+
+fn test_keepdims():
+    x = math.ndarray(_fill(24), [2, 3, 4])
+    mk = math.mean(x, -1, true)
+    if not _shape_eq(mk.shape, [2, 3, 1]):
+        core.panic("mean keepdims shape: " + str(mk.shape))
+    mn = math.mean(x, -1)
+    if not _shape_eq(mn.shape, [2, 3]):
+        core.panic("mean shape")
+    _assert_close(mk, math.ndarray(mn.data, [2, 3, 1]), 1e-12, "mean keepdims data")
+    sk = math.sum(x, 0, true)
+    if not _shape_eq(sk.shape, [1, 3, 4]):
+        core.panic("sum keepdims shape")
+    _assert_close(sk, math.ndarray(math.sum(x, 0).data, [1, 3, 4]), 1e-12, "sum keepdims data")
+    xk = math.nanmax(x, -2, true)
+    if not _shape_eq(xk.shape, [2, 1, 4]):
+        core.panic("max keepdims shape")
+    vk = math.var(x, 1, true)
+    if not _shape_eq(vk.shape, [2, 1, 4]):
+        core.panic("var keepdims shape")
+    sd = math.std(x, -1, true)
+    if not _shape_eq(sd.shape, [2, 3, 1]):
+        core.panic("std keepdims shape")
+    # broadcasting: keepdims mean can divide directly
+    q = math.ndarray(_fill(24), [2, 3, 4])
+    centered = math.subtract(q, mk)
+    _assert_close(math.mean(centered, -1, true), math.ndarray(math.mean(centered, -1).data, [2, 3, 1]), 1e-9, "keepdims broadcast mean")
+
+test_bmm()
+test_einsum_attention()
+test_einsum_generic()
+test_keepdims()
+print("einsum/bmm/keepdims checks passed")

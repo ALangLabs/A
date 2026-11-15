@@ -116,6 +116,36 @@ static void matmul_rows(void *vctx, int64_t lo, int64_t hi) {
 }
 
 typedef struct {
+    const double *ad, *bd;
+    double *out;
+    int64_t k, cols, m;   /* m = rows per batch; total rows = nbatch*m */
+    int64_t kmn;          /* k*cols: b stride between batches */
+} ABmmCtx;
+
+/* bmm row worker: output row r = (batch, i) with batch = r/m. a is the
+   contiguous (nbatch*m, k) row-major view of (nbatch, m, k); b is
+   (nbatch, k, cols) row-major, so batch b starts at bd + batch*k*cols.
+   Per-row ikj sequence is identical to matmul_rows -> bit-identical. */
+static void bmm_rows(void *vctx, int64_t lo, int64_t hi) {
+    ABmmCtx *c = (ABmmCtx *)vctx;
+    for (int64_t r = lo; r < hi; r++) {
+        int64_t batch = r / c->m;
+        double *orow = c->out + (uint64_t)r * (uint64_t)c->cols;
+        const double *arow = c->ad + (uint64_t)r * (uint64_t)c->k;
+        const double *bb = c->bd + (uint64_t)batch * (uint64_t)c->kmn;
+        for (int64_t jj = 0; jj < c->cols; jj += LINALG_TILE) {
+            int64_t jend = jj + LINALG_TILE < c->cols ? jj + LINALG_TILE : c->cols;
+            for (int64_t t = 0; t < c->k; t++) {
+                double a = arow[t];
+                const double *brow = bb + (uint64_t)t * (uint64_t)c->cols;
+                for (int64_t j = jj; j < jend; j++)
+                    orow[j] = fma(a, brow[j], orow[j]);
+            }
+        }
+    }
+}
+
+typedef struct {
     const double *x;
     const double *wf;      /* verified all-double view, or NULL */
     const int64_t *wi;     /* packed int view, or NULL */
@@ -457,6 +487,168 @@ aval bi_linalg_matmul(uint64_t n, aval *argv) {
         }
     }
     aval r = f64_list((uint64_t)(m * cols), out);
+    free(out);
+    free(ta);
+    free(tb);
+    return r;
+}
+
+/* bmm(a, b, nbatch, m, k, n) -> flat [f64] of length nbatch*m*n.
+ * Batched matmul with equal contiguous batch dims (no broadcasting):
+ * a is (nbatch, m, k) row-major — equivalently a dense (nbatch*m, k)
+ * matrix — and b is (nbatch, k, n) row-major; out[bb,i,j] =
+ * sum_t a[bb,i,t]*b[bb,t,j]. Parallel over the nbatch*m output rows;
+ * each row runs the identical tiled ikj sequence as bi_linalg_matmul,
+ * so results are bit-identical to calling linalg_matmul per batch. */
+aval bi_linalg_bmm(uint64_t n, aval *argv) {
+    want_args("linalg_bmm", n, 6, 6);
+    AArr *aa = as_arr(argv[0], "bmm() left operand");
+    AArr *bb = as_arr(argv[1], "bmm() right operand");
+    int64_t nb = a_int_full(argv[2]);
+    int64_t m = a_int_full(argv[3]);
+    int64_t k = a_int_full(argv[4]);
+    int64_t cols = a_int_full(argv[5]);
+    if (nb <= 0 || m <= 0 || k <= 0 || cols <= 0) panicf("bmm: bad dims");
+    if ((int64_t)aa->h.len < nb * m * k) panicf("bmm: left operand too short");
+    if ((int64_t)bb->h.len < nb * k * cols) panicf("bmm: right operand too short");
+    double *ta = NULL, *tb = NULL;
+    const double *ad = as_f64(aa, (uint64_t)(nb * m * k), &ta, "bmm() left operand");
+    const double *bd = as_f64(bb, (uint64_t)(nb * k * cols), &tb, "bmm() right operand");
+    int64_t total = nb * m;
+    double *out = (double *)malloc((size_t)(total * cols) * sizeof(double));
+    if (!out) panicf("out of memory");
+    memset(out, 0, (size_t)(total * cols) * sizeof(double));
+    if (lpar_ok((double)nb * (double)m * (double)k * (double)cols)) {
+        ABmmCtx mc = { ad, bd, out, k, cols, m, k * cols };
+        a_par_for(total, 1, bmm_rows, &mc);
+    } else {
+        ABmmCtx mc = { ad, bd, out, k, cols, m, k * cols };
+        bmm_rows(&mc, 0, total);
+    }
+    aval r = f64_list((uint64_t)(total * cols), out);
+    free(out);
+    free(ta);
+    free(tb);
+    return r;
+}
+
+typedef struct {
+    const double *ap, *bp;
+    double *out;
+    int64_t d1, d2;      /* contract len, free len */
+} AEvDotCtx;
+
+/* einsum2 opi=0 worker: work item w = (batch bb = w/d2, column j = w%d2)
+   computes out[bb*d2+j] = sum_i a[bb*d1+i] * b[(bb*d2+j)*d1+i] — a batched
+   vec x mat^T dot. Same 4-way fma accumulation order as linalg_dot /
+   attn_scores, so results are bit-identical to per-batch matvec_t. */
+static void einsum2_dvm(void *vctx, int64_t lo, int64_t hi) {
+    AEvDotCtx *c = (AEvDotCtx *)vctx;
+    for (int64_t w = lo; w < hi; w++) {
+        int64_t bb = w / c->d2;
+        int64_t j = w - bb * c->d2;
+        const double *arow = c->ap + (uint64_t)bb * (uint64_t)c->d1;
+        const double *brow = c->bp + ((uint64_t)bb * (uint64_t)c->d2 +
+                                      (uint64_t)j) * (uint64_t)c->d1;
+        double acc0 = 0.0, acc1 = 0.0, acc2 = 0.0, acc3 = 0.0;
+        int64_t i = 0;
+        for (; i + 4 <= c->d1; i += 4) {
+            acc0 = fma(arow[i], brow[i], acc0);
+            acc1 = fma(arow[i + 1], brow[i + 1], acc1);
+            acc2 = fma(arow[i + 2], brow[i + 2], acc2);
+            acc3 = fma(arow[i + 3], brow[i + 3], acc3);
+        }
+        for (; i < c->d1; i++) acc0 = fma(arow[i], brow[i], acc0);
+        c->out[(uint64_t)bb * (uint64_t)c->d2 + (uint64_t)j] =
+            ((acc0 + acc1) + (acc2 + acc3));
+    }
+}
+
+typedef struct {
+    const double *ap, *bp;
+    double *out;
+    int64_t d1, d2, nchunks;
+} AEvMmCtx;
+
+/* einsum2 opi=1 worker: work item w = (batch bb = w/nchunks, column chunk
+   cj) accumulates out[bb*d2 + j] = sum_i a[bb*d1+i] * b[(bb*d1+i)*d2+j]
+   for j in a 512-wide band — a batched vec x mat product. i-ascending
+   fma per output column, identical to the serial linalg_matvec loop. */
+static void einsum2_vmm(void *vctx, int64_t lo, int64_t hi) {
+    AEvMmCtx *c = (AEvMmCtx *)vctx;
+    const int64_t chunk = 512;
+    for (int64_t w = lo; w < hi; w++) {
+        int64_t bb = w / c->nchunks;
+        int64_t cj = w - bb * c->nchunks;
+        int64_t jlo = cj * chunk;
+        int64_t jhi = jlo + chunk;
+        if (jhi > c->d2) jhi = c->d2;
+        const double *arow = c->ap + (uint64_t)bb * (uint64_t)c->d1;
+        const double *bbase = c->bp + (uint64_t)bb * (uint64_t)c->d1 *
+                               (uint64_t)c->d2;
+        double *orow = c->out + (uint64_t)bb * (uint64_t)c->d2;
+        for (int64_t i = 0; i < c->d1; i++) {
+            double xi = arow[i];
+            const double *brow = bbase + (uint64_t)i * (uint64_t)c->d2;
+            for (int64_t j = jlo; j < jhi; j++)
+                orow[j] = fma(xi, brow[j], orow[j]);
+        }
+    }
+}
+
+/* einsum2(opi, a, b, nbatch, d1, d2) -> flat [f64] of length nbatch*d2.
+ * Batched vec x mat kernels backing std.math einsum's attention fast
+ * paths ("hd,htd->ht" and "ht,htd->hd" patterns):
+ *   opi=0: a is (nbatch, d1), b is (nbatch, d2, d1) row-major —
+ *          out[bb,j] = sum_i a[bb,i] * b[bb,j,i]   (contract b's last axis)
+ *   opi=1: a is (nbatch, d1), b is (nbatch, d1, d2) row-major —
+ *          out[bb,j] = sum_i a[bb,i] * b[bb,i,j]   (contract b's first
+ *          matrix axis)
+ * a is always (nbatch, d1) and the contracted length is d1 in both modes;
+ * b's total length is nbatch*d1*d2 either way. */
+aval bi_linalg_einsum2(uint64_t n, aval *argv) {
+    want_args("linalg_einsum2", n, 6, 6);
+    int64_t opi = expect_int64(argv[0], "einsum2 op");
+    AArr *aa = as_arr(argv[1], "einsum2() vector operand");
+    AArr *bb = as_arr(argv[2], "einsum2() matrix operand");
+    int64_t nb = a_int_full(argv[3]);
+    int64_t d1 = a_int_full(argv[4]);
+    int64_t d2 = a_int_full(argv[5]);
+    if (opi != 0 && opi != 1) panicf("einsum2: bad op %lld",
+                                      (long long)opi);
+    if (nb <= 0 || d1 <= 0 || d2 <= 0) panicf("einsum2: bad dims");
+    if ((int64_t)aa->h.len < nb * d1) panicf("einsum2: vector operand too short");
+    if ((int64_t)bb->h.len < nb * d1 * d2)
+        panicf("einsum2: matrix operand too short");
+    double *ta = NULL, *tb = NULL;
+    const double *ad = as_f64(aa, (uint64_t)(nb * d1), &ta,
+                              "einsum2() vector operand");
+    const double *bd = as_f64(bb, (uint64_t)(nb * d1 * d2), &tb,
+                              "einsum2() matrix operand");
+    double *out = (double *)malloc((size_t)(nb * d2) * sizeof(double));
+    if (!out) panicf("out of memory");
+    if (opi == 0) {
+        int64_t total = nb * d2;
+        if (lpar_ok((double)nb * (double)d1 * (double)d2)) {
+            AEvDotCtx mc = { ad, bd, out, d1, d2 };
+            a_par_for(total, 1, einsum2_dvm, &mc);
+        } else {
+            AEvDotCtx mc = { ad, bd, out, d1, d2 };
+            einsum2_dvm(&mc, 0, total);
+        }
+    } else {
+        memset(out, 0, (size_t)(nb * d2) * sizeof(double));
+        int64_t nchunks = (d2 + 511) / 512;
+        int64_t total = nb * nchunks;
+        if (lpar_ok((double)nb * (double)d1 * (double)d2)) {
+            AEvMmCtx mc = { ad, bd, out, d1, d2, nchunks };
+            a_par_for(total, 1, einsum2_vmm, &mc);
+        } else {
+            AEvMmCtx mc = { ad, bd, out, d1, d2, nchunks };
+            einsum2_vmm(&mc, 0, total);
+        }
+    }
+    aval r = f64_list((uint64_t)(nb * d2), out);
     free(out);
     free(ta);
     free(tb);

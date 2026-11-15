@@ -38,6 +38,8 @@ import std:core
 
 from "ndarray.astra" import NDArray, ndarray, zeros, eye, transpose, reshape, ravel
 from "ndarray.astra" import _shape_size, _broadcast_shape, _ew_bin, _scalar_or_arr
+from "ndarray.astra" import _row_major_index
+from "reductions.astra" import sum as _esum
 
 # --- small shape helpers ------------------------------------------------------
 
@@ -308,6 +310,26 @@ fn matmul(a: NDArray, b: NDArray) -> NDArray:
     mk = m * k
     kn = k * n
 
+    # Fast path: both operands already carry exactly the broadcast batch
+    # shape, so their data is contiguous (B,m,k) and (B,k,n) — one native
+    # batched-matmul kernel call instead of per-batch slicing in A code.
+    fast = nbatch_dims > 0 and len(ash) == nbatch_dims and len(bsh) == nbatch_dims
+    if fast:
+        for j in 0..nbatch_dims:
+            if ash[j] != bshape[j] or bsh[j] != bshape[j]:
+                fast = false
+    if fast:
+        outdata = linalg_bmm(a.data, b.data, B, m, k, n)
+        outshape = _cat(bshape, [m, n])
+        c = NDArray(outdata, outshape)
+        if a_vec and b_vec:
+            return NDArray(c.data, [])
+        if a_vec:
+            return reshape(c, _cat(bshape, [n]))
+        if b_vec:
+            return reshape(c, _cat(bshape, [m]))
+        return c
+
     # element strides for batch dims (0 where the operand broadcasts)
     astr = []
     abase = nbatch_dims - (na - 2)
@@ -356,6 +378,306 @@ fn matmul(a: NDArray, b: NDArray) -> NDArray:
     if b_vec:
         return reshape(c, _cat(bshape, [m]))
     return c
+
+# --- einsum --------------------------------------------------------------------
+#
+# np.einsum subset for two operands (f64). Subscripts are single-character
+# labels: "ab,bc->ac". The attention hot patterns
+#   "hd,htd->ht"  (batched vec x mat^T: scores)   and
+#   "ht,htd->hd"  (batched mat x vec:  value mix)
+# run in the native linalg_einsum2 kernel; every other 2-operand form is
+# handled by permute + reshape + the native batched matmul (linalg_bmm).
+# Ellipsis ("...") and repeated labels within one operand (diagonals) are
+# rejected.
+
+fn _lbl_idx(labels: [str], c: str) -> i64:
+    for i in 0..len(labels):
+        if labels[i] == c:
+            return i
+    return -1
+
+fn _lbl_has(labels: [str], c: str) -> bool:
+    return _lbl_idx(labels, c) >= 0
+
+fn _lcat(s1: [str], s2: [str]) -> [str]:
+    out = []
+    for v in s1:
+        out.append(v)
+    for v in s2:
+        out.append(v)
+    return out
+
+fn _permute(a: NDArray, order: [i64]) -> NDArray:
+    # order[i] = source axis that becomes target axis i (a permutation).
+    nd = len(a.shape)
+    newshape = []
+    for i in 0..nd:
+        newshape.append(a.shape[order[i]])
+    total = _shape_size(newshape)
+    data = []
+    for t in 0..total:
+        rem = t
+        tcoords = []
+        k = nd - 1
+        while k >= 0:
+            tcoords.insert(0, rem % newshape[k])
+            rem = rem // newshape[k]
+            k = k - 1
+        scoords = []
+        for i in 0..nd:
+            scoords.append(0)
+        for i in 0..nd:
+            scoords[order[i]] = tcoords[i]
+        data.append(a.data[_row_major_index(a.shape, scoords)])
+    return NDArray(data, newshape)
+
+fn einsum(subscripts: str, a: NDArray, b: NDArray) -> NDArray:
+    cs = subscripts.chars()
+    n = len(cs)
+    arrow = -1
+    i = 0
+    while i + 1 < n:
+        if str(cs[i]) == "-" and str(cs[i + 1]) == ">":
+            arrow = i
+            break
+        i = i + 1
+    if arrow < 0:
+        core.panic("einsum: expected '->' in subscripts")
+    comma = -1
+    i = 0
+    while i < arrow:
+        if str(cs[i]) == ",":
+            comma = i
+            break
+        i = i + 1
+    if comma < 0:
+        core.panic("einsum: expected ',' between the two operands")
+    j = comma + 1
+    while j < arrow:
+        if str(cs[j]) == ",":
+            core.panic("einsum: only two operands are supported")
+        j = j + 1
+    la = []
+    for k in 0..comma:
+        la.append(str(cs[k]))
+    lb = []
+    k = comma + 1
+    while k < arrow:
+        lb.append(str(cs[k]))
+        k = k + 1
+    lo = []
+    k = arrow + 2
+    while k < n:
+        lo.append(str(cs[k]))
+        k = k + 1
+    # ellipsis is not supported
+    for c in la:
+        if c == ".":
+            core.panic("einsum: ellipsis (...) is not supported")
+    for c in lb:
+        if c == ".":
+            core.panic("einsum: ellipsis (...) is not supported")
+    for c in lo:
+        if c == ".":
+            core.panic("einsum: ellipsis (...) is not supported")
+    # repeated labels (diagonal extraction) are not supported
+    for x in 0..len(la):
+        for y in x + 1..len(la):
+            if la[x] == la[y]:
+                core.panic("einsum: repeated labels within an operand are not supported")
+    for x in 0..len(lb):
+        for y in x + 1..len(lb):
+            if lb[x] == lb[y]:
+                core.panic("einsum: repeated labels within an operand are not supported")
+    for x in 0..len(lo):
+        for y in x + 1..len(lo):
+            if lo[x] == lo[y]:
+                core.panic("einsum: repeated labels in the output are not supported")
+
+    na = len(a.shape)
+    nb = len(b.shape)
+    if len(la) != na or len(lb) != nb:
+        core.panic("einsum: subscript count does not match operand rank")
+
+    # label -> dimension consistency across both operands
+    ldims = []
+    lsize = []
+    for x in 0..na:
+        c = la[x]
+        p = _lbl_idx(ldims, c)
+        if p >= 0:
+            if lsize[p] != a.shape[x]:
+                core.panic("einsum: dimension mismatch on a shared label")
+        else:
+            ldims.append(c)
+            lsize.append(a.shape[x])
+    for x in 0..nb:
+        c = lb[x]
+        p = _lbl_idx(ldims, c)
+        if p >= 0:
+            if lsize[p] != b.shape[x]:
+                core.panic("einsum: dimension mismatch on a shared label")
+        else:
+            ldims.append(c)
+            lsize.append(b.shape[x])
+    for c in lo:
+        if not _lbl_has(la, c) and not _lbl_has(lb, c):
+            core.panic("einsum: output label missing from both operands")
+
+    # scalar operand: scale the other operand (its private axes are summed
+    # out first, then it is permuted into output-label order)
+    if na == 0 or nb == 0:
+        # default: a is the scalar, b the array operand; flipped below
+        # when b is the scalar (both-scalar still yields the product).
+        sc = a.data[0]
+        o = b
+        ol = lb
+        if nb == 0:
+            sc = b.data[0]
+            o = a
+            ol = la
+        x = 0
+        while x < len(ol):
+            if not _lbl_has(lo, ol[x]):
+                o = _esum(o, x)
+                nl = []
+                for t in 0..len(ol):
+                    if t != x:
+                        nl.append(ol[t])
+                ol = nl
+            else:
+                x = x + 1
+        order = []
+        for t in 0..len(lo):
+            p = _lbl_idx(ol, lo[t])
+            if p < 0:
+                core.panic("einsum: output label missing from operands")
+            order.append(p)
+        op = _permute(o, order)
+        return _ew_bin("mul", _scalar_or_arr(sc, op.shape), op)
+
+    # attention fast paths (single shared leading batch label)
+    if len(la) == 2 and len(lb) == 3 and len(lo) == 2:
+        if la[0] == lb[0] and la[0] == lo[0] and la[1] == lb[2] and lo[1] == lb[1]:
+            # "hd,htd->ht": out[h,t] = sum_d a[h,d] * b[h,t,d]
+            B = a.shape[0]
+            d1 = a.shape[1]
+            d2 = b.shape[1]
+            outd = linalg_einsum2(0, a.data, b.data, B, d1, d2)
+            return NDArray(outd, [B, d2])
+        if la[0] == lb[0] and la[0] == lo[0] and la[1] == lb[1] and lo[1] == lb[2]:
+            # "ht,htd->hd": out[h,d] = sum_t a[h,t] * b[h,t,d]
+            B = a.shape[0]
+            d1 = a.shape[1]
+            d2 = b.shape[2]
+            outd = linalg_einsum2(1, a.data, b.data, B, d1, d2)
+            return NDArray(outd, [B, d2])
+
+    # generic 2-operand path: labels private to one operand and absent
+    # from the output are summed out first (they factorize), then the rest
+    # is a batched matmul over [batch labels] x [free labels] x [contract].
+    x = 0
+    while x < len(la):
+        c = la[x]
+        if not _lbl_has(lo, c) and not _lbl_has(lb, c):
+            a = _esum(a, x)
+            nl = []
+            for t in 0..len(la):
+                if t != x:
+                    nl.append(la[t])
+            la = nl
+        else:
+            x = x + 1
+    x = 0
+    while x < len(lb):
+        c = lb[x]
+        if not _lbl_has(lo, c) and not _lbl_has(la, c):
+            b = _esum(b, x)
+            nl = []
+            for t in 0..len(lb):
+                if t != x:
+                    nl.append(lb[t])
+            lb = nl
+        else:
+            x = x + 1
+
+    batch_l = []
+    afree_l = []
+    bfree_l = []
+    for c in lo:
+        ina = _lbl_has(la, c)
+        inb = _lbl_has(lb, c)
+        if ina and inb:
+            batch_l.append(c)
+        elif ina:
+            afree_l.append(c)
+        else:
+            bfree_l.append(c)
+    cl = []
+    for c in la:
+        if _lbl_has(lb, c) and not _lbl_has(lo, c):
+            cl.append(c)
+
+    bshape = []
+    for c in batch_l:
+        bshape.append(lsize[_lbl_idx(ldims, c)])
+    ashape = []
+    for c in afree_l:
+        ashape.append(lsize[_lbl_idx(ldims, c)])
+    kshape = []
+    for c in cl:
+        kshape.append(lsize[_lbl_idx(ldims, c)])
+    bsh2 = []
+    for c in bfree_l:
+        bsh2.append(lsize[_lbl_idx(ldims, c)])
+    Bcount = _shape_size(bshape)
+    Fa = _shape_size(ashape)
+    K = _shape_size(kshape)
+    Fb = _shape_size(bsh2)
+    canon_shape = _cat(_cat(bshape, ashape), bsh2)
+    canon_labels = _lcat(_lcat(batch_l, afree_l), bfree_l)
+
+    if K == 0:
+        # contraction over an empty axis -> all zeros (NumPy semantics)
+        return zeros(canon_shape)
+    if Bcount == 0 or Fa == 0 or Fb == 0:
+        return NDArray([], canon_shape)
+
+    # permute a -> [batch..., afree..., contract...], reshape (B,Fa,K)
+    perm_a = []
+    for c in batch_l:
+        perm_a.append(_lbl_idx(la, c))
+    for c in afree_l:
+        perm_a.append(_lbl_idx(la, c))
+    for c in cl:
+        perm_a.append(_lbl_idx(la, c))
+    pa = _permute(a, perm_a)
+    pa2 = reshape(pa, [Bcount, Fa, K])
+    # permute b -> [batch..., contract..., bfree...], reshape (B,K,Fb)
+    perm_b = []
+    for c in batch_l:
+        perm_b.append(_lbl_idx(lb, c))
+    for c in cl:
+        perm_b.append(_lbl_idx(lb, c))
+    for c in bfree_l:
+        perm_b.append(_lbl_idx(lb, c))
+    pb = _permute(b, perm_b)
+    pb2 = reshape(pb, [Bcount, K, Fb])
+
+    outdata = linalg_bmm(pa2.data, pb2.data, Bcount, Fa, K, Fb)
+    res = NDArray(outdata, canon_shape)
+    # permute canonical [batch, afree, bfree] order into the requested
+    # output-label order
+    order = []
+    ident = true
+    for t in 0..len(lo):
+        p = _lbl_idx(canon_labels, lo[t])
+        order.append(p)
+        if p != t:
+            ident = false
+    if not ident:
+        res = _permute(res, order)
+    return res
 
 fn matvec(x: NDArray, w: NDArray, bias: any = None) -> NDArray:
     # x·W (+b) helper: x is 1-D (nin,), w is 2-D (nin, nout) row-major,

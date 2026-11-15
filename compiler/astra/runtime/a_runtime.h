@@ -217,6 +217,9 @@ enum {
        lists (appended so existing builtin ids stay stable) */
     A_BI_MATH_EW_UN, A_BI_MATH_EW_BIN, A_BI_MATH_EW_BIN_SCALAR,
     A_BI_MATH_EW_REDUCE,
+    /* batched matmul + batched vec-mat einsum kernels (appended so
+       existing builtin ids stay stable) */
+    A_BI_LINALG_BMM, A_BI_LINALG_EINSUM2,
     A_BI_COUNT
 };
 
