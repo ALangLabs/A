@@ -6,7 +6,7 @@ module {
     a.return %c : !a.aval
   }
 
-  a.func @main(%arg: !a.aval) -> !a.aval {
+  a.func @main(%arg: !a.aval, %n: i64, %m: i64) -> !a.aval {
     // literals: every a.const kind
     %ci = a.const int {ivalue = 5 : i64} -> !a.aval
     %cf = a.const float {fvalue = 1.5 : f64} -> !a.aval
@@ -45,6 +45,16 @@ module {
       a.yield %acc : !a.aval
     }
 
-    a.return %loop : !a.aval
+    // generic while/do-while over a boxed carried value
+    %w = a.while (%loop) : (!a.aval) -> !a.aval {
+      ^bb0(%a2: !a.aval):
+        %cond = arith.cmpi slt, %n, %m : i64
+        a.condition(%cond) %a2 : !a.aval
+    } do {
+      ^bb0(%x2: !a.aval):
+        a.yield %x2 : !a.aval
+    }
+
+    a.return %w : !a.aval
   }
 }

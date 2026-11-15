@@ -1,0 +1,82 @@
+module {
+  llvm.func @a_fib_main(i64, i64, i64, !llvm.ptr) -> i64
+  llvm.func @a_fib_join_handle(i64) -> i64
+  llvm.func @a_fib_spawn_handle(i64, i64, !llvm.ptr) -> i64
+  llvm.func @a_add_slow(i64, i64) -> i64
+  llvm.func @a_setitem(i64, i64, i64) -> i64
+  llvm.func @a_getitem(i64, i64) -> i64
+  llvm.func @a_str_new(!llvm.ptr, i64) -> i64
+  llvm.mlir.global private constant @__a_str0() {addr_space = 0 : i32} : !llvm.array<6 x i8> {
+    %0 = llvm.mlir.constant(0 : i8) : i8
+    %1 = llvm.mlir.constant(111 : i8) : i8
+    %2 = llvm.mlir.constant(108 : i8) : i8
+    %3 = llvm.mlir.constant(101 : i8) : i8
+    %4 = llvm.mlir.constant(104 : i8) : i8
+    %5 = llvm.mlir.undef : !llvm.array<6 x i8>
+    %6 = llvm.insertvalue %4, %5[0] : !llvm.array<6 x i8> 
+    %7 = llvm.insertvalue %3, %6[1] : !llvm.array<6 x i8> 
+    %8 = llvm.insertvalue %2, %7[2] : !llvm.array<6 x i8> 
+    %9 = llvm.insertvalue %2, %8[3] : !llvm.array<6 x i8> 
+    %10 = llvm.insertvalue %1, %9[4] : !llvm.array<6 x i8> 
+    %11 = llvm.insertvalue %0, %10[5] : !llvm.array<6 x i8> 
+    llvm.return %11 : !llvm.array<6 x i8>
+  }
+  llvm.mlir.global private constant @g_str("hello") {addr_space = 0 : i32}
+  llvm.func @callee(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(-281474976710641 : i64) : i64
+    llvm.return %0 : i64
+  }
+  llvm.func @main(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(0 : i64) : i64
+    %c0_i64 = arith.constant 0 : i64
+    %c1_i64 = arith.constant 1 : i64
+    %1 = llvm.mlir.constant(-281474976710654 : i64) : i64
+    %2 = llvm.mlir.constant(5 : i64) : i64
+    %3 = llvm.mlir.constant(3 : i64) : i64
+    %4 = llvm.mlir.constant(2 : i64) : i64
+    %5 = llvm.mlir.constant(1 : i64) : i64
+    %6 = llvm.getelementptr %arg0[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    %7 = llvm.load %6 : !llvm.ptr -> i64
+    %8 = llvm.getelementptr %arg0[2] : (!llvm.ptr) -> !llvm.ptr, i64
+    %9 = llvm.load %8 : !llvm.ptr -> i64
+    %10 = llvm.getelementptr %arg0[3] : (!llvm.ptr) -> !llvm.ptr, i64
+    %11 = llvm.load %10 : !llvm.ptr -> i64
+    %12 = llvm.mlir.addressof @__a_str0 : !llvm.ptr
+    %13 = llvm.call @a_str_new(%12, %2) : (!llvm.ptr, i64) -> i64
+    %14 = llvm.alloca %c1_i64 x i64 : (i64) -> !llvm.ptr
+    llvm.store %7, %14 : i64, !llvm.ptr
+    %15 = llvm.load %14 : !llvm.ptr -> i64
+    %16 = llvm.call @a_getitem(%15, %7) : (i64, i64) -> i64
+    %17 = llvm.call @a_setitem(%15, %7, %16) : (i64, i64, i64) -> i64
+    %18 = llvm.call @a_add_slow(%17, %17) : (i64, i64) -> i64
+    %19 = llvm.inttoptr %17 : i64 to !llvm.ptr
+    %20 = llvm.call @a_fib_spawn_handle(%18, %c1_i64, %19) : (i64, i64, !llvm.ptr) -> i64
+    %21 = llvm.call @a_fib_join_handle(%20) : (i64) -> i64
+    %22 = llvm.call @a_fib_main(%c0_i64, %17, %c1_i64, %14) : (i64, i64, i64, !llvm.ptr) -> i64
+    %23 = llvm.alloca %4 x i64 : (i64) -> !llvm.ptr
+    llvm.store %1, %23 : i64, !llvm.ptr
+    %24 = llvm.getelementptr %23[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    llvm.store %17, %24 : i64, !llvm.ptr
+    %25 = llvm.call @callee(%23) : (!llvm.ptr) -> i64
+    llvm.br ^bb1(%0, %17 : i64, i64)
+  ^bb1(%26: i64, %27: i64):  // 2 preds: ^bb0, ^bb3
+    %28 = llvm.icmp "ult" %26, %3 : i64
+    llvm.cond_br %28, ^bb3(%26, %27 : i64, i64), ^bb2(%27 : i64)
+  ^bb2(%29: i64):  // pred: ^bb1
+    llvm.br ^bb4
+  ^bb3(%30: i64, %31: i64):  // pred: ^bb1
+    %32 = llvm.add %30, %5  : i64
+    llvm.br ^bb1(%32, %31 : i64, i64)
+  ^bb4:  // pred: ^bb2
+    llvm.br ^bb6(%29 : i64)
+  ^bb5(%33: i64):  // pred: ^bb6
+    llvm.br ^bb8
+  ^bb6(%34: i64):  // 2 preds: ^bb4, ^bb7
+    %35 = arith.cmpi slt, %9, %11 : i64
+    llvm.cond_br %35, ^bb7(%34 : i64), ^bb5(%34 : i64)
+  ^bb7(%36: i64):  // pred: ^bb6
+    llvm.br ^bb6(%36 : i64)
+  ^bb8:  // pred: ^bb5
+    llvm.return %33 : i64
+  }
+}

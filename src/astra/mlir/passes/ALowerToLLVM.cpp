@@ -485,18 +485,22 @@ LogicalResult lowerFunc(Operation *op) {
   Type i64Ty = IntegerType::get(ctx, 64);
   Type ptrTy = LLVMPointerType::get(ctx);
 
-  // Rebuild the body so block arguments carry LLVM types; the entry block's
-  // arguments are the A-level parameters (in declaration order).
-  llvm::DenseMap<Block *, Block *> oldToNew;
-  if (!srcRegion.empty() &&
-      failed(rebuildRegionWithLoweredArgTypes(srcRegion, oldToNew)))
-    return failure();
-
+  // Only the entry block's arguments need lowering (they are the A-level
+  // parameters). All other blocks were already lowered by the per-op
+  // lowerings (a.for/a.while/etc.) which rebuild their own regions.
   SmallVector<Type> paramTypes;
   if (!srcRegion.empty()) {
     Block &entry = srcRegion.front();
-    for (BlockArgument arg : entry.getArguments())
-      paramTypes.push_back(arg.getType());
+    for (BlockArgument arg : entry.getArguments()) {
+      Type lt;
+      if (failed(lowerType(arg.getType(), lt))) {
+        mlir::emitError(srcRegion.getLoc(),
+                        "a-lower-to-llvm: cannot lower block argument type `")
+            << arg.getType() << "`";
+        return failure();
+      }
+      paramTypes.push_back(lt);
+    }
   }
 
   // Every llvm.return operand must be the i64 aval payload; a.return was
@@ -1310,15 +1314,8 @@ LogicalResult lowerIfRegion(Operation *op) {
       armEntries.push_back(nullptr);
       continue;
     }
-    llvm::DenseMap<Block *, Block *> oldToNew;
-    // Rebuild blocks inside the arm region first (lowered arg types +
-    // remapped intra-region branches), then move the new blocks out.
-    // NOTE: rebuildRegionWithLoweredArgTypes erases old blocks; the new
-    // blocks stay in armRegion and are spliced into parentRegion below.
-    // We must run it on a temporary region? No -- it operates in place and
-    // leaves new blocks inside armRegion; we then splice them out.
-    if (failed(rebuildRegionWithLoweredArgTypes(armRegion, oldToNew)))
-      return failure();
+    // Region block-arg types were already lowered by the pre-pass in
+    // runOnOperation; armRegion now contains the lowered blocks.
     // armRegion now contains only the new blocks, in order.
     Block *entry = &armRegion.front();
     armEntries.push_back(entry);
@@ -1447,14 +1444,8 @@ LogicalResult lowerFor(Operation *op) {
   Type i1Ty = IntegerType::get(ctx, 1);
   Location loc = op->getLoc();
 
-  fprintf(stderr, "[lowerFor] enter\n");
-
-  llvm::DenseMap<Block *, Block *> oldToNew;
-  if (failed(rebuildRegionWithLoweredArgTypes(body, oldToNew)))
-    return failure();
-
-  fprintf(stderr, "[lowerFor] rebuild ok\n");
-
+  // Region block-arg types were already lowered by the pre-pass in
+  // runOnOperation; bodyBlocks now holds the lowered blocks.
   SmallVector<Block *> bodyBlocks;
   for (Block &bb : body.getBlocks())
     bodyBlocks.push_back(&bb);
@@ -1467,16 +1458,12 @@ LogicalResult lowerFor(Operation *op) {
     return failure();
   }
 
-  fprintf(stderr, "[lowerFor] args ok\n");
-
   // Bounds -> i64 (index constants materialized, i64 passthrough).
   Value lo, hi, st;
   if (failed(materializeAsI64(op, op->getOperand(0), lo)) ||
       failed(materializeAsI64(op, op->getOperand(1), hi)) ||
       failed(materializeAsI64(op, op->getOperand(2), st)))
     return failure();
-
-  fprintf(stderr, "[lowerFor] bounds ok\n");
 
   // Locate the a.yield latch inside the (possibly multi-block) body.
   Block *yieldBB = findTerminatorBlock(bodyBlocks, "a.yield");
@@ -1491,22 +1478,14 @@ LogicalResult lowerFor(Operation *op) {
     return failure();
   }
 
-  fprintf(stderr, "[lowerFor] yield ok\n");
-
   Block *parent = op->getBlock();
   Region *parentRegion = parent->getParent();
   Block *contBB = nullptr;
   splitBlockAfter(op, contBB);
-
-  fprintf(stderr, "[lowerFor] split ok\n");
-
-  fprintf(stderr, "[lowerFor] before checkBB create\n");
   Block *checkBB = new Block;
   Block *exitBB = new Block;
   checkBB->insertBefore(contBB);
   exitBB->insertBefore(contBB);
-
-  fprintf(stderr, "[lowerFor] blocks inserted\n");
   // check(iv, carried...): iv is i64, carried types come from the rebuilt
   // body entry arguments (indices 1..n).
   checkBB->addArgument(i64Ty, loc);
@@ -1526,13 +1505,9 @@ LogicalResult lowerFor(Operation *op) {
                    "iter_args count");
     return failure();
   }
-
-  fprintf(stderr, "[lowerFor] args added\n");
   // Move the body blocks into the parent region, preserving order.
   for (Block *bb : bodyBlocks)
     bb->moveBefore(contBB);
-
-  fprintf(stderr, "[lowerFor] body moved\n");
   // Entry edge: br ^check(lo, inits...).
   {
     OpBuilder b(op);
@@ -1547,11 +1522,8 @@ LogicalResult lowerFor(Operation *op) {
     b.create<BrOp>(loc, entryVals, checkBB);
   }
 
-  fprintf(stderr, "[lowerFor] entry br ok\n");
-
   // Loop guard: iv < hi (unsigned, matching index semantics for lo >= 0).
   {
-    fprintf(stderr, "[lowerFor] before icmp\n");
     OpBuilder tb = OpBuilder::atBlockEnd(checkBB);
     Value iv = checkBB->getArgument(0);
     Value cmp = tb.create<ICmpOp>(
@@ -1559,30 +1531,24 @@ LogicalResult lowerFor(Operation *op) {
         mlir::LLVM::ICmpPredicateAttr::get(
             ctx, mlir::LLVM::ICmpPredicate::ult),
         iv, hi);
-    fprintf(stderr, "[lowerFor] icmp ok\n");
     SmallVector<Value> checkArgs(checkBB->getArguments().begin(),
                                  checkBB->getArguments().end());
     SmallVector<Value> exitVals(checkArgs.begin() + 1, checkArgs.end());
     tb.create<CondBrOp>(loc, cmp, bodyEntry, checkArgs, exitBB, exitVals);
-    fprintf(stderr, "[lowerFor] condbr ok\n");
   }
 
   // Exit edge -> continuation.
   {
-    fprintf(stderr, "[lowerFor] before exit br\n");
     OpBuilder eb = OpBuilder::atBlockEnd(exitBB);
     eb.create<BrOp>(loc, ValueRange{}, contBB);
-    fprintf(stderr, "[lowerFor] exit br ok\n");
   }
 
   // Latch: replace a.yield with br ^check(iv + step, yielded...). The iv is
   // the body entry's first argument; it dominates the latch block.
   {
-    fprintf(stderr, "[lowerFor] before latch\n");
     OpBuilder yb(yield);
     Value iv = bodyEntry->getArgument(0);
     Value ivNext = yb.create<AddOp>(loc, i64Ty, iv, st);
-    fprintf(stderr, "[lowerFor] add ok\n");
     SmallVector<Value> backVals;
     backVals.push_back(ivNext);
     for (Value yv : yield->getOperands()) {
@@ -1592,9 +1558,7 @@ LogicalResult lowerFor(Operation *op) {
       backVals.push_back(v);
     }
     yb.create<BrOp>(loc, backVals, checkBB);
-    fprintf(stderr, "[lowerFor] latch br ok\n");
     yield->erase();
-    fprintf(stderr, "[lowerFor] yield erased\n");
   }
 
   // Results are the exit block arguments.
@@ -1621,10 +1585,8 @@ LogicalResult lowerWhile(Operation *op) {
   Region &after = op->getRegion(1);
   Location loc = op->getLoc();
 
-  llvm::DenseMap<Block *, Block *> oldToNew;
-  if (failed(rebuildRegionWithLoweredArgTypes(before, oldToNew)) ||
-      failed(rebuildRegionWithLoweredArgTypes(after, oldToNew)))
-    return failure();
+  // Region block-arg types were already lowered by the pre-pass in
+  // runOnOperation.
 
   SmallVector<Block *> beforeBlocks, afterBlocks;
   for (Block &bb : before.getBlocks())
@@ -1809,6 +1771,38 @@ void ALowerToLLVMPass::getDependentDialects(
 
 void ALowerToLLVMPass::runOnOperation() {
   ModuleOp module = getOperation();
+
+  // Pre-pass: rebuild region block-argument types for a.for/a.while/a.if so
+  // that ops nested inside those regions see lowered (i64/llvm) types when
+  // they are processed in the main post-order loop below.
+  module.walk<mlir::WalkOrder::PreOrder>([&](Operation *op) {
+    if (op->getDialect() == nullptr ||
+        op->getDialect()->getNamespace() != kADialectName)
+      return mlir::WalkResult::advance();
+    llvm::StringRef name = op->getName().getStringRef();
+    if (name == "a.for" && op->getNumRegions() == 1 &&
+        !op->getRegion(0).empty()) {
+      llvm::DenseMap<Block *, Block *> oldToNew;
+      (void)rebuildRegionWithLoweredArgTypes(op->getRegion(0), oldToNew);
+    } else if (name == "a.while" && op->getNumRegions() == 2 &&
+               !op->getRegion(0).empty() && !op->getRegion(1).empty()) {
+      llvm::DenseMap<Block *, Block *> m0, m1;
+      (void)rebuildRegionWithLoweredArgTypes(op->getRegion(0), m0);
+      (void)rebuildRegionWithLoweredArgTypes(op->getRegion(1), m1);
+    } else if (name == "a.if") {
+      for (unsigned r = 0; r < op->getNumRegions(); ++r) {
+        if (op->getRegion(r).empty())
+          continue;
+        llvm::DenseMap<Block *, Block *> oldToNew;
+        (void)rebuildRegionWithLoweredArgTypes(op->getRegion(r), oldToNew);
+      }
+    } else if (name == "a.func" && op->getNumRegions() == 1 &&
+               !op->getRegion(0).empty()) {
+      llvm::DenseMap<Block *, Block *> oldToNew;
+      (void)rebuildRegionWithLoweredArgTypes(op->getRegion(0), oldToNew);
+    }
+    return mlir::WalkResult::advance();
+  });
 
   // Collect `a` ops in post-order so inner ops (e.g. a.call inside an a.if
   // region, a.return inside a.func) are lowered before their containers.
