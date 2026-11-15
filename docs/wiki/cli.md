@@ -36,7 +36,10 @@ faster dev builds).
   `mlir-translate`/`opt`/`llc` subprocess chain remains as an escape
   hatch: `A_BACKEND=subprocess` (aliases `mlir-subprocess`,
   `llvm-subprocess`, `tools`) or `A_MLIR_NATIVE=0`. `A_BACKEND=llvm` is
-  a legacy driver knob, not a CLI flag. On non-Windows hosts a sibling
+  a legacy driver knob, not a CLI flag. Scalar values are emitted unboxed
+  (`i64`/`f64`/`i1`) wherever Sema proves Int/Float/Bool types; set
+  `A_MLIR_TYPED=0` for the boxed-aval emitter. On non-Windows hosts a
+  sibling
   `.ambc`/`.ambc.d` package written by `a precompile` is used
   automatically (`A_AMBC=0` disables); packages do not track dependency
   changes, so re-run `a precompile` after editing any imported module.

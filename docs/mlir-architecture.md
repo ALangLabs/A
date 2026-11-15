@@ -31,11 +31,14 @@ Implemented and exercised by `tests/mlir/` (`a mlir-opt` golden suite):
 - **`a-canonicalize` pass**: DONE — folds `to_aval`/`from_aval` round-trips,
   `from_aval(a.const int)` chains, identity `to_aval`, and `a.gep` with a
   constant-zero index; wired before the lowering passes.
-- **Typed values M1 (boxing)**: DONE — `a.to_aval`/`a.from_aval` boxing for
-  i64/f64/i1 scalars via `a-lower-typed` (`ALowerTyped.cpp`), including
-  SingleBlock-region-safe `from_aval` lowering through synthesized
-  `__a_from_aval_*` helpers. **M2 (unboxed typed values)**: in progress —
-  see `docs/mlir-typed-values-design.md`.
+- **Typed values M1+M2: DONE and DEFAULT.** `a.to_aval`/`a.from_aval`
+  boxing plus unboxed `i64`/`f64`/`i1` scalar emission for Sema-proven
+  Int/Float/Bool bindings (`A_MLIR_TYPED=0` selects the boxed
+  llvm-dialect emitter). Only exact-semantics ops stay unboxed: i64
+  bitwise/comparisons, all f64 arith, i1 logic; `+ - * << >>` and unary
+  `-` on ints keep the boxed aval path (runtime promotes int64 overflow
+  to f64 and panics on out-of-range shifts). See
+  `docs/mlir-typed-values-design.md`.
 - **Pass pipeline**: canonicalize/CSE/mem2reg/SROA + custom lowering passes
   wired in `src/astra/mlir/pipeline.cpp`; `a mlir-opt` accepts mlir-opt-style
   pass lists.
@@ -57,7 +60,9 @@ Implemented and exercised by `tests/mlir/` (`a mlir-opt` golden suite):
   (`mlir-translate`/`opt`/`llc`/`clang`) remains as the escape hatch via
   `A_MLIR_NATIVE=0` or `A_BACKEND=subprocess` (aliases
   `mlir-subprocess`/`llvm-subprocess`/`tools`). `A_BACKEND=mlir-native`
-  (or `native`) selects it explicitly. Windows and no-MLIR builds always
+  (or `native`) selects it explicitly. Scalar emission is typed by
+  default (`A_MLIR_TYPED=0` selects the boxed llvm-dialect emitter).
+  Windows and no-MLIR builds always
   use the subprocess path. `a check`/`a fmt`/`a doc`/LSP never touch
   either backend.
 

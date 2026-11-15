@@ -37,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <cctype>
 #include <memory>
 #include <sstream>
 #include <string>
@@ -107,8 +108,12 @@ class MlirDialectEmitter {
               bool testMode = false, const std::string& testFilter = "")
       : graph_(graph), sema_(sema), testMode_(testMode),
         testFilter_(testFilter) {
+    // A_MLIR_TYPED defaults ON (pipeline typedMlirEnabled agrees); only an
+    // explicit off value disables unboxed scalar emission.
     const char* t = std::getenv("A_MLIR_TYPED");
-    typed_ = t && t[0] == '1';
+    std::string ts = t ? t : "";
+    for (char& c : ts) c = (char)std::tolower((unsigned char)c);
+    typed_ = !(ts == "0" || ts == "off" || ts == "no" || ts == "false");
   }
 
   bool run(std::string& out, std::string& error) {
@@ -1128,7 +1133,7 @@ class MlirDialectEmitter {
           << " : () -> ()\n";
     if (!rootSyms_.empty()) {
       // register GC root callback marking all module globals
-      body_ << "  %gr0 = a.addressof @__a_gc_root_mark : !a.ptr\n";
+      body_ << "  %gr0 = llvm.mlir.addressof @__a_gc_root_mark : !llvm.ptr\n";
       body_ << "  a.runtime.call \"a_gc_add_root_cb\"(%gr0)"
             << " {signature = \"(!llvm.ptr) -> ()\"} : (!llvm.ptr) -> ()\n";
     }
@@ -1592,7 +1597,7 @@ class MlirDialectEmitter {
     pre_ << "  }\n";
     // in function: addressof + a_str_new(ptr, len)
     std::string r = nv();
-    fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
+    fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
     return callI64T("a_str_new", {{"!llvm.ptr", r},
                                   {"i64", c64((std::int64_t)text.size())}});
   }
@@ -1647,7 +1652,7 @@ class MlirDialectEmitter {
         pre_ << "    llvm.return " << cur << " : !llvm.array<" << bytes.size() << " x i8>\n";
         pre_ << "  }\n";
         std::string r = nv();
-        fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
+        fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
         return callI64T("a_char_new", {{"!llvm.ptr", r},
                                        {"i64", c64((std::int64_t)u8.size())}});
       }
@@ -1896,8 +1901,9 @@ class MlirDialectEmitter {
         if (tv.iConst == INT64_MIN) return {evalExprImpl(u), "aval"};
         return {"", "i64", true, -tv.iConst, 0.0};
       }
-      std::string z = c64(0);
-      return {llvm2("sub", z, tvalSSA(tv), "i64"), "i64"};
+      // Non-constant i64 negation can hit INT64_MIN, which the runtime
+      // promotes to f64 — llvm.sub cannot express that, stay boxed.
+      return {evalExprImpl(u), "aval"};
     }
     if (u.op == "-" && tv.kind == "f64") {
       if (tv.isConst) return {"", "f64", true, 0, -tv.fConst};
@@ -2647,7 +2653,7 @@ class MlirDialectEmitter {
   std::string cstrPtr(const std::string& text) {
     std::string g = cstrGlobalSym(text);
     std::string r = nv();
-    fn_ << "  " << r << " = a.addressof @" << g << " : !a.ptr\n";
+    fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
     return r;
   }
 
@@ -3028,7 +3034,7 @@ class MlirDialectEmitter {
 
   // typed scalar -> raw i64 aval word (the phase-1 boxed representation).
   std::string boxToAval(const TypedVal& v) {
-    if (v.kind == "aval" || v.name.empty() && !v.isConst) return v.name;
+    if (v.kind == "aval" || (v.name.empty() && !v.isConst)) return v.name;
     if (v.isConst) {
       if (v.kind == "i64") return avalInt(v.iConst);
       if (v.kind == "f64") return avalDbl(v.fConst);
@@ -3046,11 +3052,14 @@ class MlirDialectEmitter {
       fn_ << "  " << shl << " = llvm.shl " << v.name << ", " << one << " : i64\n";
       fn_ << "  " << pay << " = llvm.or " << shl << ", " << one << " : i64\n";
       fn_ << "  " << mask << " = llvm.mlir.constant(281474976710655 : i64) : i64\n";
-      pay = nv();
-      fn_ << "  " << pay << " = llvm.and " << pay << ", " << mask << " : i64\n";
+      // `pay` (the or-result) is the and's LEFT operand; the result needs a
+      // fresh name — reusing `pay` here emitted `llvm.and %vN, ...` with
+      // %vN as its own operand (use-before-def).
+      std::string masked = nv();
+      fn_ << "  " << masked << " = llvm.and " << pay << ", " << mask << " : i64\n";
       fn_ << "  " << tag << " = llvm.mlir.constant(" << kAvalTag << " : i64) : i64\n";
       enc = nv();
-      fn_ << "  " << enc << " = llvm.or " << tag << ", " << pay << " : i64\n";
+      fn_ << "  " << enc << " = llvm.or " << tag << ", " << masked << " : i64\n";
       std::string boxed = callI64("a_i64n", {v.name});
       std::string r = nv();
       fn_ << "  " << r << " = llvm.select " << inR << ", " << enc << ", " << boxed << " : i1, i64\n";
@@ -3126,6 +3135,18 @@ class MlirDialectEmitter {
     return {loadTy(b.slot, "i64"), "i64"};
   }
   void storeTypedVal(const MlBinding& b, const TypedVal& v) {
+    // Kind mismatches must round-trip through the aval representation:
+    // an "aval"-kind value is a raw i64 word and a different scalar kind
+    // needs conversion — storing either directly into the typed slot
+    // would emit an ill-typed llvm.store (and wrong bits).
+    if (v.kind == "aval" && !v.name.empty()) {
+      storeTypedFromAval(b, v.name);
+      return;
+    }
+    if (v.kind != b.type) {
+      storeTypedFromAval(b, boxToAval(v));
+      return;
+    }
     if (b.type == "f64") { storeTy(b.slot, tvalSSA(v), "f64"); return; }
     if (b.type == "i1") {
       // i1 -> i64 slot (zext; consts store 0/1 directly)
@@ -3261,11 +3282,14 @@ class MlirDialectEmitter {
     isBool = false;
     switch (op) {
       case BinOp::Add:
-        if (__builtin_add_overflow(a, b, &out)) return false; return true;
+        if (__builtin_add_overflow(a, b, &out)) return false;
+        return true;
       case BinOp::Sub:
-        if (__builtin_sub_overflow(a, b, &out)) return false; return true;
+        if (__builtin_sub_overflow(a, b, &out)) return false;
+        return true;
       case BinOp::Mul:
-        if (__builtin_mul_overflow(a, b, &out)) return false; return true;
+        if (__builtin_mul_overflow(a, b, &out)) return false;
+        return true;
       case BinOp::BitAnd: out = a & b; return true;
       case BinOp::BitOr: out = a | b; return true;
       case BinOp::BitXor: out = a ^ b; return true;
@@ -3374,33 +3398,38 @@ class MlirDialectEmitter {
     }
 
     std::string l = tvalSSA(lt), r = tvalSSA(rt);
+    // kind == "i1": only ==/!= are meaningful on Bool (the runtime bitwise
+    // ops panic on non-int operands, and ordering comparisons are rejected
+    // by Sema); anything else falls back to the aval path.
+    if (kind == "i1") {
+      if (op == BinOp::Eq) return {icmp("eq", l, r, "i1"), "i1"};
+      if (op == BinOp::Ne) return {icmp("ne", l, r, "i1"), "i1"};
+      return {"", "", false, 0, 0.0};
+    }
     switch (op) {
+      // i64 + - * are NOT wrap-around at runtime: value_arith.c promotes
+      // the result to f64 on int64 overflow, which an unboxed llvm.add
+      // cannot express. They stay on the aval path. Same for << / >>:
+      // the runtime panics unless the shift amount is in [0,63], while
+      // llvm.shl/ashr would be poison. Only ops with exact i64 semantics
+      // (bitwise, comparisons) may stay typed.
       case BinOp::Add:
-        if (kind == "i64") return {llvm2("add", l, r, "i64"), "i64"};
         if (kind == "f64") return {llvm2("fadd", l, r, "f64"), "f64"};
         break;
       case BinOp::Sub:
-        if (kind == "i64") return {llvm2("sub", l, r, "i64"), "i64"};
         if (kind == "f64") return {llvm2("fsub", l, r, "f64"), "f64"};
         break;
       case BinOp::Mul:
-        if (kind == "i64") return {llvm2("mul", l, r, "i64"), "i64"};
         if (kind == "f64") return {llvm2("fmul", l, r, "f64"), "f64"};
         break;
       case BinOp::BitAnd:
-        if (kind == "i64" || kind == "i1") return {llvm2("and", l, r, kind), kind};
+        if (kind == "i64") return {llvm2("and", l, r, kind), kind};
         break;
       case BinOp::BitOr:
-        if (kind == "i64" || kind == "i1") return {llvm2("or", l, r, kind), kind};
+        if (kind == "i64") return {llvm2("or", l, r, kind), kind};
         break;
       case BinOp::BitXor:
-        if (kind == "i64" || kind == "i1") return {llvm2("xor", l, r, kind), kind};
-        break;
-      case BinOp::Shl:
-        if (kind == "i64") return {llvm2("shl", l, r, "i64"), "i64"};
-        break;
-      case BinOp::Shr:
-        if (kind == "i64") return {llvm2("ashr", l, r, "i64"), "i64"};  // arithmetic
+        if (kind == "i64") return {llvm2("xor", l, r, kind), kind};
         break;
       case BinOp::Eq: case BinOp::Ne: case BinOp::Lt:
       case BinOp::Le: case BinOp::Gt: case BinOp::Ge: {
@@ -3414,7 +3443,7 @@ class MlirDialectEmitter {
           case BinOp::Ge: ip = "sge"; fp = "oge"; break;
           default: break;
         }
-        if (kind == "i64" || kind == "i1") return {icmp(ip, l, r, kind), "i1"};
+        if (kind == "i64") return {icmp(ip, l, r, kind), "i1"};
         if (kind == "f64") return {fcmp(fp, l, r), "i1"};
         break;
       }

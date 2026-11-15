@@ -34,6 +34,7 @@
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
 #include "mlir/mlir_emit.hpp"
+#include "mlir/mlir_emit_ad.hpp"
 namespace a {
 namespace {
 constexpr int kOk=0,kCErr=1,kNoIn=66;
@@ -599,6 +600,8 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
     h = mixBytes(h, nm ? nm : "");
     const char* ambc = std::getenv("A_AMBC");
     h = mixBytes(h, ambc ? ambc : "");
+    const char* typed = std::getenv("A_MLIR_TYPED");
+    h = mixBytes(h, typed ? typed : "");
   }
   {
     const std::string self = selfExePath();
@@ -822,6 +825,8 @@ inline std::string precheckKey(const std::string& path,
     h = mixBytes(h, nm ? nm : "");
     const char* ambc = std::getenv("A_AMBC");
     h = mixBytes(h, ambc ? ambc : "");
+    const char* typed = std::getenv("A_MLIR_TYPED");
+    h = mixBytes(h, typed ? typed : "");
   }
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
@@ -1681,12 +1686,34 @@ bool envFlagDisabled(const char* name) {
 // True when a_mlir_core contributed its strong MLIR-backed definitions.
 bool mlirCoreLinked() { return &initMLIRBackend != nullptr; }
 
+// A_MLIR_TYPED (default ON; =0/off/no/false disables): emit unboxed
+// i64/f64/i1 scalars for Sema-proven Int/Float/Bool bindings via the
+// `a`-dialect emitter (emitMLIRDialect) instead of the boxed llvm-dialect
+// emitter (emitMLIR). Only exact-semantics ops stay typed (bitwise i64,
+// comparisons, f64 arith); + - * << >> and unary - on ints keep the boxed
+// aval path because the runtime promotes int64 overflow to f64 and panics
+// on out-of-range shifts. Requires the in-process backend (the
+// mlir-translate subprocess path cannot consume `a`-dialect ops), so typed
+// mode also forces nativeMlirEnabled.
+bool typedMlirEnabled() {
+#ifdef _WIN32
+  return false;
+#else
+  if (!mlirCoreLinked()) return false;
+  return !envFlagDisabled("A_MLIR_TYPED");
+#endif
+}
+
 bool nativeMlirEnabled() {
 #ifdef _WIN32
   return false;
 #else
   if (!mlirCoreLinked()) return false;
   if (envFlagDisabled("A_MLIR_NATIVE")) return false;
+  // A_MLIR_TYPED emits `a`-dialect ops that only the in-process lowering
+  // pipeline understands; the mlir-translate subprocess path cannot
+  // consume them, so typed mode forces the native backend.
+  if (typedMlirEnabled()) return true;
   if (const char* v = std::getenv("A_BACKEND"); v && *v) {
     const std::string s = lowerStr(v);
     if (s == "subprocess" || s == "mlir-subprocess" ||
@@ -1698,14 +1725,24 @@ bool nativeMlirEnabled() {
 #endif
 }
 
-// Emits the checked graph to MLIR text (emitMLIR). Returns false on failure.
+// Emits the checked graph to MLIR text. A_MLIR_TYPED=1 routes through the
+// `a`-dialect emitter (emitMLIRDialect); otherwise emitMLIR produces the
+// llvm-dialect text consumed by both backends. Returns false on failure.
 bool emitMlirText(CompiledModule& m, bool testMode,
                   const std::string* testFilter, std::string& mlirText,
                   std::ostream& err) {
   std::string llError;
-  if (!emitMLIR(*m.graph, *m.sema, mlirText, llError, testMode, testFilter)) {
+  const bool ok = typedMlirEnabled()
+      ? emitMLIRDialect(*m.graph, *m.sema, mlirText, llError, testMode,
+                        testFilter)
+      : emitMLIR(*m.graph, *m.sema, mlirText, llError, testMode, testFilter);
+  if (!ok) {
     err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
     return false;
+  }
+  if (const char* dump = std::getenv("A_MLIR_DUMP"); dump && *dump) {
+    std::ofstream f(dump, std::ios::binary | std::ios::trunc);
+    if (f) f << mlirText;
   }
   return true;
 }
