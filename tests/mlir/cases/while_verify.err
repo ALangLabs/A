@@ -1,0 +1,2 @@
+loc("mlir-input":9:10): error: 'a.while' op before region argument 0 type '!a.aval' does not match init type 'i64'
+error: mlir-opt: pass pipeline failed

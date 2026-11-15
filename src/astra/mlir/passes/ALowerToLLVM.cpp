@@ -70,7 +70,9 @@ using mlir::Block;
 using mlir::BlockArgument;
 using mlir::IntegerType;
 using mlir::LLVM::AllocaOp;
+using mlir::LLVM::AddOp;
 using mlir::LLVM::AddressOfOp;
+using mlir::LLVM::BrOp;
 using mlir::LLVM::CallOp;
 using mlir::LLVM::CondBrOp;
 using mlir::LLVM::ConstantOp;
@@ -99,6 +101,7 @@ using mlir::ModuleOp;
 using mlir::Operation;
 using mlir::OperationState;
 using mlir::OpBuilder;
+using mlir::OpResult;
 using mlir::Region;
 using mlir::StringAttr;
 using mlir::SymbolRefAttr;
@@ -413,7 +416,7 @@ LogicalResult ensureLLVMFuncDecl(ModuleOp module, llvm::StringRef name,
 LogicalResult ensureOperandInRegion(Operation *op, Value &v) {
   if (v.getParentRegion() == op->getParentRegion())
     return success();
-  auto res = llvm::dyn_cast<mlir::OpResult>(v);
+  auto res = llvm::dyn_cast<OpResult>(v);
   Operation *def = res ? res.getOwner() : nullptr;
   if (!def || !def->hasTrait<mlir::OpTrait::ConstantLike>()) {
     op->emitError("a-lower-to-llvm: operand of type `")
@@ -1350,6 +1353,382 @@ LogicalResult lowerIf(Operation *op) {
 }
 
 //===----------------------------------------------------------------------===//
+// a.for / a.while -> llvm dialect control flow
+//
+// `a.yield` and `a.condition` carry no lowering of their own: they are
+// region terminators consumed by the parent `a.for`/`a.while` lowering, which
+// rewrites them into llvm.br / llvm.cond_br. lowerOp() maps them to a no-op.
+//
+// Loop shape produced for `a.for` (step must be > 0, matching the phase-1
+// emitter's `for i in [lo, hi) step st`):
+//
+//   entry:  br ^check(lo, inits...)
+//   check(iv, carried...):
+//     %c = llvm.icmp ult %iv, %hi
+//     llvm.cond_br %c, ^body(%iv, %carried...), ^exit(%carried...)
+//   body:   <lowered body ops>; a.yield -> llvm.br ^check(%iv + %step, yielded...)
+//   exit(carried...): llvm.br ^cont
+//
+// `index`-typed bounds are materialized as i64 constants (phase-1 producers
+// are `arith.constant ... : index`); non-constant index values are rejected.
+//===----------------------------------------------------------------------===//
+
+/// Materialize `v` as an i64 value usable inside the llvm dialect. i64 passes
+/// through (after the same-region check); `index` values are rebuilt as i64
+/// constants from ConstantLike producers or index_cast unwraps.
+LogicalResult materializeAsI64(Operation *op, Value v, Value &out) {
+  if (failed(ensureOperandInRegion(op, v)))
+    return failure();
+  Type t = v.getType();
+  if (auto it = llvm::dyn_cast<IntegerType>(t)) {
+    if (it.getWidth() == 64) {
+      out = v;
+      return success();
+    }
+  }
+  if (!llvm::isa<mlir::IndexType>(t)) {
+    op->emitError("a-lower-to-llvm: expected an i64 or `index` value, got `")
+        << t << "`";
+    return failure();
+  }
+  MLIRContext *ctx = op->getContext();
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Operation *def = v.getDefiningOp();
+  // `arith.index_cast`/`index_castui` unwrap: the i64 source is the value.
+  if (def && def->getNumOperands() == 1 &&
+      (def->getName().getStringRef() == "arith.index_cast" ||
+       def->getName().getStringRef() == "arith.index_castui")) {
+    Value src = def->getOperand(0);
+    if (auto sit = llvm::dyn_cast<IntegerType>(src.getType());
+        sit && sit.getWidth() == 64) {
+      out = src;
+      return success();
+    }
+  }
+  if (def && def->hasTrait<mlir::OpTrait::ConstantLike>()) {
+    if (auto ia = def->getAttrOfType<mlir::IntegerAttr>("value")) {
+      OpBuilder b(op);
+      out = b.create<ConstantOp>(op->getLoc(), i64Ty,
+                                 mlir::IntegerAttr::get(i64Ty, ia.getInt()));
+      return success();
+    }
+  }
+  op->emitError("a-lower-to-llvm: `index` value is not a constant; phase-1 "
+                 "a.for/a.while bounds must be constant-foldable");
+  return failure();
+}
+
+/// Find the single block in `blocks` whose terminator has the given `a`
+/// dialect op name ("a.yield" / "a.condition").
+Block *findTerminatorBlock(ArrayRef<Block *> blocks, llvm::StringRef name) {
+  Block *found = nullptr;
+  for (Block *bb : blocks) {
+    Operation *term = bb->getTerminator();
+    if (term && term->getName().getStringRef() == name) {
+      if (found) {
+        // Multiple exits are not expected; the verifiers enforce one.
+        return nullptr;
+      }
+      found = bb;
+    }
+  }
+  return found;
+}
+
+LogicalResult lowerFor(Operation *op) {
+  if (op->getNumRegions() != 1 || op->getRegion(0).empty() ||
+      op->getNumOperands() < 3) {
+    op->emitError("a-lower-to-llvm: malformed a.for");
+    return failure();
+  }
+  Region &body = op->getRegion(0);
+  MLIRContext *ctx = op->getContext();
+  Type i64Ty = IntegerType::get(ctx, 64);
+  Type i1Ty = IntegerType::get(ctx, 1);
+  Location loc = op->getLoc();
+
+  fprintf(stderr, "[lowerFor] enter\n");
+
+  llvm::DenseMap<Block *, Block *> oldToNew;
+  if (failed(rebuildRegionWithLoweredArgTypes(body, oldToNew)))
+    return failure();
+
+  fprintf(stderr, "[lowerFor] rebuild ok\n");
+
+  SmallVector<Block *> bodyBlocks;
+  for (Block &bb : body.getBlocks())
+    bodyBlocks.push_back(&bb);
+  Block *bodyEntry = bodyBlocks.front();
+  unsigned nInit = op->getNumOperands() - 3;
+  if (bodyEntry->getNumArguments() != nInit + 1) {
+    op->emitError("a-lower-to-llvm: a.for body entry has ")
+        << bodyEntry->getNumArguments() << " arguments, expected "
+        << nInit + 1;
+    return failure();
+  }
+
+  fprintf(stderr, "[lowerFor] args ok\n");
+
+  // Bounds -> i64 (index constants materialized, i64 passthrough).
+  Value lo, hi, st;
+  if (failed(materializeAsI64(op, op->getOperand(0), lo)) ||
+      failed(materializeAsI64(op, op->getOperand(1), hi)) ||
+      failed(materializeAsI64(op, op->getOperand(2), st)))
+    return failure();
+
+  fprintf(stderr, "[lowerFor] bounds ok\n");
+
+  // Locate the a.yield latch inside the (possibly multi-block) body.
+  Block *yieldBB = findTerminatorBlock(bodyBlocks, "a.yield");
+  if (!yieldBB) {
+    op->emitError("a-lower-to-llvm: a.for body has no a.yield terminator");
+    return failure();
+  }
+  Operation *yield = yieldBB->getTerminator();
+  if (yield->getNumOperands() != nInit) {
+    op->emitError("a-lower-to-llvm: a.yield has ")
+        << yield->getNumOperands() << " operands but a.for carries " << nInit;
+    return failure();
+  }
+
+  fprintf(stderr, "[lowerFor] yield ok\n");
+
+  Block *parent = op->getBlock();
+  Region *parentRegion = parent->getParent();
+  Block *contBB = nullptr;
+  splitBlockAfter(op, contBB);
+
+  fprintf(stderr, "[lowerFor] split ok\n");
+
+  fprintf(stderr, "[lowerFor] before checkBB create\n");
+  Block *checkBB = new Block;
+  Block *exitBB = new Block;
+  checkBB->insertBefore(contBB);
+  exitBB->insertBefore(contBB);
+
+  fprintf(stderr, "[lowerFor] blocks inserted\n");
+  // check(iv, carried...): iv is i64, carried types come from the rebuilt
+  // body entry arguments (indices 1..n).
+  checkBB->addArgument(i64Ty, loc);
+  for (unsigned i = 1; i < bodyEntry->getNumArguments(); ++i)
+    checkBB->addArgument(bodyEntry->getArgument(i).getType(), loc);
+  // exit(carried...): lowered result types.
+  SmallVector<Type> exitTys;
+  for (OpResult r : op->getResults()) {
+    Type lt;
+    if (failed(lowerTypeOrError(op, r.getType(), lt, "a.for result")))
+      return failure();
+    exitTys.push_back(lt);
+    exitBB->addArgument(lt, loc);
+  }
+  if (exitTys.size() != nInit) {
+    op->emitError("a-lower-to-llvm: a.for result count does not match "
+                   "iter_args count");
+    return failure();
+  }
+
+  fprintf(stderr, "[lowerFor] args added\n");
+  // Move the body blocks into the parent region, preserving order.
+  for (Block *bb : bodyBlocks)
+    bb->moveBefore(contBB);
+
+  fprintf(stderr, "[lowerFor] body moved\n");
+  // Entry edge: br ^check(lo, inits...).
+  {
+    OpBuilder b(op);
+    SmallVector<Value> entryVals;
+    entryVals.push_back(lo);
+    for (unsigned i = 0; i < nInit; ++i) {
+      Value init = op->getOperand(3 + i);
+      if (failed(ensureOperandInRegion(op, init)))
+        return failure();
+      entryVals.push_back(init);
+    }
+    b.create<BrOp>(loc, entryVals, checkBB);
+  }
+
+  fprintf(stderr, "[lowerFor] entry br ok\n");
+
+  // Loop guard: iv < hi (unsigned, matching index semantics for lo >= 0).
+  {
+    fprintf(stderr, "[lowerFor] before icmp\n");
+    OpBuilder tb = OpBuilder::atBlockEnd(checkBB);
+    Value iv = checkBB->getArgument(0);
+    Value cmp = tb.create<ICmpOp>(
+        loc, i1Ty,
+        mlir::LLVM::ICmpPredicateAttr::get(
+            ctx, mlir::LLVM::ICmpPredicate::ult),
+        iv, hi);
+    fprintf(stderr, "[lowerFor] icmp ok\n");
+    SmallVector<Value> checkArgs(checkBB->getArguments().begin(),
+                                 checkBB->getArguments().end());
+    SmallVector<Value> exitVals(checkArgs.begin() + 1, checkArgs.end());
+    tb.create<CondBrOp>(loc, cmp, bodyEntry, checkArgs, exitBB, exitVals);
+    fprintf(stderr, "[lowerFor] condbr ok\n");
+  }
+
+  // Exit edge -> continuation.
+  {
+    fprintf(stderr, "[lowerFor] before exit br\n");
+    OpBuilder eb = OpBuilder::atBlockEnd(exitBB);
+    eb.create<BrOp>(loc, ValueRange{}, contBB);
+    fprintf(stderr, "[lowerFor] exit br ok\n");
+  }
+
+  // Latch: replace a.yield with br ^check(iv + step, yielded...). The iv is
+  // the body entry's first argument; it dominates the latch block.
+  {
+    fprintf(stderr, "[lowerFor] before latch\n");
+    OpBuilder yb(yield);
+    Value iv = bodyEntry->getArgument(0);
+    Value ivNext = yb.create<AddOp>(loc, i64Ty, iv, st);
+    fprintf(stderr, "[lowerFor] add ok\n");
+    SmallVector<Value> backVals;
+    backVals.push_back(ivNext);
+    for (Value yv : yield->getOperands()) {
+      Value v = yv;
+      if (failed(ensureOperandInRegion(yield, v)))
+        return failure();
+      backVals.push_back(v);
+    }
+    yb.create<BrOp>(loc, backVals, checkBB);
+    fprintf(stderr, "[lowerFor] latch br ok\n");
+    yield->erase();
+    fprintf(stderr, "[lowerFor] yield erased\n");
+  }
+
+  // Results are the exit block arguments.
+  for (unsigned i = 0; i < op->getNumResults(); ++i)
+    op->getResult(i).replaceAllUsesWith(exitBB->getArgument(i));
+  op->erase();
+  (void)parentRegion;
+  return success();
+}
+
+/// `a.while` -> llvm dialect loop:
+///   entry:        br ^before(inits...)
+///   before(args): <ops>; a.condition(%c, fwd...) ->
+///                   llvm.cond_br %c, ^after(fwd...), ^exit(fwd...)
+///   after(args):  <ops>; a.yield(next...) -> llvm.br ^before(next...)
+///   exit(results): llvm.br ^cont
+LogicalResult lowerWhile(Operation *op) {
+  if (op->getNumRegions() != 2 || op->getRegion(0).empty() ||
+      op->getRegion(1).empty()) {
+    op->emitError("a-lower-to-llvm: malformed a.while");
+    return failure();
+  }
+  Region &before = op->getRegion(0);
+  Region &after = op->getRegion(1);
+  Location loc = op->getLoc();
+
+  llvm::DenseMap<Block *, Block *> oldToNew;
+  if (failed(rebuildRegionWithLoweredArgTypes(before, oldToNew)) ||
+      failed(rebuildRegionWithLoweredArgTypes(after, oldToNew)))
+    return failure();
+
+  SmallVector<Block *> beforeBlocks, afterBlocks;
+  for (Block &bb : before.getBlocks())
+    beforeBlocks.push_back(&bb);
+  for (Block &bb : after.getBlocks())
+    afterBlocks.push_back(&bb);
+  Block *beforeEntry = beforeBlocks.front();
+  Block *afterEntry = afterBlocks.front();
+
+  Block *condBB = findTerminatorBlock(beforeBlocks, "a.condition");
+  Block *yieldBB = findTerminatorBlock(afterBlocks, "a.yield");
+  if (!condBB || !yieldBB) {
+    op->emitError("a-lower-to-llvm: a.while regions lack a.condition/a.yield "
+                   "terminators");
+    return failure();
+  }
+  Operation *cond = condBB->getTerminator();
+  Operation *yield = yieldBB->getTerminator();
+  if (cond->getNumOperands() < 1) {
+    op->emitError("a-lower-to-llvm: malformed a.condition");
+    return failure();
+  }
+
+  Block *parent = op->getBlock();
+  Region *parentRegion = parent->getParent();
+  Block *contBB = nullptr;
+  splitBlockAfter(op, contBB);
+
+  Block *exitBB = new Block;
+  exitBB->insertBefore(contBB);
+  SmallVector<Type> exitTys;
+  for (OpResult r : op->getResults()) {
+    Type lt;
+    if (failed(lowerTypeOrError(op, r.getType(), lt, "a.while result")))
+      return failure();
+    exitTys.push_back(lt);
+    exitBB->addArgument(lt, loc);
+  }
+
+  // Move both regions' blocks into the parent region.
+  for (Block *bb : beforeBlocks)
+    bb->moveBefore(contBB);
+  for (Block *bb : afterBlocks)
+    bb->moveBefore(contBB);
+
+  // Entry edge: br ^before(inits...).
+  {
+    OpBuilder b(op);
+    SmallVector<Value> entryVals;
+    for (Value init : op->getOperands()) {
+      Value v = init;
+      if (failed(ensureOperandInRegion(op, v)))
+        return failure();
+      entryVals.push_back(v);
+    }
+    b.create<BrOp>(loc, entryVals, beforeEntry);
+  }
+
+  // a.condition -> llvm.cond_br: true -> after(fwd), false -> exit(fwd).
+  {
+    OpBuilder cb(cond);
+    Value c = cond->getOperand(0);
+    if (failed(ensureOperandInRegion(cond, c)))
+      return failure();
+    c = ensureI1Cond(cb, loc, c);
+    SmallVector<Value> fwd;
+    for (unsigned i = 1; i < cond->getNumOperands(); ++i) {
+      Value v = cond->getOperand(i);
+      if (failed(ensureOperandInRegion(cond, v)))
+        return failure();
+      fwd.push_back(v);
+    }
+    cb.create<CondBrOp>(loc, c, afterEntry, fwd, exitBB, fwd);
+    cond->erase();
+  }
+
+  // a.yield -> llvm.br ^before(yielded...).
+  {
+    OpBuilder yb(yield);
+    SmallVector<Value> backVals;
+    for (Value yv : yield->getOperands()) {
+      Value v = yv;
+      if (failed(ensureOperandInRegion(yield, v)))
+        return failure();
+      backVals.push_back(v);
+    }
+    yb.create<BrOp>(loc, backVals, beforeEntry);
+    yield->erase();
+  }
+
+  // Exit edge -> continuation.
+  {
+    OpBuilder eb = OpBuilder::atBlockEnd(exitBB);
+    eb.create<BrOp>(loc, ValueRange{}, contBB);
+  }
+
+  for (unsigned i = 0; i < op->getNumResults(); ++i)
+    op->getResult(i).replaceAllUsesWith(exitBB->getArgument(i));
+  op->erase();
+  (void)parentRegion;
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // Pass driver
 //===----------------------------------------------------------------------===//
 
@@ -1392,10 +1771,17 @@ LogicalResult lowerOp(Operation *op) {
     return lowerArraySet(op);
   if (name == "a.if")
     return lowerIf(op);  // legacy sketch op; not in the landed dialect
+  if (name == "a.for")
+    return lowerFor(op);
+  if (name == "a.while")
+    return lowerWhile(op);
+  if (name == "a.yield" || name == "a.condition") {
+    // Region terminators consumed by the parent a.for/a.while lowering
+    // (post-order guarantees the parent is lowered right after).
+    return success();
+  }
 
-  // Phase-1 unsupported ops: fail gracefully. Remaining `a` dialect ops:
-  //   a.for / a.while / a.condition / a.yield - structured control flow;
-  //     needs region->cf lowering (phase 2).
+  // Phase-1 unsupported ops: fail gracefully.
   //   a.struct.getfield / a.struct.setfield - need a field-name table that
   //     !a.struct<"Name"> does not carry; runtime a_getattr/a_setattr take
   //     a C string, not an index.

@@ -19,6 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <unordered_set>
 #include <vector>
 
 #include "bytecode.hpp"
@@ -28,6 +29,7 @@
 #include "native.hpp"
 #include "pipeline/pipeline.hpp"
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/OwningOpRef.h"
 
@@ -247,6 +249,54 @@ void moveModuleOpsInto(mlir::ModuleOp dst, mlir::ModuleOp src) {
   }
 }
 
+// Dedup `llvm.func` ops by symbol name after merging the entry-body
+// support ops into a module unit: the support document re-declares the
+// `a_*` runtime functions (needed for its standalone parse) that the
+// module unit already declares, and may re-declare foreign symbols.
+// Keep a definition when present, else the first declaration — mirrors
+// the consumer's dedupLlvmFuncDecls in ambc_modules.cpp.
+void dedupLlvmFuncOps(mlir::ModuleOp module) {
+  struct Entry {
+    mlir::LLVM::LLVMFuncOp op;
+    bool hasBody = false;
+  };
+  std::unordered_map<std::string, Entry> best;
+  std::vector<mlir::LLVM::LLVMFuncOp> all;
+  for (mlir::LLVM::LLVMFuncOp fn : module.getOps<mlir::LLVM::LLVMFuncOp>())
+    all.push_back(fn);
+  for (mlir::LLVM::LLVMFuncOp fn : all) {
+    const std::string name = fn.getSymName().str();
+    const bool hasBody = !fn.getBody().empty();
+    auto it = best.find(name);
+    if (it == best.end()) {
+      best.emplace(name, Entry{fn, hasBody});
+      continue;
+    }
+    Entry& cur = it->second;
+    if (!cur.hasBody && hasBody) {
+      cur.op->erase();
+      cur.op = fn;
+      cur.hasBody = true;
+    } else {
+      fn->erase();
+    }
+  }
+}
+
+// Dedup `llvm.mlir.global` ops by symbol name, keeping the first
+// occurrence — mirrors the consumer's dedupLlvmGlobals. Support-doc
+// global declarations for foreign `__a_g_*`/literal symbols may repeat
+// declarations the module unit already carries.
+void dedupLlvmGlobalOps(mlir::ModuleOp module) {
+  std::unordered_set<std::string> seen;
+  std::vector<mlir::LLVM::GlobalOp> all;
+  for (mlir::LLVM::GlobalOp g : module.getOps<mlir::LLVM::GlobalOp>())
+    all.push_back(g);
+  for (mlir::LLVM::GlobalOp g : all) {
+    if (!seen.insert(g.getSymName().str()).second) g->erase();
+  }
+}
+
 // `<stem>.ambc` for unique stems, `<stem>-m<id>.ambc` for stems shared by
 // more than one module (see package.hpp "Per-module package layout").
 std::string moduleAmbcFileName(const Module& module, int stemCollisions) {
@@ -382,6 +432,8 @@ int precompilePackageModules(const std::string& packageDirOrFile,
           return kCErr;
         }
         moveModuleOpsInto(*module, *supportModule);
+        dedupLlvmFuncOps(*module);
+        dedupLlvmGlobalOps(*module);
       }
     }
 

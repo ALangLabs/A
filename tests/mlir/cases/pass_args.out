@@ -1,0 +1,7 @@
+module {
+  llvm.func @p(%arg0: i64, %arg1: i64) -> i64 {
+    %0 = llvm.add %arg0, %arg1  : i64
+    %1 = llvm.sub %0, %0  : i64
+    llvm.return %1 : i64
+  }
+}

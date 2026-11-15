@@ -1,0 +1,10 @@
+module {
+  llvm.func @a_add_slow(i64, i64) -> i64
+  llvm.func @main(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(-281474976710571 : i64) : i64
+    %1 = llvm.getelementptr %arg0[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    %2 = llvm.load %1 : !llvm.ptr -> i64
+    %3 = llvm.call @a_add_slow(%2, %0) : (i64, i64) -> i64
+    llvm.return %3 : i64
+  }
+}

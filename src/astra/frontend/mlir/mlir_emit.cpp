@@ -3311,6 +3311,10 @@ bool emitModuleMLIR(const ModuleGraph& graph, const SemaResult& sema,
 // Entry-body emission (per-module .ambc packages)
 // ---------------------------------------------------------------------------
 
+// Defined below with the public entry points; declared here so
+// runEntryBody can use it.
+std::string moduleTextWithDecls(const std::string& text);
+
 // Emits the entry fn's body ops — the same statements emitMainBody inlines
 // into __a_main_body for the entry portion — WITHOUT a function wrapper:
 // `out` is splice-ready text for the consumer's synthesized __a_main_body
