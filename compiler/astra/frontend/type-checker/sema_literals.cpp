@@ -462,7 +462,7 @@ void Sema::checkArgAgainst(Expr& expr, TypePtr expected, const std::string& cont
 // Vector coercion for call arguments / annotated bindings: a list literal
 // of exactly N elements or a numeric scalar (broadcast) is accepted where
 // vector[T, N] is expected. On success expr.inferredType becomes the vector
-// type so llvm_emit produces unboxed <N x ty> values.
+// type so the MLIR backend produces unboxed <N x ty> values.
 bool Sema::coerceVectorInit(Expr& expr, TypePtr expected) {
   TypePtr exp = resolveType(expected);
   if (!exp || exp->kind != TypeKind::Vector) return false;

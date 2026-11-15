@@ -25,7 +25,47 @@ targets.
 
 Python objects behave like opaque values: attribute access, indexing, method
 calls, `len`, iteration, truthiness, and calls all bridge to the interpreter.
-Errors surface as A panics with the Python error text.
+Errors surface as A panics (or `Err(...)` results from `py.try_*`) with the
+Python exception type and message, e.g. `ValueError: math domain error`.
+
+## Value conversion
+
+When a Python value crosses into A (`py_to_aval`), exact builtin types
+convert eagerly: `None`/`bool`/`int`/`float`/`str`/`bytes`/`list`/`tuple`/
+`dict`/`set`/`frozenset` become the matching A values. **Subclasses of
+those types stay opaque Python objects** — `collections.Counter`,
+`OrderedDict`, `defaultdict`, `UserList`, namedtuples and structseqs keep
+their methods and attributes instead of being drained into plain A
+containers (a `Counter` iterates as a dict, so draining would silently
+turn it into a list of keys). The same applies in reverse: an A list or
+dict passed to Python becomes a real `list`/`dict`.
+
+Other iterables convert to an A `list` only when small (<= 65536 elements),
+are not buffer-protocol objects, and are not their own iterator;
+larger or streaming objects (generators, tensors, datasets) stay opaque so
+`for` consumes them lazily and they can be passed back into Python calls.
+
+Equality is symmetric: `pyobj == <A value>` converts the A side and uses
+CPython rich comparison, so `json.loads(s) == [1, 2]` and
+`counter == {"a": 2}` behave like Python `==`.
+
+One limitation: A functions/closures are not Python callables — passing one
+to CPython (e.g. as a `defaultdict` factory) falls back to its repr string
+and fails with `TypeError: first argument must be callable or None`. Pass a
+real Python callable instead (`py.getattr(builtins, "int")`).
+
+## `std:py` helpers
+
+`import std:py` exposes the runtime bridge directly: `py.buffer`,
+`py.buffer_info`, `py.import_module`/`py.try_import`, `py.getattr`/
+`py.try_getattr` (3-arg form returns a default), `py.setattr`/`py.delattr`/
+`py.hasattr`, `py.getitem`/`py.setitem`/`py.delitem`, `py.call`/`py.try_call`
+(callable + args list + optional kwargs dict), `py.call_method`/
+`py.try_call_method` (object + method name + args + kwargs),
+`py.is_pyobject`, `py.str`/`py.repr`/`py.len`/`py.contains`/`py.truthy`,
+`py.type_name`. The `try_*` variants return `Ok(v)`/`Err("ExcType: msg")`
+instead of panicking. Keyword arguments also work through the
+`python:mod.member(...)` call syntax (`re.compile("a+", flags=...)`).
 
 ## Zero-copy buffers
 

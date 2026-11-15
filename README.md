@@ -20,10 +20,10 @@ compiles A straight to native machine code.
 ## ✨ Features
 
 - **Native compilation, no runtime VM** — `a build` lowers A to machine code
-  and links a real executable. x86-64 SysV (Linux, macOS) lowers to LLVM IR
-  (`frontend/llvm/`) and compiles via `opt`/`llc`/`clang` (host targets;
-  cross-compile is not yet supported). A declined construct is a hard error
-  — there is no fallback.
+  and links a real executable. x86-64 SysV (Linux, macOS) lowers through MLIR's
+  llvm dialect (`frontend/mlir/`, the default `mlir-direct` backend) to LLVM IR
+  and compiles via `opt`/`llc`/`clang` (host targets; cross-compile is not yet
+  supported). A declined construct is a hard error — there is no fallback.
 - **Multi-target builds** — `a build --target <arch>` accepts the host
   arch/os only today; the LLVM backend cannot cross-compile (see
   *Targets* below).
@@ -157,7 +157,8 @@ closures/lambdas, comprehensions, `match` expressions, `?` optionals and
 ```mermaid
 flowchart LR
     src[".astra source"] --> fe["C++ frontend<br/>lex · parse · resolve · sema<br/>ownership · codegen"]
-    fe --> ll["LLVM IR"]
+    fe --> mlir["MLIR (llvm dialect)<br/>mlir-direct backend"]
+    mlir --> ll["LLVM IR<br/>(mlir-translate)"]
     ll --> tools["opt → llc → clang<br/>(system LLVM toolchain)"]
     rt["A runtime (C)<br/>aval values · collections · builtins"] --> tools
     tools --> bin["native executable"]
@@ -167,7 +168,9 @@ flowchart LR
 - **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
   analysis, and the native code emitters
-  (`emitLLVM` -> LLVM IR -> `opt`/`llc`/`clang`, host targets only;
+  (`emitMLIR` -> MLIR llvm dialect -> `mlir-translate` -> LLVM IR ->
+  `opt`/`llc`/`clang`, host targets only; `emitLLVM` remains as the
+  `--backend llvm` fallback;
   `cmake/aruntime.cmake` stages `compiler/astra/runtime/*.c` into
   `build/astralib/libaruntime.a`, which every compiled program links).
 - **`compiler/astra/runtime/`** — the C runtime every A program links:

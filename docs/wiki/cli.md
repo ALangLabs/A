@@ -28,9 +28,12 @@ faster dev builds).
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N` (0..3; out-of-range
   values like `9` or `-1` are rejected), `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
-- `--native` / `--backend llvm|native|asm` — execution backend for
-  `run`/`test`/`repl`. Native is the only backend: A lowers to LLVM IR and
-  compiles with `opt`/`llc`/`clang` (no interpreter).
+- `--native` / `--backend mlir-direct|llvm|native|asm` — execution backend
+  for `run`/`test`/`repl`. `mlir-direct` (default) lowers the checked AST to
+  MLIR's llvm dialect and translates it to LLVM IR (`mlir-translate`), then
+  compiles with `opt`/`llc`/`clang`; `--backend llvm` emits LLVM IR text
+  directly. `mlir` is accepted as an alias of `mlir-direct`. Native is the
+  only backend family: there is no interpreter.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.astra --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single

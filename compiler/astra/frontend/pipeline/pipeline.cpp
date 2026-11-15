@@ -33,7 +33,6 @@
 #include "name-resolution/module_loader.hpp"
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
-#include "llvm/llvm_emit.hpp"
 #include "mlir/mlir_emit.hpp"
 namespace a {
 namespace {
@@ -62,11 +61,11 @@ bool readAll(const std::string& p,std::string& t,std::ostream& e){
 
 // ---------------------------------------------------------------- LLVM exec
 // `a run`/`a build`/`a test` are thin wrappers over the LLVM toolchain:
-// the frontend lowers the checked AST straight to LLVM IR (emitLLVM),
-// then `opt` (when optimizing), `llc` and `clang` turn it into a machine-
-// code executable linked against the prebuilt libaruntime.a. LLVM is the
-// only native backend and is host-only — there is no assembly emitter
-// fallback and no cross-compile path.
+// the frontend lowers the checked AST to MLIR's llvm dialect (emitMLIR),
+// `mlir-translate` produces LLVM IR, then `opt` (when optimizing), `llc`
+// and `clang` turn it into a machine-code executable linked against the
+// prebuilt libaruntime.a. MLIR is the only native backend and is host-only
+// — there is no assembly emitter fallback and no cross-compile path.
 // Compile-time host description.
 std::string hostArch() {
 #if defined(__x86_64__) || defined(_M_X64)
@@ -1449,56 +1448,6 @@ std::string mlirToLl(const std::string& mlirPath, std::ostream& err) {
   return ll;
 }
 
-// MLIR middle-end: round-trip the emitted LLVM IR through MLIR's llvm
-// dialect — .ll -> mlir-translate --import-llvm -> mlir-opt canonicalize
-// -> mlir-translate --mlir-to-llvmir -> .ll — then hand the result to the
-// unchanged opt/llc/clang backend. This puts MLIR in the codegen pipeline
-// without changing program semantics (opaque pointers, intrinsics and
-// runtime calls all survive the dialect round-trip).
-// Returns the path of the new .ll, or "" on failure.
-std::string mlirRoundTrip(const std::string& llPath, std::ostream& err) {
-  std::string tr = findLLVMTool("A_MLIR_TRANSLATE",
-      {"mlir-translate", "mlir-translate-18", "mlir-translate-17"});
-  std::string opt = findLLVMTool("A_MLIR_OPT",
-      {"mlir-opt", "mlir-opt-18", "mlir-opt-17"});
-  if (tr.empty()) {
-    err << "error: mlir backend: no mlir-translate found (set A_MLIR_TRANSLATE)\n";
-    return "";
-  }
-  std::string mlirPath = tempPath("mlir");
-  if (mlirPath.size() >= 5 && mlirPath.substr(mlirPath.size()-5) != ".mlir")
-    mlirPath += ".mlir";
-  std::string rc0 = tempPath("ll"), rc1 = tempPath("ll");
-  // Stage 1: LLVM IR -> MLIR (llvm dialect).
-  if (runChild(tr, {"--import-llvm", llPath, "-o", mlirPath}) != 0) {
-    err << "error: mlir backend: mlir-translate --import-llvm failed on '" << llPath << "'\n";
-    std::error_code ec; std::filesystem::remove(mlirPath, ec);
-    return "";
-  }
-  // Stage 2: light MLIR canonicalization when mlir-opt is available.
-  std::string optPath = mlirPath;
-  if (!opt.empty()) {
-    std::string canon = tempPath("mlir");
-    if (canon.size() >= 5 && canon.substr(canon.size()-5) != ".mlir") canon += ".mlir";
-    if (runChild(opt, {"--canonicalize", mlirPath, "-o", canon}) == 0) {
-      std::error_code ec; std::filesystem::remove(mlirPath, ec);
-      optPath = canon;
-    } else {
-      std::error_code ec; std::filesystem::remove(canon, ec);
-    }
-  }
-  // Stage 3: MLIR -> LLVM IR.
-  if (runChild(tr, {"--mlir-to-llvmir", optPath, "-o", rc0}) != 0) {
-    err << "error: mlir backend: mlir-translate --mlir-to-llvmir failed\n";
-    std::error_code ec; std::filesystem::remove(mlirPath, ec); std::filesystem::remove(optPath, ec);
-    return "";
-  }
-  std::error_code ec;
-  std::filesystem::remove(mlirPath, ec);
-  if (optPath != mlirPath) std::filesystem::remove(optPath, ec);
-  return rc0;
-}
-
 int llvmBuild(const std::string& arch, const std::string& llPath,
               const std::string& outPath, int optimizationLevel,
               std::ostream& err) {
@@ -1688,7 +1637,7 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
         << " host=" << hostArch() << "\n";
   {
     std::string llSource, llError;
-    if (backend == "mlir-direct") {
+    {
       if (!emitMLIR(*m.graph, *m.sema, llSource, llError, testMode,
                     testFilter)) {
         err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
@@ -1707,28 +1656,17 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
       // We instead restructure: set llSource empty marker.
       // (see mlirDirectLlPath static)
       mlirDirectLlPath() = llPath2;
-    } else if (!emitLLVM(*m.graph, *m.sema, llSource, llError, testMode,
-                         testFilter)) {
-      err << "error: llvm backend: LLVM IR emission failed: " << llError
-          << "\n";
-      return kCErr;
     }
     if (std::getenv("A_LLVM_DEBUG"))
       err << "llvm-emit: ok\n";
     std::string llPath;
-    if (backend == "mlir-direct" && !mlirDirectLlPath().empty()) {
+    if (!mlirDirectLlPath().empty()) {
       llPath = mlirDirectLlPath();
       mlirDirectLlPath().clear();
     } else {
       llPath = stageSrc(llSource, ".ll", err);
     }
     if (llPath.empty()) return kCErr;
-    if (backend == "mlir") {
-      std::string mlirLl = mlirRoundTrip(llPath, err);
-      if (mlirLl.empty()) return kCErr;
-      std::error_code ec; std::filesystem::remove(llPath, ec);
-      llPath = mlirLl;
-    }
     std::string tmpBin = tempPath("bin");
     std::string runPath = (keepBin && !keepBin->empty()) ? *keepBin : tmpBin;
     // On a cache miss compile to a temp name in the cache dir so the rename
@@ -1943,7 +1881,7 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   }
   std::string llSource, llError;
   std::string directLl;
-  if (config.backend == "mlir-direct") {
+  {
     if (!emitMLIR(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
       err << "error: mlir backend: MLIR emission failed: " << llError << "\n";
       return kCErr;
@@ -1953,19 +1891,9 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     directLl = mlirToLl(mlirPath, err);
     std::error_code ec2; std::filesystem::remove(mlirPath, ec2);
     if (directLl.empty()) return kCErr;
-  } else if (!emitLLVM(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
-    err << "error: llvm backend: LLVM IR emission failed: " << llError
-        << "\n";
-    return kCErr;
   }
   std::string llPath = !directLl.empty() ? directLl : stageSrc(llSource, ".ll", err);
   if (llPath.empty()) return kCErr;
-  if (config.backend == "mlir") {
-    std::string mlirLl = mlirRoundTrip(llPath, err);
-    if (mlirLl.empty()) return kCErr;
-    std::error_code ec; std::filesystem::remove(llPath, ec);
-    llPath = mlirLl;
-  }
   int rc = llvmBuild(td.arch, llPath, outputPath,
                      config.optimizationLevel, err);
   std::error_code ec;

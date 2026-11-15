@@ -187,16 +187,18 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       std::string name = lowerAscii(argv[++i]);
       // 'llvm' is the only backend; 'asm'/'native' map to it for
       // compatibility.
-      if (name == "llvm" || name == "native" || name == "asm") { options.native = true; options.backend = "llvm"; }
-      else if (name == "mlir") { options.native = true; options.backend = "mlir"; }
-      else if (name == "mlir-direct") { options.native = true; options.backend = "mlir-direct"; }
-      else { err << "error: unknown backend '" << name << "' (expected 'llvm' or 'mlir')\n"; return false; }
+      if (name == "llvm" || name == "native" || name == "asm" ||
+          name == "mlir" || name == "mlir-direct") {
+        options.native = true; options.backend = "mlir-direct";
+      }
+      else { err << "error: unknown backend '" << name << "' (expected 'mlir-direct')\n"; return false; }
     } else if (arg.rfind("--backend=", 0) == 0) {
       std::string name = lowerAscii(arg.substr(10));
-      if (name == "llvm" || name == "native" || name == "asm") { options.native = true; options.backend = "llvm"; }
-      else if (name == "mlir") { options.native = true; options.backend = "mlir"; }
-      else if (name == "mlir-direct") { options.native = true; options.backend = "mlir-direct"; }
-      else { err << "error: unknown backend '" << name << "' (expected 'llvm' or 'mlir')\n"; return false; }
+      if (name == "llvm" || name == "native" || name == "asm" ||
+          name == "mlir" || name == "mlir-direct") {
+        options.native = true; options.backend = "mlir-direct";
+      }
+      else { err << "error: unknown backend '" << name << "' (expected 'mlir-direct')\n"; return false; }
     } else if (arg == "--indent") {
       if (i + 1 >= argc) { err << "error: '--indent' requires a number\n"; return false; }
       try { options.indentWidth = std::stoi(argv[++i]); } catch (...) { err << "error: invalid indentation width\n"; return false; }
