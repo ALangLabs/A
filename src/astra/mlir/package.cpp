@@ -15,6 +15,7 @@
 
 #include "package.hpp"
 
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -239,6 +240,18 @@ std::string absoluteModulePath(const std::string& path) {
   return ec ? path : abs.string();
 }
 
+// mtime as file_time_type ticks since epoch — the same clock both the
+// `a precompile` writer and the `a run`/`a build` reader processes see
+// through libstdc++, so the recorded value compares equal across runs.
+// ok=false when the file cannot be stat'ed.
+std::int64_t fileMtimeCount(const std::string& path, bool& ok) {
+  std::error_code ec;
+  const auto ft = fs::last_write_time(path, ec);
+  if (ec) { ok = false; return 0; }
+  ok = true;
+  return static_cast<std::int64_t>(ft.time_since_epoch().count());
+}
+
 // Moves every op out of `src`'s body into `dst`'s body (append order).
 void moveModuleOpsInto(mlir::ModuleOp dst, mlir::ModuleOp src) {
   mlir::Block* dstBody = &dst.getBodyRegion().front();
@@ -340,6 +353,17 @@ bool writeAmbcMeta(const fs::path& outDir, const ModuleGraph& graph,
     meta << "module " << id << "\t" << ambcFiles[static_cast<std::size_t>(id)]
          << "\t" << sourcePaths[static_cast<std::size_t>(id)] << "\t"
          << m.name << "\n";
+  }
+  // `src` records: absolute source path + mtime at precompile time.
+  // ambcFastBuild falls through to the normal pipeline when any listed
+  // source changed or vanished (packages embed no dependency hashes).
+  // Unknown keys are ignored by parseAmbcMeta, so older readers still
+  // accept this meta.
+  for (std::size_t id = 0; id < sourcePaths.size(); ++id) {
+    if (sourcePaths[id].empty()) continue;
+    bool ok = false;
+    const std::int64_t mt = fileMtimeCount(sourcePaths[id], ok);
+    if (ok) meta << "src " << sourcePaths[id] << "\t" << mt << "\n";
   }
   return static_cast<bool>(meta);
 }
@@ -568,6 +592,20 @@ int precompilePackage(const std::string& packageDirOrFile,
     err << "error: failed to write bytecode package '" << output << "': "
         << bcError << "\n";
     return kCErr;
+  }
+  // .srcs sidecar for the whole-graph package: the same
+  // `src <abs-path>\t<mtime>` records ambc.meta carries for per-module
+  // packages, so ambcFastBuild can detect stale dependencies here too.
+  {
+    std::ofstream srcs(output + ".srcs", std::ios::binary | std::ios::trunc);
+    if (srcs) {
+      for (const Module& m : compiled.graph->modules) {
+        const std::string ap = absoluteModulePath(m.path);
+        bool ok = false;
+        const std::int64_t mt = fileMtimeCount(ap, ok);
+        if (ok) srcs << "src " << ap << "\t" << mt << "\n";
+      }
+    }
   }
   return kOk;
 }

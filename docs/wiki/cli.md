@@ -41,8 +41,11 @@ faster dev builds).
   `A_MLIR_TYPED=0` for the boxed-aval emitter. On non-Windows hosts a
   sibling
   `.ambc`/`.ambc.d` package written by `a precompile` is used
-  automatically (`A_AMBC=0` disables); packages do not track dependency
-  changes, so re-run `a precompile` after editing any imported module.
+  automatically (`A_AMBC=0` disables). Packages record source mtimes
+  (`src` records in `ambc.meta`, `<name>.ambc.srcs` for whole-graph
+  packages): a changed or missing source falls through to the normal
+  pipeline automatically. Packages written before staleness tracking
+  (no `src` records) are still trusted unconditionally.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.astra --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single

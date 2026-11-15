@@ -1815,6 +1815,35 @@ std::string ambcPathFor(const std::string& sourcePath) {
 //   foo.ambc    — whole-graph single-file package (precompile default)
 // The per-module dir carries no entry fn body, so its entry.mlir supplies
 // the statements the consumer splices into __a_main_body.
+// `src <abs-path>\t<mtime>` records written by `a precompile` (ambc.meta
+// for per-module packages, `<name>.ambc.srcs` for whole-graph ones).
+// Returns true when any recorded source is missing or its mtime changed —
+// the package is stale and the caller should fall through to the normal
+// pipeline. Record files without any `src` lines (packages written before
+// staleness tracking) are never stale, preserving the old trust behavior.
+bool ambcSrcsStale(const std::string& recordsPath) {
+  std::ifstream in(recordsPath, std::ios::binary);
+  if (!in) return false;
+  std::string line;
+  while (std::getline(in, line)) {
+    const size_t b = line.find_first_not_of(" \t\r\n");
+    if (b == std::string::npos) continue;
+    if (line.compare(b, 4, "src ") != 0) continue;
+    const std::string rec = line.substr(b + 4);
+    const size_t tab = rec.rfind('\t');
+    if (tab == std::string::npos) continue;
+    const std::string srcPath = rec.substr(0, tab);
+    long long recMt = 0;
+    try { recMt = std::stoll(rec.substr(tab + 1)); } catch (...) { continue; }
+    std::error_code ec;
+    const auto ft = std::filesystem::last_write_time(srcPath, ec);
+    if (ec) return true;  // recorded source vanished -> stale
+    if (static_cast<long long>(ft.time_since_epoch().count()) != recMt)
+      return true;
+  }
+  return false;
+}
+
 int ambcFastBuild(const std::string& sourcePath, const std::string& arch,
                   int optLevel, const std::string& outBin,
                   std::ostream& err) {
@@ -1830,6 +1859,13 @@ int ambcFastBuild(const std::string& sourcePath, const std::string& arch,
       (!std::filesystem::exists(ambc, ec) || ec)) {
     return 2;
   }
+
+  // Staleness: `a precompile` records source mtimes (ambc.meta `src`
+  // lines for per-module packages, `<name>.ambc.srcs` for whole-graph).
+  // A changed or missing source means the package is stale — fall
+  // through to the normal pipeline instead of linking old code.
+  if (ambcSrcsStale(perModule ? (pkgDir + "/ambc.meta") : (ambc + ".srcs")))
+    return 2;
 
   std::string objPath = tempPath("llvm", "x.o");
   int rc;
@@ -2151,7 +2187,8 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     if (!ambc.empty()) {
       const std::string pkgDir = ambc + ".d";
       std::error_code ec;
-      if (std::filesystem::is_directory(pkgDir, ec)) {
+      if (std::filesystem::is_directory(pkgDir, ec) &&
+          !ambcSrcsStale(pkgDir + "/ambc.meta")) {
         std::string objPath = tempPath("llvm", "x.o");
         int rc = ambcModulesCompileToObject(pkgDir, td.arch,
                                             config.optimizationLevel, objPath,

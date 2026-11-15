@@ -92,11 +92,10 @@ void printUsage(std::ostream& os) {
      << "                           mlir-translate/opt/llc/clang subprocess path\n"
      << "  A_MLIR_NATIVE=0    same as A_BACKEND=subprocess (also =off/no/false)\n"
      << "  A_AMBC=0           disable .ambc precompiled-package fast path\n"
+     << "                     (default on; packages record source mtimes\n"
+     << "                     and fall through when sources change)\n"
      << "  A_MLIR_TYPED=0     boxed aval emission (default: unboxed i64/f64/i1\n"
-     << "                     scalars for Sema-proven Int/Float/Bool)\n"
-     << "                     (default on; re-run 'a precompile' after\n"
-     << "                     changing any imported module — packages do\n"
-     << "                     not track dependency changes)\n";
+     << "                     scalars for Sema-proven Int/Float/Bool)\n";
 }
 
 bool isTerminal() {

@@ -47,10 +47,12 @@ Implemented and exercised by `tests/mlir/` (`a mlir-opt` golden suite):
   non-Windows (`A_AMBC=0` disables; `ambc_modules.cpp`). Single-file
   `foo.ambc` sibling packages also work; `a test` uses the per-module
   layout (`ambcModulesCompileToObject` synthesizes the `a_test_main`
-  harness and applies the compile-time `--filter` substring). NOTE:
-  packages do not track
-  dependency mtimes — re-run `a precompile` after changing ANY imported
-  module or `a run`/`a build` will silently link the stale package.
+  harness and applies the compile-time `--filter` substring). Packages
+  record source mtimes (`src` records in `ambc.meta`,
+  `<name>.ambc.srcs` for whole-graph packages): a changed or missing
+  source falls through to the normal pipeline. Packages written before
+  staleness tracking (no `src` records) are still trusted
+  unconditionally.
 - **In-process LLVM bridge**: implemented in
   `src/astra/mlir/codegen.cpp`/`native.cpp` (parse llvm-dialect text ->
   LLVM IR -> `llvm::PassBuilder` -> `TargetMachine` -> `.o`) and is the
