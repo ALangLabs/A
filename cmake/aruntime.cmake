@@ -1,15 +1,15 @@
 # Builds the staged A runtime that `a run`/`a build` link against.
 #
-# compiler/astra/runtime/*.c (plus the vendored mimalloc TU and the Python
+# src/astra/runtime/*.c (plus the vendored mimalloc TU and the Python
 # interop bridge, python.c, which now lives in runtime/) is compiled once by
 # the system C compiler into libaruntime.a, and the runtime sources are
 # staged into ${CMAKE_BINARY_DIR}/astralib next to it. The `a` driver locates
 # both relative to its own executable (build/astralib for in-tree builds,
 # <prefix>/astralib for installed releases), so the stage dir name is part of
 # the runtime contract — do not rename it without updating findRuntime() in
-# compiler/astra/frontend/pipeline/pipeline.cpp.
+# src/astra/frontend/pipeline/pipeline.cpp.
 
-set(ASTRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/compiler/astra")
+set(ASTRA_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/astra")
 set(ASTRA_RUNTIME_DIR "${ASTRA_ROOT}/runtime")
 set(ASTRA_STAGE "${CMAKE_BINARY_DIR}/astralib")
 set(ASTRA_OBJ_DIR "${CMAKE_BINARY_DIR}/aruntime-obj")
@@ -74,7 +74,7 @@ foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
         VERBATIM)
     list(APPEND ASTRA_RT_OBJS "${rt_obj}")
 endforeach()
-# Vendored mimalloc (compiler/astra/runtime/vendor/mimalloc): compiled as a
+# Vendored mimalloc (src/astra/runtime/vendor/mimalloc): compiled as a
 # single TU exposing mi_* symbols. Not yet wired into the GC allocator —
 # kept as a ready fast allocator for runtime allocation paths.
 set(ASTRA_MIMALLOC_SRC "${ASTRA_RUNTIME_DIR}/vendor/mimalloc/src/static.c")

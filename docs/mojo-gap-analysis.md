@@ -2,7 +2,7 @@
 
 Goal: identify what Mojo does (from the OSS mirror at `/tmp/mojo-ref`), map each
 capability onto A's current implementation, and prioritize the work needed for
-parity. Sources: `compiler/astra/frontend/**` (A), `/tmp/mojo-ref/Mojo/**`
+parity. Sources: `src/astra/frontend/**` (A), `/tmp/mojo-ref/Mojo/**`
 (Mojo stdlib, docs, proposals; the Mojo compiler itself is closed-source —
 only design docs under `Mojo/docs/compiler/` are public).
 
@@ -59,7 +59,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
   `proposals/parameter-binding-syntax.md`, `parametric_alias.md`).
 - **A**: `fn id<T>(x: T) -> T`, `<T: Trait>` bounds, `class`/`enum`/`trait`/
   `impl`/`type` all exist (`docs/wiki/declarations.md`,
-  `compiler/astra/frontend/type-checker/sema.hpp` `typeParams`/`typeParamVars`
+  `src/astra/frontend/type-checker/sema.hpp` `typeParams`/`typeParamVars`
   on `FnSig`/`StructSym`/`EnumInfo`). `where` constraints **work**
   (`sema` + `tests/integration/cases/*where*`); traits support inheritance.
   **Gap**: no comptime *value* parameters (see 2.2), no aliases-as-parameters,
@@ -94,7 +94,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
   register packing; GPU `DevicePassable` types.
 - **A**: `stdlib/std/simd/simd.astra` is explicitly "scalar-emulated fixed-width
   lanes" (`docs/wiki/stdlib.md:21`); real perf comes from hand-written C
-  kernels (`linalg_*` builtins in `compiler/astra/runtime/`). The LLVM
+  kernels (`linalg_*` builtins in `src/astra/runtime/`). The LLVM
   backend `llvm/llvm_emit.cpp` emits **only i64 `aval` words** and routes every
   operation through `a_*` runtime calls — there is **no `llvm.vector`, no
   vector arithmetic, no autovectorization possible**; `clang -O` can only
@@ -113,7 +113,7 @@ The compiler is **not** in the repo (MLIR-based, closed). Public surface:
   **unstable/draft** (`proposals/async-design.md`); `parallelize`/task
   runtime lives in `max.runtime`; `std.algorithm` CPU/GPU backends.
 - **A**: no async syntax. Has **implicit parallelism**: runtime thread pool
-  (`compiler/astra/runtime/rt_pool.c`) auto-parallelizes `sum`/`map`/`filter`
+  (`src/astra/runtime/rt_pool.c`) auto-parallelizes `sum`/`map`/`filter`
   over large lists and `linalg_*` kernels; `A_PAR=0`/`A_PAR_THREADS=N` knobs.
 - **Priority: P2** — Mojo itself hasn't shipped stable async; A is arguably at
   parity for user-facing features.

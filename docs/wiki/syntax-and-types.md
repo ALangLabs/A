@@ -1,6 +1,6 @@
 # Syntax and types
 
-Verified against `compiler/astra/frontend/lexer/` (keyword table, literal
+Verified against `src/astra/frontend/lexer/` (keyword table, literal
 scanners) and `examples/`/`tests/`.
 
 ## Lexical structure

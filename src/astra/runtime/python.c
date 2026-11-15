@@ -2,7 +2,7 @@
 
 /* ------------------------------------------------------------------ */
 /* python interop: libpython is dlopen'd at run time (no link-time     */
-/* dependency). Mirrors compiler/astra/python/python_loader.cpp:       */
+/* dependency). Mirrors src/astra/python/python_loader.cpp:       */
 /* A_PYTHON_LIB / A_PYTHON overrides, project + env venvs, PATH         */
 /* interpreters, uv installs, then system libpython*.so* as fallback.  */
 /* ------------------------------------------------------------------ */

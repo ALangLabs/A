@@ -47,7 +47,7 @@ branches and loops; a value moved on any path counts as moved afterwards.
 ## Runtime memory management
 
 A reclaims memory automatically with a **conservative mark-sweep
-garbage collector** (`compiler/astra/runtime/gc.c`). It is enabled by
+garbage collector** (`src/astra/runtime/gc.c`). It is enabled by
 default; set `A_GC=0` to disable, `A_GC_STATS=1` for per-collection
 stats, `A_GC_DEBUG=1` for stage markers.
 

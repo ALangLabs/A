@@ -783,7 +783,7 @@ aval bi_py_truthy_builtin(uint64_t n, aval *argv);
 aval bi_py_type_builtin(uint64_t n, aval *argv);
 aval bi_py_buffer_info(uint64_t n, aval *argv);
 
-/* Python interop bridge (compiler/astra/runtime/python.c): opaque
+/* Python interop bridge (src/astra/runtime/python.c): opaque
    T_PYOBJ values behave like Python objects — attribute access, indexing,
    method calls, len/contains, iteration and call. Each takes the GIL
    internally; Python errors panicf with the interpreter's error text. */

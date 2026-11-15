@@ -93,6 +93,6 @@ compiler stores it before each statement); function frames show the
 function's declaration line, so the arrow points at the `fn` for a panic
 raised inside a function. Frames come from `a_frame_push`/
 `a_frame_pop` and the `a_stmt_line` slot in
-`compiler/astra/runtime/core_util.c`.
+`src/astra/runtime/core_util.c`.
 
 See also [builtins](builtins.md) and [testing](testing.md).

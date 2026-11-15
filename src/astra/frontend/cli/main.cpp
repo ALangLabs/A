@@ -74,10 +74,6 @@ void printUsage(std::ostream& os) {
      << "                    match the host OS — the LLVM backend cannot\n"
      << "                    cross OSes or arches; host target only)\n"
      << "  --native         force the native codegen backend (default)\n"
-     << "  --backend <b>    select backend: 'mlir-direct' (default; emits MLIR\n"
-     << "                    llvm dialect directly), 'llvm' (LLVM IR text),\n"
-     << "                    'mlir' (LLVM IR -> MLIR round-trip); 'asm'/'native'\n"
-     << "                    are accepted aliases for 'llvm')\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
@@ -112,7 +108,6 @@ struct Options {
   bool jsonOutput = false;
   bool optnone = false;
   bool native = false;
-  std::string backend = "mlir-direct";
   int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;
@@ -182,24 +177,7 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
       try { options.jobs = std::stoi(arg.substr(2)); } catch (...) { err << "error: invalid jobs value\n"; return false; }
       if (options.jobs < 0) { err << "error: jobs must be >= 0\n"; return false; }
     }
-    else if (arg == "--backend") {
-      if (i + 1 >= argc) { err << "error: '--backend' requires a name\n"; return false; }
-      std::string name = lowerAscii(argv[++i]);
-      // 'llvm' is the only backend; 'asm'/'native' map to it for
-      // compatibility.
-      if (name == "llvm" || name == "native" || name == "asm" ||
-          name == "mlir" || name == "mlir-direct") {
-        options.native = true; options.backend = "mlir-direct";
-      }
-      else { err << "error: unknown backend '" << name << "' (expected 'mlir-direct')\n"; return false; }
-    } else if (arg.rfind("--backend=", 0) == 0) {
-      std::string name = lowerAscii(arg.substr(10));
-      if (name == "llvm" || name == "native" || name == "asm" ||
-          name == "mlir" || name == "mlir-direct") {
-        options.native = true; options.backend = "mlir-direct";
-      }
-      else { err << "error: unknown backend '" << name << "' (expected 'mlir-direct')\n"; return false; }
-    } else if (arg == "--indent") {
+    else if (arg == "--indent") {
       if (i + 1 >= argc) { err << "error: '--indent' requires a number\n"; return false; }
       try { options.indentWidth = std::stoi(argv[++i]); } catch (...) { err << "error: invalid indentation width\n"; return false; }
       if (options.indentWidth < 1 || options.indentWidth > 16) { err << "error: indentation width must be 1-16\n"; return false; }
@@ -326,9 +304,9 @@ int main(int argc, char** argv) {
   config.checkOnly = options.command == "check";
   config.useColor = options.useColor;
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
-  config.backend = options.backend;
+  config.backend = "mlir-direct";
   if (const char* be = std::getenv("A_BACKEND"); be && *be) {
-    // 'llvm' is the only native backend; 'asm' is no longer selectable.
+    // Escape hatch for the direct LLVM-IR emitter; not exposed as a flag.
     if (lowerAscii(be) == "llvm") config.backend = "llvm";
   }
   config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count

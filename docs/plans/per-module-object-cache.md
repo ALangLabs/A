@@ -235,7 +235,7 @@ set of programs.
 | module init order regression | inits stay in one place (`main`) and call per-module init functions in `graph.order`; dedicated golden case |
 | `a test` table / test filter | test table is built in the entry unit and keys on the filter (existing cache key already includes it) |
 | cross-compilation (`--target arm64 …`) | same split; units are per target (target in the key); staged `astra-<arch>` driver unchanged |
-| concurrent edits by another process in `compiler/astra/frontend/codegen/` | phase 1 touches `codegen_decls.cpp`, `codegen_emit.cpp`; those are currently clean while `codegen_native.cpp`, `codegen_internal.hpp`, `ir*`, `sema*` are dirty — coordinate before starting, or land phase 1 first while the others are frozen |
+| concurrent edits by another process in `src/astra/frontend/codegen/` | phase 1 touches `codegen_decls.cpp`, `codegen_emit.cpp`; those are currently clean while `codegen_native.cpp`, `codegen_internal.hpp`, `ir*`, `sema*` are dirty — coordinate before starting, or land phase 1 first while the others are frozen |
 | rollback | `A_SPLIT_UNITS=0` returns to the single-unit path; each phase is one commit, revertible independently |
 
 ## Effort

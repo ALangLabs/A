@@ -165,15 +165,15 @@ flowchart LR
     bin --> out["stdout / exit code"]
 ```
 
-- **`compiler/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
+- **`src/astra/frontend/`** — the C++20 frontend (`namespace a`): lexer,
   parser, AST, diagnostics, module loader, `Sema` type checker, ownership
   analysis, and the native code emitters
   (`emitMLIR` -> MLIR llvm dialect -> `mlir-translate` -> LLVM IR ->
   `opt`/`llc`/`clang`, host targets only; `emitLLVM` remains as the
-  `--backend llvm` fallback;
-  `cmake/aruntime.cmake` stages `compiler/astra/runtime/*.c` into
+  `A_BACKEND=llvm` debug fallback;
+  `cmake/aruntime.cmake` stages `src/astra/runtime/*.c` into
   `build/astralib/libaruntime.a`, which every compiled program links).
-- **`compiler/astra/runtime/`** — the C runtime every A program links:
+- **`src/astra/runtime/`** — the C runtime every A program links:
   NaN-boxed `aval` values, collections, builtins, and native modules
   (json, fs, net, arena, unsafe, python interop, terminal, time, intrinsics).
 - **`tools/lsp/`** — `a-lsp`, a full stdio language server (diagnostics,
@@ -192,7 +192,7 @@ produce and execute binaries for the host architecture and OS
 targets but rejects them with a clear error — there is no cross-compile
 path and no per-arch assembler backend. RISC-V32, `i386`, `arm`, `riscv64`
 and the bare-metal `i8086` target are all unsupported; the hand-written
-`compiler/astra/runtime/i8086_runtime.s` subset remains in the tree for
+`src/astra/runtime/i8086_runtime.s` subset remains in the tree for
 reference only.
 
 Windows is a supported host OS (x86-64 and arm64): the pipeline's
@@ -205,7 +205,7 @@ Windows: TCP sockets work via Winsock2, but TLS/zlib stay unavailable
 POSIX-only pieces like `terminal` raw mode degrade gracefully.
 
 The staged runtime (`build/astralib/` in-tree, `<prefix>/astralib/` when
-installed) contains copies of `compiler/astra/runtime/*` plus the
+installed) contains copies of `src/astra/runtime/*` plus the
 prebuilt `libaruntime.a` that `llvmBuild` links via `clang`; LLVM tools
 are located via `A_LLVM_OPT`/`A_LLVM_LLC`/`A_LLVM_CC` or PATH.
 

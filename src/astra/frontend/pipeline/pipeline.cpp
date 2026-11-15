@@ -1281,11 +1281,11 @@ inline std::string unitCachePath(const std::string& key) {
 
 
 // Locates the staged A runtime directory containing a_runtime.c and
-// libaruntime.a (cmake/aruntime.cmake copies compiler/astra/runtime/*.c into
+// libaruntime.a (cmake/aruntime.cmake copies src/astra/runtime/*.c into
 // <bindir>/../astralib for installed layouts, or build/astralib in-tree).
 // Candidates: $A_RUNTIME_C, the astralib dirs relative to the `a` executable
-// and the cwd, then the compiler/astra/runtime source tree as a last resort
-// (libaruntime.a is then expected at compiler/astra/runtime/libaruntime.a or
+// and the cwd, then the src/astra/runtime source tree as a last resort
+// (libaruntime.a is then expected at src/astra/runtime/libaruntime.a or
 // one of the ../.. variants llvmBuild probes).
 bool findRuntime(const std::string& arch, std::string& runtimeC,
                  std::string& runtimeDir) {
@@ -1303,9 +1303,9 @@ bool findRuntime(const std::string& arch, std::string& runtimeC,
       candidates.push_back(d + "/../../../" + ln + "/a_runtime.c");
     }
     // Source-tree fallbacks last: a staged astralib* dir for ANY libname
-    // must win over the (portable but lib-less) compiler/astra/runtime dir.
-    candidates.push_back(d + "/../../compiler/astra/runtime/a_runtime.c");
-    candidates.push_back(d + "/../../../compiler/astra/runtime/a_runtime.c");
+    // must win over the (portable but lib-less) src/astra/runtime dir.
+    candidates.push_back(d + "/../../src/astra/runtime/a_runtime.c");
+    candidates.push_back(d + "/../../../src/astra/runtime/a_runtime.c");
   };
   const std::string self = exePath();
   if (!self.empty()) {
@@ -1317,8 +1317,8 @@ bool findRuntime(const std::string& arch, std::string& runtimeC,
     candidates.push_back(ln + "/a_runtime.c");
     candidates.push_back("./" + ln + "/a_runtime.c");
   }
-  candidates.push_back("compiler/astra/runtime/a_runtime.c");
-  candidates.push_back("./compiler/astra/runtime/a_runtime.c");
+  candidates.push_back("src/astra/runtime/a_runtime.c");
+  candidates.push_back("./src/astra/runtime/a_runtime.c");
   for (const auto& c : candidates) {
     std::error_code ec;
     if (std::filesystem::exists(c, ec)) {
@@ -1526,8 +1526,8 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
       runtimeDir + "/libaruntime.a",
       runtimeDir + "/../libaruntime.a",
       runtimeDir + "/../../libaruntime.a",
-      "compiler/astra/runtime/libaruntime.a",
-      "./compiler/astra/runtime/libaruntime.a",
+      "src/astra/runtime/libaruntime.a",
+      "./src/astra/runtime/libaruntime.a",
   };
   // The staged astralib dir sits next to the `a` binary's parent (bin/ ->
   // ../astralib); cover it even when a_runtime.c resolved via the source

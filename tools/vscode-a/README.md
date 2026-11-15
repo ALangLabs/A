@@ -88,7 +88,7 @@ Notes:
   `vsce package` + upload); `npm run package` still produces a local
   `.vsix` via `vsce`.
 - Keep `version` in `package.json` in sync with the other version
-  sources (`CMakeLists.txt`, `compiler/astra/frontend/driver/version.hpp`,
+  sources (`CMakeLists.txt`, `src/astra/frontend/driver/version.hpp`,
   `tools/lsp/server.cpp`) — CI enforces this.
 
 ## Develop

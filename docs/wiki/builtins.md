@@ -1,7 +1,7 @@
 # Builtins and native modules
 
 Core builtin functions are available without imports (verified against
-`compiler/astra/frontend/ast/builtins.hpp` and the runtime `A_BI_*` table).
+`src/astra/frontend/ast/builtins.hpp` and the runtime `A_BI_*` table).
 
 ## Core builtins
 
@@ -46,7 +46,7 @@ runtime always takes the serial path.
 ## Native modules
 
 `import <name>` binds a namespace of builtins (table in
-`compiler/astra/frontend/name-resolution/native_modules.hpp`):
+`src/astra/frontend/name-resolution/native_modules.hpp`):
 
 `math` (sqrt/abs/min/max/pow/trig/log/floor/ceil/round/trunc/random + `PI`,`E`),
 `io` (print/eprint/input/flush), `fs` (file ops + POSIX primitives: `read_file`,

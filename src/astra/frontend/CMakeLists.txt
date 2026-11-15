@@ -1,5 +1,5 @@
 # C++ frontend of the A toolchain (formerly compiler/stages/).
-# Everything compiler-related lives under compiler/astra/; this
+# Everything compiler-related lives under src/astra/; this
 # directory holds the lex/parse/sema/IR/codegen/pipeline modules while
 # ../runtime/ is the C runtime linked into every compiled program.
 # Modules in dependency order (each owns its CMakeLists.txt).

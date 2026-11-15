@@ -31,7 +31,7 @@ demo/
 # test output residue (written by tests/integration/cases/file_io.astra)
 data.txt
 # runtime archive built by the astra_runtime target
-compiler/astra/runtime/libaruntime.a
+src/astra/runtime/libaruntime.a
 websearchcli.astra
 # A compiler cache (like Python's __pycache__)
 _acache_/

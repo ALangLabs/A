@@ -28,12 +28,12 @@ faster dev builds).
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N` (0..3; out-of-range
   values like `9` or `-1` are rejected), `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
-- `--native` / `--backend mlir-direct|llvm|native|asm` — execution backend
-  for `run`/`test`/`repl`. `mlir-direct` (default) lowers the checked AST to
-  MLIR's llvm dialect and translates it to LLVM IR (`mlir-translate`), then
-  compiles with `opt`/`llc`/`clang`; `--backend llvm` emits LLVM IR text
-  directly. `mlir` is accepted as an alias of `mlir-direct`. Native is the
-  only backend family: there is no interpreter.
+- `--native` — execution backend for `run`/`test`/`repl` (the only
+  backend; there is no interpreter). Codegen lowers the checked AST to
+  MLIR's llvm dialect and translates it to LLVM IR (`mlir-translate`),
+  then compiles with `opt`/`llc`/`clang`. The direct LLVM-IR emitter is
+  still reachable for debugging via the `A_BACKEND=llvm` environment
+  variable — it is not exposed as a CLI flag.
 - `--filter <substr>` — `a test` only: run just the `test_*` functions whose
   name contains the substring (e.g. `a test foo.astra --filter dict`, or
   `a test --filter dict` to select across discovered files). For a single
@@ -64,7 +64,7 @@ faster dev builds).
 Unsupported. The LLVM backend is host-only and there is no longer a
 per-arch assembler backend, so `--target i8086` (aliases `i86`, `8086`,
 `8088`) is rejected like every other non-host target. The hand-written
-runtime subset remains in `compiler/astra/runtime/i8086_runtime.s` for
+runtime subset remains in `src/astra/runtime/i8086_runtime.s` for
 reference, and `tests/integration/i8086_image.sh` is inert.
 
 Environment: `A_STDLIB`, `A_RUNTIME_C` (path to a_runtime.c overriding the

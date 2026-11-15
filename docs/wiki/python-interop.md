@@ -1,7 +1,7 @@
 # Python interop
 
 A can call into CPython at run time — libpython is `dlopen`'d, so there is no
-link-time dependency (verified in `compiler/astra/runtime/python.c` and
+link-time dependency (verified in `src/astra/runtime/python.c` and
 `examples/python-interop/`).
 
 ## Importing Python modules
