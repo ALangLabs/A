@@ -65,18 +65,18 @@ struct MlBinding {
 // mode) and emitModuleDecls (per-module .ambc mode). Sig strings use the
 // compact "(args) -> ret" form parsed by runtimeDeclText.
 const std::pair<const char*, const char*> kRuntimeSigs[] = {
-    {"a_add_slow", "(i64, i64) -> i64"}, {"a_sub_slow", "(i64, i64) -> i64"},
-    {"a_mul_slow", "(i64, i64) -> i64"}, {"a_div_slow", "(i64, i64) -> i64"},
-    {"a_floordiv_slow", "(i64, i64) -> i64"},
-    {"a_mod_slow", "(i64, i64) -> i64"}, {"a_pow", "(i64, i64) -> i64"},
-    {"a_eq_slow", "(i64, i64) -> i64"}, {"a_ne_slow", "(i64, i64) -> i64"},
-    {"a_lt_slow", "(i64, i64) -> i64"}, {"a_le_slow", "(i64, i64) -> i64"},
-    {"a_gt_slow", "(i64, i64) -> i64"}, {"a_ge_slow", "(i64, i64) -> i64"},
-    {"a_band_slow", "(i64, i64) -> i64"}, {"a_bor_slow", "(i64, i64) -> i64"},
-    {"a_bxor_slow", "(i64, i64) -> i64"}, {"a_shl_slow", "(i64, i64) -> i64"},
-    {"a_shr_slow", "(i64, i64) -> i64"}, {"a_neg_slow", "(i64) -> i64"},
-    {"a_bnot_slow", "(i64) -> i64"}, {"a_not", "(i64) -> i64"},
-    {"a_truthy_raw_slow", "(i64) -> i64"},
+    {"a_add_fast", "(i64, i64) -> i64"}, {"a_sub_fast", "(i64, i64) -> i64"},
+    {"a_mul_fast", "(i64, i64) -> i64"}, {"a_div_fast", "(i64, i64) -> i64"},
+    {"a_floordiv_fast", "(i64, i64) -> i64"},
+    {"a_mod_fast", "(i64, i64) -> i64"}, {"a_pow_fast", "(i64, i64) -> i64"},
+    {"a_eq_fast", "(i64, i64) -> i64"}, {"a_ne_fast", "(i64, i64) -> i64"},
+    {"a_lt_fast", "(i64, i64) -> i64"}, {"a_le_fast", "(i64, i64) -> i64"},
+    {"a_gt_fast", "(i64, i64) -> i64"}, {"a_ge_fast", "(i64, i64) -> i64"},
+    {"a_band_fast", "(i64, i64) -> i64"}, {"a_bor_fast", "(i64, i64) -> i64"},
+    {"a_bxor_fast", "(i64, i64) -> i64"}, {"a_shl_fast", "(i64, i64) -> i64"},
+    {"a_shr_fast", "(i64, i64) -> i64"}, {"a_neg_fast", "(i64) -> i64"},
+    {"a_bnot_fast", "(i64) -> i64"}, {"a_not_fast", "(i64) -> i64"},
+    {"a_truthy_raw_fast", "(i64) -> i64"},
     {"a_unwrap", "(i64) -> i64"}, {"a_some_new", "(i64) -> i64"},
     {"a_try_result", "(i64) -> i64"}, {"a_is_option", "(i64) -> i32"},
     {"a_is_propagate", "(i64) -> i32"}, {"a_str", "(i64) -> i64"},
@@ -1895,7 +1895,7 @@ class MlirEmitter {
       case Pattern::Kind::Literal: {
         if (!pat.value) return "";
         std::string lv = evalExpr(*pat.value);
-        std::string eq = callI64("a_eq_slow", {subj, lv});
+        std::string eq = callI64("a_eq_fast", {subj, lv});
         // a_eq_slow returns aval bool (A_TRUE/A_FALSE) — compare to A_TRUE
         std::string at = c64(kAvalTag | 0x6);
         std::string r = nv();
@@ -1906,8 +1906,8 @@ class MlirEmitter {
         if (!pat.rangeStart || !pat.rangeEnd) return "";
         std::string lo = evalExpr(*pat.rangeStart);
         std::string hi = evalExpr(*pat.rangeEnd);
-        std::string ge = callI64("a_ge_slow", {subj, lo});
-        std::string le = callI64("a_le_slow", {subj, hi});
+        std::string ge = callI64("a_ge_fast", {subj, lo});
+        std::string le = callI64("a_le_fast", {subj, hi});
         std::string at = c64(kAvalTag | 0x6);
         std::string g = nv(), l = nv(), r = nv();
         fn_ << "  " << g << " = llvm.icmp \"eq\" " << ge << ", " << at << " : i64\n";
@@ -1927,7 +1927,7 @@ class MlirEmitter {
           // unresolvable: whole-value equality against ctor expr
           if (!pat.ctor) return "";
           std::string cv = evalExpr(*pat.ctor);
-          std::string eq = callI64("a_eq_slow", {subj, cv});
+          std::string eq = callI64("a_eq_fast", {subj, cv});
           std::string at = c64(kAvalTag | 0x6);
           std::string r = nv();
           fn_ << "  " << r << " = llvm.icmp \"eq\" " << eq << ", " << at << " : i64\n";
@@ -1937,7 +1937,7 @@ class MlirEmitter {
           // simple variant: compare whole values
           std::vector<std::string> dummy;
           std::string cv = variantValue(*mv, parts.back(), nullptr);
-          std::string eq = callI64("a_eq_slow", {subj, cv});
+          std::string eq = callI64("a_eq_fast", {subj, cv});
           std::string at = c64(kAvalTag | 0x6);
           std::string r = nv();
           fn_ << "  " << r << " = llvm.icmp \"eq\" " << eq << ", " << at << " : i64\n";
@@ -1948,7 +1948,7 @@ class MlirEmitter {
         {
           std::string tagV = callI64("a_dict_get",
               {subj, stringLiteralAval("__tag"), c64(kAvalTag | 0x2)});
-          std::string eq = callI64("a_eq_slow", {tagV, avalInt(mv->tag)});
+          std::string eq = callI64("a_eq_fast", {tagV, avalInt(mv->tag)});
           std::string at = c64(kAvalTag | 0x6);
           std::string r = nv();
           fn_ << "  " << r << " = llvm.icmp \"eq\" " << eq << ", " << at << " : i64\n";
@@ -2697,7 +2697,7 @@ class MlirEmitter {
   std::string emitIncDec(const Expr& target, bool inc, bool prefix,
                          const UnaryExpr& u) {
     auto bump = [&](const std::string& cur) {
-      return callI64(inc ? "a_add_slow" : "a_sub_slow", {cur, avalInt(1)});
+      return callI64(inc ? "a_add_fast" : "a_sub_fast", {cur, avalInt(1)});
     };
     if (target.kind == ExprKind::Ident) {
       const std::string& nm = static_cast<const IdentExpr&>(target).name;
@@ -2739,10 +2739,10 @@ class MlirEmitter {
       failAt("postfix ++/-- not supported", &u); return "";
     }
     std::string v = evalExpr(*u.operand);
-    if (u.op == "-") return callI64("a_neg_slow", {v});
-    if (u.op == "~") return callI64("a_bnot_slow", {v});
+    if (u.op == "-") return callI64("a_neg_fast", {v});
+    if (u.op == "~") return callI64("a_bnot_fast", {v});
     if (u.op == "!") return callI64("a_unwrap", {v});
-    if (u.op == "not") return callI64("a_not", {v});
+    if (u.op == "not") return callI64("a_not_fast", {v});
     if (u.op == "++" || u.op == "--") {
       return emitIncDec(*u.operand, u.op == "++", /*prefix=*/true, u);
     }
@@ -2754,31 +2754,31 @@ class MlirEmitter {
                         const Span& span) {
     const char* sym = nullptr;
     switch (op) {
-      case BinOp::Add: sym = "a_add_slow"; break;
-      case BinOp::Sub: sym = "a_sub_slow"; break;
-      case BinOp::Mul: sym = "a_mul_slow"; break;
-      case BinOp::Div: sym = "a_div_slow"; break;
-      case BinOp::FloorDiv: sym = "a_floordiv_slow"; break;
-      case BinOp::Mod: sym = "a_mod_slow"; break;
-      case BinOp::Pow: sym = "a_pow"; break;
-      case BinOp::Eq: sym = "a_eq_slow"; break;
-      case BinOp::Ne: sym = "a_ne_slow"; break;
-      case BinOp::Lt: sym = "a_lt_slow"; break;
-      case BinOp::Le: sym = "a_le_slow"; break;
-      case BinOp::Gt: sym = "a_gt_slow"; break;
-      case BinOp::Ge: sym = "a_ge_slow"; break;
-      case BinOp::BitAnd: sym = "a_band_slow"; break;
-      case BinOp::BitOr: sym = "a_bor_slow"; break;
-      case BinOp::BitXor: sym = "a_bxor_slow"; break;
-      case BinOp::Shl: sym = "a_shl_slow"; break;
-      case BinOp::Shr: sym = "a_shr_slow"; break;
+      case BinOp::Add: sym = "a_add_fast"; break;
+      case BinOp::Sub: sym = "a_sub_fast"; break;
+      case BinOp::Mul: sym = "a_mul_fast"; break;
+      case BinOp::Div: sym = "a_div_fast"; break;
+      case BinOp::FloorDiv: sym = "a_floordiv_fast"; break;
+      case BinOp::Mod: sym = "a_mod_fast"; break;
+      case BinOp::Pow: sym = "a_pow_fast"; break;
+      case BinOp::Eq: sym = "a_eq_fast"; break;
+      case BinOp::Ne: sym = "a_ne_fast"; break;
+      case BinOp::Lt: sym = "a_lt_fast"; break;
+      case BinOp::Le: sym = "a_le_fast"; break;
+      case BinOp::Gt: sym = "a_gt_fast"; break;
+      case BinOp::Ge: sym = "a_ge_fast"; break;
+      case BinOp::BitAnd: sym = "a_band_fast"; break;
+      case BinOp::BitOr: sym = "a_bor_fast"; break;
+      case BinOp::BitXor: sym = "a_bxor_fast"; break;
+      case BinOp::Shl: sym = "a_shl_fast"; break;
+      case BinOp::Shr: sym = "a_shr_fast"; break;
       case BinOp::In: {
         // a_contains(container, item) — rhs is container
         return callI64("a_contains", {r, l});
       }
       case BinOp::NotIn: {
         std::string c = callI64("a_contains", {r, l});
-        return callI64("a_not", {c});
+        return callI64("a_not_fast", {c});
       }
       case BinOp::Range:
         return callI64("a_range_new", {l, r, avalInt(1)});
@@ -2881,7 +2881,7 @@ class MlirEmitter {
   }
 
   std::string truthyI1(const std::string& aval) {
-    std::string t = callI64("a_truthy_raw_slow", {aval});
+    std::string t = callI64("a_truthy_raw_fast", {aval});
     std::string r = nv();
     { std::string z = c64(0);
       fn_ << "  " << r << " = llvm.icmp \"ne\" " << t << ", " << z << " : i64\n"; }

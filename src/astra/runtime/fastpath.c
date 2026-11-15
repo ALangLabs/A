@@ -95,11 +95,10 @@ aval a_mul_fast(aval l, aval r) {
 
 aval a_div_fast(aval l, aval r) {
     if (a_is_int(l) && a_is_int(r)) {
-        int64_t a = a_int_val(l), b = a_int_val(r);
-        if (b != 0 && !(a == INT64_MIN && b == -1)) {
-            int64_t res = a / b;
-            if (a_in_inline_range(res)) return a_mkint(res);
-        }
+        /* `/` is true division (Python parity): int/int yields float.
+           b == 0 defers to slow for the panic. */
+        int64_t b = a_int_val(r);
+        if (b != 0) return mkdouble((double)a_int_val(l) / (double)b);
         return a_div_slow(l, r);
     }
     /* Double division (incl. mixed int/double): division by zero.0 must
@@ -115,7 +114,8 @@ aval a_div_fast(aval l, aval r) {
 aval a_floordiv_fast(aval l, aval r) {
     if (a_is_int(l) && a_is_int(r)) {
         int64_t a = a_int_val(l), b = a_int_val(r);
-        if (b != 0) {
+        /* INT64_MIN / -1 is UB in C; slow returns mkdouble(-2^63). */
+        if (b != 0 && !(a == INT64_MIN && b == -1)) {
             int64_t q = a / b;
             if (a % b != 0 && ((a < 0) != (b < 0))) --q;
             if (a_in_inline_range(q)) return a_mkint(q);
@@ -135,6 +135,9 @@ aval a_mod_fast(aval l, aval r) {
         int64_t a = a_int_val(l), b = a_int_val(r);
         if (b != 0 && b != -1) {
             int64_t res = a % b;
+            /* Python parity: result takes the sign of the divisor
+               (arith_int_int '%' in value_arith.c). */
+            if (res != 0 && ((res < 0) != (b < 0))) res += b;
             if (a_in_inline_range(res)) return a_mkint(res);
         } else if (b == -1) {
             return a_mkint(0);
