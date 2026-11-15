@@ -1,6 +1,6 @@
 // Direct MLIR backend (A -> .mlir llvm dialect -> mlir-translate -> .ll ->
 // opt/llc/clang -> machine code). Mojo-style path: the frontend emits MLIR
-// directly instead of hand-writing LLVM IR text.
+// directly instead of hand-writing LLVM IR tePLACEHOLDER_NO_MATCHt.
 //
 // MVP coverage: entry points, plain `fn` declarations and direct calls,
 // let/assign/expr/return/if/while/do-while/for/loop/break/continue,
@@ -13,6 +13,8 @@
 #include <cstring>
 #include <map>
 #include <memory>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -59,6 +61,112 @@ struct MlBinding {
   std::string dropFn; // cname of struct `drop` method, "" if none
 };
 
+// Runtime (`a_*`) function signatures shared by emitDecls (whole-graph
+// mode) and emitModuleDecls (per-module .ambc mode). Sig strings use the
+// compact "(args) -> ret" form parsed by runtimeDeclText.
+const std::pair<const char*, const char*> kRuntimeSigs[] = {
+    {"a_add_slow", "(i64, i64) -> i64"}, {"a_sub_slow", "(i64, i64) -> i64"},
+    {"a_mul_slow", "(i64, i64) -> i64"}, {"a_div_slow", "(i64, i64) -> i64"},
+    {"a_floordiv_slow", "(i64, i64) -> i64"},
+    {"a_mod_slow", "(i64, i64) -> i64"}, {"a_pow", "(i64, i64) -> i64"},
+    {"a_eq_slow", "(i64, i64) -> i64"}, {"a_ne_slow", "(i64, i64) -> i64"},
+    {"a_lt_slow", "(i64, i64) -> i64"}, {"a_le_slow", "(i64, i64) -> i64"},
+    {"a_gt_slow", "(i64, i64) -> i64"}, {"a_ge_slow", "(i64, i64) -> i64"},
+    {"a_band_slow", "(i64, i64) -> i64"}, {"a_bor_slow", "(i64, i64) -> i64"},
+    {"a_bxor_slow", "(i64, i64) -> i64"}, {"a_shl_slow", "(i64, i64) -> i64"},
+    {"a_shr_slow", "(i64, i64) -> i64"}, {"a_neg_slow", "(i64) -> i64"},
+    {"a_bnot_slow", "(i64) -> i64"}, {"a_not", "(i64) -> i64"},
+    {"a_truthy_raw_slow", "(i64) -> i64"},
+    {"a_unwrap", "(i64) -> i64"}, {"a_some_new", "(i64) -> i64"},
+    {"a_try_result", "(i64) -> i64"}, {"a_is_option", "(i64) -> i32"},
+    {"a_is_propagate", "(i64) -> i32"}, {"a_str", "(i64) -> i64"},
+    {"a_repr", "(i64) -> i64"}, {"a_len", "(i64) -> i64"},
+    {"a_int", "(i64) -> i64"}, {"a_float", "(i64) -> i64"},
+    {"a_bool", "(i64) -> i64"}, {"a_type_name", "(i64) -> i64"},
+    {"a_int_full", "(i64) -> i64"}, {"a_i64n", "(i64) -> i64"},
+    {"a_str_new", "(!llvm.ptr, i64) -> i64"},
+    {"a_char_new", "(!llvm.ptr, i64) -> i64"},
+    {"a_str_concat", "(i64, i64) -> i64"},
+    {"a_str_join", "(i64, !llvm.ptr) -> i64"},
+    {"a_str_joinsep", "(i64, i64, !llvm.ptr) -> i64"},
+    {"a_list_new", "(i64, !llvm.ptr) -> i64"},
+    {"a_list_append", "(i64, i64) -> i64"},
+    {"a_list_append_int", "(i64, i64) -> i64"},
+    {"a_list_from_iter", "(i64) -> i64"},
+    {"a_tuple_new", "(i64, !llvm.ptr) -> i64"},
+    {"a_dict_new", "() -> i64"}, {"a_dict_set", "(i64, i64, i64) -> i64"},
+    {"a_dict_get", "(i64, i64, i64) -> i64"},
+    {"a_dict_has", "(i64, i64) -> i64"},
+    {"a_set_new", "() -> i64"}, {"a_set_add", "(i64, i64) -> i64"},
+    {"a_range_new", "(i64, i64, i64) -> i64"},
+    {"a_range_bound", "(i64, i64) -> i64"},
+    {"a_getitem", "(i64, i64) -> i64"},
+    {"a_setitem", "(i64, i64, i64) -> i64"},
+    {"a_slice", "(i64, i64, i64, i64) -> i64"},
+    {"a_iter_new", "(i64) -> i64"},
+    {"a_iter_next", "(i64, !llvm.ptr) -> i64"},
+    {"a_contains", "(i64, i64) -> i64"},
+    {"a_fnon_new", "(i64, i64, !llvm.ptr) -> i64"},
+    {"a_closure_env_new", "(i64) -> i64"},
+    {"a_env_new", "(i64) -> i64"}, {"a_env_get", "(i64, i64) -> i64"},
+    {"a_env_set", "(i64, i64, i64) -> i64"},
+    {"a_struct_new", "(i64, i64, i64) -> i64"},
+    {"a_builtin", "(i64) -> i64"},
+    {"a_bi_call", "(i64, i64, !llvm.ptr) -> i64"},
+    {"a_call", "(i64, i64, !llvm.ptr) -> i64"},
+    {"a_method", "(i64, !llvm.ptr, i64, i64, !llvm.ptr) -> i64"},
+    {"a_getattr", "(i64, !llvm.ptr) -> i64"},
+    {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
+    {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(i64) -> i64"},
+    {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
+    {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
+    {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
+    {"a_fib_main", "(i64, i64, i64, !llvm.ptr) -> i64"},
+    {"a_fib_spawn_handle", "(i64, i64, !llvm.ptr) -> i64"},
+    {"a_fib_join_handle", "(i64) -> i64"},
+    {"a_test_main", "(i64, !llvm.ptr, !llvm.ptr) -> i32"},
+    {"a_printv", "(i64, !llvm.ptr) -> ()"},
+    {"a_eprintv", "(i64, !llvm.ptr) -> ()"},
+    {"a_println", "(i64) -> ()"}, {"a_sleep", "(i64) -> ()"},
+    {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
+    {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
+};
+
+const char* runtimeSigOf(const std::string& name) {
+  for (const auto& kv : kRuntimeSigs)
+    if (name == kv.first) return kv.second;
+  return nullptr;
+}
+
+// Renders "  llvm.func @<name>(<typed args>) -> <ret>" for a runtime sig.
+std::string runtimeDeclText(const std::string& name, const char* sig) {
+  std::string s = sig;
+  std::string args = s.substr(1, s.find(')') - 1);
+  std::string ret = s.substr(s.find("->") + 3);
+  while (!ret.empty() && ret.front() == ' ') ret.erase(ret.begin());
+  // split arg types on commas not inside <>
+  std::vector<std::string> tys;
+  {
+    std::string cur;
+    int depth = 0;
+    for (char ch : args) {
+      if (ch == '<') ++depth;
+      if (ch == '>') --depth;
+      if (ch == ',' && depth == 0) { tys.push_back(cur); cur.clear(); }
+      else cur += ch;
+    }
+    if (!cur.empty()) tys.push_back(cur);
+  }
+  std::string decl = "  llvm.func @" + name + "(";
+  for (size_t i = 0; i < tys.size(); ++i) {
+    if (i) decl += ", ";
+    decl += "%a" + std::to_string(i) + ": " + tys[i];
+  }
+  decl += ")";
+  if (ret != "()") decl += " -> " + ret;
+  return decl;
+}
+
 class MlirEmitter {
  public:
   MlirEmitter(const ModuleGraph& graph, const SemaResult& sema,
@@ -80,6 +188,36 @@ class MlirEmitter {
     emitGcRoots();
     emitMain();
     emitLambdas();  // drain last: lambdas may be created anywhere
+    if (failed_) return false;
+    out = pre_.str() + body_.str() + "}\n";
+    return true;
+  }
+
+  // Per-module emission (Mojo-style .ambc prerequisite): emit ONLY the decls
+  // owned by `moduleId` — its functions, struct ctors, globals, and a
+  // `__a_m<id>_init` fn holding its global inits + top-level stmts. All
+  // cross-module symbol tables are still collected (collectTopLevel scans the
+  // whole graph), so calls/globals/methods in other modules resolve to the
+  // same mangled symbols the whole-graph emitter produces. Program-global
+  // pieces (runtime decls, __a_gc_root_mark, __a_main_body orchestration,
+  // main/a_test_main) are NOT emitted; the consumer re-declares them.
+  bool runModule(int moduleId, std::string& out, std::string& error) {
+    if (moduleId < 0 || moduleId >= (int)graph_.modules.size()) {
+      error = "mlir backend: emitModuleMLIR: invalid module id " +
+              std::to_string(moduleId);
+      return false;
+    }
+    emitOnlyModule_ = moduleId;
+    error_ = &error;
+    collectTopLevel();
+    emitModuleOpen();
+    resolveImpls();
+    emitGlobals();
+    emitFunctions();
+    emitStructCtors();
+    emitModuleInit();
+    emitLambdas();  // drain lambdas/parfors created by this module's code
+    emitModuleDecls();  // last: scans emitted text for foreign @symbol refs
     if (failed_) return false;
     out = pre_.str() + body_.str() + "}\n";
     return true;
@@ -115,6 +253,10 @@ class MlirEmitter {
   // module-member value resolution (os.name, os.path, ...)
   std::map<std::pair<int, std::string>, std::string> moduleGlobals_;
   int curModuleId_ = -1;  // module owning the code currently being emitted
+  // >=0 restricts emission to one module's owned decls (runModule path);
+  // symbol tables still cover the whole graph so cross-module references
+  // resolve to identical mangled names. -1 = whole-graph mode (emitMLIR).
+  int emitOnlyModule_ = -1;
   // moduleId -> exported local name -> (source moduleId, original name)
   std::map<int, std::map<std::string, std::pair<int, std::string>>> moduleReexports_;
   // from-imported module-level values: local name -> (moduleId, member name);
@@ -162,6 +304,12 @@ class MlirEmitter {
   std::vector<std::pair<const FnDecl*, std::string>> methodFns_;
   std::unordered_map<std::string, const FnDecl*> methodDecls_;  // cname -> decl
   std::vector<const ImplDecl*> pendingImpls_;
+  // ImplDecl -> owning module (ImplDecl has no moduleId field). Used only by
+  // per-module emission to attribute impl methods, which Sema leaves at
+  // moduleId=-1.
+  std::unordered_map<const ImplDecl*, int> implModule_;
+  // ImplDecl method FnDecl -> owning module (filled by resolveImpls).
+  std::unordered_map<const FnDecl*, int> implMethodModule_;
   struct PendingLambda {
     const LambdaExpr* expr;
     std::vector<std::string> captures;  // names, sorted
@@ -630,7 +778,9 @@ class MlirEmitter {
             structs_.push_back(ms);
           }
         } else if (s->kind == StmtKind::ImplDecl) {
-          pendingImpls_.push_back(static_cast<const ImplDecl*>(s.get()));
+          const ImplDecl* impl = static_cast<const ImplDecl*>(s.get());
+          pendingImpls_.push_back(impl);
+          implModule_[impl] = mod.id;
         } else if (s->kind == StmtKind::FromImport) {
           const FromImportStmt* fi = static_cast<const FromImportStmt*>(s.get());
           if (fi->pythonModuleImport || !fi->pythonModule.empty()) {
@@ -694,107 +844,28 @@ class MlirEmitter {
 
   void emitDecls() {
     // (sig parsed below into llvm.func declarations)
-    static const std::pair<const char*, const char*> sigs[] = {
-        {"a_add_slow", "(i64, i64) -> i64"}, {"a_sub_slow", "(i64, i64) -> i64"},
-        {"a_mul_slow", "(i64, i64) -> i64"}, {"a_div_slow", "(i64, i64) -> i64"},
-        {"a_floordiv_slow", "(i64, i64) -> i64"},
-        {"a_mod_slow", "(i64, i64) -> i64"}, {"a_pow", "(i64, i64) -> i64"},
-        {"a_eq_slow", "(i64, i64) -> i64"}, {"a_ne_slow", "(i64, i64) -> i64"},
-        {"a_lt_slow", "(i64, i64) -> i64"}, {"a_le_slow", "(i64, i64) -> i64"},
-        {"a_gt_slow", "(i64, i64) -> i64"}, {"a_ge_slow", "(i64, i64) -> i64"},
-        {"a_band_slow", "(i64, i64) -> i64"}, {"a_bor_slow", "(i64, i64) -> i64"},
-        {"a_bxor_slow", "(i64, i64) -> i64"}, {"a_shl_slow", "(i64, i64) -> i64"},
-        {"a_shr_slow", "(i64, i64) -> i64"}, {"a_neg_slow", "(i64) -> i64"},
-        {"a_bnot_slow", "(i64) -> i64"}, {"a_not", "(i64) -> i64"},
-        {"a_truthy_raw_slow", "(i64) -> i64"},
-        {"a_unwrap", "(i64) -> i64"}, {"a_some_new", "(i64) -> i64"},
-        {"a_try_result", "(i64) -> i64"}, {"a_is_option", "(i64) -> i32"},
-        {"a_is_propagate", "(i64) -> i32"}, {"a_str", "(i64) -> i64"},
-        {"a_repr", "(i64) -> i64"}, {"a_len", "(i64) -> i64"},
-        {"a_int", "(i64) -> i64"}, {"a_float", "(i64) -> i64"},
-        {"a_bool", "(i64) -> i64"}, {"a_type_name", "(i64) -> i64"},
-        {"a_int_full", "(i64) -> i64"}, {"a_i64n", "(i64) -> i64"},
-        {"a_str_new", "(!llvm.ptr, i64) -> i64"},
-        {"a_char_new", "(!llvm.ptr, i64) -> i64"},
-        {"a_str_concat", "(i64, i64) -> i64"},
-        {"a_str_join", "(i64, !llvm.ptr) -> i64"},
-        {"a_str_joinsep", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_list_new", "(i64, !llvm.ptr) -> i64"},
-        {"a_list_append", "(i64, i64) -> i64"},
-        {"a_list_append_int", "(i64, i64) -> i64"},
-        {"a_list_from_iter", "(i64) -> i64"},
-        {"a_tuple_new", "(i64, !llvm.ptr) -> i64"},
-        {"a_dict_new", "() -> i64"}, {"a_dict_set", "(i64, i64, i64) -> i64"},
-        {"a_dict_get", "(i64, i64, i64) -> i64"},
-        {"a_dict_has", "(i64, i64) -> i64"},
-        {"a_set_new", "() -> i64"}, {"a_set_add", "(i64, i64) -> i64"},
-        {"a_range_new", "(i64, i64, i64) -> i64"},
-        {"a_range_bound", "(i64, i64) -> i64"},
-        {"a_getitem", "(i64, i64) -> i64"},
-        {"a_setitem", "(i64, i64, i64) -> i64"},
-        {"a_slice", "(i64, i64, i64, i64) -> i64"},
-        {"a_iter_new", "(i64) -> i64"},
-        {"a_iter_next", "(i64, !llvm.ptr) -> i64"},
-        {"a_contains", "(i64, i64) -> i64"},
-        {"a_fnon_new", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_closure_env_new", "(i64) -> i64"},
-        {"a_env_new", "(i64) -> i64"}, {"a_env_get", "(i64, i64) -> i64"},
-        {"a_env_set", "(i64, i64, i64) -> i64"},
-        {"a_struct_new", "(i64, i64, i64) -> i64"},
-        {"a_builtin", "(i64) -> i64"},
-        {"a_bi_call", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_call", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_method", "(i64, !llvm.ptr, i64, i64, !llvm.ptr) -> i64"},
-        {"a_getattr", "(i64, !llvm.ptr) -> i64"},
-        {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
-        {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(i64) -> i64"},
-        {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
-        {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
-        {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
-        {"a_fib_main", "(i64, i64, i64, !llvm.ptr) -> i64"},
-        {"a_fib_spawn_handle", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_fib_join_handle", "(i64) -> i64"},
-        {"a_test_main", "(i64, !llvm.ptr, !llvm.ptr) -> i32"},
-        {"a_printv", "(i64, !llvm.ptr) -> ()"},
-        {"a_eprintv", "(i64, !llvm.ptr) -> ()"},
-        {"a_println", "(i64) -> ()"}, {"a_sleep", "(i64) -> ()"},
-        {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
-        {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
-    };
-    for (const auto& kv : sigs) {
-      std::string sig = kv.second;
-      std::string args = sig.substr(1, sig.find(')') - 1);
-      std::string ret = sig.substr(sig.find("->") + 3);
-      while (!ret.empty() && ret.front() == ' ') ret.erase(ret.begin());
-      // split arg types on commas not inside <>
-      std::vector<std::string> tys;
-      {
-        std::string cur;
-        int depth = 0;
-        for (char ch : args) {
-          if (ch == '<') ++depth;
-          if (ch == '>') --depth;
-          if (ch == ',' && depth == 0) { tys.push_back(cur); cur.clear(); }
-          else cur += ch;
-        }
-        if (!cur.empty()) tys.push_back(cur);
-      }
-      std::string decl = "  llvm.func @" + std::string(kv.first) + "(";
-      for (size_t i = 0; i < tys.size(); ++i) {
-        if (i) decl += ", ";
-        decl += "%a" + std::to_string(i) + ": " + tys[i];
-      }
-      decl += ")";
-      if (ret != "()") decl += " -> " + ret;
-      pre_ << decl << "\n";
-    }
+    const auto& sigs = kRuntimeSigs;
+    for (const auto& kv : sigs)
+      pre_ << runtimeDeclText(kv.first, kv.second) << "\n";
   }
+
 
   void emitGlobals() {
     rootSyms_.clear();
     std::vector<std::string> syms;
-    for (const auto& kv : globals_) syms.push_back(kv.second);
-    for (const auto& kv : moduleGlobals_) syms.push_back(kv.second);
+    if (emitOnlyModule_ < 0) {
+      // whole-graph: globals_ + moduleGlobals_ (dedup below)
+      for (const auto& kv : globals_) syms.push_back(kv.second);
+    }
+    for (const auto& kv : moduleGlobals_) {
+      // per-module mode: only this module's globals are defined here; other
+      // modules' globals are declared by their own .ambc units. In whole-
+      // graph mode moduleGlobals_ already covers every module's lets and
+      // implicit-assign globals, so globals_ adds nothing new there either
+      // (it is kept for exact parity with the original union).
+      if (emitOnlyModule_ >= 0 && kv.first.first != emitOnlyModule_) continue;
+      syms.push_back(kv.second);
+    }
     std::sort(syms.begin(), syms.end());
     syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
     rootSyms_ = syms;
@@ -935,6 +1006,7 @@ class MlirEmitter {
           fprintf(stderr, "[modfns] mod=%d fn=%s\n", kv.first.first, kv.first.second.c_str());
     }
     for (auto& kv : fnDecls_) {
+      if (emitOnlyModule_ >= 0 && kv.second != emitOnlyModule_) continue;
       const FnDecl* fn = kv.first;
       beginFunction(fnDeclCnames_[fn], fn);
       bool sv = inFnBody_; inFnBody_ = true;
@@ -945,6 +1017,16 @@ class MlirEmitter {
       if (failed_) return;
     }
     for (auto& mf : methodFns_) {
+      // Ownership: struct methods carry moduleId from Sema; impl methods keep
+      // -1 and are attributed via implMethodModule_ (the module holding the
+      // `impl` block). Unattributed methods fall back to the requested module
+      // so they are never silently dropped in split mode.
+      int owner = mf.first->moduleId;
+      if (owner < 0) {
+        auto im = implMethodModule_.find(mf.first);
+        owner = im != implMethodModule_.end() ? im->second : emitOnlyModule_;
+      }
+      if (emitOnlyModule_ >= 0 && owner != emitOnlyModule_) continue;
       beginFunction(mf.second, mf.first);
       bool sv = inFnBody_; inFnBody_ = true;
       bool suv = inUserFn_; inUserFn_ = true;
@@ -957,6 +1039,7 @@ class MlirEmitter {
 
   void resolveImpls() {
     for (const ImplDecl* im : pendingImpls_) {
+      int implMod = implModule_.count(im) ? implModule_[im] : -1;
       if (!im->traitName.empty() && im->traitName != im->targetName) continue;
       for (auto& ms : structs_) {
         bool match = ms.displayName == im->targetName ||
@@ -969,6 +1052,7 @@ class MlirEmitter {
           ms.methods.push_back({m->name, mc});
           methodFns_.push_back({m.get(), mc});
           methodDecls_[mc] = m.get();
+          if (implMod >= 0) implMethodModule_[m.get()] = implMod;
         }
         break;
       }
@@ -979,6 +1063,7 @@ class MlirEmitter {
   // Mirrors LlvmEmitter::emitStructCtorBody (methods dict empty in v1).
   void emitStructCtors() {
     for (const MlStruct& ms : structs_) {
+      if (emitOnlyModule_ >= 0 && ms.moduleId != emitOnlyModule_) continue;
       FnDecl dummy;
       beginFunction(ms.ctorCname, &dummy);
       std::string nameV = stringLiteralAval(ms.displayName);
@@ -1051,6 +1136,20 @@ class MlirEmitter {
     }
     endFunction();
   }
+
+  // Per-module emission helpers (runModule path; emitOnlyModule_ >= 0).
+  // emitModuleDecls: scans the emitted text for `@symbol` references and
+  // inserts `llvm.func` declarations (no body) for every referenced symbol
+  // this module does not itself define — the consumer links per-module
+  // objects, so calls to `__a_f_m<id>_*`/`__a_m*`/`__a_ctor_*` owned by
+  // other modules must be declared. Runs AFTER all bodies are emitted so
+  // locally-defined symbols (incl. `__a_lam_*`/`__a_pf_*` helpers) are known
+  // and never redeclared.
+  void emitModuleDecls();
+  // emitModuleInit: `__a_m<id>_init` — this module's global initializers and
+  // top-level statements, in source order. This is the per-module unit the
+  // program-global `__a_main_body` would call; see emitModuleMLIR docs.
+  void emitModuleInit();
 
   void emitMain() {
     if (testMode_) { emitTestMain(); return; }
@@ -2336,6 +2435,7 @@ class MlirEmitter {
     while (!failed_ && !pendingLambdas_.empty()) {
       PendingLambda pl = pendingLambdas_.back();
       pendingLambdas_.pop_back();
+      if (emitOnlyModule_ >= 0 && pl.moduleId != emitOnlyModule_) continue;
       const LambdaExpr& x = *pl.expr;
       FnDecl dummy;
       dummy.moduleId = pl.moduleId;
@@ -2360,6 +2460,7 @@ class MlirEmitter {
     while (!failed_ && !pendingParfors_.empty()) {
       PendingParfor pf = pendingParfors_.back();
       pendingParfors_.pop_back();
+      if (emitOnlyModule_ >= 0 && pf.moduleId != emitOnlyModule_) continue;
       emitParforFn(pf);
     }
   }
@@ -3081,6 +3182,104 @@ bool emitMLIR(const ModuleGraph& graph, const SemaResult& sema,
               const std::string* testFilter) {
   MlirEmitter emitter(graph, sema, testMode, testFilter ? *testFilter : "");
   return emitter.run(out, error);
+}
+
+// ---------------------------------------------------------------------------
+// Per-module emission (runModule path)
+// ---------------------------------------------------------------------------
+
+void MlirEmitter::emitModuleDecls() {
+  // Collect every @symbol referenced by the emitted text, then subtract the
+  // symbols this unit defines itself (llvm.func bodies + llvm.mlir.global
+  // defs). What remains are foreign definitions (other modules' fns,
+  // methods, ctors) plus `a_*` runtime symbols — the runtime block is the
+  // consumer's job, so `a_*` names are skipped here.
+  const std::string text = pre_.str() + body_.str();
+  std::set<std::string> defined, referenced;
+  {
+    // function + global definitions: `llvm.func @sym(` ... `{` or
+    // `llvm.mlir.global [private constant] @sym(` — match the op name first
+    // so calls/addressofs of the same symbol don't count as definitions.
+    static const std::regex defRe(
+        "llvm\\.(?:func|mlir\\.global)[^@\\n]*@([A-Za-z_][A-Za-z0-9_]*)");
+    // any @symbol use (call target, addressof, global ref)
+    static const std::regex refRe("@([A-Za-z_][A-Za-z0-9_]*)");
+    for (std::sregex_iterator it(text.begin(), text.end(), defRe), end; it != end; ++it)
+      defined.insert((*it)[1].str());
+    for (std::sregex_iterator it(text.begin(), text.end(), refRe), end; it != end; ++it)
+      referenced.insert((*it)[1].str());
+  }
+  std::vector<std::string> decls;
+  std::vector<std::pair<std::string, std::string>> runtimeDecls;
+  for (const std::string& sym : referenced) {
+    if (defined.count(sym)) continue;
+    if (sym.rfind("a_", 0) == 0) {
+      // Runtime symbols: the per-module unit must still declare them with
+      // their real signatures — each .ambc module is self-contained MLIR
+      // text and llvm.call requires the callee to resolve in scope. The
+      // runtime block is only *defined* once per link unit (consumer's
+      // job), but the llvm.func declaration lives here.
+      const char* sig = runtimeSigOf(sym);
+      if (sig) runtimeDecls.emplace_back(sym, sig);
+      continue;
+    }
+    decls.push_back(sym);
+  }
+  if (decls.empty() && runtimeDecls.empty()) return;
+  std::sort(decls.begin(), decls.end());
+  std::sort(runtimeDecls.begin(), runtimeDecls.end());
+  std::ostringstream ins;
+  for (const auto& rd : runtimeDecls)
+    ins << runtimeDeclText(rd.first, rd.second.c_str()) << "\n";
+  for (const std::string& sym : decls)
+    ins << "  llvm.func @" << sym << "(%argv: !llvm.ptr) -> i64\n";
+  // insert right after `module {\n` at the top of pre_
+  std::string p = pre_.str();
+  auto nl = p.find('\n');
+  if (nl == std::string::npos) {
+    p += ins.str();
+  } else {
+    p.insert(nl + 1, ins.str());
+  }
+  pre_.str("");
+  pre_ << p;
+}
+
+void MlirEmitter::emitModuleInit() {
+  // `__a_m<id>_init`: this module's share of what whole-graph `__a_main_body`
+  // runs — global initializers first, then top-level statements, in module
+  // order. The entry fn's body is NOT included (it is program-global, owned
+  // by the consumer's main/__a_main_body). Mirrors emitMainBody's structure.
+  FnDecl dummy;
+  dummy.moduleId = emitOnlyModule_;
+  const std::string sym = "__a_m" + std::to_string(emitOnlyModule_) + "_init";
+  beginFunction(sym, &dummy);
+  for (const auto& gi : globalInits_) {
+    if (gi.moduleId != emitOnlyModule_) continue;
+    curModuleId_ = gi.moduleId;
+    if (gi.stmt->init) {
+      std::string v = evalExpr(*gi.stmt->init);
+      std::string g = globalSymFor(gi.stmt->name);
+      if (g.empty()) g = globals_[gi.stmt->name];
+      std::string r = nv();
+      fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+      store(r, v);
+    }
+    if (failed_) return;
+  }
+  for (const auto& ts : topStmts_) {
+    if (ts.moduleId != emitOnlyModule_) continue;
+    curModuleId_ = ts.moduleId;
+    emitStmt(*ts.stmt);
+    if (failed_) return;
+  }
+  endFunction();
+}
+
+bool emitModuleMLIR(const ModuleGraph& graph, const SemaResult& sema,
+                    int moduleId, std::string& out, std::string& error) {
+  MlirEmitter emitter(graph, sema);
+  return emitter.runModule(moduleId, out, error);
 }
 
 }  // namespace a

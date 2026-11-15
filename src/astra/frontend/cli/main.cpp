@@ -314,13 +314,9 @@ int main(int argc, char** argv) {
       return a::runPrecompileCli(argc, argv, std::cout, std::cerr);
     }
     if (sub == "mlir-opt") {
-      // runMlirOptCli expects argv[0] == program and the args AFTER the
-      // subcommand name; rebuild a shifted argv.
-      std::vector<char*> shifted;
-      shifted.push_back(argv[0]);
-      for (int i = 2; i < argc; ++i) shifted.push_back(argv[i]);
-      shifted.push_back(nullptr);
-      return a::runMlirOptCli(argc - 1, shifted.data(), std::cout, std::cerr);
+      // runMlirOptCli expects the arguments AFTER the subcommand name
+      // (driver.hpp contract): pass argv[2..] verbatim.
+      return a::runMlirOptCli(argc - 2, argv + 2, std::cout, std::cerr);
     }
   }
   Options options;

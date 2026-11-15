@@ -28,6 +28,7 @@
 #include "mlir/Transforms/Passes.h"
 
 #include "codegen.hpp"  // a::initMLIR
+#include "pipeline.hpp"   // a::registerAllDialects / buildAOptPipeline
 
 namespace a {
 
@@ -39,6 +40,9 @@ void registerCoreDialects(mlir::MLIRContext& ctx) {
                   mlir::cf::ControlFlowDialect, mlir::scf::SCFDialect,
                   mlir::arith::ArithDialect, mlir::index::IndexDialect,
                   mlir::vector::VectorDialect>();
+  // The `a` dialect (src/astra/mlir/include/A) so `a.` ops parse; the
+  // lowering pass turns them into llvm dialect before codegen.
+  registerADialect(ctx);
   ctx.appendDialectRegistry(registry);
   ctx.loadDialect<mlir::func::FuncDialect, mlir::LLVM::LLVMDialect,
                   mlir::cf::ControlFlowDialect, mlir::scf::SCFDialect,
@@ -106,14 +110,14 @@ int nativeCompileMlirTextToObject(const std::string& mlirText,
     return 1;
   }
 
-  // Lightweight MLIR-level cleanup before LLVM translation: canonicalizer +
-  // CSE on the llvm dialect module. The heavy optimization still happens in
-  // the LLVM opt pipeline inside mlirModuleToObject.
+  // Full A opt/lowering pipeline: canonicalize+CSE, mem2reg/SROA at
+  // optLevel>0, and the `a` -> `llvm` lowering when the input uses the
+  // `a` dialect (no-op for llvm-dialect-only modules).
   mlir::PassManager pm(module->getContext());
-  pm.addPass(mlir::createCanonicalizerPass());
-  pm.addPass(mlir::createCSEPass());
+  a::registerAPasses();
+  a::buildAOptPipeline(pm, optLevel, /*emitLlvmDialect=*/true);
   if (failed(pm.run(module->getOperation()))) {
-    err << "error: mlir backend: MLIR canonicalize/cse pipeline failed\n";
+    err << "error: mlir backend: MLIR pass pipeline failed\n";
     return 1;
   }
 
@@ -128,6 +132,7 @@ std::string mlirModuleToLlvmIrText(mlir::ModuleOp module,
     return {};
   }
   initMLIR();  // registers all MLIR translations (idempotent)
+  mlir::registerBuiltinDialectTranslation(*module.getContext());
   mlir::registerLLVMDialectTranslation(*module.getContext());
 
   llvm::LLVMContext llvmCtx;

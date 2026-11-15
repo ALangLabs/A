@@ -8,11 +8,13 @@
 # CONFIG) or MLIR_DIR set) and to provide the `a_mlir_core` target
 # (../CMakeLists.txt); falls back to `a_mlir` for standalone use.
 
-# Pass sources. ALowerToLLVM.cpp intentionally matches `a` dialect ops by
-# name so it compiles before the dialect headers exist; once they land the
-# string dispatch should be replaced with typed accessors (see file header).
+# Pass sources. ALowerTyped.cpp uses the generated `a` dialect headers
+# (typed accessors for a.to_aval/a.from_aval); ALowerToLLVM.cpp intentionally
+# matches `a` dialect ops by name so it compiles without them.
 set(A_MLIR_PASS_SOURCES
   ALowerToLLVM.cpp
+  ALowerTyped.cpp
+  ALowerTyped.hpp
 )
 
 # The parent scope defines `a_mlir_core` (see ../CMakeLists.txt). Fall back

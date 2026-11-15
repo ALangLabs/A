@@ -56,6 +56,7 @@ endif()
 # back (pipeline.cpp forward-declares the native entry points and the `a`
 # executable resolves them from a_mlir_core).
 set(A_MLIR_CORE_SOURCES
+    ambc.cpp
     bytecode.cpp
     codegen.cpp
     native.cpp
@@ -65,6 +66,7 @@ set(A_MLIR_CORE_SOURCES
     dialect/AOps.cpp
     dialect/ATypes.cpp
     passes/ALowerToLLVM.cpp
+    passes/ALowerTyped.cpp
 )
 
 # Frontend-coupled sources: only meaningful when the frontend exists.

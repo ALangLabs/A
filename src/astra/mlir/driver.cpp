@@ -124,7 +124,8 @@ std::string joinPassArgs(const std::vector<std::string> &args) {
   if (args.empty()) return {};
   std::string pipeline;
   for (size_t i = 0; i < args.size(); ++i) {
-    if (i) pipeline += ";";
+    // MLIR pass-pipeline grammar separates nested pass elements with ','.
+    if (i) pipeline += ",";
     pipeline += args[i];
   }
   return pipeline;
@@ -135,12 +136,18 @@ std::string joinPassArgs(const std::vector<std::string> &args) {
 // parsePassPipeline can consume it.
 std::string normalizePipelineText(std::string pipeline) {
   // Already fully rooted (e.g. "builtin.module(...)" or contains parens on
-  // an op name).
-  if (pipeline.find('(') != std::string::npos) return pipeline;
-  // Split top-level on ';' and wrap each bare name: `a; b` ->
-  // `builtin.module(a);builtin.module(b)` is wrong; instead wrap the whole
-  // list as `builtin.module(a;b)`.
-  return "builtin.module(" + pipeline + ")";
+  // an op name). A comma-joined list of rooted pipelines is not valid MLIR
+  // pipeline syntax, so this only supports a single rooted argument; bare
+  // names are wrapped below.
+  if (pipeline.find('(') != std::string::npos &&
+      pipeline.find(',') == std::string::npos)
+    return pipeline;
+  // Bare pass names: wrap the whole comma-separated list as
+  // `builtin.module(cse,canonicalize)`. If the list mixes rooted and bare
+  // elements the parser will reject it, which is the correct diagnostic.
+  if (pipeline.find('(') == std::string::npos)
+    return "builtin.module(" + pipeline + ")";
+  return pipeline;
 }
 
 } // namespace
@@ -382,6 +389,9 @@ int runMlirOptCli(int argc, char **argv, std::ostream &out, std::ostream &err) {
   }
 
   a::registerAPasses();
+  // Stock MLIR transform passes (cse, canonicalizer, mem2reg, ...) must be
+  // registered before parsePassPipeline can resolve bare pass names.
+  mlir::registerTransformsPasses();
 
   std::string pipelineText = joinPassArgs(passArgs);
   if (pipelineText.empty()) {

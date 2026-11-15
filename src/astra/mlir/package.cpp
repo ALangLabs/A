@@ -19,6 +19,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <vector>
 
 #include "bytecode.hpp"
 #include "diagnostics/diagnostics.hpp"
@@ -31,6 +32,14 @@
 #include "mlir/IR/OwningOpRef.h"
 
 namespace a {
+
+// Per-module emitter provided by the frontend MLIR backend
+// (src/astra/frontend/mlir/mlir_emit.cpp, owned by a parallel workstream).
+// Forward-declared here so this TU compiles before that symbol lands; the
+// declaration matches the one being added to mlir/mlir_emit.hpp.
+bool emitModuleMLIR(const ModuleGraph& graph, const SemaResult& sema,
+                    int moduleId, std::string& out, std::string& error);
+
 namespace fs = std::filesystem;
 namespace {
 
@@ -198,6 +207,13 @@ bool loadAmbcIndex(const std::string& root, AmbcIndex& index) {
     if (p.extension() != ".ambc") continue;
     fs::path src = p;
     src.replace_extension(kSourceExt);
+    // Skip .ambc files with no .astra sibling: in per-module packages the
+    // flat <stem>[-m<id>].ambc names never match a real source, and the
+    // ambc.index manifest already carries the authoritative mapping.
+    // (Whole-graph .ambc files sit next to their .astra, so this does not
+    // change existing behavior.)
+    std::error_code srcEc;
+    if (!fs::is_regular_file(src, srcEc) || srcEc) continue;
     const std::string key = canonicalKey(src.string());
     if (index.bySource.count(key)) continue; // manifest already mapped it
     index.bySource[key] = p.string();
@@ -206,12 +222,200 @@ bool loadAmbcIndex(const std::string& root, AmbcIndex& index) {
 }
 
 // ---------------------------------------------------------------------------
+// precompilePackageModules - per-module .ambc package (.mojoc model)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Absolute-ize a module path for index/meta records. module.path is the
+// loader's display path and may be relative when the entry was given
+// relative to the cwd; canonicalKey only weakly canonicalizes, so make the
+// path absolute first for stable cross-process lookups.
+std::string absoluteModulePath(const std::string& path) {
+  std::error_code ec;
+  const fs::path abs = fs::absolute(path, ec);
+  return ec ? path : abs.string();
+}
+
+// `<stem>.ambc` for unique stems, `<stem>-m<id>.ambc` for stems shared by
+// more than one module (see package.hpp "Per-module package layout").
+std::string moduleAmbcFileName(const Module& module, int stemCollisions) {
+  std::string stem = stemOf(module.path);
+  if (stemCollisions > 1) {
+    stem += "-m" + std::to_string(module.id);
+  }
+  return stem + ".ambc";
+}
+
+bool writeAmbcMeta(const fs::path& outDir, const ModuleGraph& graph,
+                   const std::vector<std::string>& ambcFiles,
+                   const std::vector<std::string>& sourcePaths,
+                   std::ostream& err) {
+  std::ofstream meta(outDir / "ambc.meta", std::ios::binary | std::ios::trunc);
+  if (!meta) {
+    err << "error: cannot write '" << (outDir / "ambc.meta") << "'\n";
+    return false;
+  }
+  meta << "# ambc.meta v1 - per-module .ambc package descriptor\n"
+       << "# format documented in src/astra/mlir/package.hpp\n"
+       << "format=ambc-modules-v1\n"
+       << "compiler=" << kAmbcVersion << "\n"
+       << "entry=" << graph.entry << "\n"
+       << "prelude=" << graph.preludeId << "\n"
+       << "init_order=";
+  for (std::size_t i = 0; i < graph.order.size(); ++i) {
+    if (i) meta << ",";
+    meta << graph.order[i];
+  }
+  meta << "\n"
+       << "module_count=" << ambcFiles.size() << "\n";
+  // `module` records in ModuleGraph::modules (deque) order; ambcFiles and
+  // sourcePaths are indexed by module id.
+  for (const Module& m : graph.modules) {
+    const int id = m.id;
+    if (id < 0 || static_cast<std::size_t>(id) >= ambcFiles.size() ||
+        ambcFiles[static_cast<std::size_t>(id)].empty()) {
+      continue;
+    }
+    meta << "module " << id << "\t" << ambcFiles[static_cast<std::size_t>(id)]
+         << "\t" << sourcePaths[static_cast<std::size_t>(id)] << "\t"
+         << m.name << "\n";
+  }
+  return static_cast<bool>(meta);
+}
+
+} // namespace
+
+int precompilePackageModules(const std::string& packageDirOrFile,
+                             const std::string& outDir,
+                             const PipelineConfig& config,
+                             std::ostream& err) {
+  std::string entry;
+  if (!resolvePackageEntry(packageDirOrFile, entry, err)) return kNoIn;
+
+  std::string source;
+  if (!readTextFile(entry, source, err)) return kNoIn;
+
+  // Full frontend pipeline once; per-module emission reuses the same
+  // checked ModuleGraph + SemaResult for every module id.
+  DiagnosticSink sink;
+  CompiledModule compiled =
+      runFrontendPipeline(entry, std::move(source), config, sink, err, err);
+  if (!compiled.ok || !compiled.graph || !compiled.sema) return kCErr;
+
+  ModuleGraph& graph = *compiled.graph;
+
+  std::error_code ec;
+  fs::create_directories(outDir, ec);
+  if (ec) {
+    err << "error: cannot create output directory '" << outDir << "': "
+        << ec.message() << "\n";
+    return kCErr;
+  }
+  const fs::path outDirPath = fs::absolute(outDir, ec);
+  const fs::path outRoot = ec ? fs::path(outDir) : outDirPath;
+
+  // Stem collision counts across all modules (prelude included).
+  std::unordered_map<std::string, int> stemCounts;
+  for (const Module& m : graph.modules) ++stemCounts[stemOf(m.path)];
+
+  const std::size_t moduleCount = graph.modules.size();
+  std::vector<std::string> ambcFiles(moduleCount);
+  std::vector<std::string> sourcePaths(moduleCount);
+
+  mlir::MLIRContext& ctx = sharedMlirContext();
+
+  // Emit + serialize each module. Iterate the deque (load order); ids are
+  // dense 0..n-1 so they index ambcFiles/sourcePaths directly.
+  for (const Module& m : graph.modules) {
+    const int id = m.id;
+    if (id < 0 || static_cast<std::size_t>(id) >= moduleCount) continue;
+
+    std::string mlirText;
+    std::string mlirError;
+    if (!emitModuleMLIR(graph, *compiled.sema, id, mlirText, mlirError)) {
+      err << "error: per-module MLIR emission failed for '" << m.path
+          << "' (module " << id << "): " << mlirError << "\n";
+      return kCErr;
+    }
+
+    std::string parseError;
+    mlir::OwningOpRef<mlir::ModuleOp> module =
+        parseMlirText(ctx, mlirText, parseError);
+    if (!module) {
+      err << "error: failed to parse emitted MLIR for '" << m.path
+          << "' (module " << id << "): " << parseError << "\n";
+      return kCErr;
+    }
+
+    const std::string fileName =
+        moduleAmbcFileName(m, stemCounts[stemOf(m.path)]);
+    const fs::path outFile = outRoot / fileName;
+    std::string bcError;
+    if (!writeModuleBytecode(*module, outFile.string(), bcError)) {
+      err << "error: failed to write bytecode package '" << outFile.string()
+          << "': " << bcError << "\n";
+      return kCErr;
+    }
+
+    ambcFiles[static_cast<std::size_t>(id)] = fileName;
+    sourcePaths[static_cast<std::size_t>(id)] = absoluteModulePath(m.path);
+  }
+
+  // ambc.index: `<ambc_file><TAB><absolute_source_path>` per line, the exact
+  // format loadAmbcIndex parses (paths relative to outDir on the .ambc side).
+  {
+    std::ofstream index(outRoot / "ambc.index",
+                        std::ios::binary | std::ios::trunc);
+    if (!index) {
+      err << "error: cannot write '" << (outRoot / "ambc.index") << "'\n";
+      return kCErr;
+    }
+    for (std::size_t id = 0; id < ambcFiles.size(); ++id) {
+      if (ambcFiles[id].empty()) continue;
+      index << ambcFiles[id] << "\t" << sourcePaths[id] << "\n";
+    }
+    if (!index) {
+      err << "error: failed writing '" << (outRoot / "ambc.index") << "'\n";
+      return kCErr;
+    }
+  }
+
+  if (!writeAmbcMeta(outRoot, graph, ambcFiles, sourcePaths, err)) {
+    return kCErr;
+  }
+  return kOk;
+}
+
+// ---------------------------------------------------------------------------
 // precompilePackage
 // ---------------------------------------------------------------------------
+
+// True when `outPath` selects per-module directory output: an existing
+// directory, a trailing path separator, or the ".ambc.d" suffix (e.g.
+// `-o foo.ambc.d`).
+bool isPerModuleOutputPath(const std::string& outPath) {
+  if (outPath.empty()) return false;
+  if (!outPath.empty() &&
+      (outPath.back() == '/' || outPath.back() == '\\')) {
+    return true;
+  }
+  if (outPath.size() >= 6 &&
+      outPath.compare(outPath.size() - 6, 6, ".ambc.d") == 0) {
+    return true;
+  }
+  std::error_code ec;
+  return fs::is_directory(outPath, ec) && !ec;
+}
 
 int precompilePackage(const std::string& packageDirOrFile,
                       const std::string& outPath, const PipelineConfig& config,
                       std::ostream& err) {
+  // Per-module (.mojoc-style) mode: `-o` names a directory.
+  if (isPerModuleOutputPath(outPath)) {
+    return precompilePackageModules(packageDirOrFile, outPath, config, err);
+  }
+
   std::string entry;
   if (!resolvePackageEntry(packageDirOrFile, entry, err)) return kNoIn;
 

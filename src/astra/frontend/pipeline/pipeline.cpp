@@ -355,6 +355,13 @@ int nativeCompileMlirTextToObject(const std::string& mlirText,
                                   std::ostream& err);
 int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
                     const std::string& runtimeLib, std::ostream& err);
+// .ambc bytecode package -> object (src/astra/mlir/ambc.cpp): the Mojo
+// `.mojoc` fast path — skips the entire frontend when a compatible
+// precompiled package sits next to the source. Weak fallback at the
+// bottom of this file covers no-MLIR builds.
+int ambcCompileToObject(const std::string& ambcPath, const std::string& arch,
+                        int optLevel, const std::string& objPath,
+                        std::ostream& err);
 
 namespace {
 
@@ -1685,6 +1692,66 @@ int nativeMlirBuild(const std::string& mlirText, const std::string& arch,
   return rc == 0 ? 0 : 1;
 }
 
+// ---- .ambc bytecode fast path ----------------------------------------------
+// A_AMBC=1: a sibling `<name>.ambc` (written by `a precompile`) is compiled
+// directly to an object and linked — parse/comptime/sema/emit are all
+// skipped, the Mojo `.mojoc` model. The package embeds the whole checked
+// module graph, so it is only as fresh as the last `a precompile`; the
+// format-version + producer check in bytecodeIsCompatible rejects packages
+// built by a different compiler/MLIR, but NOT stale dependencies — users
+// must re-run `a precompile` after changing any imported module.
+
+bool ambcEnabled() {
+#ifdef _WIN32
+  return false;
+#else
+  if (const char* v = std::getenv("A_AMBC"); v && *v == '1') return true;
+  return false;
+#endif
+}
+
+// foo.astra -> foo.ambc (mirrors a::ambcSiblingPath in mlir/package.cpp;
+// duplicated here because a_pipeline does not link a_mlir_core).
+std::string ambcPathFor(const std::string& sourcePath) {
+  std::filesystem::path p(sourcePath);
+  if (p.extension() != "." + std::string(kSourceExt)) return {};
+  p.replace_extension("ambc");
+  return p.string();
+}
+
+// Returns 0 when `outBin` was produced, 1 on a handled failure, 2 when the
+// fast path does not apply (disabled, no sibling .ambc, incompatible
+// package) and the caller should run the normal frontend pipeline.
+int ambcFastBuild(const std::string& sourcePath, const std::string& arch,
+                  int optLevel, const std::string& outBin,
+                  std::ostream& err) {
+  if (!ambcEnabled()) return 2;
+  const std::string ambc = ambcPathFor(sourcePath);
+  if (ambc.empty()) return 2;
+  std::error_code ec;
+  if (!std::filesystem::exists(ambc, ec) || ec) return 2;
+
+  std::string objPath = tempPath("llvm", "x.o");
+  int rc = ambcCompileToObject(ambc, arch, optLevel, objPath, err);
+  if (rc == 0) {
+    std::string runtimeC, runtimeDir;
+    if (!findRuntime(arch, runtimeC, runtimeDir)) {
+      err << "error: mlir backend: cannot locate A runtime (a_runtime.c)\n";
+      rc = 1;
+    } else {
+      const std::string rtLib = findRuntimeLib(arch, runtimeDir);
+      if (rtLib.empty()) {
+        err << "error: mlir backend: cannot locate libaruntime.a\n";
+        rc = 1;
+      } else {
+        rc = linkWithRuntime(objPath, outBin, rtLib, err);
+      }
+    }
+  }
+  std::filesystem::remove(objPath, ec);
+  return rc == 0 ? 0 : 1;
+}
+
 int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::ostream& err,
                   bool testMode = false, int optimizationLevel = 3,
                   const std::string* keepBin = nullptr,
@@ -1871,6 +1938,19 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
       std::filesystem::create_directories(std::filesystem::path(preBin).parent_path(), ec2);
     }
   }
+  // .ambc fast path: sibling precompiled package -> object -> link -> run,
+  // skipping the frontend entirely (A_AMBC=1).
+  if (td.native) {
+    const std::string runPath = tempPath("bin");
+    int arc = ambcFastBuild(path, td.arch, config.optimizationLevel, runPath, err);
+    if (arc == 0) {
+      int hit = runBinary(runPath);
+      std::error_code ec;
+      std::filesystem::remove(runPath, ec);
+      return hit < 0 ? kCErr : hit;
+    }
+    if (arc == 1) return kCErr;
+  }
   std::string diagCapture;
   {
     std::ostringstream diagStream;
@@ -1974,6 +2054,34 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     }
   }
   std::string src; if(!readAll(path,src,err)) return kNoIn;
+  // .ambc fast path (A_AMBC=1): compile the sibling precompiled package
+  // straight to the output binary, skipping the frontend. Target is
+  // resolved early here only for the ambc attempt; the normal path
+  // re-resolves it below as before.
+  if (ambcEnabled()) {
+    TargetDesc atd;
+    if (resolveTarget(config.target, atd, err) && atd.native) {
+      const std::string tmpOut = tempPath("bin");
+      int arc = ambcFastBuild(path, atd.arch, config.optimizationLevel,
+                              tmpOut, err);
+      if (arc == 0) {
+        std::error_code ec;
+        std::filesystem::rename(tmpOut, outputPath, ec);
+        if (ec) {
+          err << "error: mlir backend: cannot move '" << tmpOut << "' to '"
+              << outputPath << "': " << ec.message() << "\n";
+          std::filesystem::remove(tmpOut, ec);
+          return kCErr;
+        }
+        return 0;
+      }
+      if (arc == 1) {
+        std::error_code ec;
+        std::filesystem::remove(tmpOut, ec);
+        return kCErr;
+      }
+    }
+  }
   DiagnosticSink sink; auto m=runFrontendPipeline(path,std::move(src),config,sink,err,err); if(!m.ok) return kCErr;
   // `a build`: the LLVM backend is the only native backend and is
   // host-only — a non-host target is a hard error.
@@ -2254,6 +2362,15 @@ __attribute__((weak)) int nativeCompileMlirTextToObject(
   (void)mlirText; (void)arch; (void)optLevel; (void)objPath;
   err << "error: mlir backend: in-process MLIR backend unavailable "
          "(built without MLIR dev files); unset A_MLIR_NATIVE\n";
+  return 1;
+}
+
+__attribute__((weak)) int ambcCompileToObject(
+    const std::string& ambcPath, const std::string& arch, int optLevel,
+    const std::string& objPath, std::ostream& err) {
+  (void)ambcPath; (void)arch; (void)optLevel; (void)objPath;
+  err << "error: ambc backend: in-process MLIR backend unavailable "
+         "(built without MLIR dev files); unset A_AMBC\n";
   return 1;
 }
 

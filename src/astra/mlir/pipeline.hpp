@@ -29,8 +29,8 @@ void registerADialect(mlir::MLIRContext &ctx);
 /// Idempotent: dialects already loaded on the context are skipped by MLIR.
 void registerAllDialects(mlir::MLIRContext &ctx);
 
-/// Registers the A-specific passes (currently `a-lower-to-llvm`) with the
-/// global pass registry so PassManager string pipelines and
+/// Registers the A-specific passes (`a-lower-typed`, `a-lower-to-llvm`)
+/// with the global pass registry so PassManager string pipelines and
 /// mlir::parsePassPipeline can find them. Idempotent.
 void registerAPasses();
 
@@ -38,8 +38,9 @@ void registerAPasses();
 ///   - canonicalizer + CSE always;
 ///   - mem2reg + SROA when optLevel > 0 (followed by another
 ///     canonicalize/CSE cleanup);
-///   - the `a` -> `llvm` lowering pass when `emitLlvmDialect` is true
-///     (followed by canonicalize/CSE).
+///   - the `a` -> `llvm` lowering passes when `emitLlvmDialect` is true:
+///     `a-lower-typed` (M1 boxing ops) then `a-lower-to-llvm` (followed by
+///     canonicalize/CSE).
 /// `optLevel` mirrors `-O<n>` (0..3). Does NOT add nested pipelines; callers
 /// composing this into a larger pipeline may add their own.
 void buildAOptPipeline(mlir::PassManager &pm, int optLevel,

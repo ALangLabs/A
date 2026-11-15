@@ -200,6 +200,114 @@ def AReturnOp : A_Op<"return",
 }
 
 //===----------------------------------------------------------------------===//
+// a.to_aval / a.from_aval: boxing boundary for typed scalars (phase 2 / M1)
+//===----------------------------------------------------------------------===//
+
+// `a.to_aval` boxes a typed scalar into the `!a.aval` tagged-i64 payload.
+// Operand and result are the *only* types allowed: any M1 scalar
+// (`iN` integer, `fN` float, `i1` bool) in, `!a.aval` out.
+//
+//   %b = a.to_aval %x : i64 -> !a.aval
+//   %f = a.to_aval %d : f64 -> !a.aval
+//   %t = a.to_aval %c : i1 -> !a.aval
+//
+// Boxing semantics mirror the phase-1 emitter/runtime
+// (src/astra/frontend/mlir/mlir_emit.cpp `avalInt`/`avalDbl`/`avalBool`,
+// src/astra/runtime/a_runtime.h `a_mkint`/`a_mkdouble`):
+//   iN  : extended to i64 (zext when `uvalue` is set, sext otherwise; for
+//         N < 64 the emitter's `uN` spellings arrive as zext too), then if
+//         -2^46 <= v < 2^46 encoded inline as
+//         `A_TAG | (((v << 1) | 1) & 0x0000FFFFFFFFFFFF)`; otherwise lowered
+//         to `llvm.call @a_i64n(i64) -> i64` (the full-range heap-boxed
+//         integer path). NOTE: for `i64` operands the emitter's `uvalue`
+//         attribute is the only signedness signal; when absent the value is
+//         treated as signed (the common `int` case).
+//   fN  : extended to f64 (fpext) if narrower, NaN canonicalized (any NaN
+//         becomes the quiet NaN 0x7FF8000000000000, matching runtime
+//         `mkdouble`, so NaN payloads cannot collide with the tag space),
+//         then bitcast to i64 -- the aval double payload is the raw f64 bit
+//         pattern.
+//   i1  : `icmp eq` against 1 then select kAvalTrue (A_TAG|6) / kAvalFalse
+//         (A_TAG|4).
+//
+// `a.to_aval` on an `!a.aval` operand is the identity (verifier-admitted
+// no-op; `a-lower-typed` forwards the operand).
+//
+// Lowering: emitted inline by the `a-lower-typed` pass (docs/
+// mlir-typed-values-design.md M1); never reaches `a-lower-to-llvm`.
+def AToAvalOp : A_Op<"to_aval", [Pure]> {
+  let summary = "box a typed scalar into !a.aval";
+  let description = [{
+    Converts a phase-2 unboxed scalar (`iN`, `fN`, or `i1`) into the boxed
+    `!a.aval` representation (tagged i64). See the op comment block above for
+    the exact encoding. `uvalue`, when present, marks an unsigned integer
+    operand (the only signedness signal for `i64`; narrower widths use
+    zext/sext per this flag as well).
+  }];
+
+  let arguments = (ins
+    AnyType:$value,
+    OptionalAttr<I64Attr>:$uvalue);
+  let results = (outs AVAL:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value) `->` type(results)
+  }];
+
+  let hasVerifier = 1;
+}
+
+// `a.from_aval` unboxes an `!a.aval` into a typed scalar. The result type is
+// the *target* scalar type (`iN`, `fN`, or `i1`); the operand must be
+// `!a.aval`.
+//
+//   %x = a.from_aval %a : !a.aval -> i64
+//   %d = a.from_aval %a : !a.aval -> f64
+//   %c = a.from_aval %a : !a.aval -> i1
+//
+// Decoding (per docs/mlir-typed-values-design.md §3):
+//   iN  : inline ints (tag bits set and payload bit0 == 1) decode as
+//         `(payload >> 1)` with sign extension from bit 46, then
+//         trunc/sext to iN. Any other aval word (notably heap-boxed T_INT64
+//         values produced by `a_i64n`) goes through `llvm.call
+//         @a_int_full(i64) -> i64`, which unboxes inline and boxed ints and
+//         panics on non-ints -- the *unchecked ABI unpack*: it is only
+//         legal where Sema proves the value is that scalar (function call
+//         boundaries, typed loads). Mid-expression checked narrowing is a
+//         separate future op (`a.unbox<T>`), not this one.
+//   fN  : requires an untagged aval (top 16 bits clear); the i64 word is
+//         bitcast to f64 then fptrunc/fpext to fN. Tag mismatch traps.
+//   i1  : compares the aval word against kAvalTrue/kAvalFalse
+//         (A_TAG|6 / A_TAG|4); tag mismatch traps.
+//
+// The `uvalue` attribute marks unsigned decode for `iN` results (zext instead
+// of sext); for `i64` it is required to distinguish u64 from int.
+//
+// Lowering: emitted inline by the `a-lower-typed` pass; never reaches
+// `a-lower-to-llvm`.
+def AFromAvalOp : A_Op<"from_aval", [Pure]> {
+  let summary = "unbox !a.aval into a typed scalar";
+  let description = [{
+    Unchecked ABI unpack of a boxed `!a.aval` into the scalar result type.
+    Only emitted where Sema has proven the dynamic type (see the op comment
+    block); int operands that are not inline ints are unboxed via
+    `@a_int_full`, other tag mismatches are `llvm.trap` at runtime, not a
+    recoverable error. `uvalue` marks unsigned integer decode.
+  }];
+
+  let arguments = (ins
+    AVAL:$value,
+    OptionalAttr<I64Attr>:$uvalue);
+  let results = (outs AnyType:$result);
+
+  let assemblyFormat = [{
+    $value attr-dict `:` type($value) `->` type(results)
+  }];
+
+  let hasVerifier = 1;
+}
+
+//===----------------------------------------------------------------------===//
 // Structured control flow (mirrors scf.for/scf.while semantics)
 //===----------------------------------------------------------------------===//
 

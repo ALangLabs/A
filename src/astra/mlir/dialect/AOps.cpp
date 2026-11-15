@@ -32,6 +32,17 @@ bool isBoxedOrPtr(Type type) {
   return isa<AVALType, APtrType>(type);
 }
 
+/// Returns true if `type` is an M1 unboxed scalar: any integer width up to
+/// i64 (i1 booleans included), or any float width up to f64. The aval ABI
+/// payload is a single i64 word, so wider scalars have no boxing encoding.
+bool isM1Scalar(Type type) {
+  if (auto intTy = dyn_cast<IntegerType>(type))
+    return intTy.getWidth() <= 64;
+  if (auto floatTy = dyn_cast<FloatType>(type))
+    return floatTy.getWidth() <= 64;
+  return false;
+}
+
 } // namespace
 
 //===----------------------------------------------------------------------===//
@@ -507,6 +518,34 @@ LogicalResult AArraySetOp::verify() {
   if (auto ty = getArrayTypeAttr())
     if (!isa<AArrayType>(ty.getValue()))
       return emitOpError() << "array_type must be an !a.array type";
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// a.to_aval / a.from_aval (phase-2 boxing boundary, M1)
+//===----------------------------------------------------------------------===//
+
+LogicalResult AToAvalOp::verify() {
+  // Only M1 scalars may be boxed; an !a.aval operand is the identity (the
+  // pass folds it), and aggregates/pointers have no M1 unboxed form.
+  if (!isM1Scalar(getValue().getType()) &&
+      !isa<AVALType>(getValue().getType()))
+    return emitOpError() << "operand must be an unboxed scalar (iN/fN/i1) or "
+                            "!a.aval, got "
+                         << getValue().getType();
+  return success();
+}
+
+LogicalResult AFromAvalOp::verify() {
+  if (!isa<AVALType>(getValue().getType()))
+    return emitOpError() << "operand must be !a.aval, got "
+                         << getValue().getType();
+  // Unchecked ABI unpack: only scalars are legal result types. Anything else
+  // (aggregates, pointers, aval) is either a no-op or needs the checked
+  // `a.unbox<T>` op that phase 2 has not introduced yet.
+  if (!isM1Scalar(getResult().getType()))
+    return emitOpError() << "result must be an unboxed scalar (iN/fN/i1), got "
+                         << getResult().getType();
   return success();
 }
 

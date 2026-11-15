@@ -95,9 +95,9 @@ void registerDialect(DialectRegistry &registry) { registry.insert<ADialect>(); }
 void ADialect::initialize() {
   addOperations<AAddressofOp, AAllocaOp, AArrayGetOp, AArraySetOp, ACallOp,
                 AConditionOp, AConstOp, AFibJoinOp, AFibMainOp, AFibSpawnOp,
-                AForOp, AFuncOp, AGetElementPtrOp, ALoadOp, AReturnOp,
-                ARuntimeCallOp, AStoreOp, AStructGetFieldOp, AStructSetFieldOp,
-                AWhileOp, AYieldOp>();
+                AForOp, AFromAvalOp, AFuncOp, AGetElementPtrOp, ALoadOp,
+                AReturnOp, ARuntimeCallOp, AStoreOp, AStructGetFieldOp,
+                AStructSetFieldOp, AToAvalOp, AWhileOp, AYieldOp>();
   // NOTE: AConstKindAttr (an I64EnumAttr) is intentionally not registered via
   // addAttributes<>: that instantiation requires the complete
   // IntegerAttrStorage definition, which only exists in the MLIRIR TU that
