@@ -20,4 +20,21 @@ struct SemaResult;
 bool emitMLIRDialect(const ModuleGraph& graph, const SemaResult& sema,
                      std::string& out, std::string& error,
                      bool testMode = false, const std::string* testFilter = nullptr);
+
+// Per-module emission (Mojo-style .ambc prerequisite), `a`-dialect
+// variants of the emitModuleMLIR / emitEntryBodyMLIR /
+// emitEntrySupportMLIR entry points in mlir_emit.hpp. Same contracts:
+// emitModuleMLIRDialect emits one module's owned decls as a standalone
+// `module { ... }` document; the entry-body pair produces the splice-ready
+// statement stream and its module-level support document. Symbol names are
+// identical to the whole-graph emitter's.
+bool emitModuleMLIRDialect(const ModuleGraph& graph, const SemaResult& sema,
+                           int moduleId, std::string& out,
+                           std::string& error);
+bool emitEntryBodyMLIRDialect(const ModuleGraph& graph,
+                              const SemaResult& sema, std::string& out,
+                              std::string& error);
+bool emitEntrySupportMLIRDialect(const ModuleGraph& graph,
+                                 const SemaResult& sema, std::string& out,
+                                 std::string& error);
 }  // namespace a

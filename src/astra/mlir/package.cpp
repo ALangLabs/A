@@ -26,6 +26,7 @@
 #include "bytecode.hpp"
 #include "diagnostics/diagnostics.hpp"
 #include "mlir/mlir_emit.hpp"
+#include "mlir/mlir_emit_ad.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "native.hpp"
 #include "pipeline/pipeline.hpp"
@@ -409,6 +410,10 @@ int precompilePackageModules(const std::string& packageDirOrFile,
 
   mlir::MLIRContext& ctx = sharedMlirContext();
 
+  // A_MLIR_TYPED selects the `a`-dialect emitters so precompiled packages
+  // carry the same typed scalar ops `a run`/`a build` emit.
+  const bool typed = mlirTypedEmissionEnabled();
+
   // Emit + serialize each module. Iterate the deque (load order); ids are
   // dense 0..n-1 so they index ambcFiles/sourcePaths directly.
   for (const Module& m : graph.modules) {
@@ -417,7 +422,11 @@ int precompilePackageModules(const std::string& packageDirOrFile,
 
     std::string mlirText;
     std::string mlirError;
-    if (!emitModuleMLIR(graph, *compiled.sema, id, mlirText, mlirError)) {
+    const bool emitted = typed
+        ? emitModuleMLIRDialect(graph, *compiled.sema, id, mlirText,
+                                mlirError)
+        : emitModuleMLIR(graph, *compiled.sema, id, mlirText, mlirError);
+    if (!emitted) {
       err << "error: per-module MLIR emission failed for '" << m.path
           << "' (module " << id << "): " << mlirError << "\n";
       return kCErr;
@@ -440,8 +449,12 @@ int precompilePackageModules(const std::string& packageDirOrFile,
     // both runs mint identical "__a_e" symbol names.
     if (id == graph.entry) {
       std::string supportText, supportError;
-      if (!emitEntrySupportMLIR(graph, *compiled.sema, supportText,
-                                supportError)) {
+      const bool supportEmitted = typed
+          ? emitEntrySupportMLIRDialect(graph, *compiled.sema, supportText,
+                                        supportError)
+          : emitEntrySupportMLIR(graph, *compiled.sema, supportText,
+                                 supportError);
+      if (!supportEmitted) {
         err << "error: entry-body support emission failed for '" << m.path
             << "': " << supportError << "\n";
         return kCErr;
@@ -481,7 +494,11 @@ int precompilePackageModules(const std::string& packageDirOrFile,
   // has no entry fn.
   {
     std::string entryBody, entryBodyError;
-    if (!emitEntryBodyMLIR(graph, *compiled.sema, entryBody, entryBodyError)) {
+    const bool entryEmitted = typed
+        ? emitEntryBodyMLIRDialect(graph, *compiled.sema, entryBody,
+                                   entryBodyError)
+        : emitEntryBodyMLIR(graph, *compiled.sema, entryBody, entryBodyError);
+    if (!entryEmitted) {
       err << "error: entry-body emission failed: " << entryBodyError << "\n";
       return kCErr;
     }
@@ -567,7 +584,10 @@ int precompilePackage(const std::string& packageDirOrFile,
 
   std::string mlirText;
   std::string mlirError;
-  if (!emitMLIR(*compiled.graph, *compiled.sema, mlirText, mlirError)) {
+  const bool mlirOk = mlirTypedEmissionEnabled()
+      ? emitMLIRDialect(*compiled.graph, *compiled.sema, mlirText, mlirError)
+      : emitMLIR(*compiled.graph, *compiled.sema, mlirText, mlirError);
+  if (!mlirOk) {
     err << "error: MLIR emission failed for '" << entry << "': " << mlirError
         << "\n";
     return kCErr;

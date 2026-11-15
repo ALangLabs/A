@@ -52,7 +52,10 @@ Implemented and exercised by `tests/mlir/` (`a mlir-opt` golden suite):
   `<name>.ambc.srcs` for whole-graph packages): a changed or missing
   source falls through to the normal pipeline. Packages written before
   staleness tracking (no `src` records) are still trusted
-  unconditionally.
+  unconditionally. Module units and entry.mlir are emitted with the
+  `a`-dialect typed emitter when `A_MLIR_TYPED` is on (the default) and
+  the boxed llvm-dialect emitter when it is off, matching `a run`/
+  `a build`.
 - **In-process LLVM bridge**: implemented in
   `src/astra/mlir/codegen.cpp`/`native.cpp` (parse llvm-dialect text ->
   LLVM IR -> `llvm::PassBuilder` -> `TargetMachine` -> `.o`) and is the

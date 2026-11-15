@@ -39,6 +39,8 @@
 #include <map>
 #include <cctype>
 #include <memory>
+#include <regex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -135,6 +137,46 @@ class MlirDialectEmitter {
     return true;
   }
 
+  // Per-module emission (Mojo-style .ambc prerequisite): emit ONLY the decls
+  // owned by `moduleId` — its functions, struct ctors, globals, and a
+  // `__a_m<id>_init` fn holding its global inits + top-level stmts. All
+  // cross-module symbol tables are still collected (collectTopLevel scans the
+  // whole graph), so calls/globals/methods in other modules resolve to the
+  // same mangled symbols the whole-graph emitter produces. Program-global
+  // pieces (runtime decls, __a_gc_root_mark, __a_main_body orchestration,
+  // main/a_test_main) are NOT emitted; the consumer re-declares them.
+  // Mirrors MlirEmitter::runModule in mlir_emit.cpp.
+  bool runModule(int moduleId, std::string& out, std::string& error) {
+    if (moduleId < 0 || moduleId >= (int)graph_.modules.size()) {
+      error = "mlir-a backend: emitModuleMLIR: invalid module id " +
+              std::to_string(moduleId);
+      return false;
+    }
+    emitOnlyModule_ = moduleId;
+    error_ = &error;
+    collectTopLevel();
+    emitModuleOpen();
+    resolveImpls();
+    emitGlobals();
+    emitFunctions();
+    emitStructCtors();
+    emitModuleInit();
+    emitLambdas();  // drain lambdas/parfors created by this module's code
+    emitModuleDecls();  // last: scans emitted text for foreign @symbol refs
+    if (failed_) return false;
+    out = pre_.str() + body_.str() + "}\n";
+    return true;
+  }
+
+  // Entry-body emission for per-module .ambc packages: `out` = the entry
+  // fn's body statements (splice-ready for the consumer's synthesized
+  // __a_main_body), `support` = a `module { ... }` document with the
+  // module-level ops the body created (literal globals, auto-vivified
+  // __a_g_ globals, lambda/parfor helpers) for the precompile step to merge
+  // into the entry module's .ambc. Mirrors MlirEmitter::runEntryBody.
+  bool runEntryBody(std::string& out, std::string& support,
+                    std::string& error);
+
  private:
   const ModuleGraph& graph_;
   const SemaResult& sema_;
@@ -228,6 +270,27 @@ class MlirDialectEmitter {
   };
   std::vector<PendingParfor> pendingParfors_;
   int parforCounter_ = 0;
+  // >=0 restricts emission to one module's owned decls (runModule path);
+  // symbol tables still cover the whole graph so cross-module references
+  // resolve to identical mangled names. -1 = whole-graph mode.
+  int emitOnlyModule_ = -1;
+  // ImplDecl -> owning module, and impl method FnDecl -> owning module
+  // (Sema leaves impl methods at moduleId=-1; only consulted in split mode).
+  std::unordered_map<const ImplDecl*, int> implModule_;
+  std::unordered_map<const FnDecl*, int> implMethodModule_;
+  // Entry-body mode (runEntryBody): emitter-private symbols get
+  // "__a_e"-flavored names (__a_estr/__a_echr/__a_ecstr/__a_elam_/
+  // __a_epf_) so they cannot collide with the per-module units'
+  // __a_str/__a_chr/__a_cstr/__a_lam_/__a_pf_ counters (which restart per
+  // module). privPrefix() yields "__a_e" in this mode, "__a_" otherwise.
+  bool entryBodyMode_ = false;
+  // The consumer's synthesized __a_main_body has no a_frame_push, so the
+  // entry body's own `return` must not emit a_frame_pop (whole-graph
+  // __a_main_body pushes one frame for itself). Only suppresses the pop
+  // while emitting the entry body's statements — helper funcs keep
+  // balanced push/pop.
+  bool suppressFramePop_ = false;
+  std::string privPrefix() const { return entryBodyMode_ ? "__a_e" : "__a_"; }
   bool inFnBody_ = false;
   bool inUserFn_ = false;  // inside a user fn/lambda/parfor body (not main_body)
   // A_MLIR_TYPED=1: emit unboxed i64/f64/i1 scalars for Sema-proven Int/
@@ -692,7 +755,9 @@ class MlirDialectEmitter {
             structs_.push_back(ms);
           }
         } else if (s->kind == StmtKind::ImplDecl) {
-          pendingImpls_.push_back(static_cast<const ImplDecl*>(s.get()));
+          const ImplDecl* impl = static_cast<const ImplDecl*>(s.get());
+          pendingImpls_.push_back(impl);
+          implModule_[impl] = mod.id;
         } else if (s->kind == StmtKind::FromImport) {
           const FromImportStmt* fi = static_cast<const FromImportStmt*>(s.get());
           if (fi->pythonModuleImport || !fi->pythonModule.empty()) {
@@ -860,8 +925,18 @@ class MlirDialectEmitter {
   void emitGlobals() {
     rootSyms_.clear();
     std::vector<std::string> syms;
-    for (const auto& kv : globals_) syms.push_back(kv.second);
-    for (const auto& kv : moduleGlobals_) syms.push_back(kv.second);
+    if (emitOnlyModule_ < 0) {
+      // whole-graph: globals_ + moduleGlobals_ (dedup below)
+      for (const auto& kv : globals_) syms.push_back(kv.second);
+    }
+    for (const auto& kv : moduleGlobals_) {
+      // per-module mode: only this module's globals are defined here; other
+      // modules' globals are declared by their own .ambc units (and by the
+      // consumer's synthesized tail). globals_ is keyed by bare name across
+      // the whole graph, so it is whole-graph-only.
+      if (emitOnlyModule_ >= 0 && kv.first.first != emitOnlyModule_) continue;
+      syms.push_back(kv.second);
+    }
     std::sort(syms.begin(), syms.end());
     syms.erase(std::unique(syms.begin(), syms.end()), syms.end());
     rootSyms_ = syms;
@@ -966,6 +1041,7 @@ class MlirDialectEmitter {
         << " : (!llvm.ptr, !llvm.ptr, i32) -> ()\n";
   }
   void emitFramePop() {
+    if (suppressFramePop_) return;
     fn_ << "  a.runtime.call \"a_frame_pop\"() {signature = \"() -> ()\"}"
         << " : () -> ()\n";
   }
@@ -1008,6 +1084,7 @@ class MlirDialectEmitter {
           fprintf(stderr, "[modfns] mod=%d fn=%s\n", kv.first.first, kv.first.second.c_str());
     }
     for (auto& kv : fnDecls_) {
+      if (emitOnlyModule_ >= 0 && kv.second != emitOnlyModule_) continue;
       const FnDecl* fn = kv.first;
       beginFunction(fnDeclCnames_[fn], fn);
       bool sv = inFnBody_; inFnBody_ = true;
@@ -1018,6 +1095,16 @@ class MlirDialectEmitter {
       if (failed_) return;
     }
     for (auto& mf : methodFns_) {
+      // Ownership: struct methods carry moduleId from Sema; impl methods keep
+      // -1 and are attributed via implMethodModule_ (the module holding the
+      // `impl` block). Unattributed methods fall back to the requested module
+      // so they are never silently dropped in split mode.
+      int owner = mf.first->moduleId;
+      if (owner < 0) {
+        auto im = implMethodModule_.find(mf.first);
+        owner = im != implMethodModule_.end() ? im->second : emitOnlyModule_;
+      }
+      if (emitOnlyModule_ >= 0 && owner != emitOnlyModule_) continue;
       beginFunction(mf.second, mf.first);
       bool sv = inFnBody_; inFnBody_ = true;
       bool suv = inUserFn_; inUserFn_ = true;
@@ -1030,6 +1117,7 @@ class MlirDialectEmitter {
 
   void resolveImpls() {
     for (const ImplDecl* im : pendingImpls_) {
+      int implMod = implModule_.count(im) ? implModule_[im] : -1;
       if (!im->traitName.empty() && im->traitName != im->targetName) continue;
       for (auto& ms : structs_) {
         bool match = ms.displayName == im->targetName ||
@@ -1042,6 +1130,7 @@ class MlirDialectEmitter {
           ms.methods.push_back({m->name, mc});
           methodFns_.push_back({m.get(), mc});
           methodDecls_[mc] = m.get();
+          if (implMod >= 0) implMethodModule_[m.get()] = implMod;
         }
         break;
       }
@@ -1052,6 +1141,7 @@ class MlirDialectEmitter {
   // Mirrors LlvmEmitter::emitStructCtorBody (methods dict empty in v1).
   void emitStructCtors() {
     for (const MlStruct& ms : structs_) {
+      if (emitOnlyModule_ >= 0 && ms.moduleId != emitOnlyModule_) continue;
       FnDecl dummy;
       beginFunction(ms.ctorCname, &dummy);
       std::string nameV = stringLiteralAval(ms.displayName);
@@ -1578,7 +1668,7 @@ class MlirDialectEmitter {
     // emit byte global with insertvalue initializer
     std::string bytes = text;
     bytes.push_back('\0');
-    std::string g = "__a_str" + std::to_string(strCounter_++);
+    std::string g = privPrefix() + "str" + std::to_string(strCounter_++);
     pre_ << "  llvm.mlir.global private constant @" << g << "() : !llvm.array<"
          << bytes.size() << " x i8> {\n";
     // initializer region: build array via insertvalue chain
@@ -1633,7 +1723,7 @@ class MlirDialectEmitter {
           u8 += (char)(0x80 | (cp & 0x3F));
         }
         // reuse stringLiteralAval machinery via a_char_new
-        std::string g = "__a_chr" + std::to_string(strCounter_++);
+        std::string g = privPrefix() + "chr" + std::to_string(strCounter_++);
         std::string bytes = u8;
         bytes.push_back('\0');
         pre_ << "  llvm.mlir.global private constant @" << g << "() : !llvm.array<"
@@ -2242,7 +2332,7 @@ class MlirDialectEmitter {
         if (!caps.count(kv.first)) caps[kv.first] = kv.second.slot;
     PendingLambda pl;
     pl.expr = &x;
-    pl.cname = "__a_lam_" + std::to_string(lamCounter_++);
+    pl.cname = privPrefix() + "lam_" + std::to_string(lamCounter_++);
     for (auto& kv : caps) pl.captures.push_back(kv.first);
     pl.moduleId = curModuleId_;
     pendingLambdas_.push_back(pl);
@@ -2412,7 +2502,7 @@ class MlirDialectEmitter {
         if (!caps.count(kv.first)) caps[kv.first] = kv.second.slot;
     PendingParfor pf;
     pf.stmt = &s;
-    pf.cname = "__a_pf_" + std::to_string(parforCounter_++);
+    pf.cname = privPrefix() + "pf_" + std::to_string(parforCounter_++);
     for (auto& kv : caps) pf.capNames.push_back(kv.first);
     pf.moduleId = curModuleId_;
     pendingParfors_.push_back(pf);
@@ -2544,6 +2634,7 @@ class MlirDialectEmitter {
     while (!failed_ && !pendingLambdas_.empty()) {
       PendingLambda pl = pendingLambdas_.back();
       pendingLambdas_.pop_back();
+      if (emitOnlyModule_ >= 0 && pl.moduleId != emitOnlyModule_) continue;
       const LambdaExpr& x = *pl.expr;
       FnDecl dummy;
       dummy.moduleId = pl.moduleId;
@@ -2568,6 +2659,7 @@ class MlirDialectEmitter {
     while (!failed_ && !pendingParfors_.empty()) {
       PendingParfor pf = pendingParfors_.back();
       pendingParfors_.pop_back();
+      if (emitOnlyModule_ >= 0 && pf.moduleId != emitOnlyModule_) continue;
       emitParforFn(pf);
     }
   }
@@ -2632,7 +2724,7 @@ class MlirDialectEmitter {
   std::string cstrGlobalSym(const std::string& text) {
     std::string bytes = text;
     bytes.push_back('\0');
-    std::string g = "__a_cstr" + std::to_string(strCounter_++);
+    std::string g = privPrefix() + "cstr" + std::to_string(strCounter_++);
     pre_ << "  llvm.mlir.global private constant @" << g << "() : !llvm.array<"
          << bytes.size() << " x i8> {\n";
     pre_ << "    %u = llvm.mlir.undef : !llvm.array<" << bytes.size() << " x i8>\n";
@@ -3762,7 +3854,219 @@ class MlirDialectEmitter {
     if (fv.empty()) return "";
     return callValue(fv, evalArgs());
   }
+
+  // Per-module emission helpers (runModule path; emitOnlyModule_ >= 0).
+  // emitModuleDecls: scans the emitted text for `@symbol` references and
+  // inserts declarations (no body) for every referenced symbol this module
+  // does not itself define — the consumer links per-module objects, so calls
+  // to `__a_f_m<id>_*`/`__a_m*`/`__a_ctor_*`/`__a_lam_*`/`__a_pf_*` owned by
+  // other modules must be declared, and foreign `__a_g_<id>_*` globals need
+  // `llvm.mlir.global external` decls so `llvm.mlir.addressof` resolves.
+  // Runs AFTER all bodies are emitted so locally-defined symbols are known
+  // and never redeclared. `a_*` runtime symbols need no decls here: they
+  // are invoked via `a.runtime.call "sym"` (string callee, not an @ref) and
+  // a-lower-to-llvm materializes the llvm.func decl itself.
+  void emitModuleDecls() {
+    const std::string text = pre_.str() + body_.str();
+    std::set<std::string> defined, referenced;
+    {
+      // function + global definitions: `llvm.func @sym(` /
+      // `llvm.mlir.global ... @sym(` — match the op name first so
+      // calls/addressofs of the same symbol don't count as definitions.
+      static const std::regex defRe(
+          "llvm\\.(?:func|mlir\\.global)[^@\\n]*@([A-Za-z_][A-Za-z0-9_]*)");
+      static const std::regex refRe("@([A-Za-z_][A-Za-z0-9_]*)");
+      for (std::sregex_iterator it(text.begin(), text.end(), defRe), end;
+           it != end; ++it)
+        defined.insert((*it)[1].str());
+      for (std::sregex_iterator it(text.begin(), text.end(), refRe), end;
+           it != end; ++it)
+        referenced.insert((*it)[1].str());
+    }
+    std::vector<std::string> funcDecls, globalDecls;
+    for (const std::string& sym : referenced) {
+      if (defined.count(sym)) continue;
+      if (sym.rfind("__a_g_", 0) == 0) {
+        // Foreign module global: declare it exactly like the owning unit's
+        // definition (external linkage + zero initializer — the real init
+        // runs in that module's __a_m<id>_init). addressof only needs the
+        // symbol to resolve; the i64 element type matches every __a_g_*.
+        globalDecls.push_back(
+            "  llvm.mlir.global external @" + sym +
+            "(0 : i64) {addr_space = 0 : i32} : i64\n");
+        continue;
+      }
+      // Uniform A-function ABI: every user fn/method/ctor/lambda/parfor
+      // takes the packed argv pointer and returns an aval i64.
+      funcDecls.push_back("  llvm.func @" + sym +
+                          "(%argv: !llvm.ptr) -> i64\n");
+    }
+    if (funcDecls.empty() && globalDecls.empty()) return;
+    std::sort(funcDecls.begin(), funcDecls.end());
+    std::sort(globalDecls.begin(), globalDecls.end());
+    std::ostringstream ins;
+    for (const std::string& d : globalDecls) ins << d;
+    for (const std::string& d : funcDecls) ins << d;
+    // insert right after `module {\n` at the top of pre_
+    std::string p = pre_.str();
+    auto nl = p.find('\n');
+    if (nl == std::string::npos) {
+      p += ins.str();
+    } else {
+      p.insert(nl + 1, ins.str());
+    }
+    pre_.str("");
+    pre_ << p;
+  }
+
+  // emitModuleInit: `__a_m<id>_init` — this module's global initializers and
+  // top-level statements, in module order. This is the per-module unit the
+  // program-global `__a_main_body` calls; see emitModuleMLIRDialect docs.
+  // Mirrors MlirEmitter::emitModuleInit / the emitMainBody preamble.
+  void emitModuleInit() {
+    FnDecl dummy;
+    dummy.moduleId = emitOnlyModule_;
+    const std::string sym =
+        "__a_m" + std::to_string(emitOnlyModule_) + "_init";
+    beginFunction(sym, &dummy);
+    for (const auto& gi : globalInits_) {
+      if (gi.moduleId != emitOnlyModule_) continue;
+      curModuleId_ = gi.moduleId;
+      if (gi.stmt->init) {
+        std::string v = evalExpr(*gi.stmt->init);
+        std::string g = globalSymFor(gi.stmt->name);
+        if (g.empty()) g = globals_[gi.stmt->name];
+        std::string r = nv();
+        fn_ << "  " << r << " = llvm.mlir.addressof @" << g << " : !llvm.ptr\n";
+        store(r, v);
+      }
+      if (failed_) return;
+    }
+    for (const auto& ts : topStmts_) {
+      if (ts.moduleId != emitOnlyModule_) continue;
+      curModuleId_ = ts.moduleId;
+      emitStmt(*ts.stmt);
+      if (failed_) return;
+    }
+    endFunction();
+  }
 };
+
+// Defined below with the public entry points; declared here so
+// runEntryBody can use it.
+std::string moduleTextWithDeclsAD(const std::string& text);
+
+// Emits the entry fn's body ops — the same statements emitMainBody inlines
+// into __a_main_body for the entry portion — WITHOUT a function wrapper:
+// `out` is splice-ready text for the consumer's synthesized __a_main_body
+// (hoisted allocas first, then the statements). `support` receives a
+// `module { ... }` document holding the module-level ops the body created
+// (literal globals, auto-vivified __a_g_ globals, lambda/parfor helpers)
+// for the precompile step to merge into the entry module's .ambc.
+// Mirrors MlirEmitter::runEntryBody.
+bool MlirDialectEmitter::runEntryBody(std::string& out, std::string& support,
+                                      std::string& error) {
+  error_ = &error;
+  entryBodyMode_ = true;
+  collectTopLevel();
+  resolveImpls();
+  if (failed_) return false;
+  out.clear();
+  support.clear();
+  if (!entry_) return true;  // no entry fn: empty body, no support ops
+
+  // Mirror emitMainBody's entry portion exactly: inFnBody_=true while
+  // inUserFn_ stays false (bare `x = ...` binds a global, same as
+  // whole-graph), module context = the entry's module so __a_g_<id>_*
+  // names match the per-module units. No beginFunction: the consumer's
+  // __a_main_body supplies the func frame (and deliberately no
+  // a_frame_push, hence suppressFramePop_ for the body's own return).
+  // assignScanPending_ is set manually because there is no beginFunction
+  // call to arm the typed-binding assign-kind scan.
+  curModuleId_ = entry_->moduleId;
+  curFnName_ = entry_->name;
+  curFnFile_ = (entry_->moduleId >= 0 &&
+                entry_->moduleId < (int)graph_.modules.size())
+                   ? graph_.at(entry_->moduleId).path
+                   : "";
+  curFnLine_ = entry_->span.line > 0 ? entry_->span.line : 0;
+  pushScope();
+  assignScanPending_ = true;
+  assignKindMask_.clear();
+  inFnBody_ = true;
+  suppressFramePop_ = true;
+  emitStatements(entry_->body);
+  if (!terminated_) {
+    // endFunction's tail for the non-returning case: deferred stmts and
+    // live-binding drops run before the consumer's appended none-return.
+    emitPendingDefers();
+    emitAllDrops();
+  }
+  suppressFramePop_ = false;
+  inFnBody_ = false;
+  if (failed_) return false;
+  if (terminated_) {
+    // The entry body emitted `return` (llvm.return is a terminator). The
+    // consumer always appends its own none-constant + llvm.return after
+    // the splice, so open an unreachable block to keep __a_main_body
+    // well-formed (ops after a terminator in one block are invalid).
+    fn_ << "^a_entry_tail:\n";
+    terminated_ = false;
+  }
+  // Snapshot the statement stream BEFORE draining helpers: emitLambdas
+  // reuses fn_/fnAllocs_ for the helper function bodies.
+  out = fnAllocs_.str() + fn_.str();
+  emitLambdas();  // lambda/parfor helpers created by the entry body
+  if (failed_) return false;
+  // The support document is parsed standalone by the precompile step, so
+  // it must declare every foreign/runtime symbol its helper funcs use —
+  // the same job emitModuleDecls does for per-module units.
+  support = moduleTextWithDeclsAD("module {\n" + pre_.str() + body_.str() +
+                                  "}\n");
+  return true;
+}
+
+// Inserts the declarations a standalone `module { ... }` parse needs:
+// every @symbol referenced but not defined locally gets an llvm.func
+// declaration (the uniform (!llvm.ptr) -> i64 A-function signature for
+// user functions/methods/ctors/lambda+parfor helpers) or an
+// llvm.mlir.global external declaration for global-shaped symbols.
+// Mirrors MlirEmitter::moduleTextWithDecls, but for `a`-dialect emitter
+// text: `a.runtime.call "sym"` ops carry their callee as a string attr
+// (no @ref), and a-lower-to-llvm materializes their llvm.func decls, so
+// only llvm.* @refs need declarations here.
+std::string moduleTextWithDeclsAD(const std::string& text) {
+  std::set<std::string> defined, referenced;
+  static const std::regex defRe(
+      "llvm\\.(?:func|mlir\\.global)[^@\\n]*@([A-Za-z_][A-Za-z0-9_]*)");
+  static const std::regex refRe("@([A-Za-z_][A-Za-z0-9_]*)");
+  for (std::sregex_iterator it(text.begin(), text.end(), defRe), end;
+       it != end; ++it)
+    defined.insert((*it)[1].str());
+  for (std::sregex_iterator it(text.begin(), text.end(), refRe), end;
+       it != end; ++it)
+    referenced.insert((*it)[1].str());
+  std::vector<std::string> funcDecls, globalDecls;
+  for (const std::string& sym : referenced) {
+    if (defined.count(sym)) continue;
+    if (sym.rfind("__a_g_", 0) == 0) {
+      globalDecls.push_back("llvm.mlir.global external @" + sym +
+                            "(0 : i64) {addr_space = 0 : i32} : i64\n");
+      continue;
+    }
+    funcDecls.push_back("llvm.func @" + sym +
+                        "(%argv: !llvm.ptr) -> i64\n");
+  }
+  if (funcDecls.empty() && globalDecls.empty()) return text;
+  std::sort(funcDecls.begin(), funcDecls.end());
+  std::sort(globalDecls.begin(), globalDecls.end());
+  std::ostringstream ins;
+  for (const std::string& d : globalDecls) ins << d;
+  for (const std::string& d : funcDecls) ins << d;
+  const auto nl = text.find('\n');
+  if (nl == std::string::npos) return ins.str() + text;
+  return text.substr(0, nl + 1) + ins.str() + text.substr(nl + 1);
+}
 
 }  // namespace
 
@@ -3771,6 +4075,29 @@ bool emitMLIRDialect(const ModuleGraph& graph, const SemaResult& sema,
               const std::string* testFilter) {
   MlirDialectEmitter emitter(graph, sema, testMode, testFilter ? *testFilter : "");
   return emitter.run(out, error);
+}
+
+bool emitModuleMLIRDialect(const ModuleGraph& graph, const SemaResult& sema,
+                           int moduleId, std::string& out,
+                           std::string& error) {
+  MlirDialectEmitter emitter(graph, sema);
+  return emitter.runModule(moduleId, out, error);
+}
+
+bool emitEntryBodyMLIRDialect(const ModuleGraph& graph,
+                              const SemaResult& sema, std::string& out,
+                              std::string& error) {
+  MlirDialectEmitter emitter(graph, sema);
+  std::string support;
+  return emitter.runEntryBody(out, support, error);
+}
+
+bool emitEntrySupportMLIRDialect(const ModuleGraph& graph,
+                                 const SemaResult& sema, std::string& out,
+                                 std::string& error) {
+  MlirDialectEmitter emitter(graph, sema);
+  std::string stmts;
+  return emitter.runEntryBody(stmts, out, error);
 }
 
 }  // namespace a

@@ -3235,6 +3235,7 @@ void MlirEmitter::emitModuleDecls() {
       referenced.insert((*it)[1].str());
   }
   std::vector<std::string> decls;
+  std::vector<std::string> globalDecls;
   std::vector<std::pair<std::string, std::string>> runtimeDecls;
   for (const std::string& sym : referenced) {
     if (defined.count(sym)) continue;
@@ -3248,14 +3249,27 @@ void MlirEmitter::emitModuleDecls() {
       if (sig) runtimeDecls.emplace_back(sym, sig);
       continue;
     }
+    if (sym.rfind("__a_g_", 0) == 0) {
+      // Foreign module global: declare it as an llvm.mlir.global external
+      // (same shape as the owning unit's definition — external linkage +
+      // zero initializer; the real init runs in that module's
+      // __a_m<id>_init). A bare llvm.func decl here would collide with the
+      // real global definition when the per-module units are merged
+      // ("redefinition of symbol"), and addressof needs a global symbol.
+      globalDecls.push_back("  llvm.mlir.global external @" + sym +
+                            "(0 : i64) {addr_space = 0 : i32} : i64\n");
+      continue;
+    }
     decls.push_back(sym);
   }
-  if (decls.empty() && runtimeDecls.empty()) return;
+  if (decls.empty() && globalDecls.empty() && runtimeDecls.empty()) return;
   std::sort(decls.begin(), decls.end());
+  std::sort(globalDecls.begin(), globalDecls.end());
   std::sort(runtimeDecls.begin(), runtimeDecls.end());
   std::ostringstream ins;
   for (const auto& rd : runtimeDecls)
     ins << runtimeDeclText(rd.first, rd.second.c_str()) << "\n";
+  for (const std::string& d : globalDecls) ins << d;
   for (const std::string& sym : decls)
     ins << "  llvm.func @" << sym << "(%argv: !llvm.ptr) -> i64\n";
   // insert right after `module {\n` at the top of pre_

@@ -2446,6 +2446,10 @@ bool parseTestSummary(const std::string& s, int& passed, int& failed){
 }
 } // namespace
 
+// Public wrapper for the anonymous-namespace typedMlirEnabled() so the
+// .ambc precompile path (a_mlir_core) can pick the matching emitter.
+bool mlirTypedEmissionEnabled() { return typedMlirEnabled(); }
+
 int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err){
   const std::string target = path.empty() ? "." : path;
   std::error_code ec;

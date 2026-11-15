@@ -40,6 +40,12 @@ int testPipeline(const std::string& path, const PipelineConfig& config, std::ist
 // `a test` on a file, directory, or (empty path) the current directory:
 // discovers test files recursively and runs them, aggregating results.
 int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err);
+// True when A_MLIR_TYPED selects the `a`-dialect emitter for MLIR text
+// emission (default on non-Windows). The .ambc precompile path
+// (src/astra/mlir/package.cpp) uses this to pick emitMLIRDialect /
+// emitModuleMLIRDialect / the entry-body dialect variants over the boxed
+// llvm-dialect emitters so precompiled packages match `a run`/`a build`.
+bool mlirTypedEmissionEnabled();
 int buildPipeline(const std::string& path, const std::string& outputPath, const PipelineConfig& config, std::ostream& err);
 
 // Interactive REPL session. The driver feeds the full accumulated source on
