@@ -15,6 +15,11 @@
 set(_A_LLVM_PREFIXES
     /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16 /usr/lib/llvm
     /usr/local /opt/homebrew/opt/llvm /opt/homebrew /usr/local/opt/llvm)
+# Any other /usr/lib/llvm-<ver> install (distro default toolchains, apt.llvm.org)
+# is probed too, after the preferred versions above.
+file(GLOB _A_LLVM_EXTRA_PREFIXES "/usr/lib/llvm-*")
+list(APPEND _A_LLVM_PREFIXES ${_A_LLVM_EXTRA_PREFIXES})
+list(REMOVE_DUPLICATES _A_LLVM_PREFIXES)
 # Distro layouts differ: Debian/Ubuntu <=24.04 use <prefix>/lib/cmake/<pkg>,
 # newer releases and Homebrew-adjacent installs use <prefix>/cmake/<pkg> or
 # <prefix>/cmake. Probe all of them.

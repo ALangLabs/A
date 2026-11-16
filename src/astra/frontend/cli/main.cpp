@@ -283,7 +283,11 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
               joined += '\'';
             }
           }
+#ifdef _WIN32
+          _putenv_s("A_ARGS", joined.c_str());
+#else
           setenv("A_ARGS", joined.c_str(), 1);
+#endif
         } else if (positional.size() > 2) {
           err << "error: unexpected argument '" << positional[2] << "'\n"; return false;
         }
