@@ -6,16 +6,48 @@
 # Sources are added by the workstream that owns them; this file lists the
 # expected set and is kept in sync at integration time.
 
-# MLIR/LLVM 18 dev files are installed system-wide but not on CMake's
+# MLIR/LLVM dev files are installed system-wide but not on CMake's
 # default search path (only LLVMConfig is, via LLVM_DIR). Probe the standard
-# llvm-<ver> prefixes before find_package so distro installs Just Work.
+# llvm-<ver> prefixes — and Homebrew's llvm prefix — before find_package so
+# distro installs Just Work. LLVM_DIR must be set BEFORE find_package(MLIR):
+# MLIRConfig.cmake does find_dependency(LLVM) and fails outright when no
+# LLVM config is locatable.
+set(_A_LLVM_PREFIXES
+    /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16 /usr/lib/llvm
+    /usr/local /opt/homebrew/opt/llvm /opt/homebrew /usr/local/opt/llvm)
+if(NOT LLVM_DIR OR LLVM_DIR STREQUAL "LLVM_DIR-NOTFOUND")
+    foreach(_prefix IN LISTS _A_LLVM_PREFIXES)
+        if(EXISTS "${_prefix}/lib/cmake/llvm/LLVMConfig.cmake")
+            set(LLVM_DIR "${_prefix}/lib/cmake/llvm" CACHE PATH FORCE
+                "Directory containing LLVMConfig.cmake")
+            break()
+        elseif(EXISTS "${_prefix}/LLVMConfig.cmake")
+            set(LLVM_DIR "${_prefix}" CACHE PATH FORCE
+                "Directory containing LLVMConfig.cmake")
+            break()
+        endif()
+    endforeach()
+endif()
+# llvm-config knows its own cmake dir on every distro layout; use it as a
+# last-resort probe when the prefix guesses above missed.
+if(NOT LLVM_DIR OR LLVM_DIR STREQUAL "LLVM_DIR-NOTFOUND")
+    find_program(_A_LLVM_CONFIG NAMES llvm-config llvm-config-18
+                 llvm-config-17 llvm-config-16)
+    if(_A_LLVM_CONFIG)
+        execute_process(COMMAND ${_A_LLVM_CONFIG} --cmakedir
+                        OUTPUT_VARIABLE _A_LLVM_CMAKEDIR
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        ERROR_QUIET)
+        if(_A_LLVM_CMAKEDIR AND EXISTS "${_A_LLVM_CMAKEDIR}/LLVMConfig.cmake")
+            get_filename_component(_A_LLVM_CMAKEDIR "${_A_LLVM_CMAKEDIR}" ABSOLUTE)
+            set(LLVM_DIR "${_A_LLVM_CMAKEDIR}" CACHE PATH FORCE
+                "Directory containing LLVMConfig.cmake")
+        endif()
+    endif()
+endif()
+find_package(LLVM CONFIG QUIET)
 if(NOT MLIR_DIR OR MLIR_DIR STREQUAL "MLIR_DIR-NOTFOUND")
-    foreach(_prefix
-            /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16 /usr/lib/llvm
-            /usr/local/lib/cmake/mlir /usr/lib/cmake/mlir
-            /opt/homebrew/opt/llvm/lib/cmake/mlir
-            /opt/homebrew/lib/cmake/mlir
-            /usr/local/opt/llvm/lib/cmake/mlir)
+    foreach(_prefix IN LISTS _A_LLVM_PREFIXES)
         if(EXISTS "${_prefix}/lib/cmake/mlir/MLIRConfig.cmake")
             set(MLIR_DIR "${_prefix}/lib/cmake/mlir" CACHE PATH FORCE
                 "Directory containing MLIRConfig.cmake")
@@ -27,19 +59,22 @@ if(NOT MLIR_DIR OR MLIR_DIR STREQUAL "MLIR_DIR-NOTFOUND")
         endif()
     endforeach()
 endif()
-find_package(MLIR CONFIG QUIET)
-if(NOT LLVM_DIR OR LLVM_DIR STREQUAL "LLVM_DIR-NOTFOUND")
-    foreach(_prefix /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16
-                   /usr/lib/llvm /usr/local /opt/homebrew/opt/llvm
-                   /opt/homebrew /usr/local/opt/llvm)
-        if(EXISTS "${_prefix}/lib/cmake/llvm/LLVMConfig.cmake")
-            set(LLVM_DIR "${_prefix}/lib/cmake/llvm" CACHE PATH FORCE
-                "Directory containing LLVMConfig.cmake")
-            break()
-        endif()
-    endforeach()
+# MLIR's cmake dir sits next to LLVM's on every layout we support.
+if((NOT MLIR_DIR OR MLIR_DIR STREQUAL "MLIR_DIR-NOTFOUND")
+   AND LLVM_DIR AND NOT LLVM_DIR STREQUAL "LLVM_DIR-NOTFOUND")
+    get_filename_component(_A_LLVM_CMAKE_ROOT "${LLVM_DIR}" DIRECTORY)
+    if(EXISTS "${_A_LLVM_CMAKE_ROOT}/mlir/MLIRConfig.cmake")
+        set(MLIR_DIR "${_A_LLVM_CMAKE_ROOT}/mlir" CACHE PATH FORCE
+            "Directory containing MLIRConfig.cmake")
+    elseif(EXISTS "${_A_LLVM_CMAKE_ROOT}/../mlir/MLIRConfig.cmake")
+        get_filename_component(_A_MLIR_DIR "${_A_LLVM_CMAKE_ROOT}/../mlir" ABSOLUTE)
+        set(MLIR_DIR "${_A_MLIR_DIR}" CACHE PATH FORCE
+            "Directory containing MLIRConfig.cmake")
+    endif()
 endif()
-find_package(LLVM CONFIG QUIET)
+find_package(MLIR CONFIG QUIET)
+message(STATUS "a mlir: LLVM_DIR=${LLVM_DIR} MLIR_DIR=${MLIR_DIR} "
+               "LLVM_FOUND=${LLVM_FOUND} MLIR_FOUND=${MLIR_FOUND}")
 
 if(MLIR_FOUND)
     # MLIRConfig.cmake sets MLIR_TABLEGEN_EXE to the bare "mlir-tblgen" name;
