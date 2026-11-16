@@ -3,7 +3,7 @@
 namespace a::lsp {
 class IndexBuilder {
  public:
-  IndexBuilder(FileIndex& file, int moduleId) : file_(file), moduleId_(moduleId) {}
+  IndexBuilder(FileIndex& file, int moduleId) : file_(file) { (void)moduleId; }
 
   void build(Program& program) {
     file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan, {}, {}});
@@ -416,7 +416,6 @@ class IndexBuilder {
   }
 
   FileIndex& file_;
-  int moduleId_ = -1;
 };
 
 namespace {

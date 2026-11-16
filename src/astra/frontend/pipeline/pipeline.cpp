@@ -948,15 +948,15 @@ inline bool envFlagOff(const char* name) {
   std::string s = lowerStr(v);
   return s == "0" || s == "off" || s == "no" || s == "none" || s == "false";
 }
-inline bool splitUnitsEnabled() {
+[[maybe_unused]] inline bool splitUnitsEnabled() {
   // Kept for the object-cache key helpers; the per-module split build that
   // consumed this was removed with the assembly backend.
   return !envFlagOff("A_SPLIT_UNITS");
 }
-inline bool objCacheEnabled() {
+[[maybe_unused]] inline bool objCacheEnabled() {
   return !run_cache::disabled();
 }
-inline bool debugUnits() {
+[[maybe_unused]] inline bool debugUnits() {
   const char* v = std::getenv("A_DEBUG_UNITS");
   return v && *v && lowerStr(v) != "0";
 }
@@ -1230,7 +1230,7 @@ inline std::set<int> directImports(const ModuleGraph& g, int moduleId) {
     out.insert(g.preludeId);
   return out;
 }
-inline std::set<int> transitiveImports(const ModuleGraph& g, int moduleId) {
+[[maybe_unused]] inline std::set<int> transitiveImports(const ModuleGraph& g, int moduleId) {
   std::set<int> seen;
   std::vector<int> stack;
   for (int d : directImports(g, moduleId)) stack.push_back(d);
@@ -1247,7 +1247,7 @@ inline std::set<int> transitiveImports(const ModuleGraph& g, int moduleId) {
 // Unit key (Phase 3): content of M plus the interface closure it was built
 // against. The entry unit additionally keys on every module's interface
 // (its fnon setup table covers all modules) and on the test filter.
-inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
+[[maybe_unused]] inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
                            int optimizationLevel, bool testMode,
                            const std::string* testFilter,
                            const std::string* entrySource, int moduleId,
@@ -1307,7 +1307,7 @@ struct KeyContext {
   std::unordered_map<int, std::uint64_t> sighById;
   std::unordered_map<int, std::string> sourceById;
 };
-inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
+[[maybe_unused]] inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
                                  int optimizationLevel,
                                  const std::string* entrySource) {
   KeyContext ctx;
@@ -1354,7 +1354,7 @@ inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
   }
   return ctx;
 }
-inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
+[[maybe_unused]] inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
                                   bool testMode,
                                   const std::string* testFilter, int moduleId,
                                   const std::set<int>& deps) {
@@ -1382,7 +1382,7 @@ inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
   }
   return hex64(h);
 }
-inline std::string unitCachePath(const std::string& key) {
+[[maybe_unused]] inline std::string unitCachePath(const std::string& key) {
   return objCacheDir() + "/" + key + ".o";
 }
 

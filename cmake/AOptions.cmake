@@ -26,6 +26,11 @@ if(MSVC)
   endif()
 else()
   target_compile_options(a_project_options INTERFACE -Wall -Wextra -Wpedantic)
+  # fastpath_mlir.hpp embeds a ~94 KB generated MLIR literal; AppleClang
+  # rejects literals over 65536 bytes under -Werror,-Woverlength-strings.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(a_project_options INTERFACE -Wno-overlength-strings)
+  endif()
   if(A_WARNINGS_AS_ERRORS)
     target_compile_options(a_project_options INTERFACE -Werror)
   endif()

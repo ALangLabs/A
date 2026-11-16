@@ -100,11 +100,11 @@ void a_win_sleep_ms(int64_t ms);
    _putenv) through msvcrt.def. WINAPI is __stdcall on 32-bit Windows
    and empty on Win64; BOOL is int, HANDLE is void*, DWORD is
    unsigned long. */
-#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
-#define A_WINAPI
-#else
+/* WINAPI is spelled __stdcall on every Windows target — the SDK defines it
+   that way even on Win64, where the attribute is ignored — so these
+   declarations must match exactly or TUs that also include <windows.h>
+   fail with C2375 "redefinition; different linkage". */
 #define A_WINAPI __stdcall
-#endif
 extern void A_WINAPI GetSystemTimeAsFileTime(void *lpSystemTimeAsFileTime);
 extern int A_WINAPI QueryPerformanceCounter(long long *lpPerformanceCount);
 extern int A_WINAPI QueryPerformanceFrequency(long long *lpPerformanceFrequency);
