@@ -100,10 +100,17 @@ if(EXISTS "${ASTRA_MIMALLOC_SRC}")
     if(NOT WIN32)
         set(ASTRA_MIMALLOC_DEFS -DMI_MALLOC_OVERRIDE=1)
     endif()
+    if(MSVC)
+        set(mi_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${ASTRA_MIMALLOC_DEFS}
+                       -I${ASTRA_RUNTIME_DIR}/vendor/mimalloc/include
+                       /c "${ASTRA_MIMALLOC_SRC}" /Fo${mimalloc_obj})
+    else()
+        set(mi_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${ASTRA_MIMALLOC_DEFS}
+                       -I${ASTRA_RUNTIME_DIR}/vendor/mimalloc/include
+                       -c "${ASTRA_MIMALLOC_SRC}" -o "${mimalloc_obj}")
+    endif()
     add_custom_command(OUTPUT "${mimalloc_obj}"
-        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${ASTRA_MIMALLOC_DEFS}
-                -I${ASTRA_RUNTIME_DIR}/vendor/mimalloc/include
-                -c "${ASTRA_MIMALLOC_SRC}" -o "${mimalloc_obj}"
+        COMMAND ${mi_compile}
         DEPENDS "${ASTRA_MIMALLOC_SRC}"
         COMMENT "system runtime mimalloc"
         VERBATIM)
