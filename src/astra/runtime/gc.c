@@ -969,38 +969,20 @@ static int gc_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
 }
 #elif defined(_WIN32)
 /* Walk committed MEM_PRIVATE regions upward from the current SP using
-   VirtualQuery (exported by kernel32; declared in a_runtime_internal.h
-   style — declare locally to keep the ABI struct private). */
-typedef struct {
-    void *BaseAddress;
-    void *AllocationBase;
-    unsigned long AllocationProtect;
-#if defined(_WIN64) || defined(__x86_64__) || defined(__aarch64__)
-    unsigned short PartitionId;
-    unsigned short _pad;
-    size_t RegionSize;
-    unsigned long State, Protect, Type;
-#else
-    size_t RegionSize;
-    unsigned long State, Protect, Type;
-#endif
-} GCMemInfo;
-extern int A_WINAPI VirtualQuery(const void *lpAddress, GCMemInfo *lpBuffer,
-                                 size_t dwLength);
-#define GC_MEM_COMMIT  0x1000UL
-#define GC_MEM_PRIVATE 0x20000UL
+   VirtualQuery (kernel32; the SDK types arrive through <windows.h> in
+   a_runtime_internal.h). */
 static int gc_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
     volatile char anchor;
     uintptr_t sp = (uintptr_t)&anchor;
-    GCMemInfo mi;
+    MEMORY_BASIC_INFORMATION mi;
     uintptr_t cur = sp & ~(uintptr_t)0xFFF;
     uintptr_t top = 0;
     for (int i = 0; i < 4096; ++i) {
         memset(&mi, 0, sizeof mi);
-        if (!VirtualQuery((const void *)cur, &mi, sizeof mi)) break;
+        if (!VirtualQuery((LPCVOID)cur, &mi, sizeof mi)) break;
         uintptr_t rb = (uintptr_t)mi.BaseAddress;
         uintptr_t re = rb + mi.RegionSize;
-        if (mi.State == GC_MEM_COMMIT && mi.Type == GC_MEM_PRIVATE) {
+        if (mi.State == MEM_COMMIT && mi.Type == MEM_PRIVATE) {
             if (re > cur) top = re;
             cur = re;
             continue;
