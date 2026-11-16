@@ -816,8 +816,8 @@ aval bi_net_udp_send(uint64_t n, aval *argv) {
     if (getaddrinfo(host, port, &hints, &res) != 0 || !res) return mkint_full(-1);
     uint64_t len;
     const char *data = str_data(argv[3], &len);
-#if A_FIBERS
     net_ssize_t sent;
+#if A_FIBERS
     if (a_fib_on()) {
         for (;;) {
             sent = sendto(s->fd, data, len, MSG_DONTWAIT, res->ai_addr, res->ai_addrlen);
@@ -843,8 +843,8 @@ aval bi_net_udp_recv(uint64_t n, aval *argv) {
     char *buf = (char *)xmalloc((size_t)maxb);
     struct sockaddr_storage from;
     socklen_t fl = sizeof from;
-#if A_FIBERS
     net_ssize_t r;
+#if A_FIBERS
     if (a_fib_on()) {
         for (;;) {
             r = recvfrom(s->fd, buf, (size_t)maxb, MSG_DONTWAIT,
