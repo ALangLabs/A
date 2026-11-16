@@ -252,7 +252,7 @@ class LlvmEmitter {
     if (v >= -kInlineLim && v < kInlineLim) {
       std::uint64_t p = ((std::uint64_t)v << 1) | 1ULL;
       p &= 281474976710655ULL;
-      std::uint64_t a = -281474976710656ULL | p;
+      std::uint64_t a = ~281474976710655ULL | p;  // -2^48 without unsigned negation (C4146)
       return std::to_string(a);
     }
     std::string r = T();

@@ -3,6 +3,7 @@
 #include "analysis.hpp"
 #include "name-resolution/builtin_docs.hpp"
 #include "name-resolution/native_modules.hpp"
+#include "text_utils.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -55,15 +56,6 @@ inline std::string readFileText(const std::string& path) {
   std::ostringstream buffer;
   buffer << file.rdbuf();
   return buffer.str();
-}
-
-inline std::string canonicalPath(const std::string& path) {
-  std::error_code error;
-  fs::path canonical = fs::weakly_canonical(path, error);
-  if (!error) return canonical.string();
-  error.clear();
-  fs::path absolute = fs::absolute(path, error);
-  return error ? path : absolute.string();
 }
 
 inline std::string moduleStem(const std::string& path) {

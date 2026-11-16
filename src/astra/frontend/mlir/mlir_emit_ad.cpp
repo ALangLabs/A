@@ -4144,18 +4144,75 @@ class MlirDialectEmitter {
   }
 
   // ---- typed constant folding --------------------------------------------------
+  // Signed-overflow-checked i64 arithmetic. GCC/Clang have
+  // __builtin_*_overflow; MSVC does not, so fall back to explicit range
+  // checks there (and anywhere else the builtins are unavailable).
+  static bool i64AddOverflow(std::int64_t a, std::int64_t b,
+                             std::int64_t& out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_add_overflow(a, b, &out);
+#else
+    if ((b > 0 && a > INT64_MAX - b) || (b < 0 && a < INT64_MIN - b))
+      return true;
+    out = a + b;
+    return false;
+#endif
+  }
+  static bool i64SubOverflow(std::int64_t a, std::int64_t b,
+                             std::int64_t& out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_sub_overflow(a, b, &out);
+#else
+    if ((b < 0 && a > INT64_MAX + b) || (b > 0 && a < INT64_MIN + b))
+      return true;
+    out = a - b;
+    return false;
+#endif
+  }
+  static bool i64MulOverflow(std::int64_t a, std::int64_t b,
+                             std::int64_t& out) {
+#if defined(__GNUC__) || defined(__clang__)
+    return __builtin_mul_overflow(a, b, &out);
+#else
+    if (a > 0) {
+      if (b > 0) {
+        if (a > INT64_MAX / b) return true;
+      } else if (b < 0) {
+        if (b < INT64_MIN / a) return true;
+      } else {
+        out = 0;
+        return false;
+      }
+    } else if (a < 0) {
+      if (b > 0) {
+        if (a < INT64_MIN / b) return true;
+      } else if (b < 0) {
+        if (a != 0 && b < INT64_MAX / a) return true;
+      } else {
+        out = 0;
+        return false;
+      }
+    } else {
+      out = 0;
+      return false;
+    }
+    out = a * b;
+    return false;
+#endif
+  }
+
   static bool foldI64BinOp(BinOp op, std::int64_t a, std::int64_t b,
                            std::int64_t& out, bool& isBool) {
     isBool = false;
     switch (op) {
       case BinOp::Add:
-        if (__builtin_add_overflow(a, b, &out)) return false;
+        if (i64AddOverflow(a, b, out)) return false;
         return true;
       case BinOp::Sub:
-        if (__builtin_sub_overflow(a, b, &out)) return false;
+        if (i64SubOverflow(a, b, out)) return false;
         return true;
       case BinOp::Mul:
-        if (__builtin_mul_overflow(a, b, &out)) return false;
+        if (i64MulOverflow(a, b, out)) return false;
         return true;
       case BinOp::BitAnd: out = a & b; return true;
       case BinOp::BitOr: out = a | b; return true;
