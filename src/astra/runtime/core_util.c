@@ -1,3 +1,6 @@
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE /* pthread_getattr_np declaration on glibc (C99+ needs it) */
+#endif
 #include "a_runtime_internal.h"
 
 #if defined(__linux__)

@@ -64,6 +64,9 @@
 #if defined(__GLIBC__)
 #include <malloc.h> /* malloc_trim */
 #endif
+#if defined(__linux__) || defined(__APPLE__)
+#include <execinfo.h> /* backtrace / backtrace_symbols_fd for A_GC_TRACE */
+#endif
 
 #undef free
 #if defined(_WIN32) && !defined(_WIN64)
@@ -1479,9 +1482,11 @@ void a_gc_register(void *p, size_t n) {
                 p, n, i, __builtin_return_address(0),
                 __builtin_return_address(1));
         if (n >= ((size_t)1 << 20)) {
+#if defined(__linux__) || defined(__APPLE__)
             void *bt[32];
             int nb = backtrace(bt, 32);
             backtrace_symbols_fd(bt, nb, 2);
+#endif
         }
     }
 }

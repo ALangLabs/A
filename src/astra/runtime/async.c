@@ -35,6 +35,9 @@
  * Windows, TinyCC/astoc-built runtimes, and when A_ASYNC=0/off/no/false.
  * In that case every entry point degrades to the plain synchronous path.
  */
+#if defined(__APPLE__) && !defined(_XOPEN_SOURCE)
+#define _XOPEN_SOURCE 700 /* getcontext/swapcontext: Darwin hides them otherwise */
+#endif
 #include "a_runtime_internal.h"
 
 #if A_FIBERS
@@ -911,7 +914,6 @@ int a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms) {
     (void)fd; (void)events; (void)timeout_ms; return 0;
 }
 struct AFib_opaque;
-typedef struct AFib_opaque AFib;
 AFib *a_fib_spawn_fn(aval fnval, uint64_t n, aval *args) { (void)fnval; (void)n; (void)args; return NULL; }
 aval a_fib_spawn_handle(aval fnval, uint64_t n, aval *args) {
     a_call(fnval, n, args);
