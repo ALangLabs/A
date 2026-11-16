@@ -40,6 +40,14 @@ int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
                        int optLevel, const std::string& objPath,
                        std::ostream& err);
 
+// GPU offload extraction (Mojo-style compile_offload): compiles llvm.funcs
+// stamped with `a.offload` into a device module (NVPTX->PTX, AMDGPU->code
+// object), strips them from the host module, and writes <objPath>.offload.bin
+// + <objPath>.offload.c next to the host object for linkWithRuntime to
+// compile/link. Returns 0 on success (including "no offloads present").
+int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
+                      int optLevel, std::ostream& err);
+
 // Links an object produced by mlirModuleToObject with the staged A runtime
 // archive by invoking the clang driver, mirroring pipeline.cpp's llvmBuild
 // link stage (including the mold fast path). `runtimeLib` must be the

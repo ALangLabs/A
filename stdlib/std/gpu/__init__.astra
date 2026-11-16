@@ -1,0 +1,68 @@
+# std.gpu — GPU offload runtime bindings (Mojo-style kernel/device fns).
+#
+# `kernel fn` / `device fn` declarations compile to device code embedded in
+# the binary (PTX on NVIDIA via the CUDA driver, code objects on AMD via
+# HIP). This module wraps the a_gpu_* runtime entry points. All functions
+# degrade gracefully: they return false/-1 when no GPU driver is present.
+#
+# Kernel launch: kernels take up to 8 scalar params passed as raw 64-bit
+# slots. Use launch_i for int kernels and launch_f for float kernels.
+
+extern fn a_gpu_available() -> int
+extern fn a_gpu_module_load(kind: int, data: Pointer, len: int) -> int
+extern fn a_gpu_register_kernel(mod: int, name: str, ksym: str, nparams: int) -> int
+extern fn a_gpu_launch_i(name: str, gx: int, gy: int, gz: int,
+                         bx: int, by: int, bz: int, n: int,
+                         a0: int, a1: int, a2: int, a3: int,
+                         a4: int, a5: int, a6: int, a7: int) -> int
+extern fn a_gpu_launch_f(name: str, gx: int, gy: int, gz: int,
+                         bx: int, by: int, bz: int, n: int,
+                         a0: float, a1: float, a2: float, a3: float,
+                         a4: float, a5: float, a6: float, a7: float) -> int
+extern fn a_gpu_alloc(bytes: int) -> int
+extern fn a_gpu_free(p: int) -> int
+extern fn a_gpu_memcpy_htod(dst: int, src: int, n: int) -> int
+extern fn a_gpu_memcpy_dtoh(dst: int, src: int, n: int) -> int
+extern fn a_gpu_synchronize() -> int
+
+"""available() -> whether a CUDA or HIP driver was found at runtime."""
+fn available() -> bool:
+    return a_gpu_available() != 0
+
+"""
+launch_i(name, gx, gy, gz, bx, by, bz, n, a0..a7) -> launch an int kernel.
+`name` is the kernel fn's source name; grid/block dims are thread counts.
+Pass unused trailing args as 0; `n` is the kernel's parameter count.
+"""
+fn launch_i(name: str, gx: int, gy: int, gz: int, bx: int, by: int, bz: int,
+            n: int, a0: int, a1: int, a2: int, a3: int,
+            a4: int, a5: int, a6: int, a7: int) -> bool:
+    return a_gpu_launch_i(name, gx, gy, gz, bx, by, bz, n,
+                          a0, a1, a2, a3, a4, a5, a6, a7) == 0
+
+"""launch_f — same as launch_i but for float (f64) kernel params."""
+fn launch_f(name: str, gx: int, gy: int, gz: int, bx: int, by: int, bz: int,
+            n: int, a0: float, a1: float, a2: float, a3: float,
+            a4: float, a5: float, a6: float, a7: float) -> bool:
+    return a_gpu_launch_f(name, gx, gy, gz, bx, by, bz, n,
+                          a0, a1, a2, a3, a4, a5, a6, a7) == 0
+
+"""alloc(bytes) -> device pointer (as int), or -1."""
+fn alloc(bytes: int) -> int:
+    return a_gpu_alloc(bytes)
+
+"""free(p) -> release a device allocation."""
+fn free(p: int) -> bool:
+    return a_gpu_free(p) == 0
+
+"""htod(dst_dev, src_host, n) -> copy n bytes host -> device."""
+fn htod(dst: int, src: int, n: int) -> bool:
+    return a_gpu_memcpy_htod(dst, src, n) == 0
+
+"""dtoh(dst_host, src_dev, n) -> copy n bytes device -> host."""
+fn dtoh(dst: int, src: int, n: int) -> bool:
+    return a_gpu_memcpy_dtoh(dst, src, n) == 0
+
+"""synchronize() -> wait for all launched kernels to finish."""
+fn synchronize() -> bool:
+    return a_gpu_synchronize() == 0

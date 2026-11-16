@@ -5,8 +5,8 @@
 // DIALECT STATUS (verified against `a mlir-opt`, MLIR 18 + this tree's
 // src/astra/mlir): this emitter produces the llvm-dialect op stream with the
 // `a`-dialect ops that ARE text-expressible and semantics-preserving:
-//   * every `a_*` runtime call (helpers callI64/callI64T/callI32T/
-//     callVoidT, pin, frame push/pop, gc roots, a_runtime_init, a_fib_main,
+//   * every `a_*` runtime call (helpers callI64/callI64T/callI32T,
+//     pin, frame push/pop, gc roots, a_runtime_init, a_fib_main,
 //     a_test_main) emits `a.runtime.call "sym"(args) {signature = ...} :
 //     (types) -> ret`. a-lower-to-llvm lowers it to `llvm.call @sym` with
 //     the same signature inferred from lowered operand/result types.
@@ -52,6 +52,7 @@
 #include "codegen/codegen_internal.hpp"
 #include "fastpath_mlir.hpp"
 #include "mlir/mlir_util.hpp"
+#include "mlir/runtime_sigs.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
@@ -857,11 +858,12 @@ class MlirDialectEmitter {
   void emitModuleOpen() { pre_ << "module {\n"; }
 
   void emitDecls() {
-    // (sig parsed below into llvm.func declarations)
-    // The a_*_fast exports are DEFINED (not declared) via
-    // fastpathmlir::kFastPathMLIR appended to body_ in run(); only their
-    // *_slow fallbacks and helpers are declared here.
-    static const std::pair<const char*, const char*> sigs[] = {
+    // Shared signatures come from runtime_sigs::kRuntimeSigs (single source
+    // of truth with mlir_emit.cpp / ambc_modules.cpp). The a_*_fast exports
+    // are DEFINED (not declared) via fastpathmlir::kFastPathMLIR appended to
+    // body_ in run(), so they are skipped here; kAdExtraSigs covers the
+    // ad-dialect-only decls (slow paths, libm/intrinsic helpers).
+    static const std::pair<const char*, const char*> kAdExtraSigs[] = {
         {"a_add_slow", "(i64, i64) -> i64"}, {"a_sub_slow", "(i64, i64) -> i64"},
         {"a_mul_slow", "(i64, i64) -> i64"}, {"a_div_slow", "(i64, i64) -> i64"},
         {"a_floordiv_slow", "(i64, i64) -> i64"},
@@ -881,62 +883,14 @@ class MlirDialectEmitter {
          "(i64, i64) -> !llvm.struct<(i64, i1)>"},
         {"llvm.smul.with.overflow.i64",
          "(i64, i64) -> !llvm.struct<(i64, i1)>"},
-        {"a_unwrap", "(i64) -> i64"}, {"a_some_new", "(i64) -> i64"},
-        {"a_try_result", "(i64) -> i64"}, {"a_is_option", "(i64) -> i32"},
-        {"a_is_propagate", "(i64) -> i32"}, {"a_str", "(i64) -> i64"},
-        {"a_repr", "(i64) -> i64"}, {"a_len", "(i64) -> i64"},
-        {"a_int", "(i64) -> i64"}, {"a_float", "(i64) -> i64"},
-        {"a_bool", "(i64) -> i64"}, {"a_type_name", "(i64) -> i64"},
-        {"a_int_full", "(i64) -> i64"}, {"a_i64n", "(i64) -> i64"},
-        {"a_str_new", "(!llvm.ptr, i64) -> i64"},
-        {"a_char_new", "(!llvm.ptr, i64) -> i64"},
-        {"a_str_concat", "(i64, i64) -> i64"},
-        {"a_str_join", "(i64, !llvm.ptr) -> i64"},
-        {"a_str_joinsep", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_list_new", "(i64, !llvm.ptr) -> i64"},
-        {"a_list_append", "(i64, i64) -> i64"},
-        {"a_list_append_int", "(i64, i64) -> i64"},
-        {"a_list_from_iter", "(i64) -> i64"},
-        {"a_tuple_new", "(i64, !llvm.ptr) -> i64"},
-        {"a_dict_new", "() -> i64"}, {"a_dict_set", "(i64, i64, i64) -> i64"},
-        {"a_dict_get", "(i64, i64, i64) -> i64"},
-        {"a_dict_has", "(i64, i64) -> i64"},
-        {"a_set_new", "() -> i64"}, {"a_set_add", "(i64, i64) -> i64"},
-        {"a_range_new", "(i64, i64, i64) -> i64"},
-        {"a_range_bound", "(i64, i64) -> i64"},
-        {"a_getitem", "(i64, i64) -> i64"},
-        {"a_setitem", "(i64, i64, i64) -> i64"},
-        {"a_slice", "(i64, i64, i64, i64) -> i64"},
-        {"a_iter_new", "(i64) -> i64"},
-        {"a_iter_next", "(i64, !llvm.ptr) -> i64"},
-        {"a_contains", "(i64, i64) -> i64"},
-        {"a_fnon_new", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_closure_env_new", "(i64) -> i64"},
-        {"a_env_new", "(i64) -> i64"}, {"a_env_get", "(i64, i64) -> i64"},
-        {"a_env_set", "(i64, i64, i64) -> i64"},
-        {"a_struct_new", "(i64, i64, i64) -> i64"},
-        {"a_builtin", "(i64) -> i64"},
-        {"a_bi_call", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_call", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_method", "(i64, !llvm.ptr, i64, i64, !llvm.ptr) -> i64"},
-        {"a_getattr", "(i64, !llvm.ptr) -> i64"},
-        {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
-        {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(!llvm.ptr) -> i64"},
-        {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
-        {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
-        {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
-        {"a_fib_main", "(i64, i64, i64, !llvm.ptr) -> i64"},
-        {"a_fib_spawn_handle", "(i64, i64, !llvm.ptr) -> i64"},
-        {"a_fib_join_handle", "(i64) -> i64"},
-        {"a_test_main", "(i64, !llvm.ptr, !llvm.ptr) -> i32"},
-        {"a_printv", "(i64, !llvm.ptr) -> ()"},
-        {"a_eprintv", "(i64, !llvm.ptr) -> ()"},
-        {"a_println", "(i64) -> ()"}, {"a_sleep", "(i64) -> ()"},
-        {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
-        {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
     };
-    for (const auto& kv : sigs)
+    for (const auto& kv : kAdExtraSigs)
       pre_ << runtimeDeclText(kv.first, kv.second) << "\n";
+    for (const auto& kv : runtime_sigs::kRuntimeSigs) {
+      const std::string n = kv.first;
+      if (n.size() > 5 && n.compare(n.size() - 5, 5, "_fast") == 0) continue;
+      pre_ << runtimeDeclText(kv.first, kv.second) << "\n";
+    }
     if (typed_) {
       // aval -> f64 decode for typed float slots (core_util.c num_to_double:
       // int avals convert, double avals bitcast, else panic).
@@ -1665,7 +1619,8 @@ class MlirDialectEmitter {
         std::string ks = stringLiteralAval(ms.fieldNames[i]);
         callI64("a_dict_set", {obj, ks, fv});
       }
-      callI64("a_promote", {obj});
+      fn_ << "  a.runtime.call \"a_promote\"(" << obj
+           << ") {signature = \"(i64) -> ()\"} : (i64) -> ()\n";
       emitReturn(obj);
       fn_ << "}\n\n";
       flushFunction();
@@ -2811,7 +2766,8 @@ class MlirDialectEmitter {
     fn_ << "^" << lprop << ":\n";
     terminated_ = false;
     emitPendingDefers();
-    callI64("a_promote", {t});
+    fn_ << "  a.runtime.call \"a_promote\"(" << t
+         << ") {signature = \"(i64) -> ()\"} : (i64) -> ()\n";
     emitReturn(t);
     fn_ << "^" << lok << ":\n";
     terminated_ = false;

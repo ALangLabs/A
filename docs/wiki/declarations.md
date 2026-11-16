@@ -121,3 +121,34 @@ unrolls — when the condition/iterable is a compile-time constant (including
 substituted comptime params); otherwise they degrade to ordinary runtime
 `if`/`for`. Comptime params on methods, comptime types, and `reflect` are not
 implemented yet. Constraints via `where` do work (see above).
+
+## Kernel / device functions (GPU offload)
+
+`kernel fn` and `device fn` mark functions for GPU compilation (Mojo-style
+`compile_offload`): the typed MLIR backend slices them into a device module
+compiled by LLVM's NVPTX (PTX text, loaded via the CUDA driver) or AMDGPU
+(code object, loaded via HIP) targets, and embeds the blob in the binary.
+No CUDA/ROCm toolkit is needed — only the GPU driver at runtime.
+
+```python
+kernel fn square(x: int) -> int:
+    return x * x
+
+device fn add1(x: int) -> int:
+    return x + 1
+```
+
+- `kernel` fns are launchable entry points; `device` fns are only callable
+  from other kernel/device functions. Host code cannot call either directly
+  (Sema rejects it); kernels are launched via `std.gpu` (`gpu.launch_i` /
+  `gpu.launch_f`, `gpu.alloc`/`htod`/`dtoh`/`synchronize`).
+- Params and return type must be explicitly annotated scalars
+  (`int`/`float`/`bool`); no generics, `comptime`, `extern`, or `entry`.
+- Bodies must be free of the host runtime: scalar arithmetic and calls to
+  other kernel/device fns only — no builtins (`print`, `len`, ...), no
+  allocation, no `for x in <non-range>` iteration. Prefer `while` loops.
+- Device target: `A_GPU_TARGET` (default `nvptx64-nvidia-cuda`;
+  `amdgcn-amd-amdhsa` for AMD), `A_GPU_CPU` (default `sm_60`/`gfx900`),
+  `A_GPU_ATTRS` (LLVM feature string), `A_GPU_OFFLOAD=0` disables.
+- Requires the in-process MLIR backend (default); the subprocess
+  `mlir-translate`/`llc` path does not extract offloads.

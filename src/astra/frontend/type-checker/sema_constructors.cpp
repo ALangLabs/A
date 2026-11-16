@@ -54,7 +54,11 @@ void Sema::checkOffloadCall(const FnDecl& callee, CallExpr& call) {
   const FnDecl* caller = currentFunction_;
   const auto callerKind =
       caller ? caller->offload : FnDecl::OffloadKind::None;
-  if (callee.offload == callerKind) return;
+  // kernel<->device calls are fine (both compile to device code); only a
+  // host<->offload boundary is an error.
+  if ((callee.offload != FnDecl::OffloadKind::None) ==
+      (callerKind != FnDecl::OffloadKind::None))
+    return;
   const char* kind =
       callee.offload == FnDecl::OffloadKind::Kernel ? "kernel" : "device";
   if (callee.offload == FnDecl::OffloadKind::None) {

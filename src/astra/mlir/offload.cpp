@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "llvm/ADT/StringRef.h"
+#include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
@@ -43,6 +44,8 @@
 
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 
 namespace a {
@@ -72,10 +75,8 @@ std::string offloadKindOf(mlir::LLVM::LLVMFuncOp fn) {
 }
 
 int nparamsOf(mlir::LLVM::LLVMFuncOp fn) {
-  auto ft = fn.getFunctionType();
-  if (!ft) return 0;
-  // LLVMFunctionType wraps an llvm::FunctionType; getNumInputs mirrors it.
-  return (int)ft.getNumInputs();
+  // FunctionOpInterface arg count == LLVM parameter count for llvm.func.
+  return (int)fn.getNumArguments();
 }
 
 // Recover the A-level function name from the mangled core symbol:
@@ -112,11 +113,9 @@ std::string deviceTriple() {
 
 std::string deviceCPU(const llvm::Triple& t) {
   if (const char* e = std::getenv("A_GPU_CPU"); e && *e) return e;
-  switch (t.getArch()) {
-    case llvm::Triple::NVPTX: return "sm_60";
-    case llvm::Triple::AMDGPU: return "gfx900";
-    default: return "";
-  }
+  if (t.isNVPTX()) return "sm_60";
+  if (t.isAMDGCN()) return "gfx900";
+  return "";
 }
 
 }  // namespace
@@ -147,30 +146,28 @@ int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
   mlir::ModuleOp devModule = mlir::cast<mlir::ModuleOp>(clonedOp);
 
   llvm::Triple triple(deviceTriple());
+  std::string targetErr;
   const llvm::Target* target =
-      llvm::TargetRegistry::lookupTarget(triple.normalize(), err);
+      llvm::TargetRegistry::lookupTarget(triple.normalize(), targetErr);
   if (!target) {
     err << "error: gpu offload: no LLVM target for '" << triple.normalize()
-        << "' (supported: nvptx64-*, amdgcn-*)\n";
+        << "': " << targetErr << "\n";
     return 1;
   }
 
   int kind = 0;  // 1 = PTX text, 2 = code object
   llvm::CodeGenFileType fileType;
-  switch (triple.getArch()) {
-    case llvm::Triple::NVPTX:
-      kind = 1;
-      fileType = llvm::CodeGenFileType::AssemblyFile;
-      break;
-    case llvm::Triple::AMDGPU:
-      kind = 2;
-      fileType = llvm::CodeGenFileType::ObjectFile;
-      break;
-    default:
-      err << "error: gpu offload: unsupported device target '"
-          << triple.normalize()
-          << "' (supported: nvptx64-nvidia-cuda, amdgcn-amd-amdhsa)\n";
-      return 1;
+  if (triple.isNVPTX()) {
+    kind = 1;
+    fileType = llvm::CodeGenFileType::AssemblyFile;
+  } else if (triple.isAMDGCN()) {
+    kind = 2;
+    fileType = llvm::CodeGenFileType::ObjectFile;
+  } else {
+    err << "error: gpu offload: unsupported device target '"
+        << triple.normalize()
+        << "' (supported: nvptx64-nvidia-cuda, amdgcn-amd-amdhsa)\n";
+    return 1;
   }
 
   mlir::MLIRContext* ctx = module.getContext();
@@ -191,12 +188,16 @@ int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
   // unreferenced).
   std::unordered_set<std::string> keep;
   for (const OffloadFn& o : offloads) keep.insert(o.sym);
+  llvm::SmallVector<llvm::Function*> strip;
   for (llvm::Function& fn : devLLVM->functions()) {
     if (fn.isDeclaration()) continue;
     if (keep.count(fn.getName().str())) continue;
-    if (!fn.use_empty())
-      fn.replaceAllUsesWith(llvm::UndefValue::get(fn.getType()));
-    fn.eraseFromParent();
+    strip.push_back(&fn);
+  }
+  for (llvm::Function* fn : strip) {
+    if (!fn->use_empty())
+      fn->replaceAllUsesWith(llvm::UndefValue::get(fn->getType()));
+    fn->eraseFromParent();
   }
 
   devLLVM->setTargetTriple(triple.normalize());
@@ -229,8 +230,8 @@ int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
   }
 
   const std::string cpu = deviceCPU(triple);
-  const std::string feats =
-      (const char* e = std::getenv("A_GPU_ATTRS"); e && *e) ? e : "";
+  std::string feats;
+  if (const char* e = std::getenv("A_GPU_ATTRS"); e && *e) feats = e;
 
   llvm::TargetOptions topts;
   topts.AllowFPOpFusion = llvm::FPOpFusion::Fast;
@@ -251,18 +252,41 @@ int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
   if (devLLVM->getDataLayout().isDefault())
     devLLVM->setDataLayout(tm->createDataLayout());
 
-  std::string blob;
+  // Emit straight to the blob path (addPassesToEmitFile needs a pwrite
+  // stream), then read it back for embedding in the .c registration unit.
+  const std::string blobPath = objPath + ".offload.bin";
+  const std::string cPath = objPath + ".offload.c";
   {
-    llvm::raw_string_ostream os(blob);
+    std::error_code bec;
+    llvm::raw_fd_ostream bos(blobPath, bec);
+    if (bec) {
+      err << "error: gpu offload: cannot open '" << blobPath << "': "
+          << bec.message() << "\n";
+      return 1;
+    }
     llvm::legacy::PassManager pm;
-    if (tm->addPassesToEmitFile(pm, os, nullptr, fileType)) {
+    if (tm->addPassesToEmitFile(pm, bos, nullptr, fileType)) {
       err << "error: gpu offload: device target cannot emit "
           << (kind == 1 ? "assembly" : "object") << " for '"
           << triple.normalize() << "'\n";
       return 1;
     }
     pm.run(*devLLVM);
-    os.flush();
+    bos.flush();
+    if (bos.has_error()) {
+      err << "error: gpu offload: failed writing '" << blobPath << "'\n";
+      return 1;
+    }
+  }
+  std::string blob;
+  {
+    std::ifstream bf(blobPath, std::ios::binary);
+    if (!bf) {
+      err << "error: gpu offload: cannot read '" << blobPath << "'\n";
+      return 1;
+    }
+    blob.assign(std::istreambuf_iterator<char>(bf),
+                std::istreambuf_iterator<char>());
   }
   if (blob.empty()) {
     err << "error: gpu offload: device emission produced no output\n";
@@ -278,14 +302,7 @@ int prepareGpuOffload(mlir::ModuleOp module, const std::string& objPath,
   }
   for (mlir::Operation* op : toErase) op->erase();
 
-  // Write the blob + generated registration unit next to the host object.
-  const std::string blobPath = objPath + ".offload.bin";
-  const std::string cPath = objPath + ".offload.c";
-  if (!writeFile(blobPath, blob)) {
-    err << "error: gpu offload: cannot write '" << blobPath << "'\n";
-    return 1;
-  }
-
+  // Write the generated registration unit next to the host object.
   std::string c;
   c.reserve(blob.size() + offloads.size() * 96 + 512);
   c += "/* Generated by a: GPU offload module registration (Mojo-style "

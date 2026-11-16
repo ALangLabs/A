@@ -196,6 +196,11 @@ int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
   }
   level = std::max(0, std::min(3, level));
 
+  // (a) GPU offload: slice `a.offload` funcs into a device module, compile
+  // for the GPU target, and stage <objPath>.offload.{bin,c} for the link
+  // stage. Must run before host translation so offload funcs are gone.
+  if (int rc = prepareGpuOffload(module, objPath, level, err)) return rc;
+
   // (a) llvm-dialect MLIR -> LLVM IR module.
   mlir::MLIRContext* ctx = module.getContext();
   // Ensure the builtin + llvm dialect translation interfaces are registered
@@ -454,6 +459,30 @@ int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
   // llc emits a non-PIC object; -no-pie keeps the link consistent with it.
   std::vector<std::string> args =
       a::toolchain::runtimeLinkArgs(objPath, runtimeLib, outputPath);
+  // GPU offload: <objPath>.offload.c (written by prepareGpuOffload) carries
+  // the device blob + a constructor registering kernels with the runtime.
+  // Compile it with the same driver and link the object in before the
+  // runtime archive so its a_gpu_* symbols resolve.
+  {
+    const std::string offC = objPath + ".offload.c";
+    std::error_code oec2;
+    if (std::filesystem::exists(offC, oec2)) {
+      const std::string offO = objPath + ".offload.o";
+      bool compiled = false;
+      for (const auto& drv : drivers) {
+        if (a::toolchain::runToolProcess(drv, {"-O2", "-c", offC, "-o", offO},
+                                         /*discardStdout=*/true) == 0) {
+          compiled = true;
+          break;
+        }
+      }
+      if (!compiled) {
+        err << "error: llvm backend: failed to compile '" << offC << "'\n";
+        return 1;
+      }
+      args.insert(args.begin() + 1, offO);
+    }
+  }
   // mold is dramatically faster than ld/lld for the final link; use it when
   // present and retry with the default linker if it fails (mirrors llvmBuild).
   const bool useMold = a::toolchain::moldAvailable();

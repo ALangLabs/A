@@ -124,6 +124,7 @@ set(A_MLIR_CORE_SOURCES
     bytecode.cpp
     codegen.cpp
     native.cpp
+    offload.cpp
     pipeline.cpp
     driver.cpp
     dialect/ADialect.cpp
