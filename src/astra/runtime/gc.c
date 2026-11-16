@@ -65,9 +65,6 @@
 #if defined(__GLIBC__)
 #include <malloc.h> /* malloc_trim */
 #endif
-#if defined(__linux__) || defined(__APPLE__)
-#include <execinfo.h> /* backtrace / backtrace_symbols_fd for A_GC_TRACE */
-#endif
 
 #undef free
 #if defined(_WIN32) && !defined(_WIN64)
