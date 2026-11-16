@@ -536,10 +536,6 @@ int a_fib_wait_fd(int fd, short events, int64_t timeout_ms) {
     return rv;
 }
 
-int a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms) {
-    return a_fib_wait_fd(fd, events, timeout_ms) != 0;
-}
-
 /* Wait for another fiber to reach DONE (structured concurrency). */
 void a_fib_wait_fiber(AFib *target) {
     if (!a_fib_current || !target || target == a_fib_current || target->state == FIB_DONE)
@@ -709,7 +705,7 @@ static void sched_run(void) {
 }
 
 /* Wait for `f` to finish. Inside a fiber: cooperative wait. Outside:
-   drive the scheduler (used by a_fib_call/a_fib_main). */
+   drive the scheduler (used by a_fib_main). */
 static aval fib_await(AFib *f) {
     if (!f) return A_NONE;
     if (a_fib_current) {
@@ -726,13 +722,6 @@ static aval fib_await(AFib *f) {
 
 /* Spawn an A fnval on a fiber and wait for its result. Outside a fiber
    this drives the whole scheduler; inside one it waits cooperatively. */
-aval a_fib_call(aval fn, uint64_t n, aval *args) {
-    if (!fib_enabled()) return a_call(fn, n, args);
-    AFib *f = a_fib_spawn_fn(fn, n, args);
-    if (!f) return a_call(fn, n, args);
-    return fib_await(f);
-}
-
 /* Run a raw C entry inside a fiber + scheduler (emitMain wraps
    __a_main_body this way). Falls back to a direct call when off. */
 aval a_fib_main(uint64_t entry, aval env, uint64_t n, aval *args) {
@@ -797,14 +786,6 @@ void a_fib_reap_all(void) {
 /* ------------------------------------------------------------------ */
 /* public predicates                                                   */
 /* ------------------------------------------------------------------ */
-
-/* Number of live fibers (diagnostics / tests). */
-int a_fib_count(void) {
-    int n = 0;
-    for (AFib *f = g_fibs; f; f = f->next_all) ++n;
-    for (AFib *f = g_fib_done; f; f = f->next_done) ++n;
-    return n;
-}
 
 /* ------------------------------------------------------------------ */
 /* builtins: async.spawn / async.join                                  */
@@ -901,16 +882,12 @@ aval bi_fib_cancel(uint64_t n, aval *argv) {
 
 int a_fib_on(void) { return 0; }
 int a_fib_stack_bounds(uintptr_t *lo, uintptr_t *hi) { (void)lo; (void)hi; return 0; }
-int a_fib_count(void) { return 0; }
 void a_fib_sleep_ms(int64_t ms) {
     struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
 }
 void *a_fib_blocking(void *(*fn)(void *), void *arg) { return fn(arg); }
 int a_fib_wait_fd(int fd, short events, int64_t timeout_ms) {
-    (void)fd; (void)events; (void)timeout_ms; return 0;
-}
-int a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms) {
     (void)fd; (void)events; (void)timeout_ms; return 0;
 }
 struct AFib_opaque;
@@ -922,7 +899,6 @@ aval a_fib_spawn_handle(aval fnval, uint64_t n, aval *args) {
 aval a_fib_join_handle(aval h) { (void)h; return A_NONE; }
 AFib *a_fib_spawn_raw(uint64_t entry, aval env, uint64_t n, aval *args) { (void)entry; (void)env; (void)n; (void)args; return NULL; }
 void a_fib_wait_fiber(AFib *target) { (void)target; }
-aval a_fib_call(aval fn, uint64_t n, aval *args) { return a_call(fn, n, args); }
 aval a_fib_main(uint64_t entry, aval env, uint64_t n, aval *args) {
     aval (*code)(aval *) = (aval (*)(aval *))(uintptr_t)entry;
     aval *av = (aval *)xmalloc((size_t)(n + 1) * sizeof(aval));

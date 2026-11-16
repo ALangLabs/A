@@ -172,10 +172,6 @@ static void stack_guard_check(void) {
     }
 }
 
-/* Lightweight guard emitted for frame-free typed cores: those skip the
-   traceback/region frame hooks but must still catch unbounded recursion. */
-void a_stack_guard(void) { stack_guard_check(); }
-
 /* Opaque escape for GC-visible stack slots: taking the slot's address in
    an external call keeps LLVM from promoting the alloca to a register, so
    the conservative GC can always see the aval stored there. */

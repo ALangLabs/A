@@ -155,7 +155,6 @@ void Sema::buildModuleExports(Module& module) {
       exports.values[entry.first] = entry.second.type;
     }
   }
-  exports.structAliases = structAliases_;
 }
 
 SemaResult Sema::analyze() {
@@ -253,11 +252,6 @@ SemaResult Sema::analyzeParallel(int jobs) {
   }
   result.exprTypes = exprTypes_;
   return result;
-}
-
-void Sema::analyzeModule(Module& module) {
-  registerModule(module);
-  checkModule(module);
 }
 
 void Sema::registerModule(Module& module) {
@@ -498,7 +492,5 @@ void Sema::checkModule(Module& module) {
   }
   buildModuleExports(module);
 }
-
-void Sema::checkModuleBodies(Module& module) { checkModule(module); }
 
 }  // namespace a

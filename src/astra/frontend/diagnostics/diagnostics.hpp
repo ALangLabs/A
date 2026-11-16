@@ -30,9 +30,9 @@ struct Diagnostic {
 // to map spans back to files in multi-file programs.
 //
 // Thread-safe (ty/pyrefly checkers emit diagnostics from worker threads):
-// error/warning/addFile/diagnosticsCopy/flush may run concurrently. The
+// error/warning/addFile/flush may run concurrently. The
 // `diagnostics()` accessor returns the live vector and must only be called
-// when no writer is active; prefer `diagnosticsCopy()` otherwise.
+// when no writer is active.
 class DiagnosticSink {
  public:
   DiagnosticSink() = default;
@@ -56,7 +56,6 @@ class DiagnosticSink {
   // `# ty: ignore`, or `# pyrefly: ignore` on a line suppresses diagnostics
   // whose span starts on that line. An optional `[CODE]` filters by code,
   // e.g. `# a: ignore[W0001]`.
-  bool isSuppressed(Span span, const std::string& code = {}) const;
   bool isSuppressed(Span span, Severity severity, const std::string& code) const;
 
   bool hasErrors() const {
@@ -72,9 +71,6 @@ class DiagnosticSink {
   // this to translate compiler diagnostics into editor diagnostics without
   // going through the terminal renderer.
   const std::vector<Diagnostic>& diagnostics() const { return diagnostics_; }
-
-  // Thread-safe snapshot of everything collected so far.
-  std::vector<Diagnostic> diagnosticsCopy() const;
 
   // Prints diagnostics added since the previous flush. This lets each
   // pipeline stage flush without reprinting earlier output.

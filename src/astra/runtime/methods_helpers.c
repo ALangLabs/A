@@ -157,31 +157,6 @@ AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit) {
     return out;
 }
 
-aval str_replace(aval v, aval oldv, aval newv, int64_t count) {
-    AStr *s = astr_flat(v);
-    uint64_t on, nn, sn = s->h.len;
-    const char *op = str_data(oldv, &on), *np = str_data(newv, &nn);
-    const char *sp = s->data;
-    Buf b;
-    buf_init(&b);
-    if (on == 0) panicf("The 'replace' target must not be empty.");
-    if (count < 0) count = INT64_MAX;
-    uint64_t pos = 0, last = 0;
-    int64_t done = 0;
-    while (done < count && pos + on <= sn) {
-        size_t p;
-        if (!find_bytes(sp + pos, (size_t)(sn - pos), op, (size_t)on, 0, &p)) break;
-        uint64_t at = pos + p;
-        buf_addn(&b, sp + last, at - last);
-        buf_addn(&b, np, (size_t)nn);
-        pos = at + on;
-        last = pos;
-        ++done;
-    }
-    buf_addn(&b, sp + last, sn - last);
-    return buf_take(&b);
-}
-
 int str_pred(aval v, int pred) {
     AStr *s = astr_flat(v);
     if (s->h.len == 0) return 0;

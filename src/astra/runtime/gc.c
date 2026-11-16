@@ -1581,20 +1581,6 @@ void a_gc_free(void *p) {
 /* only; OLD objects remain GC-managed exactly as before.              */
 /* ------------------------------------------------------------------ */
 
-/* 1 when p is a registered GC object that regions may reclaim
-   (excludes arena/xarena objects, which are not individually freeable,
-   and pinned T_PYOBJ/T_PYBUF objects). */
-int a_gc_regionable(void *p) {
-    if (!gc_enabled() || !p || g_in_gc) return 0;
-    uint32_t i = ht_find((uintptr_t)p);
-    if (i == GC_NONE) return 0;
-    GCBlock *b = &g_blk[i];
-    if (!(b->flags & GC_F_USED) || !(b->flags & GC_F_OBJ)) return 0;
-    if (gc_in_arena((uintptr_t)p)) return 0;
-    if (gc_obj_pinned(p)) return 0;
-    return 1;
-}
-
 /* Single-lookup variant of regionable+set_region for the mkobj hot path:
    stamps the block's region depth and returns 1 iff the object is
    region-trackable (registered GC object, not arena, not pinned). */
@@ -1613,13 +1599,6 @@ int a_gc_track_region(void *p, uint32_t depth) {
     if (gc_obj_pinned(p)) return 0;
     b->region = depth;
     return 1;
-}
-
-void a_gc_set_region(void *p, uint32_t depth) {
-    if (!gc_enabled() || !p) return;
-    uint32_t i = ht_find((uintptr_t)p);
-    if (i == GC_NONE) return;
-    g_blk[i].region = depth;
 }
 
 /* Single-lookup escape check for region.c's a_region_store: returns
@@ -1658,32 +1637,6 @@ int a_gc_promote_visit(void *p) {
     if (gc_obj_pinned(p)) return 0;
     b->flags |= GC_F_OLD;
     return 1;
-}
-
-uint32_t a_gc_obj_region(void *p) {
-    if (!gc_enabled() || !p) return 0;
-    uint32_t i = ht_find((uintptr_t)p);
-    return i == GC_NONE ? 0 : g_blk[i].region;
-}
-
-int a_gc_obj_old(void *p) {
-    if (!gc_enabled() || !p) return 0;
-    uint32_t i = ht_find((uintptr_t)p);
-    return i != GC_NONE && (g_blk[i].flags & GC_F_OLD) != 0;
-}
-
-void a_gc_promote_block(void *p) {
-    if (!gc_enabled() || !p) return;
-    uint32_t i = ht_find((uintptr_t)p);
-    if (i != GC_NONE) g_blk[i].flags |= GC_F_OLD;
-}
-
-int a_gc_registered_obj(void *p) {
-    if (!p) return 0;
-    uint32_t i = ht_find((uintptr_t)p);
-    if (i == GC_NONE) return 0;
-    GCBlock *b = &g_blk[i];
-    return ((b->flags & (GC_F_USED | GC_F_OBJ)) == (GC_F_USED | GC_F_OBJ));
 }
 
 /* Release every live T_PYOBJ/T_PYBUF wrapper's owned reference at

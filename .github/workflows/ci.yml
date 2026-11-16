@@ -20,8 +20,22 @@ jobs:
             command -v "$c" >/dev/null 2>&1 && { echo "$c -> $($c --version) cmake=$($c --cmakedir 2>/dev/null)"; }
           done
           dpkg -L libmlir-18-dev 2>/dev/null | grep -i cmake | head
+          # Resolve the cmake config dirs explicitly: llvm-config knows its
+          # own layout, and MLIRConfig.cmake sits next to LLVMConfig.cmake.
+          LLVM_CONFIG="$(command -v llvm-config-18 || command -v llvm-config || true)"
+          LLVM_CMAKE_DIR=""
+          [ -n "$LLVM_CONFIG" ] && LLVM_CMAKE_DIR="$("$LLVM_CONFIG" --cmakedir 2>/dev/null || true)"
+          MLIR_CMAKE_DIR=""
+          if [ -n "$LLVM_CMAKE_DIR" ] && [ -f "$(dirname "$LLVM_CMAKE_DIR")/mlir/MLIRConfig.cmake" ]; then
+            MLIR_CMAKE_DIR="$(dirname "$LLVM_CMAKE_DIR")/mlir"
+          fi
+          echo "LLVM_CMAKE_DIR=$LLVM_CMAKE_DIR MLIR_CMAKE_DIR=$MLIR_CMAKE_DIR" >> "$GITHUB_ENV"
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON -DA_ENABLE_LTO=ON
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DA_WARNINGS_AS_ERRORS=ON -DA_ENABLE_LTO=ON
+          ${MLIR_CMAKE_DIR:+-DMLIR_DIR="$MLIR_CMAKE_DIR"}
+          ${LLVM_CMAKE_DIR:+-DLLVM_DIR="$LLVM_CMAKE_DIR"}
       - name: Build
         run: cmake --build build -j
       - name: Version is consistent
@@ -46,10 +60,20 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libmlir-18-dev clang-18
+          LLVM_CONFIG="$(command -v llvm-config-18 || command -v llvm-config || true)"
+          LLVM_CMAKE_DIR=""
+          [ -n "$LLVM_CONFIG" ] && LLVM_CMAKE_DIR="$("$LLVM_CONFIG" --cmakedir 2>/dev/null || true)"
+          MLIR_CMAKE_DIR=""
+          if [ -n "$LLVM_CMAKE_DIR" ] && [ -f "$(dirname "$LLVM_CMAKE_DIR")/mlir/MLIRConfig.cmake" ]; then
+            MLIR_CMAKE_DIR="$(dirname "$LLVM_CMAKE_DIR")/mlir"
+          fi
+          echo "LLVM_CMAKE_DIR=$LLVM_CMAKE_DIR MLIR_CMAKE_DIR=$MLIR_CMAKE_DIR" >> "$GITHUB_ENV"
       - name: Configure
         run: |
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \
             -DA_WARNINGS_AS_ERRORS=ON \
+            ${MLIR_CMAKE_DIR:+-DMLIR_DIR="$MLIR_CMAKE_DIR"} \
+            ${LLVM_CMAKE_DIR:+-DLLVM_DIR="$LLVM_CMAKE_DIR"} \
             -DCMAKE_CXX_FLAGS="-fsanitize=address,undefined -fno-omit-frame-pointer"
       - name: Build
         run: cmake --build build-asan -j

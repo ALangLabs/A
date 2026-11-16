@@ -83,7 +83,6 @@ inline std::string rootIdentName(const Expr& expr) {
 struct Scope {
   StringMap<OwnershipState> vars;
   std::vector<std::string> views;    // views declared in this scope
-  std::vector<std::string> lenders;  // their lenders (parallel to `views`)
 };
 
 // Flow-sensitive ownership analysis: tracks moved values and shared/mutable

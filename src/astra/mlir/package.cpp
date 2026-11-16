@@ -20,6 +20,7 @@
 #include <fstream>
 #include <sstream>
 #include <system_error>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -51,17 +52,6 @@ namespace {
 constexpr int kOk = 0;
 constexpr int kCErr = 1;
 constexpr int kNoIn = 66;
-
-// Mirrors ModuleLoader::canonicalKey (module_loader.cpp): weakly_canonical
-// with an absolute-path fallback so AmbcIndex keys match byPath_ keys.
-std::string canonicalKey(const std::string& path) {
-  std::error_code error;
-  fs::path canonical = fs::weakly_canonical(path, error);
-  if (!error) return canonical.string();
-  error.clear();
-  fs::path absolute = fs::absolute(path, error);
-  return error ? path : absolute.string();
-}
 
 bool readTextFile(const std::string& path, std::string& out,
                   std::ostream& err) {
@@ -118,114 +108,6 @@ bool resolvePackageEntry(const std::string& dirOrFile, std::string& entry,
 } // namespace
 
 // ---------------------------------------------------------------------------
-// AmbcIndex
-// ---------------------------------------------------------------------------
-
-const std::string* AmbcIndex::find(const std::string& canonicalSourcePath) const {
-  auto it = bySource.find(canonicalSourcePath);
-  if (it != bySource.end()) return &it->second;
-  // Forgiving lookup: canonicalize the query and retry, so callers may pass
-  // a non-canonical path.
-  const std::string key = canonicalKey(canonicalSourcePath);
-  it = bySource.find(key);
-  return it == bySource.end() ? nullptr : &it->second;
-}
-
-void AmbcIndex::add(const std::string& sourcePath,
-                    const std::string& ambcPath) {
-  bySource[canonicalKey(sourcePath)] = ambcPath;
-}
-
-std::string ambcSiblingPath(const std::string& sourcePath) {
-  fs::path p(sourcePath);
-  if (p.extension().empty()) return sourcePath + ".ambc";
-  p.replace_extension("ambc");
-  return p.string();
-}
-
-std::string canonicalSourceKey(const std::string& path) {
-  return canonicalKey(path);
-}
-
-std::string defaultAmbcOutputPath(const std::string& packageDirOrFile) {
-  std::string entry;
-  std::ostringstream devnull;
-  if (!resolvePackageEntry(packageDirOrFile, entry, devnull)) return {};
-  return ambcSiblingPath(entry);
-}
-
-bool loadAmbcIndex(const std::string& root, AmbcIndex& index) {
-  index = AmbcIndex{};
-  index.root = root;
-  std::error_code ec;
-  const fs::path rootPath(root);
-
-  if (fs::is_regular_file(rootPath, ec) && !ec) {
-    // Single .ambc file: source is the sibling .astra.
-    const std::string ambc = fs::absolute(rootPath, ec).string();
-    fs::path src = rootPath;
-    src.replace_extension(kSourceExt);
-    index.add(src.string(), ambc);
-    return true;
-  }
-  if (!fs::is_directory(rootPath, ec) || ec) return true; // empty index
-
-  const fs::path absRoot = fs::absolute(rootPath, ec);
-
-  // Optional manifest: <root>/ambc.index, lines of
-  //   <ambc_path><TAB><source_path>
-  // Paths are relative to `root` unless absolute. `#` starts a comment.
-  {
-    std::ifstream manifest(absRoot / "ambc.index");
-    std::string line;
-    while (std::getline(manifest, line)) {
-      const std::size_t hash = line.find('#');
-      if (hash != std::string::npos) line.resize(hash);
-      const std::size_t tab = line.find('\t');
-      if (tab == std::string::npos) continue;
-      std::string ambc = line.substr(0, tab);
-      std::string src = line.substr(tab + 1);
-      auto trim = [](std::string& s) {
-        const auto b = s.find_first_not_of(" \t\r");
-        const auto e = s.find_last_not_of(" \t\r");
-        s = (b == std::string::npos) ? "" : s.substr(b, e - b + 1);
-      };
-      trim(ambc);
-      trim(src);
-      if (ambc.empty() || src.empty()) continue;
-      fs::path a = fs::path(ambc).is_absolute() ? fs::path(ambc)
-                                                : absRoot / ambc;
-      fs::path s = fs::path(src).is_absolute() ? fs::path(src)
-                                               : absRoot / src;
-      index.add(s.string(), a.string());
-    }
-  }
-
-  // Recursive scan for *.ambc; each maps to its sibling .astra. Manifest
-  // entries win (add() would overwrite, so skip existing keys).
-  std::error_code itEc;
-  for (fs::recursive_directory_iterator it(absRoot, itEc), end;
-       !itEc && it != end; it.increment(itEc)) {
-    const fs::path& p = it->path();
-    if (!it->is_regular_file(itEc) || itEc) continue;
-    if (p.extension() != ".ambc") continue;
-    fs::path src = p;
-    src.replace_extension(kSourceExt);
-    // Skip .ambc files with no .astra sibling: in per-module packages the
-    // flat <stem>[-m<id>].ambc names never match a real source, and the
-    // ambc.index manifest already carries the authoritative mapping.
-    // (Whole-graph .ambc files sit next to their .astra, so this does not
-    // change existing behavior.)
-    std::error_code srcEc;
-    if (!fs::is_regular_file(src, srcEc) || srcEc) continue;
-    const std::string key = canonicalKey(src.string());
-    if (index.bySource.count(key)) continue; // manifest already mapped it
-    index.bySource[key] = p.string();
-  }
-  return true;
-}
-
-// ---------------------------------------------------------------------------
 // precompilePackageModules - per-module .ambc package (.mojoc model)
 // ---------------------------------------------------------------------------
 
@@ -233,8 +115,8 @@ namespace {
 
 // Absolute-ize a module path for index/meta records. module.path is the
 // loader's display path and may be relative when the entry was given
-// relative to the cwd; canonicalKey only weakly canonicalizes, so make the
-// path absolute first for stable cross-process lookups.
+// relative to the cwd; make the path absolute for stable cross-process
+// lookups.
 std::string absoluteModulePath(const std::string& path) {
   std::error_code ec;
   const fs::path abs = fs::absolute(path, ec);

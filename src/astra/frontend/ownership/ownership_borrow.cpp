@@ -55,7 +55,6 @@ void Analyzer::analyzeBorrowInit(const std::string& borrower, const Expr& init) 
 
     addBorrow(borrower, lender, kind);
     scopes_.back().views.push_back(borrower);
-    scopes_.back().lenders.push_back(lender);
   }
 
 // ------------------------------------------------------------- views
@@ -79,7 +78,6 @@ void Analyzer::detectView(const std::string& view, const Expr& init) {
     const std::string lender = lenderChain(root);
     addBorrow(view, lender);
     scopes_.back().views.push_back(view);
-    scopes_.back().lenders.push_back(lender);
   }
 
 }  // namespace a::detail

@@ -16,7 +16,6 @@ class SourceFile {
   // Returns the text of a 1-based line without its line terminator. Out of
   // range requests return an empty string.
   std::string lineText(int line) const;
-  int lineCount() const { return static_cast<int>(lines_.size()); }
 
  private:
   std::string path_;

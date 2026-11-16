@@ -214,7 +214,7 @@ struct ZeroIndexGepPattern
 
 } // namespace
 
-void populateACanonicalizePatterns(mlir::RewritePatternSet &patterns) {
+static void populateACanonicalizePatterns(mlir::RewritePatternSet &patterns) {
   patterns.add<ToAvalOfFromAvalPattern, FromAvalOfToAvalPattern,
                FromAvalConstIntPattern, ToAvalIdentityPattern,
                ZeroIndexGepPattern>(patterns.getContext());
@@ -236,14 +236,6 @@ void ACanonicalizePass::runOnOperation() {
 
 std::unique_ptr<mlir::Pass> createACanonicalizePass() {
   return std::make_unique<ACanonicalizePass>();
-}
-
-void registerACanonicalizePass() {
-  static bool registered = [] {
-    mlir::registerPass([] { return createACanonicalizePass(); });
-    return true;
-  }();
-  (void)registered;
 }
 
 } // namespace a

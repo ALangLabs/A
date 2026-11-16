@@ -85,15 +85,6 @@ void DiagnosticSink::warning(Span span, std::string code, std::string message,
       Diagnostic{Severity::Warning, std::move(code), span, std::move(message), std::move(help)});
 }
 
-std::vector<Diagnostic> DiagnosticSink::diagnosticsCopy() const {
-  std::lock_guard<std::mutex> lock(mutex_);
-  return diagnostics_;
-}
-
-bool DiagnosticSink::isSuppressed(Span span, const std::string& code) const {
-  return isSuppressed(span, Severity::Error, code);
-}
-
 bool DiagnosticSink::isSuppressed(Span span, Severity, const std::string& code) const {
   if (!span.valid()) return false;
   const SourceFile* source = file(span.fileId);

@@ -254,11 +254,6 @@ inline bool isNumericType(const TypePtr& type) {
   return t && (t->kind == TypeKind::Int || t->kind == TypeKind::Float);
 }
 
-inline bool isVectorType(const TypePtr& type) {
-  TypePtr t = resolveType(type);
-  return t && t->kind == TypeKind::Vector;
-}
-
 inline TypePtr builtinTypeByName(const std::string& name) {
   if (name == "bool") return typeBool();
   if (name == "char") return typeChar();

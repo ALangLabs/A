@@ -528,21 +528,6 @@ class MlirDialectEmitter {
     fn_ << s;
     return r;
   }
-  // typed args -> void
-  void callVoidT(const std::string& sym,
-                 const std::vector<std::pair<std::string, std::string>>& args) {
-    std::string s = "  a.runtime.call \"" + sym + "\"(";
-    std::string tys;
-    for (size_t i = 0; i < args.size(); ++i) {
-      if (i) { s += ", "; tys += ", "; }
-      s += args[i].second;
-      tys += args[i].first;
-    }
-    s += ") {signature = \"" + runtimeSig(tys, "()")
-         + "\"} : (" + tys + ") -> ()\n";
-    fn_ << s;
-  }
-
   // pack aval args into [n x i64] argv array, return ptr
   std::string argvPack(const std::vector<std::string>& args) {
     int n = (int)args.size();
@@ -3859,9 +3844,6 @@ class MlirDialectEmitter {
       case TypeKind::Bool: return "i1";
       default: return "";
     }
-  }
-  static std::string scalarKindOfE(const Expr* e) {
-    return e ? scalarKindOfT(e->inferredType) : "";
   }
   static int scalarKindBit(const std::string& kind) {
     if (kind == "i64") return 1;

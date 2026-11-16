@@ -41,16 +41,6 @@ mlir::OwningOpRef<mlir::ModuleOp> parseMlirText(mlir::MLIRContext& ctx,
                                                llvm::StringRef text,
                                                std::string& error);
 
-// In-process codegen backend, implemented in codegen.cpp. Lower `module`
-// (llvm dialect ops) to a machine object at `objPath`.
-//   arch     - target triple or arch name; "" / "host" / "native" select the
-//              host default triple (cross compile is unsupported).
-//   optLevel - 0..3, mirroring `opt -O<n>` / `llc -O<n>`.
-// Returns 0 on success, 1 on failure.
-int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
-                       int optLevel, const std::string& objPath,
-                       std::ostream& err);
-
 // Full in-process compile of emitter-produced MLIR text to an object file:
 // parse -> canonicalizer/CSE -> mlirModuleToObject. Returns 0 on success,
 // 1 on failure. Equivalent to the old `mlir-translate` + `opt` + `llc`

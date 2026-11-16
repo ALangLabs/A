@@ -36,15 +36,37 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y llvm-18-dev libmlir-18-dev clang-18
+          LLVM_CONFIG="$(command -v llvm-config-18 || command -v llvm-config || true)"
+          LLVM_CMAKE_DIR=""
+          [ -n "$LLVM_CONFIG" ] && LLVM_CMAKE_DIR="$("$LLVM_CONFIG" --cmakedir 2>/dev/null || true)"
+          MLIR_CMAKE_DIR=""
+          if [ -n "$LLVM_CMAKE_DIR" ] && [ -f "$(dirname "$LLVM_CMAKE_DIR")/mlir/MLIRConfig.cmake" ]; then
+            MLIR_CMAKE_DIR="$(dirname "$LLVM_CMAKE_DIR")/mlir"
+          fi
+          echo "LLVM_CMAKE_DIR=$LLVM_CMAKE_DIR MLIR_CMAKE_DIR=$MLIR_CMAKE_DIR" >> "$GITHUB_ENV"
 
       - name: Install LLVM/MLIR (macOS)
         if: runner.os == 'macOS'
-        run: brew install llvm
+        run: |
+          brew install llvm
+          LLVM_PREFIX="$(brew --prefix llvm 2>/dev/null || true)"
+          LLVM_CONFIG=""
+          [ -n "$LLVM_PREFIX" ] && [ -x "$LLVM_PREFIX/bin/llvm-config" ] && LLVM_CONFIG="$LLVM_PREFIX/bin/llvm-config"
+          [ -z "$LLVM_CONFIG" ] && LLVM_CONFIG="$(command -v llvm-config || true)"
+          LLVM_CMAKE_DIR=""
+          [ -n "$LLVM_CONFIG" ] && LLVM_CMAKE_DIR="$("$LLVM_CONFIG" --cmakedir 2>/dev/null || true)"
+          MLIR_CMAKE_DIR=""
+          if [ -n "$LLVM_CMAKE_DIR" ] && [ -f "$(dirname "$LLVM_CMAKE_DIR")/mlir/MLIRConfig.cmake" ]; then
+            MLIR_CMAKE_DIR="$(dirname "$LLVM_CMAKE_DIR")/mlir"
+          fi
+          echo "LLVM_CMAKE_DIR=$LLVM_CMAKE_DIR MLIR_CMAKE_DIR=$MLIR_CMAKE_DIR" >> "$GITHUB_ENV"
 
       - name: Configure
         run: >
           cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
           -DA_WARNINGS_AS_ERRORS=ON -DA_ENABLE_LTO=ON
+          ${MLIR_CMAKE_DIR:+-DMLIR_DIR="$MLIR_CMAKE_DIR"}
+          ${LLVM_CMAKE_DIR:+-DLLVM_DIR="$LLVM_CMAKE_DIR"}
 
       - name: Build
         run: cmake --build build --parallel

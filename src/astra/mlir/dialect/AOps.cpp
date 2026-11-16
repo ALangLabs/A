@@ -953,38 +953,6 @@ AWhileOp::getEntrySuccessorOperands(RegionBranchPoint point) {
 }
 
 //===----------------------------------------------------------------------===//
-// a.for accessors (extraClassDeclaration)
-//===----------------------------------------------------------------------===//
-
-BlockArgument AForOp::getInductionVar() {
-  return getBody().front().getArgument(0);
-}
-
-Value AForOp::getLowerBoundOperand() { return getOperand(0); }
-Value AForOp::getUpperBoundOperand() { return getOperand(1); }
-Value AForOp::getStepOperand() { return getOperand(2); }
-
-ValueRange AForOp::getRegionIterArgs() {
-  return getBody().front().getArguments().drop_front(1);
-}
-
-ValueRange AForOp::getYieldedValues() {
-  // The yielded values of the single-block body: the a.yield operands.
-  Operation *term = getBody().front().getTerminator();
-  if (!term)
-    return ValueRange();
-  return term->getOperands();
-}
-
-void AForOp::setYieldedValues(ValueRange newValues) {
-  Operation *term = getBody().front().getTerminator();
-  if (!term)
-    return;
-  for (auto it : llvm::zip(term->getOpOperands(), newValues))
-    std::get<0>(it).assign(std::get<1>(it));
-}
-
-//===----------------------------------------------------------------------===//
 // ODS-generated definitions (mlir-tblgen -gen-op-defs output).
 // The .cpp.inc opens `namespace mlir::a` itself, so it must be included at
 // global scope.

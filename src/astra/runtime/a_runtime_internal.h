@@ -748,7 +748,6 @@ int a_py_truthy(aval obj);
 int a_py_equals(aval a, aval b);              /* PyObject_RichCompareBool(Py_EQ) */
 int a_py_equals_mixed(aval a, aval b);         /* one side T_PYOBJ, other any A value */
 void a_py_release_obj(void *p);                /* GC: release owned PyObject/buffer */
-int a_gc_registered_obj(void *p);
 void a_gc_shutdown_py(void);                    /* exit: drop live Py refs */
 aval a_py_buffer_view(aval obj);              /* T_PYOBJ -> zero-copy T_PYBUF view */
 aval a_py_hasattr(aval obj, const char *name);
@@ -761,9 +760,6 @@ aval a_print_opts(uint64_t n, aval *argv, aval sep, aval end, aval file,
                   int is_stderr);
 aval a_panic_msg(const char *msg);
 aval a_list_push(aval list, aval v);
-aval a_list_push_int_str(aval list, int64_t v);
-aval a_list_fill_str_range(aval list, int64_t lo, int64_t hi, int64_t step);
-aval a_set_add_int_str(aval s, int64_t v);
 /* Fast path for `list.append(v)` emitted by the asm backend when the
    receiver's static type is an array: pushes directly, preserving the
    generic a_method semantics (incl. the view-append panic) for every
@@ -833,17 +829,14 @@ typedef struct AFib AFib;
 extern A_RT_TLS AFib *a_fib_current; /* running fiber, NULL outside      */
 int  a_fib_on(void);                 /* nonzero inside a running fiber   */
 int  a_fib_stack_bounds(uintptr_t *lo, uintptr_t *hi); /* current fiber */
-int  a_fib_count(void);              /* live fibers (diagnostics)        */
 void a_fib_sleep_ms(int64_t ms);     /* yields inside a fiber            */
 int  a_fib_wait_fd(int fd, short events, int64_t timeout_ms);
-int  a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms);
 void *a_fib_blocking(void *(*fn)(void *), void *arg); /* pool offload */
 AFib *a_fib_spawn_fn(aval fnval, uint64_t n, aval *args);
 aval a_fib_spawn_handle(aval fnval, uint64_t n, aval *args);
 aval a_fib_join_handle(aval h);
 AFib *a_fib_spawn_raw(uint64_t entry, aval env, uint64_t n, aval *args);
 void a_fib_wait_fiber(AFib *target);
-aval a_fib_call(aval fn, uint64_t n, aval *args);
 aval a_fib_main(uint64_t entry, aval env, uint64_t n, aval *args);
 void a_fib_reap_all(void);
 aval bi_fib_spawn(uint64_t n, aval *argv);
@@ -868,12 +861,7 @@ void a_region_store(void *container, aval child);
 void a_region_barrier(aval container, aval *slot);
 void a_region_barrier_range(aval container, aval *slots, uint64_t n);
 void a_promote(aval v);
-int  a_gc_regionable(void *p);
 int  a_gc_track_region(void *p, uint32_t depth);
-void a_gc_set_region(void *p, uint32_t depth);
-uint32_t a_gc_obj_region(void *p);
-int  a_gc_obj_old(void *p);
-void a_gc_promote_block(void *p);
 int  a_gc_release_obj(void *p);
 
 /* Route every runtime free() through the collector so tracked blocks are

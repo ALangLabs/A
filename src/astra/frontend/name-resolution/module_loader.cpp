@@ -145,7 +145,6 @@ int ModuleLoader::loadModule(const std::string& resolvedPath, const std::string&
   const std::string key = canonicalKey(resolvedPath);
   auto existing = byPath_.find(key);
   if (existing != byPath_.end()) {
-    if (existing->second.state == State::Loading) return existing->second.id;
     return existing->second.id;
   }
 

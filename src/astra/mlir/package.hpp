@@ -13,7 +13,6 @@
 
 #include <iosfwd>
 #include <string>
-#include <unordered_map>
 
 namespace mlir {
 class MLIRContext;
@@ -143,50 +142,6 @@ int precompilePackageModules(const std::string& packageDirOrFile,
                              const PipelineConfig& config,
                              std::ostream& err);
 
-// ---------------------------------------------------------------------------
-// AmbcIndex: module-path -> .ambc lookup for the ModuleLoader / driver hook.
-//
-// `bySource` maps the canonical (weakly_canonical) path of an `.astra` source
-// file to the `.ambc` file that contains its checked MLIR. Two layouts are
-// supported:
-//   * whole-graph: ONE `.ambc` holds the entry's entire flattened module
-//     graph; only the ENTRY source should map to it (imports inside the
-//     package are already inside that ModuleOp and must not be looked up
-//     individually — see integration notes below).
-//   * per-module: each module's `.ambc` maps to ITS OWN source path; the
-//     consumer merges all ModuleOps and synthesizes the global tail (see
-//     "Consumer spec" in the layout section above).
-// ---------------------------------------------------------------------------
-struct AmbcIndex {
-  // Root the index was built from (directory scanned, or "" for a single
-  // file). Informational; lookups only consult `bySource`.
-  std::string root;
-  // canonical .astra path -> .ambc path
-  std::unordered_map<std::string, std::string> bySource;
-
-  // Returns the .ambc path for `canonicalSourcePath`, or nullptr.
-  const std::string* find(const std::string& canonicalSourcePath) const;
-  // Registers one mapping. `sourcePath` is canonicalized internally.
-  void add(const std::string& sourcePath, const std::string& ambcPath);
-};
-
-// Builds an AmbcIndex under `root`:
-//   * `root` is a regular `.ambc` file -> single entry, source = sibling
-//     `.astra` (same basename, extension swapped).
-//   * `root` is a directory -> first reads an optional manifest
-//     `<root>/ambc.index` (one `ambc_path<TAB>source_path` per line, paths
-//     relative to `root`; `#` comments allowed), then recursively scans for
-//     `*.ambc` files and maps each to its sibling `.astra` — but ONLY when
-//     that sibling `.astra` actually exists on disk. The existence check
-//     keeps per-module packages clean: their flat `<stem>[-m<id>].ambc`
-//     files have no `.astra` sibling, so the scan contributes nothing and
-//     the manifest alone defines the mapping (avoiding bogus
-//     `foo-m3.ambc -> foo-m3.astra` entries). Entries already present from
-//     the manifest win either way.
-// Returns false only on hard I/O errors; a missing root simply yields an
-// empty index (returns true).
-bool loadAmbcIndex(const std::string& root, AmbcIndex& index);
-
 // Convenience: sibling `.ambc` path for a source path
 // (`foo/bar.astra` -> `foo/bar.ambc`). Used by both `precompilePackage`'s
 // default output and the suggested loader/driver hook.
@@ -197,45 +152,6 @@ std::string ambcSiblingPath(const std::string& sourcePath);
 // Returns "" if no entry can be resolved. Used by the CLI to report the
 // output path when `-o` was not given.
 std::string defaultAmbcOutputPath(const std::string& packageDirOrFile);
-
-// Canonicalizes `path` the same way ModuleLoader::canonicalKey does
-// (weakly_canonical, falling back to absolute). Exposed so callers can key
-// AmbcIndex entries identically to ModuleLoader::byPath_.
-std::string canonicalSourceKey(const std::string& path);
-
-// ---------------------------------------------------------------------------
-// Integration points (for the integrator - do NOT wire here)
-//
-// (a) CLI dispatch, src/astra/frontend/cli/main.cpp:
-//     In main(), next to the other command dispatches (~line 346), add:
-//         if (options.command == "precompile") {
-//           return a::runPrecompileCli(argc, argv, std::cout, std::cerr);
-//         }
-//     Also add a usage line in printUsage() and relax the '-o' gate at
-//     ~line 277 to allow precompile. runPrecompileCli expects the ORIGINAL
-//     argv (argv[1] == "precompile"); it re-parses argv[2..] itself, so
-//     Options/parseOptions do not need to know about it.
-//
-// (b) Consuming .ambc - RECOMMENDED (entry-level short-circuit):
-//     In pipeline.cpp executePipeline()/buildPipeline(), BEFORE calling
-//     runFrontendPipeline, canonicalize `path` and check
-//     bytecodeIsCompatible(ambcSiblingPath(path), reason). On success call
-//     readModuleBytecode(sharedMlirContext(), ambc, err) and hand the
-//     ModuleOp straight to mlirModuleToObject()/nativeCompile - skipping
-//     parse+sema+emitMLIR entirely (the Mojo .mojoc model). Gate behind
-//     env A_AMBC=1 (or reuse A_MLIR_NATIVE) until validated. `a check`/`fmt`/
-//     `doc` still need the AST, so they must keep using source.
-//
-// (c) Alternative (per-module, inside ModuleLoader::load): after
-//     resolveQuoted/resolveBare produce `X.astra`, check `X.ambc` sibling.
-//     For PER-MODULE packages produced by precompilePackageModules the
-//     mapping lives in `<outDir>/ambc.index` (loadAmbcIndex) plus
-//     `ambc.meta` for init ordering — see the "Consumer spec" above. Whole-
-//     graph `.ambc` files still must only short-circuit at entry level: a
-//     whole-graph ModuleOp contains the entry's entire flattened graph
-//     (including main/init code), so splicing it into a larger ModuleGraph
-//     would duplicate dependencies and drag in a second `main`.
-// ---------------------------------------------------------------------------
 
 // `a precompile` CLI entry point. Parses argv itself:
 //   a precompile <file.astra|dir> [-o out.ambc] [-I dir]... [--stdlib dir]

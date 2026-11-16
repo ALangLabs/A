@@ -40,21 +40,6 @@ class Lexer {
   void scanChar();
 
   void add(Tok kind, std::size_t start, int startLine, int startCol);
-  void addSimple(Tok kind) {
-    std::size_t start = pos_;
-    int line = line_;
-    int col = col_;
-    advance();
-    add(kind, start, line, col);
-  }
-  void addTwo(Tok kind) {
-    std::size_t start = pos_;
-    int line = line_;
-    int col = col_;
-    advance();
-    advance();
-    add(kind, start, line, col);
-  }
   void error(Span span, std::string message, std::string help = {});
   Span makeSpan(std::size_t start, int startLine, int startCol) const;
 

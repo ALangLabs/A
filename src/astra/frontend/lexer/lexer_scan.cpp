@@ -202,10 +202,6 @@ void Lexer::scanString() {
         token.span = makeSpan(start, startLine, startCol);
         token.lexeme = text_.substr(start, pos_ - start);
         token.strValue = text_.substr(contentStart, contentEnd - contentStart);
-        if (!terminated) {
-          error(token.span, "Unterminated triple-quoted string literal.",
-                "Close the raw string with '\"\"\"'.");
-        }
         tokens_.push_back(std::move(token));
         return;
       }
@@ -307,10 +303,6 @@ void Lexer::scanChar() {
         token.span = makeSpan(start, startLine, startCol);
         token.lexeme = text_.substr(start, pos_ - start);
         token.strValue = text_.substr(contentStart, contentEnd - contentStart);
-        if (!terminated) {
-          error(token.span, "Unterminated triple-quoted string literal.",
-                "Close the raw string with '''.");
-        }
         tokens_.push_back(std::move(token));
         return;
       }
@@ -466,9 +458,6 @@ void Lexer::scanChar() {
   token.charValue = value;
   if (!closed) {
     error(token.span, "Unterminated character literal.", "Add a closing '\\'' after one character.");
-  }
-  if (!ok) {
-    // keep going; diagnostic already reported
   }
   tokens_.push_back(std::move(token));
 }

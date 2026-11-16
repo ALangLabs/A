@@ -22,7 +22,6 @@ struct ModuleExports {
   StringMap<const FnDecl*> functions;
   StringMap<const StructDecl*> structs;
   StringMap<TypePtr> values;
-  StringMap<std::string> structAliases;  // local alias -> qualified
   StringMap<std::string> enums;  // name -> qualified enum name
   StringMap<std::string> traits;  // name -> qualified trait name
 };
@@ -182,10 +181,8 @@ class Sema {
   };
 
   // program-level
-  void analyzeModule(Module& module);
   void registerModule(Module& module);
   void checkModule(Module& module);
-  void checkModuleBodies(Module& module);
   // Per-module snapshot of import/alias bindings taken after registration
   // (passes 1-3) so body checking can run in parallel on workers.
   struct ModuleCheckState {

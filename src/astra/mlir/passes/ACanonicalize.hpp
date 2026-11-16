@@ -51,16 +51,6 @@ struct ACanonicalizePass
 /// Factory used by pipeline.hpp / PassManager::addPass.
 std::unique_ptr<mlir::Pass> createACanonicalizePass();
 
-/// Adds the `a` dialect canonicalization patterns to `patterns`. Intended
-/// for use inside a canonicalize-style pass (e.g. via
-/// `populateAndApplyPatterns` or `applyPatternsAndFoldGreedily`); the same
-/// patterns back the standalone `a-canonicalize` pass.
-void populateACanonicalizePatterns(mlir::RewritePatternSet &patterns);
-
-/// Registers `a-canonicalize` with the global pass registry so
-/// PassManager string pipelines and `mlir::parsePassPipeline` can find it.
-/// Idempotent; call alongside a::registerAPasses().
-void registerACanonicalizePass();
 
 } // namespace a
 

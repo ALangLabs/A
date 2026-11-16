@@ -49,28 +49,6 @@ static int range_contains_raw(ARange *r, int64_t v) {
     return fabsl(fmodl(diff, (long double)r->step)) == 0.0L;
 }
 
-aval a_range_contains(aval r, aval v) {
-    AObj *o = obj_of(r);
-    if (!o || o->type != T_RANGE)
-        panicf("range_contains() argument must be range");
-    if (!is_int_val(v)) panicf("range membership requires an integer");
-    return bool_aval(range_contains_raw((ARange *)o, int_val_full(v)));
-}
-
-aval a_in_range(aval v, aval lo, aval hi) {
-    if (is_int_val(v) && is_int_val(lo) && is_int_val(hi)) {
-        int64_t x = int_val_full(v), a = int_val_full(lo), b = int_val_full(hi);
-        return bool_aval(a <= x && x < b);
-    }
-    if (is_num(v) && is_num(lo) && is_num(hi)) {
-        double x = num_to_double(v), a = num_to_double(lo), b = num_to_double(hi);
-        return bool_aval(a <= x && x < b);
-    }
-    panicf("unsupported operand type(s) for in: '%s' and 'range'",
-           type_name_cstr(v));
-    return A_NONE;
-}
-
 aval a_in_range_inclusive(aval v, aval lo, aval hi) {
     if (is_int_val(v) && is_int_val(lo) && is_int_val(hi)) {
         int64_t x = int_val_full(v), a = int_val_full(lo), b = int_val_full(hi);

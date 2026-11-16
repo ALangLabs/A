@@ -19,16 +19,6 @@ namespace a {
 // AVAL
 //===----------------------------------------------------------------------===//
 
-bool AVALType::isPhase1ValueType(Type type) {
-  // Phase 1: boxed aval plus the raw machine types that appear at runtime
-  // ABI boundaries (i64 payloads, i32 status codes, pointers).
-  if (mlir::isa<AVALType, APtrType, ANoneType, ABoolType>(type))
-    return true;
-  if (auto intTy = mlir::dyn_cast<IntegerType>(type))
-    return intTy.getWidth() == 64 || intTy.getWidth() == 32;
-  return false;
-}
-
 //===----------------------------------------------------------------------===//
 // AStruct / AEnum: non-empty names
 //===----------------------------------------------------------------------===//

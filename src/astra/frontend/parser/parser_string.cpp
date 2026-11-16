@@ -210,7 +210,6 @@ std::vector<StringPart> Parser::parseStringParts(const Token& token) {
     flushLiteral();
 
     Span base = token.span;
-    base.line = token.span.line;
     base.col = token.span.col + 1 + static_cast<int>(i + 1);
 
     StringPart part;

@@ -478,81 +478,6 @@ aval a_setitem(aval obj, aval idx, aval val) {
     }
 }
 
-/* Bulk fill for the `for i in lo..hi[..step]: xs[i] = v` idiom emitted by
- * the codegen fill-loop fast path. Applies a_setitem's K_LIST/K_VIEW
- * element stores for the whole index range: normalize_index panics
- * "index out of range" at the first bad index, exactly like the
- * interpreted loop, and len/root are resolved once up front (a plain
- * item store cannot resize the container). The index advances with
- * unsigned wrap to mirror the int64 slot arithmetic of the counted
- * loop. Returns val (the loop discards it). */
-aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
-                       aval val) {
-    AArr *root;
-    int64_t base = 0;
-    uint64_t len;
-    switch (kind_of(obj)) {
-        case K_VIEW: {
-            AView *vw = (AView *)obj_of(obj);
-            len = (uint64_t)vw->len;
-            root = view_root(obj, &base);
-            break;
-        }
-        case K_LIST: {
-            AArr *a = (AArr *)obj_of(obj);
-            len = a->h.len;
-            root = a;
-            break;
-        }
-        default:
-            panicf("object of type '%s' does not support item assignment",
-                   type_name_cstr(obj));
-            return A_NONE;
-    }
-    /* Packed-int storage: an all-int fill stays packed; a non-int value
-       converts the root to aval storage first (mirrors a_setitem). */
-    int pok = 0;
-    int64_t pv = 0;
-    /* root is NULL only for an empty (parentless) view; normalize_index
-       below panics on the first iteration anyway, so skipping the packed
-       probe here preserves the out-of-range panic semantics. */
-    if (root && arr_packed(root)) {
-        if (is_int_val(val)) {
-            pok = 1;
-            pv = int_val_full(val);
-        } else {
-            root->flags |= ARR_F_NOMIX;
-            arr_ensure_aval(root);
-        }
-    }
-    /* Same val is stored at every index: one barrier call promotes it
-       once if root can outlive the value's region. */
-    if (!pok) a_region_store(root, val);
-    int64_t k = lo;
-    if (step >= 0) {
-        while (k < hi) {
-            int64_t i = normalize_index(k, len);
-            if (pok) root->iitems[(size_t)(base + i)] = pv;
-            else {
-                if ((root->flags & ARR_F_F64) && !a_is_double(val)) arr_f64_unmark(root);
-                root->items[(size_t)(base + i)] = val;
-            }
-            k = (int64_t)((uint64_t)k + (uint64_t)step);
-        }
-    } else {
-        while (k > hi) {
-            int64_t i = normalize_index(k, len);
-            if (pok) root->iitems[(size_t)(base + i)] = pv;
-            else {
-                if ((root->flags & ARR_F_F64) && !a_is_double(val)) arr_f64_unmark(root);
-                root->items[(size_t)(base + i)] = val;
-            }
-            k = (int64_t)((uint64_t)k + (uint64_t)step);
-        }
-    }
-    return val;
-}
-
 static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
     AView *vw = (AView *)xmalloc(sizeof(AView));
     vw->h.type = T_VIEW;
@@ -563,7 +488,7 @@ static aval view_new(aval parent, int64_t off, int64_t len, int is_tuple) {
        parent reference is unobservable. Dropping it keeps e.g. xs[a..a] of a
        huge list from pinning the whole backing store. view_root() returns
        NULL for such views; all callers either bounds-check len first or
-       guard the NULL (see a_list_fill_range/method_view/value_compare). */
+       guard the NULL (see method_view/value_compare). */
     vw->parent = len ? parent : A_NONE;
     vw->off = off;
     vw->len = len;

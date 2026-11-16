@@ -178,12 +178,10 @@ void Analyzer::analyzeIf(const IfStmt& stmt) {
     for (const auto& branch : stmt.branches) {
       restore(before);
       useExpr(*branch.cond);
-      Snapshot condState = snapshot();
       scopes_.emplace_back();
       for (const auto& inner : branch.body) analyzeStmt(*inner);
       popScope();
       outcomes.push_back(snapshot());
-      (void)condState;
     }
     if (hasElse) {
       restore(before);

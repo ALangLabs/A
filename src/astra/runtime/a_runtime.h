@@ -419,7 +419,6 @@ static inline aval a_ge(aval l, aval r) {
     return a_ge_slow(l, r);
 }
 aval a_contains(aval cont, aval item);
-aval a_in_range(aval v, aval lo, aval hi); /* lo <= v < hi */
 aval a_in_range_inclusive(aval v, aval lo, aval hi); /* lo <= v <= hi */
 
 /* bitwise / shifts (with header fast paths) */
@@ -488,13 +487,10 @@ aval a_set_new(void);
 aval a_set_add(aval s, aval v);
 aval a_range_new(aval lo, aval hi, aval step);
 int64_t a_range_bound(aval v, int64_t is_step);  /* expect_int64, range() wording */
-aval a_range_contains(aval r, aval v);
 
 /* indexing / slicing */
 aval a_getitem(aval obj, aval idx);             /* str/list/tuple/dict */
 aval a_setitem(aval obj, aval idx, aval val);   /* list/dict */
-aval a_list_fill_range(aval obj, int64_t lo, int64_t hi, int64_t step,
-                       aval val);                /* xs[lo..hi step] = val */
 aval a_slice(aval obj, aval lo, aval hi, aval step); /* lo/hi/step may be A_NONE */
 
 /* iteration protocol: iter = a_iter_new(v); loop a_iter_next(it,&out) */

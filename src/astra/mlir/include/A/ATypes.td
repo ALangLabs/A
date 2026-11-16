@@ -47,11 +47,6 @@ def AVAL : AType<"AVAL", "aval"> {
 
   let genVerifyDecl = 1;
 
-  let extraClassDeclaration = [{
-    /// Returns true if `type` is a legal operand/result type for `a` value
-    /// ops in phase 1 (boxed aval, plus raw machine ints used by the ABI).
-    static bool isPhase1ValueType(Type type);
-  }];
 }
 
 //===----------------------------------------------------------------------===//

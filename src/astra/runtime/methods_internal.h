@@ -39,7 +39,6 @@ aval str_case_map(aval v, int mode);
 int is_space_byte(unsigned char c);
 aval str_strip_impl(aval v, int left, int right);
 AVec str_split_impl(aval v, aval sep, int64_t maxsplit, int rsplit);
-aval str_replace(aval v, aval oldv, aval newv, int64_t count);
 int str_pred(aval v, int pred);
 aval str_affix(aval v, int64_t width, aval fillv, int mode);
 aval seq_index(aval v, aval item, int64_t start, int64_t stop);
