@@ -887,6 +887,7 @@ void a_gc_scan_region(uintptr_t lo, uintptr_t hi);
    function degrades to the synchronous path and a_fib_on() is always 0.
    AFib is opaque to callers outside async.c. */
 typedef struct AFib AFib;
+extern A_RT_TLS AFib *a_fib_current; /* running fiber, NULL outside      */
 int  a_fib_on(void);                 /* nonzero inside a running fiber   */
 int  a_fib_stack_bounds(uintptr_t *lo, uintptr_t *hi); /* current fiber */
 int  a_fib_count(void);              /* live fibers (diagnostics)        */
@@ -910,9 +911,13 @@ aval bi_fib_cancel(uint64_t n, aval *argv);
 /* ------------------------------------------------------------------ */
 /* deterministic regions (region.c) + gc.c region hooks               */
 /* ------------------------------------------------------------------ */
-/* a_frame_push/a_frame_pop drive a per-thread stack of young regions;
-   mkobj reports objects to the innermost region and store sites call
+/* a_frame_push/a_frame_pop drive traceback frames and the frame-depth
+   counter regions use for lazy young-region creation; mkobj reports
+   objects to the innermost region and store sites call
    a_region_store/a_promote. All no-ops when A_REGIONS=0 or GC is off. */
+extern A_RT_TLS uint32_t a_region_frame_depth;
+const char *a_frame_top_name(void);
+void a_frame_note_region(void);
 void a_region_enter(const char *name);
 void a_region_leave(void);
 void a_region_note_obj(void *p);

@@ -77,7 +77,7 @@ static size_t fib_stack_size(void) {
 
 typedef enum {
     FIB_READY = 0,   /* runnable: sitting in the ready queue            */
-    FIB_RUN,         /* currently executing (only meaningful for g_cur) */
+    FIB_RUN,         /* currently executing (only meaningful for a_fib_current) */
     FIB_WAIT_FD,     /* waiting for fd readiness (poll)                 */
     FIB_WAIT_TIMER,  /* waiting for a deadline                          */
     FIB_WAIT_TASK,   /* waiting for a blocking-pool job                 */
@@ -121,7 +121,7 @@ static AFib *g_fibs;                 /* fibers not yet DONE                  */
 static AFib *g_fib_done, *g_fib_done_tail;
 static AFib *g_ready_head, *g_ready_tail;
 static ucontext_t g_sched_ctx;
-static __thread AFib *g_cur;         /* running fiber, NULL = outside        */
+A_RT_TLS AFib *a_fib_current;         /* running fiber, NULL = outside        */
 static int g_rootcb_done;
 static AFib **g_fib_tab;              /* idx -> fiber (makecontext arg channel) */
 static int *g_fib_freeidx;
@@ -242,7 +242,7 @@ static void fib_gc_roots(void) {
     for (AFib *f = g_fibs; f; f = f->next_all) {
         a_gc_mark_ptr(f);            /* struct: ucontext regs + args ptr */
         if (f->args && f->args != f->small_argv) a_gc_mark_ptr(f->args);
-        if (f != g_cur && f->sp && f->stack) {
+        if (f != a_fib_current && f->sp && f->stack) {
             uintptr_t lo = (uintptr_t)f->sp;
             uintptr_t hi = (uintptr_t)f->stack + f->stack_size;
             if (hi > lo) a_gc_scan_region(lo, hi);
@@ -270,7 +270,7 @@ static void fib_register_rootcb(void) {
 /* Current fiber's stack bounds — used by gc.c mark_c_stack when the GC
    runs inside a fiber (pthread bounds would name the main stack). */
 int a_fib_stack_bounds(uintptr_t *lo, uintptr_t *hi) {
-    AFib *f = g_cur;
+    AFib *f = a_fib_current;
     if (!f || !f->stack) return 0;
     *lo = (uintptr_t)f->stack;
     *hi = *lo + f->stack_size;
@@ -328,7 +328,7 @@ static void fib_fill_argv(AFib *f, aval env, uint64_t n, aval *args) {
 static void fib_trampoline(int idx) {
     AFib *f = idx >= 0 ? g_fib_tab[idx] : NULL;
     if (!f) { swapcontext(NULL, &g_sched_ctx); return; }
-    g_cur = f;
+    a_fib_current = f;
     f->sp = __builtin_frame_address(0);
     aval r;
     if (f->is_raw) {
@@ -342,7 +342,7 @@ static void fib_trampoline(int idx) {
     }
     f->result = r;
     f->state = FIB_DONE;
-    g_cur = NULL;
+    a_fib_current = NULL;
     /* Return to the scheduler context (uc_link also covers a raw return). */
     swapcontext(&f->ctx, &g_sched_ctx);
     /* unreachable */
@@ -474,23 +474,23 @@ static void block_drain_done(void) {
 /* Run fn(arg) on a blocking-pool worker; inside a fiber this yields the
    scheduler until the job completes. fn MUST use raw malloc only. */
 void *a_fib_blocking(void *(*fn)(void *), void *arg) {
-    if (!fib_enabled() || !g_cur) return fn(arg);
+    if (!fib_enabled() || !a_fib_current) return fn(arg);
     block_pool_init();
     ABlockJob *j = (ABlockJob *)malloc(sizeof(ABlockJob));
     if (!j) panicf("out of memory (block job)");
     j->fn = fn; j->arg = arg; j->result = NULL;
-    j->fiber = g_cur; j->next = NULL;
+    j->fiber = a_fib_current; j->next = NULL;
     pthread_mutex_lock(&g_bmu);
     j->next = g_bqueue;
     g_bqueue = j;
     pthread_cond_signal(&g_bwork);
     pthread_mutex_unlock(&g_bmu);
-    g_cur->job = j;
-    g_cur->state = FIB_WAIT_TASK;
-    g_cur->sp = (void *)__builtin_frame_address(0);
-    swapcontext(&g_cur->ctx, &g_sched_ctx);
-    void *r = g_cur->task_result;
-    g_cur->task_result = NULL;
+    a_fib_current->job = j;
+    a_fib_current->state = FIB_WAIT_TASK;
+    a_fib_current->sp = (void *)__builtin_frame_address(0);
+    swapcontext(&a_fib_current->ctx, &g_sched_ctx);
+    void *r = a_fib_current->task_result;
+    a_fib_current->task_result = NULL;
     return r;
 }
 
@@ -498,15 +498,15 @@ void *a_fib_blocking(void *(*fn)(void *), void *arg) {
 /* yield primitives (called from patched builtins, inside a fiber)     */
 /* ------------------------------------------------------------------ */
 
-int a_fib_on(void) { return g_cur != NULL; }
+int a_fib_on(void) { return a_fib_current != NULL; }
 
 void a_fib_sleep_ms(int64_t ms) {
-    if (!g_cur) {
+    if (!a_fib_current) {
         struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
         while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
         return;
     }
-    AFib *f = g_cur;
+    AFib *f = a_fib_current;
     f->wake_ms = fib_now_ms() + (ms > 0 ? ms : 0);
     f->state = FIB_WAIT_TIMER;
     f->sp = (void *)__builtin_frame_address(0);
@@ -518,7 +518,7 @@ void a_fib_sleep_ms(int64_t ms) {
    Returns poll revents mask; 0 means timeout/none. Only inside fibers —
    callers check a_fib_on() first. */
 int a_fib_wait_fd(int fd, short events, int64_t timeout_ms) {
-    AFib *f = g_cur;
+    AFib *f = a_fib_current;
     if (!f) return 0;
     f->wait_fd = fd;
     f->wait_events = events;
@@ -539,9 +539,9 @@ int a_fib_wait_fd_ready(int fd, short events, int64_t timeout_ms) {
 
 /* Wait for another fiber to reach DONE (structured concurrency). */
 void a_fib_wait_fiber(AFib *target) {
-    if (!g_cur || !target || target == g_cur || target->state == FIB_DONE)
+    if (!a_fib_current || !target || target == a_fib_current || target->state == FIB_DONE)
         return;
-    AFib *f = g_cur;
+    AFib *f = a_fib_current;
     f->wait_fib = target;
     f->state = FIB_WAIT_FIB;
     f->sp = (void *)__builtin_frame_address(0);
@@ -694,13 +694,13 @@ static void sched_run(void) {
             continue;
         }
         f->state = FIB_RUN;
-        /* g_cur must name the RUNNING fiber at all times: yield builtins
+        /* a_fib_current must name the RUNNING fiber at all times: yield builtins
            (a_fib_on, a_fib_sleep_ms, a_fib_blocking) and GC stack scans
            depend on it. The trampoline only sets it on first entry, so
            the scheduler maintains it on every resume/yield. */
-        g_cur = f;
+        a_fib_current = f;
         swapcontext(&g_sched_ctx, &f->ctx);
-        g_cur = NULL;
+        a_fib_current = NULL;
         /* fiber yielded (state WAIT_*) or finished (state DONE): loop */
     }
 }
@@ -709,7 +709,7 @@ static void sched_run(void) {
    drive the scheduler (used by a_fib_call/a_fib_main). */
 static aval fib_await(AFib *f) {
     if (!f) return A_NONE;
-    if (g_cur) {
+    if (a_fib_current) {
         a_fib_wait_fiber(f);
         aval r = f->result;
         fib_free(f);
@@ -748,7 +748,7 @@ aval a_fib_main(uint64_t entry, aval env, uint64_t n, aval *args) {
 }
 
 /* Reap every remaining fiber (program exit path). The currently running
-   fiber (g_cur — the main body itself) is skipped: freeing its stack
+   fiber (a_fib_current — the main body itself) is skipped: freeing its stack
    while it executes would be a use-after-free; it is freed by fib_await
    once it finishes. */
 static void reap_one(AFib *f) {
@@ -765,7 +765,7 @@ void a_fib_reap_all(void) {
     AFib **pp = &g_fibs;
     while (*pp) {
         AFib *f = *pp;
-        if (f == g_cur) { pp = &f->next_all; continue; }
+        if (f == a_fib_current) { pp = &f->next_all; continue; }
         *pp = f->next_all;
         f->next_all = NULL;
         reap_one(f);
@@ -773,7 +773,7 @@ void a_fib_reap_all(void) {
     pp = &g_fib_done;
     while (*pp) {
         AFib *f = *pp;
-        if (f == g_cur) { pp = &f->next_done; continue; }
+        if (f == a_fib_current) { pp = &f->next_done; continue; }
         *pp = f->next_done;
         f->next_done = NULL;
         reap_one(f);

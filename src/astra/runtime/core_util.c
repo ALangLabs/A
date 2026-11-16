@@ -15,6 +15,7 @@ typedef struct {
     const char *name;
     const char *file;
     int line;
+    unsigned has_region;
 } AFrame;
 
 /* A_RT_TLS: pool workers pushing frames concurrently must not share the
@@ -120,13 +121,32 @@ static void stack_overflow_error(uintptr_t sp) {
     exit(2);
 }
 
+static __attribute__((noinline)) void stack_guard_init(uintptr_t sp) {
+    g_stack_guard_init = 1;
+    g_stack_probe = (char *)sp;
+#if defined(__linux__) && !defined(__TINYC__)
+    pthread_attr_t attr;
+    if (pthread_getattr_np(pthread_self(), &attr) == 0) {
+        void *base = NULL;
+        size_t size = 0;
+        if (pthread_attr_getstack(&attr, &base, &size) == 0 && base && size) {
+            g_stack_lo = (char *)base;
+            g_stack_size = size;
+            g_stack_have_bounds = 1;
+        }
+        pthread_attr_destroy(&attr);
+    }
+#endif
+}
+
 static void stack_guard_check(void) {
     uintptr_t sp = (uintptr_t)__builtin_frame_address(0);
 #if A_FIBERS
     /* Inside a fiber the SP lives on the fiber's malloc'd stack, not the
        pthread stack — use the fiber's bounds or every deep-ish call
-       would look like an overflow. */
-    if (a_fib_on()) {
+       would look like an overflow. Read the exported TLS slot directly so
+       the common non-fiber path does not pay an a_fib_on() call. */
+    if (a_fib_current) {
         uintptr_t flo = 0, fhi = 0;
         if (a_fib_stack_bounds(&flo, &fhi) && fhi > flo) {
             if (sp < flo + A_STACK_GUARD_MARGIN) stack_overflow_error(sp);
@@ -134,23 +154,7 @@ static void stack_guard_check(void) {
         return;
     }
 #endif
-    if (!g_stack_guard_init) {
-        g_stack_guard_init = 1;
-        g_stack_probe = (char *)sp;
-#if defined(__linux__) && !defined(__TINYC__)
-        pthread_attr_t attr;
-        if (pthread_getattr_np(pthread_self(), &attr) == 0) {
-            void *base = NULL;
-            size_t size = 0;
-            if (pthread_attr_getstack(&attr, &base, &size) == 0 && base && size) {
-                g_stack_lo = (char *)base;
-                g_stack_size = size;
-                g_stack_have_bounds = 1;
-            }
-            pthread_attr_destroy(&attr);
-        }
-#endif
-    }
+    if (!g_stack_guard_init) stack_guard_init(sp);
 #if defined(__linux__) && !defined(__TINYC__)
     if (g_stack_have_bounds) {
         uintptr_t lo = (uintptr_t)g_stack_lo;
@@ -178,16 +182,32 @@ void a_frame_push(const char *name, const char *file, int line) {
         g_frames = nf;
         g_capframes = ncap;
     }
-    g_frames[g_nframes].name = name;
-    g_frames[g_nframes].file = file;
-    g_frames[g_nframes].line = line;
+    AFrame *f = &g_frames[g_nframes];
+    f->name = name;
+    f->file = file;
+    f->line = line;
+    f->has_region = 0;
     ++g_nframes;
-    a_region_enter(name);   /* young-generation region for this frame */
+    ++a_region_frame_depth;
 }
 
 void a_frame_pop(void) {
-    if (g_nframes) --g_nframes;
-    a_region_leave();       /* sweep unescaped young objects of the frame */
+    if (!g_nframes) return;
+    AFrame *f = &g_frames[g_nframes - 1];
+    unsigned had_region = f->has_region;
+    --g_nframes;
+    if (a_region_frame_depth) --a_region_frame_depth;
+    /* Regions are created lazily on the first tracked allocation, so most
+       frames have nothing to sweep and pay no region_leave() call. */
+    if (had_region) a_region_leave();
+}
+
+const char *a_frame_top_name(void) {
+    return g_nframes ? g_frames[g_nframes - 1].name : NULL;
+}
+
+void a_frame_note_region(void) {
+    if (g_nframes) g_frames[g_nframes - 1].has_region = 1;
 }
 
 static void print_traceback(void) {

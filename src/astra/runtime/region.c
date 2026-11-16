@@ -56,9 +56,15 @@ typedef struct ARegion {
     struct ARegion *next;   /* active-stack link / pool link */
 } ARegion;
 
+/* Frame depth is owned by core_util.c's frame stack: it increments on every
+   a_frame_push and decrements on every a_frame_pop, including frames that
+   never allocate. Regions stay lazy — a_region_note_obj creates one only
+   when the current frame first tracks an object — so ARegion.depth records
+   the owning frame depth rather than a dense region serial. */
+A_RT_TLS uint32_t a_region_frame_depth;
 static A_RT_TLS ARegion *g_region;       /* innermost active region */
 static A_RT_TLS ARegion *g_region_pool;  /* retired regions kept for reuse */
-static A_RT_TLS uint32_t g_region_depth;
+static A_RT_TLS uint32_t g_region_depth; /* active-region count (debug)   */
 static int g_regions = -1;
 static int g_region_dbg = -1;
 static int region_dbg(void) {
@@ -95,10 +101,14 @@ void a_region_enter(const char *name) {
         r->cap = 0;
     }
     r->n = 0;
-    r->depth = ++g_region_depth;
-    r->immortal = name && !strcmp(name, "<module>");
+    r->depth = a_region_frame_depth;
+    ++g_region_depth;
+    // "<module>" is the only immortal frame name; gate the strcmp behind a
+    // first-char check so ordinary frames skip the PLT call entirely.
+    r->immortal = name && name[0] == '<' && !strcmp(name, "<module>");
     r->next = g_region;
     g_region = r;
+    a_frame_note_region();
     if (region_dbg())
         fprintf(stderr, "[region] enter %s depth=%u\n",
                 name ? name : "?", r->depth);
@@ -137,8 +147,13 @@ void a_region_leave(void) {
 #define REGION_TRACK_CAP (1u << 16)   /* 64K objects = 512 KiB of pointers */
 
 void a_region_note_obj(void *p) {
-    if (!regions_on() || !g_region || g_region->immortal) return;
+    if (!regions_on()) return;
+    uint32_t fd = a_region_frame_depth;
+    if (!fd) return;  /* allocation outside any A frame: pure-GC object */
+    if (!g_region || g_region->depth != fd)
+        a_region_enter(a_frame_top_name());  /* first tracked alloc in frame */
     ARegion *r = g_region;
+    if (!r || r->immortal) return;
     if (r->n >= REGION_TRACK_CAP) return;
     if (!a_gc_track_region(p, r->depth)) return;  /* arena / pinned / untracked */
     if (r->n == r->cap) {
@@ -292,7 +307,11 @@ void a_promote(aval v) {
    region+OLD double lookup into a single hash probe. */
 void a_region_store(void *container, aval child) {
     if (!regions_on() || !a_is_ptr(child) || !container) return;
-    if (a_gc_region_escape(container, g_region_depth))
+    /* The escape depth is the innermost active region's owning frame depth:
+       frames without allocations have no region, so the top region is the
+       birth region of any still-live young object reachable here. */
+    uint32_t depth = g_region ? g_region->depth : 0;
+    if (a_gc_region_escape(container, depth))
         a_promote(child);
 }
 

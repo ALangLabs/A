@@ -44,6 +44,7 @@
 #include <sstream>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -356,6 +357,15 @@ class MlirDialectEmitter {
   // raw scalars plus a boxed-ABI thunk under `<cname>`. inTypedCore_ marks
   // body emission inside a core (typed returns, no argv params).
   bool inTypedCore_ = false;
+  // A typed core whose body cannot call anything, allocate, or trap needs no
+  // frame hooks: there is no young object to track, no traceback to enrich,
+  // and no stack overflow risk. Skipping a_frame_push/pop on these leaf cores
+  // lets LLVM fully inline them (the calls are opaque side effects otherwise)
+  // — without this, a call in a hot loop keeps two runtime calls per iteration
+  // even after the callee body is inlined (100x+ slowdown on call-heavy code).
+  bool curFnFrameFree_ = false;
+  std::unordered_map<const FnDecl*, bool> frameFreeMemo_;
+  std::unordered_set<const FnDecl*> frameFreeVisiting_;
   std::string typedCoreRetKind_;
   std::unordered_map<const FnDecl*, int> typedCoreCache_;  // 1=yes, -1=no
   bool testMode_ = false;
@@ -1044,6 +1054,7 @@ class MlirDialectEmitter {
     pendingDefers_.clear();
     terminated_ = false;
     inTypedCore_ = false;
+    curFnFrameFree_ = false;
     // typed-binding safety scan runs on the first emitStatements of this fn
     assignScanPending_ = true;
     assignKindMask_.clear();
@@ -1120,6 +1131,7 @@ class MlirDialectEmitter {
   // call-frame tracking for panic tracebacks + stack-overflow detection
   // (mirrors LlvmEmitter::emitFramePush/emitFramePop).
   void emitFramePush() {
+    if (curFnFrameFree_) return;
     std::string np = cstrPtr(curFnName_);
     std::string fp = cstrPtr(curFnFile_);
     std::string lp = nv();
@@ -1130,7 +1142,7 @@ class MlirDialectEmitter {
         << " : (!llvm.ptr, !llvm.ptr, i32) -> ()\n";
   }
   void emitFramePop() {
-    if (suppressFramePop_) return;
+    if (suppressFramePop_ || curFnFrameFree_) return;
     fn_ << "  a.runtime.call \"a_frame_pop\"() {signature = \"() -> ()\"}"
         << " : () -> ()\n";
   }
@@ -1243,6 +1255,169 @@ class MlirDialectEmitter {
     return "__a_tc_" + cname;
   }
 
+  // Resolve a syntactically direct call to its FnDecl (mirrors tryTypedCall).
+  // Indirect calls (function values, lambdas, builtins) never qualify.
+  const FnDecl* resolveCallFn(const CallExpr& c) const {
+    if (c.typeArgs.size() || c.calleeIsBuiltin ||
+        c.builtinId != BuiltinId::None)
+      return nullptr;
+    if (c.calleeFunction) return c.calleeFunction;
+    if (!c.callee || c.callee->kind != ExprKind::Ident) return nullptr;
+    const std::string& name = static_cast<const IdentExpr&>(*c.callee).name;
+    if (name == "cast") return nullptr;
+    auto fn = fnCnames_.find(name);
+    if (fn == fnCnames_.end()) return nullptr;
+    auto fit = fnByCname_.find(fn->second);
+    return fit == fnByCname_.end() ? nullptr : fit->second;
+  }
+
+  // Conservative "no side effects that need a frame" scan. Only expressions
+  // built from literals, locals, non-trapping scalar operators, and calls to
+  // other frame-free user functions qualify; anything that can call out to
+  // the runtime, allocate, or trap keeps its frame hooks. Calls to unknown /
+  // indirect targets conservatively keep frames too.
+  bool exprFrameFree(const Expr& e) {
+    switch (e.kind) {
+      case ExprKind::IntLit:
+      case ExprKind::FloatLit:
+      case ExprKind::BoolLit:
+      case ExprKind::CharLit:
+      case ExprKind::Ident:
+        return true;
+      case ExprKind::StringLit:
+        return false;  // interpolation may call repr/format helpers
+      case ExprKind::Unary: {
+        const auto& u = static_cast<const UnaryExpr&>(e);
+        return exprFrameFree(*u.operand);
+      }
+      case ExprKind::Binary: {
+        const auto& b = static_cast<const BinaryExpr&>(e);
+        // Div/Mod/Pow/FloorDiv route through *_slow and can panic; string
+        // '+' can allocate. Only the plain arithmetic/bitwise/comparison
+        // ops stay allocation- and trap-free in the typed path.
+        switch (b.binop) {
+          case BinOp::Div: case BinOp::FloorDiv: case BinOp::Mod:
+          case BinOp::Pow: case BinOp::Coalesce:
+            return false;
+          default:
+            break;
+        }
+        return exprFrameFree(*b.lhs) && exprFrameFree(*b.rhs);
+      }
+      case ExprKind::Ternary: {
+        const auto& t = static_cast<const TernaryExpr&>(e);
+        return exprFrameFree(*t.cond) && exprFrameFree(*t.thenValue) &&
+               exprFrameFree(*t.elseValue);
+      }
+      case ExprKind::Call: {
+        const auto& c = static_cast<const CallExpr&>(e);
+        const FnDecl* callee = resolveCallFn(c);
+        if (!callee || !fnFrameFree(callee)) return false;
+        for (const CallArg& a : c.args)
+          if (!a.value || !exprFrameFree(*a.value)) return false;
+        return true;
+      }
+      default:
+        // Index, Slice, Field, Range, ArrayLit, Tuple, MapLit, SetLit,
+        // Lambda, Comprehension, Match, Try, SafeNav can call/allocate/trap.
+        return false;
+    }
+  }
+  bool stmtsFrameFree(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& sp : stmts) {
+      if (!sp) continue;
+      const Stmt& s = *sp;
+      switch (s.kind) {
+        case StmtKind::Let: {
+          const auto& l = static_cast<const LetStmt&>(s);
+          if (l.init && !exprFrameFree(*l.init)) return false;
+          break;
+        }
+        case StmtKind::Assign: {
+          const auto& a = static_cast<const AssignStmt&>(s);
+          if (a.value && !exprFrameFree(*a.value)) return false;
+          break;
+        }
+        case StmtKind::Expr: {
+          const auto& x = static_cast<const ExprStmt&>(s);
+          if (x.expr && !exprFrameFree(*x.expr)) return false;
+          break;
+        }
+        case StmtKind::Return: {
+          const auto& r = static_cast<const ReturnStmt&>(s);
+          if (r.value && !exprFrameFree(*r.value)) return false;
+          break;
+        }
+        case StmtKind::If: {
+          const auto& i = static_cast<const IfStmt&>(s);
+          for (const auto& br : i.branches) {
+            if (br.cond && !exprFrameFree(*br.cond)) return false;
+            if (!stmtsFrameFree(br.body)) return false;
+          }
+          if (!stmtsFrameFree(i.elseBody)) return false;
+          break;
+        }
+        case StmtKind::While: {
+          const auto& w = static_cast<const WhileStmt&>(s);
+          if (w.cond && !exprFrameFree(*w.cond)) return false;
+          if (!stmtsFrameFree(w.body)) return false;
+          break;
+        }
+        case StmtKind::DoWhile: {
+          const auto& w = static_cast<const DoWhileStmt&>(s);
+          if (w.cond && !exprFrameFree(*w.cond)) return false;
+          if (!stmtsFrameFree(w.body)) return false;
+          break;
+        }
+        case StmtKind::For: {
+          // for-loops over a scalar range emit a_range_bound (no allocation,
+          // no trap) plus the body. Any other iterable may call/allocate.
+          const auto& f = static_cast<const ForStmt&>(s);
+          if (f.iterable) {
+            if (f.iterable->kind == ExprKind::Range) {
+              const auto& rg = static_cast<const RangeExpr&>(*f.iterable);
+              if ((rg.start && !exprFrameFree(*rg.start)) ||
+                  (rg.end && !exprFrameFree(*rg.end)) ||
+                  (rg.step && !exprFrameFree(*rg.step)))
+                return false;
+            } else if (!exprFrameFree(*f.iterable)) {
+              return false;
+            }
+          }
+          if (!stmtsFrameFree(f.body)) return false;
+          break;
+        }
+        case StmtKind::Loop: {
+          const auto& l = static_cast<const LoopStmt&>(s);
+          if (!stmtsFrameFree(l.body)) return false;
+          break;
+        }
+        case StmtKind::Break:
+        case StmtKind::Continue:
+          break;
+        default:
+          // Defer, nested fn/struct decls, imports, Destructure: keep frames.
+          return false;
+      }
+    }
+    return true;
+  }
+  // Memoized fixpoint over the direct-call graph. Functions in the current
+  // walk are assumed frame-free so direct/mutual recursion terminates; a
+  // cycle can only contain functions that otherwise qualify, and none of
+  // them allocates or calls out to a frame-requiring target.
+  bool fnFrameFree(const FnDecl* fn) {
+    if (!fn) return false;
+    auto it = frameFreeMemo_.find(fn);
+    if (it != frameFreeMemo_.end()) return it->second;
+    if (frameFreeVisiting_.count(fn)) return true;
+    frameFreeVisiting_.insert(fn);
+    bool ok = stmtsFrameFree(fn->body);
+    frameFreeVisiting_.erase(fn);
+    frameFreeMemo_[fn] = ok;
+    return ok;
+  }
+
   // beginFunction variant for the typed core: params arrive as unboxed
   // scalar SSA args (bound directly into typed slots), returns are raw.
   void beginFunctionTyped(const std::string& sym, const FnDecl* fn,
@@ -1267,6 +1442,7 @@ class MlirDialectEmitter {
     assignScanPending_ = true;
     assignKindMask_.clear();
     inTypedCore_ = true;
+    curFnFrameFree_ = typed_ && fnFrameFree(fn);
     typedCoreRetKind_ = retkind;
     pushScope();
     fn_ << "llvm.func @" << sym << "(";
@@ -1322,6 +1498,7 @@ class MlirDialectEmitter {
     fn_ << "}\n\n";
     flushFunction();
     inTypedCore_ = false;
+    curFnFrameFree_ = false;
   }
 
   // Boxed-ABI thunk for a typed core: unboxes each argv param, calls the
