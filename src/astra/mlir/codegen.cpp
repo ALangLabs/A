@@ -14,15 +14,15 @@
 
 #include "codegen.hpp"
 
+#include "frontend/toolchain_tools.hpp"
+
 #include <algorithm>
-#include <cerrno>
 #include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <sstream>
 #include <string>
 #include <system_error>
 #include <unordered_map>
@@ -56,7 +56,6 @@
 
 #ifndef _WIN32
 #include <sys/types.h>
-#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -340,9 +339,6 @@ int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
 
 namespace {
 
-int runProcess(const std::string& prog,
-               const std::vector<std::string>& args);
-
 // Locate clang/clang++/cc candidates, mirroring findLLVMTool("A_LLVM_CC", ...)
 // in pipeline.cpp: env override, bundled llvm-tools/bin dirs, then PATH.
 // The probe base is derived from `anchor` — the resolved libaruntime.a path —
@@ -367,16 +363,10 @@ std::vector<std::string> findClangDrivers(const std::string& anchor) {
     out.push_back(cand);
   };
   auto tryDir = [&](const std::string& dir) {
-    for (const char* n : kNames) {
-      std::string cand = dir + "/" + n;
-      std::error_code ec;
-      if (!std::filesystem::exists(cand, ec)) continue;
-#ifndef _WIN32
-      if (access(cand.c_str(), X_OK) != 0) continue;
-#endif
-      add(cand);
-      break;  // one driver per directory is enough
-    }
+    // One driver per directory is enough; shared probe keeps the
+    // exists()+X_OK semantics identical to pipeline.cpp's findLLVMTool.
+    std::string cand = a::toolchain::findToolInDir(dir, kNames);
+    if (!cand.empty()) add(cand);
   };
   // Bundled toolchain next to the runtime archive: libaruntime.a lives in
   // <root>/astralib[-arch]/ or <root>/bin/../astralib; clang ships under
@@ -411,64 +401,10 @@ std::vector<std::string> findClangDrivers(const std::string& anchor) {
       }
     }
   }
-  const char* pathEnv = std::getenv("PATH");
-  std::istringstream ss(pathEnv ? pathEnv : "");
-  std::string dir;
-#ifdef _WIN32
-  const char delim = ';';
-#else
-  const char delim = ':';
-#endif
-  while (std::getline(ss, dir, delim)) {
-    if (dir.empty()) continue;
+  for (const std::string& dir : a::toolchain::pathEntries()) {
     tryDir(dir);
   }
   return out;
-}
-
-// True when `mold` is on PATH and A_NO_MOLD is unset (mirrors llvmBuild).
-bool moldAvailable() {
-  if (const char* e = std::getenv("A_NO_MOLD"); e && *e) return false;
-  const char* path = std::getenv("PATH");
-  std::string p(path ? path : "");
-  size_t pos = 0;
-  while (pos <= p.size()) {
-    size_t colon = p.find(':', pos);
-    std::string dir = p.substr(pos, colon == std::string::npos
-                                        ? std::string::npos : colon - pos);
-    std::error_code ec;
-    if (std::filesystem::exists(dir + "/mold", ec)) return true;
-    if (colon == std::string::npos) break;
-    pos = colon + 1;
-  }
-  return false;
-}
-
-int runProcess(const std::string& prog,
-               const std::vector<std::string>& args) {
-#ifdef _WIN32
-  (void)prog; (void)args;
-  return 1;
-#else
-  // Minimal execvp-based runner (no shell). stderr/stdout inherited so the
-  // driver's diagnostics reach the user, matching runChild in pipeline.cpp.
-  std::vector<char*> argv;
-  argv.push_back(const_cast<char*>(prog.c_str()));
-  for (const auto& a : args) argv.push_back(const_cast<char*>(a.c_str()));
-  argv.push_back(nullptr);
-  pid_t pid = fork();
-  if (pid < 0) return 127;
-  if (pid == 0) {
-    execvp(prog.c_str(), argv.data());
-    _exit(127);
-  }
-  int status = 0;
-  while (waitpid(pid, &status, 0) < 0) {
-    if (errno != EINTR) return 127;
-  }
-  if (WIFEXITED(status)) return WEXITSTATUS(status);
-  return 127;
-#endif
 }
 
 }  // namespace
@@ -485,7 +421,12 @@ std::vector<std::string> viableLinkDrivers(const std::string& anchor) {
   if (it != cache.end()) return it->second;
   std::vector<std::string> viable;
   for (const auto& c : findClangDrivers(anchor)) {
-    if (runProcess(c, {"--version"}) == 0) viable.push_back(c);
+    // Viability probe: discard the child's stdout so the `clang --version`
+    // banner cannot leak into the compiled program's stdout; stderr stays
+    // inherited so loader/driver diagnostics still reach the user.
+    if (a::toolchain::runToolProcess(c, {"--version"},
+                                     /*discardStdout=*/true) == 0)
+      viable.push_back(c);
   }
   cache.emplace(anchor, viable);
   return viable;
@@ -511,22 +452,19 @@ int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
     return 1;
   }
   // llc emits a non-PIC object; -no-pie keeps the link consistent with it.
-  std::vector<std::string> args = {objPath, runtimeLib, "-o", outputPath,
-                                   "-no-pie", "-lm", "-lpthread"};
-#ifndef __APPLE__
-  args.push_back("-ldl");
-#endif
+  std::vector<std::string> args =
+      a::toolchain::runtimeLinkArgs(objPath, runtimeLib, outputPath);
   // mold is dramatically faster than ld/lld for the final link; use it when
   // present and retry with the default linker if it fails (mirrors llvmBuild).
-  const bool useMold = moldAvailable();
+  const bool useMold = a::toolchain::moldAvailable();
   for (const auto& cc : drivers) {
     if (useMold) {
-      std::vector<std::string> margs = args;
-      margs.insert(margs.begin() + 1, "-fuse-ld=mold");
-      if (runProcess(cc, margs) == 0) return 0;
+      if (a::toolchain::runToolProcess(cc, a::toolchain::moldLinkArgs(args))
+              == 0)
+        return 0;
       // mold missing/broken: fall through to the default linker.
     }
-    if (runProcess(cc, args) == 0) return 0;
+    if (a::toolchain::runToolProcess(cc, args) == 0) return 0;
   }
   err << "error: llvm backend: clang link failed\n";
   return 1;

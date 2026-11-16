@@ -23,14 +23,8 @@
      values_equal). Complex keys can never equal a simple key, so the
      domains never need to merge. */
 
-static uint64_t mix64(uint64_t x) {
-    x ^= x >> 30;
-    x *= UINT64_C(0xbf58476d1ce4e5b9);
-    x ^= x >> 27;
-    x *= UINT64_C(0x94d049bb133111eb);
-    x ^= x >> 31;
-    return x;
-}
+/* a_mix64 (splitmix64 finalizer) and a_fnv1a live in
+   a_runtime_internal.h. */
 
 /* Key equality for probe steps. Every scalar that A can compare by value is
    canonical in its aval form: an inline int has one bit pattern per value,
@@ -77,27 +71,26 @@ static uint64_t dict_key_hash(aval k) {
     if (a_is_int(k)) {
         union { double d; uint64_t u; } c;
         c.d = (double)a_int_val(k);
-        return mix64(c.u);
+        return a_mix64(c.u);
     }
     if (a_is_double(k)) {
         double d = a_double_val(k);
         if (d == 0.0) d = 0.0; /* -0.0 == +0.0 under values_equal */
         union { double d; uint64_t u; } c;
         c.d = d;
-        return mix64(c.u);
+        return a_mix64(c.u);
     }
     if (is_int_val(k)) { /* boxed T_INT64 outside the inline range */
         union { double d; uint64_t u; } c;
         c.d = (double)int_val_full(k);
-        return mix64(c.u);
+        return a_mix64(c.u);
     }
     if (a_is_none(k) || k == A_TRUE || k == A_FALSE)
-        return mix64(k ^ UINT64_C(0x517cc1b727220a95));
+        return a_mix64(k ^ UINT64_C(0x517cc1b727220a95));
     AObj *o = obj_of(k);
     if (o && (o->type == T_STR || o->type == T_CHAR || o->type == T_ROPE)) {
         /* FNV-1a over the bytes, then final mix. A rope hashes exactly like
            the T_STR it flattens to (same tag, same bytes). */
-        uint64_t h = UINT64_C(0xcbf29ce484222325);
         uint64_t n;
         const char *p;
         if (o->type == T_ROPE) {
@@ -108,12 +101,9 @@ static uint64_t dict_key_hash(aval k) {
             p = ((AStr *)o)->data;
             n = o->len;
         }
-        for (uint32_t i = 0; i < n; ++i) {
-            h ^= (unsigned char)p[i];
-            h *= UINT64_C(0x100000001b3);
-        }
+        uint64_t h = a_fnv1a(p, n);
         uint32_t tag_t = o->type == T_ROPE ? T_STR : o->type;
-        return mix64(h ^ ((uint64_t)tag_t << 56));
+        return a_mix64(h ^ ((uint64_t)tag_t << 56));
     }
     /* complex/unhashable-by-value keys: one shared domain (see above) */
     return UINT64_C(0x9e3779b97f4a7c15);
@@ -237,7 +227,7 @@ int64_t dict_find_cstr(ADict *d, const char *s, uint64_t len) {
         h ^= (unsigned char)s[i];
         h *= UINT64_C(0x100000001b3);
     }
-    h = mix64(h ^ ((uint64_t)T_STR << 56));
+    h = a_mix64(h ^ ((uint64_t)T_STR << 56));
     if (d->scap == 0) {
         for (uint64_t i = 0; i < d->h.len; ++i) {
             AObj *o = obj_of(d->pairs[i].k);

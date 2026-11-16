@@ -220,13 +220,9 @@ typedef struct { const void *old; aval nw; } DCEnt;
 typedef struct { DCEnt *t; size_t cap, len; } DCMap;
 
 static uint64_t dcent_hash(const void *p) {
-    uintptr_t x = (uintptr_t)p >> 4;
-    x ^= x >> 33;
-    x *= UINT64_C(0xff51afd7ed558ccd);
-    x ^= x >> 33;
-    x *= UINT64_C(0xc4ceb9fe1a85ec53);
-    x ^= x >> 33;
-    return (uint64_t)x;
+    /* Same murmur3 fmix64 as gc.c's gc_mix (a_fmix64 in
+       a_runtime_internal.h), applied to the pointer >> 4. */
+    return a_fmix64((uint64_t)((uintptr_t)p >> 4));
 }
 
 static void dcmap_grow(DCMap *m) {

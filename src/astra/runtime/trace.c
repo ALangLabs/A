@@ -37,15 +37,7 @@ static ASpan *span_find(uint64_t id) {
     return NULL;
 }
 
-static int64_t now_ms(void) {
-#if defined(_WIN32)
-    return a_win_mono_ms();
-#else
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-#endif
-}
+/* a_rt_mono_ms lives in a_runtime_internal.h. */
 
 aval bi_trace_start(uint64_t n, aval *argv) {
     want_args("trace.start", n, 1, 2);
@@ -58,11 +50,11 @@ aval bi_trace_start(uint64_t n, aval *argv) {
     s->id = g_next_span++;
     a_promote(argv[0]);        /* escapes into the file-static span table */
     s->name = argv[0];
-    s->attrs = dict_new_empty();
+    s->attrs = a_dict_new();
     s->events = list_from_vec(NULL, 0, 0);
     a_promote(s->attrs);       /* referenced only from g_spans */
     a_promote(s->events);
-    s->start_ms = now_ms();
+    s->start_ms = a_rt_mono_ms();
     s->end_ms = -1;
     if (!g_trace_id_lo)
         g_trace_id_lo = ((uint64_t)time(NULL) << 32) ^ (s->id * UINT64_C(0x9e3779b97f4a7c15));
@@ -74,7 +66,7 @@ aval bi_trace_end(uint64_t n, aval *argv) {
     want_args("trace.end", n, 1, 1);
     ASpan *s = span_find((uint64_t)int_val_full(argv[0]));
     if (!s) panicf("trace.end: unknown span");
-    s->end_ms = now_ms();
+    s->end_ms = a_rt_mono_ms();
     if (g_current_span == s->id) g_current_span = 0;
     return A_NONE;
 }
@@ -97,7 +89,7 @@ aval bi_trace_add_event(uint64_t n, aval *argv) {
     ASpan *s = span_find((uint64_t)int_val_full(argv[0]));
     if (!s) panicf("trace.add_event: unknown span");
     /* events: list of {name, attributes?} dicts */
-    aval ev = dict_new_empty();
+    aval ev = a_dict_new();
     ADict *ed = (ADict *)obj_of(ev);
     dict_put(ed, a_str_new("name", 4), argv[1]);
     if (n > 2) dict_put(ed, a_str_new("attributes", 10), argv[2]);
@@ -145,7 +137,7 @@ aval bi_trace_spans(uint64_t n, aval *argv) {
     aval *items = (aval *)xmalloc(sizeof(aval) * (g_nspans ? g_nspans : 1));
     for (size_t i = 0; i < g_nspans; ++i) {
         ASpan *s = &g_spans[i];
-        aval d = dict_new_empty();
+        aval d = a_dict_new();
         ADict *dd = (ADict *)obj_of(d);
         dict_put(dd, a_str_new("id", 2), mkint_full((int64_t)s->id));
         dict_put(dd, a_str_new("name", 4), s->name);

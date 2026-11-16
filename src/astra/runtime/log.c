@@ -8,29 +8,11 @@ static int g_log_level = 1;   /* 0=debug 1=info 2=warn 3=error */
 static int g_log_json = 0;
 static const char *const k_log_level_names[] = {"debug", "info", "warn", "error"};
 
+/* JSON string quoting lives in a_runtime_internal.h as a_buf_json_quote
+   (shared with json.c; byte-identical output — the old per-byte loop
+   here only differed in not using memcpy runs). */
 static void log_append_json_str(Buf *b, const char *s, uint64_t n) {
-    buf_addc(b, '"');
-    for (uint64_t i = 0; i < n; ++i) {
-        unsigned char c = (unsigned char)s[i];
-        switch (c) {
-            case '"': buf_adds(b, "\\\""); break;
-            case '\\': buf_adds(b, "\\\\"); break;
-            case '\b': buf_adds(b, "\\b"); break;
-            case '\f': buf_adds(b, "\\f"); break;
-            case '\n': buf_adds(b, "\\n"); break;
-            case '\r': buf_adds(b, "\\r"); break;
-            case '\t': buf_adds(b, "\\t"); break;
-            default:
-                if (c < 0x20) {
-                    char tmp[8];
-                    snprintf(tmp, sizeof tmp, "\\u%04x", c);
-                    buf_adds(b, tmp);
-                } else {
-                    buf_addc(b, (char)c);
-                }
-        }
-    }
-    buf_addc(b, '"');
+    a_buf_json_quote(b, s, n);
 }
 
 static void log_write_line(int level, const char *msg, uint64_t mlen, aval fields) {

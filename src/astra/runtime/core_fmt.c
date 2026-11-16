@@ -573,7 +573,7 @@ static aval a_str_i64(int64_t v) {
     fmt_active_gc_hook();
     int ci = (v >= 0 && v < 4096) ? (int)v : -1;
     if (ci >= 0 && g_int_str_cache[ci]) return g_int_str_cache[ci];
-    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    uint64_t u = a_i64_abs_u64(v);
     uint64_t t = u;
     int nd = 1;
     while (t >= 10) { t /= 10; ++nd; }

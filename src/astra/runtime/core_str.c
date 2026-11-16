@@ -169,33 +169,6 @@ int str_eq(aval a, aval b) {
     return la == lb && (la == 0 || memcmp(pa, pb, (size_t)la) == 0);
 }
 
-/* Rightmost byte == c in p[0..n), or NULL. Word-at-a-time scan from the
-   end; portable (memrchr is a GNU/BSD extension absent on MSVC). The
-   haszero bit trick can only over-report, and the verify loop re-checks
-   real bytes, so no false hits are possible. */
-static const char *memrchr8(const char *p, size_t n, unsigned char c) {
-    const char *base = p;
-    p += n;
-    uint64_t pat = UINT64_C(0x0101010101010101) * c;
-    while ((size_t)(p - base) >= 8) {
-        uint64_t w;
-        memcpy(&w, p - 8, 8);
-        uint64_t x = w ^ pat;
-        uint64_t m = (x - UINT64_C(0x0101010101010101)) & ~x &
-                     UINT64_C(0x8080808080808080);
-        if (m) {
-            for (int k = 7; k >= 0; --k)
-                if (p[-8 + k] == (char)c) return p - 8 + k;
-        }
-        p -= 8;
-    }
-    while (p > base) {
-        --p;
-        if ((unsigned char)*p == c) return p;
-    }
-    return NULL;
-}
-
 const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
                               size_t from, size_t *pos) {
     if (nn == 0) {
@@ -234,42 +207,9 @@ const char *find_bytes(const char *h, size_t hn, const char *n, size_t nn,
 int64_t str_find(aval hay, aval needle, int64_t start, int reverse) {
     uint64_t hn, nn;
     const char *h = str_data(hay, &hn), *n = str_data(needle, &nn);
-    /* The codepoint count is only needed for negative starts, empty needles
-       and the "start past the end" check: counting the whole haystack first
-       made every contains()/find() two full passes. */
-    int64_t st = start;
-    if (st < 0) {
-        st += (int64_t)u8_count(h, hn);
-        if (st < 0) st = 0;
-    }
-    if (nn == 0) {
-        if (st > (int64_t)u8_count(h, hn)) return -1;
-        return st;
-    }
-    uint64_t st_byte = st == 0 ? 0 : cp_to_byte(h, hn, st);
-    if (st_byte >= hn) return -1;
-    if (!reverse) {
-        size_t pos = 0;
-        const char *p = find_bytes(h, (size_t)hn, n, (size_t)nn, st_byte, &pos);
-        if (!p) return -1;
-        return (int64_t)u8_count(h, pos);
-    }
-    /* Reverse search: jump between first-byte candidates with a
-       word-at-a-time backward memchr and memcmp only on candidates.
-       Keeps the old loop's early exit (a match near the end is found in
-       a few words) while scanning ~8x faster on misses. */
-    if (nn > hn) return -1;
-    int64_t i = (int64_t)(hn - nn);
-    while (i >= (int64_t)st_byte) {
-        const char *hit = memrchr8(h + st_byte, (size_t)(i - (int64_t)st_byte + 1),
-                                   (unsigned char)n[0]);
-        if (!hit) return -1;
-        size_t cand = (size_t)(hit - h);
-        if (memcmp(h + cand, n, (size_t)nn) == 0)
-            return (int64_t)u8_count(h, cand);
-        i = (int64_t)cand - 1;
-    }
-    return -1;
+    /* Shared code-point search core (also backs methods_str.c's bounded
+       variant); see a_find_in_bytes in a_runtime_internal.h. */
+    return a_find_in_bytes(h, hn, n, nn, start, reverse);
 }
 
 aval str_repeat(aval s, int64_t count) {

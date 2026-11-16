@@ -383,6 +383,299 @@ static inline int arr_i64_eq_aval(int64_t e, aval v) {
     if (is_num(v)) return (double)e == num_to_double(v);
     return 0;
 }
+
+/* ------------------------------------------------------------------ */
+/* shared inline helpers (deduplicated across the rt_*.c modules)      */
+/* ------------------------------------------------------------------ */
+
+/* |v| as uint64 — correct for INT64_MIN. Was iabs_u/iabs_u64/fp_iabs_u
+   and inlined copies in buf_addi64/a_str_i64/i64_digits. */
+static inline uint64_t a_i64_abs_u64(int64_t v) {
+    return v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+}
+
+/* int64 multiply with overflow check: *r = a*b, returns 1 on overflow.
+   Was imul_of (value_arith.c) / fp_imul_of (fastpath.c). */
+static inline int a_imul_of(int64_t a, int64_t b, int64_t *r) {
+    if (a == 0 || b == 0) { *r = 0; return 0; }
+    uint64_t ua = a_i64_abs_u64(a), ub = a_i64_abs_u64(b);
+    int neg = (a < 0) != (b < 0);
+    uint64_t limit = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
+    if (ua > limit / ub) return 1;
+    uint64_t m = ua * ub;
+    if (neg) {
+        *r = (m == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)m;
+    } else {
+        *r = (int64_t)m;
+    }
+    return 0;
+}
+
+/* splitmix64 finalizer — identical to mix64 (core_dict.c) / sh_mix
+   (methods_helpers.c). */
+static inline uint64_t a_mix64(uint64_t x) {
+    x ^= x >> 30;
+    x *= UINT64_C(0xbf58476d1ce4e5b9);
+    x ^= x >> 27;
+    x *= UINT64_C(0x94d049bb133111eb);
+    x ^= x >> 31;
+    return x;
+}
+
+/* murmur3 fmix64 — pointer-table hashes: gc.c gc_mix and value_collect.c
+   dcent_hash (the latter shifts the pointer right 4 first). */
+static inline uint64_t a_fmix64(uint64_t x) {
+    x ^= x >> 33;
+    x *= UINT64_C(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    x *= UINT64_C(0xc4ceb9fe1a85ec53);
+    x ^= x >> 33;
+    return x;
+}
+
+/* FNV-1a over n bytes with the offset basis applied. Callers keep their
+   own finalization: dict_key_hash mixes in a type tag, aval_hash mixes
+   in the length — those differ, so only the byte loop is shared. */
+static inline uint64_t a_fnv1a(const char *p, uint64_t n) {
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    for (uint64_t i = 0; i < n; ++i) {
+        h ^= (unsigned char)p[i];
+        h *= UINT64_C(0x100000001b3);
+    }
+    return h;
+}
+
+/* Rightmost byte == c in p[0..n), or NULL. Word-at-a-time scan from the
+   end; portable (memrchr is a GNU/BSD extension absent on MSVC). The
+   haszero bit trick can only over-report, and the verify loop re-checks
+   real bytes, so no false hits are possible. Was memrchr8 /
+   memrchr8_local in core_str.c / methods_str.c. */
+static inline const char *a_memrchr8(const char *p, size_t n,
+                                     unsigned char c) {
+    const char *base = p;
+    p += n;
+    uint64_t pat = UINT64_C(0x0101010101010101) * c;
+    while ((size_t)(p - base) >= 8) {
+        uint64_t w;
+        memcpy(&w, p - 8, 8);
+        uint64_t x = w ^ pat;
+        uint64_t m = (x - UINT64_C(0x0101010101010101)) & ~x &
+                     UINT64_C(0x8080808080808080);
+        if (m) {
+            for (int k = 7; k >= 0; --k)
+                if (p[-8 + k] == (char)c) return p - 8 + k;
+        }
+        p -= 8;
+    }
+    while (p > base) {
+        --p;
+        if ((unsigned char)*p == c) return p;
+    }
+    return NULL;
+}
+
+/* Code-point-indexed substring search over a raw byte range — the shared
+   core of str_find (core_str.c) and str_find_bounded (methods_str.c).
+   h/n are BYTES; start is a code-point index (negative counts from the
+   end) and reverse selects rfind semantics. Returns the code-point index
+   of the match or -1. Identical body in both former copies. */
+static inline int64_t a_find_in_bytes(const char *h, uint64_t hn,
+                                      const char *n, uint64_t nn,
+                                      int64_t start, int reverse) {
+    /* The codepoint count is only needed for negative starts, empty needles
+       and the "start past the end" check: counting the whole haystack first
+       made every contains()/find() two full passes. */
+    int64_t st = start;
+    if (st < 0) {
+        st += (int64_t)u8_count(h, hn);
+        if (st < 0) st = 0;
+    }
+    if (nn == 0) {
+        if (st > (int64_t)u8_count(h, hn)) return -1;
+        return st;
+    }
+    uint64_t st_byte = st == 0 ? 0 : cp_to_byte(h, hn, st);
+    if (st_byte >= hn) return -1;
+    if (!reverse) {
+        size_t pos = 0;
+        const char *p = find_bytes(h, (size_t)hn, n, (size_t)nn, st_byte,
+                                   &pos);
+        if (!p) return -1;
+        return (int64_t)u8_count(h, pos);
+    }
+    /* Reverse search: jump between first-byte candidates with a
+       word-at-a-time backward memchr and memcmp only on candidates.
+       Keeps the old loop's early exit (a match near the end is found in
+       a few words) while scanning ~8x faster on misses. */
+    if (nn > hn) return -1;
+    int64_t i = (int64_t)(hn - nn);
+    while (i >= (int64_t)st_byte) {
+        const char *hit = a_memrchr8(h + st_byte,
+                                     (size_t)(i - (int64_t)st_byte + 1),
+                                     (unsigned char)n[0]);
+        if (!hit) return -1;
+        size_t cand = (size_t)(hit - h);
+        if (memcmp(h + cand, n, (size_t)nn) == 0)
+            return (int64_t)u8_count(h, cand);
+        i = (int64_t)cand - 1;
+    }
+    return -1;
+}
+
+/* Encode one code point as UTF-8 into out (>= 4 bytes); returns the byte
+   count. Was utf8_encode_cp (binary.c) / jutf8 (json.c) — byte-identical
+   output for every cp < 2^32 (callers bound cp to <= 0x10FFFF; lone
+   surrogates encode as 3-byte CESU-8 in both). */
+static inline int a_utf8_encode_cp(uint64_t cp, char *out) {
+    if (cp < 0x80) { out[0] = (char)cp; return 1; }
+    if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); return 2;
+    }
+    if (cp < 0x10000) {
+        out[0] = (char)(0xE0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F)); return 3;
+    }
+    out[0] = (char)(0xF0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[3] = (char)(0x80 | (cp & 0x3F));
+    return 4;
+}
+
+/* JSON string literal (surrounding quotes included) appended to b:
+   escapes " \ \b \f \n \r \t and other C0 controls as \u00XX (lowercase
+   hex), copying runs of plain bytes with memcpy. Was json_escape_str
+   (json.c) and log_append_json_str (log.c) — byte-identical output.
+   NOTE: this is NOT the repr quoter — format_quoted (core_fmt.c)
+   escapes only " \ \n \t \r and passes other control bytes through
+   raw, so the two must stay separate. */
+static inline void a_buf_json_quote(Buf *b, const char *s, uint64_t n) {
+    static const char hexd[] = "0123456789abcdef";
+    buf_addc(b, '"');
+    uint64_t i = 0;
+    while (i < n) {
+        /* memcpy runs of unescaped bytes instead of per-byte buf_addc. */
+        uint64_t j = i;
+        while (j < n) {
+            unsigned char c = (unsigned char)s[j];
+            if (c == '"' || c == '\\' || c == '\b' || c == '\f' ||
+                c == '\n' || c == '\r' || c == '\t' || c < 0x20) break;
+            ++j;
+        }
+        if (j > i) buf_addn(b, s + i, (size_t)(j - i));
+        if (j >= n) break;
+        unsigned char c = (unsigned char)s[j];
+        switch (c) {
+            case '"': buf_adds(b, "\\\""); break;
+            case '\\': buf_adds(b, "\\\\"); break;
+            case '\b': buf_adds(b, "\\b"); break;
+            case '\f': buf_adds(b, "\\f"); break;
+            case '\n': buf_adds(b, "\\n"); break;
+            case '\r': buf_adds(b, "\\r"); break;
+            case '\t': buf_adds(b, "\\t"); break;
+            default: {
+                /* c < 0x20 -> \u00XX (lowercase hex, same as %04x) */
+                char tmp[6] = {'\\', 'u', '0', '0',
+                               hexd[c >> 4], hexd[c & 15]};
+                buf_addn(b, tmp, 6);
+                break;
+            }
+        }
+        i = j + 1;
+    }
+    buf_addc(b, '"');
+}
+
+/* Monotonic wall time in milliseconds. Was now_ms (trace.c) /
+   fib_now_ms (async.c). */
+static inline int64_t a_rt_mono_ms(void) {
+#if defined(_WIN32)
+    return a_win_mono_ms();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+#endif
+}
+
+/* ---- dense numeric list helpers (shared by linalg.c / math_ew.c) ---- */
+
+/* aval -> double for numeric elements; msg is passed to panicf when the
+   value is neither an inline double nor an int. */
+static inline double a_num_aval(aval v, const char *msg) {
+    if (a_is_double(v)) {
+        union { uint64_t u; double d; } c;
+        c.u = v;
+        return c.d;
+    }
+    if (is_int_val(v)) return (double)int_val_full(v);
+    panicf("%s", msg);
+    return 0.0;
+}
+
+static inline double a_arr_num(const AArr *a, uint64_t i,
+                               const char *msg) {
+    if (arr_packed(a)) return (double)a->iitems[i];
+    return a_num_aval(a->items[i], msg);
+}
+
+/* Strict T_LIST check (unlike arr_of, tuples/sets are rejected).
+   Was as_arr in linalg.c / math_ew.c. */
+static inline AArr *a_list_arr(aval v, const char *what) {
+    AObj *o = obj_of(v);
+    if (!o || o->type != T_LIST) panicf("%s must be a list", what);
+    return (AArr *)o;
+}
+
+/* Verified all-double aval storage -> raw double view (caches
+   ARR_F_F64 on the array; mutating writes clear the flag). */
+static inline const double *a_arr_f64_ptr(AArr *a) {
+    if (arr_packed(a) || !a->items) return NULL;
+    if (!(a->flags & ARR_F_F64)) {
+        for (uint64_t i = 0; i < a->h.len; i++)
+            if (!a_is_double(a->items[i])) return NULL;
+        arr_f64_mark(a);   /* items is raw double bits: exempt from GC scan */
+    }
+    return (const double *)(const void *)a->items;
+}
+
+/* Copy the first n elements into a fresh double buffer. nummsg is the
+   a_arr_num panic message for non-numeric elements. */
+static inline double *a_arr_to_f64(const AArr *a, uint64_t n,
+                                   const char *what, const char *nummsg) {
+    if ((uint64_t)a->h.len < n) panicf("%s too short", what);
+    double *out = (double *)malloc((size_t)(n ? n : 1) * sizeof(double));
+    if (!out) panicf("out of memory");
+    for (uint64_t i = 0; i < n; i++) out[i] = a_arr_num(a, i, nummsg);
+    return out;
+}
+
+/* Raw double view of the first `need` elements, materializing a malloc'd
+   copy into *tmp when the list is not already verified all-double.
+   Caller frees *tmp (NULL when a direct view was returned). */
+static inline const double *a_arr_as_f64(const AArr *a, uint64_t need,
+                                         double **tmp, const char *what,
+                                         const char *nummsg) {
+    *tmp = NULL;
+    if ((uint64_t)a->h.len < need) panicf("%s too short", what);
+    const double *view = a_arr_f64_ptr((AArr *)a);
+    if (view) return view;
+    *tmp = a_arr_to_f64(a, need, what, nummsg);
+    return *tmp;
+}
+
+/* New T_LIST (ARR_F_F64-marked) from a double buffer. */
+static inline aval a_f64_list(uint64_t n, const double *src) {
+    AArr *a = (AArr *)xmalloc(sizeof(AArr));
+    a->h.type = T_LIST;
+    a->h.len = (uint32_t)n;
+    a->h.cap = n;
+    a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
+    a->iitems = NULL;
+    a->flags = ARR_F_F64;
+    a_gc_set_noscan(a->items, 1);   /* all-double items: no pointers inside */
+    for (uint64_t i = 0; i < n; i++) a->items[i] = mkdouble(src[i]);
+    return mkobj(a);
+}
+
 ADict *dict_of(aval v, const char *what);
 int64_t dict_find(ADict *d, aval k);
 void dict_put(ADict *d, aval k, aval v);
@@ -617,7 +910,6 @@ aval bi_struct_name(uint64_t n, aval *argv);
 aval bi_struct_methods(uint64_t n, aval *argv);
 aval bi_fn_signature(uint64_t n, aval *argv);
 aval bi_fn_doc(uint64_t n, aval *argv);
-aval dict_new_empty(void);
 aval bi_binary_encode(uint64_t n, aval *argv);
 aval bi_binary_decode(uint64_t n, aval *argv);
 aval bi_log_set_level(uint64_t n, aval *argv);

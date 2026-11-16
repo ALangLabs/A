@@ -24,68 +24,35 @@
 /* list <-> double view helpers (same scheme as linalg.c)              */
 /* ------------------------------------------------------------------ */
 
+/* Dense-list helpers are shared with linalg.c via a_runtime_internal.h;
+   panic strings are passed through so messages stay identical. */
+#define MATH_EW_NUMMSG "math ufuncs expect numeric arrays"
 static AArr *as_arr(aval v, const char *what) {
-    AObj *o = obj_of(v);
-    if (!o || o->type != T_LIST) panicf("%s must be a list", what);
-    return (AArr *)o;
+    return a_list_arr(v, what);
 }
 
 static inline double arr_num(const AArr *a, uint64_t i) {
-    if (arr_packed(a)) return (double)a->iitems[i];
-    aval v = a->items[i];
-    if (a_is_double(v)) {
-        union { uint64_t u; double d; } c;
-        c.u = v;
-        return c.d;
-    }
-    if (is_int_val(v)) return (double)int_val_full(v);
-    panicf("math ufuncs expect numeric arrays");
-    return 0.0;
+    return a_arr_num(a, i, MATH_EW_NUMMSG);
 }
 
-/* Verified all-double aval storage -> raw double view (caches ARR_F_F64). */
 static const double *f64_ptr(AArr *a) {
-    if (arr_packed(a) || !a->items) return NULL;
-    if (!(a->flags & ARR_F_F64)) {
-        for (uint64_t i = 0; i < a->h.len; i++)
-            if (!a_is_double(a->items[i])) return NULL;
-        arr_f64_mark(a);   /* items is raw double bits: exempt from GC scan */
-    }
-    return (const double *)(const void *)a->items;
+    return a_arr_f64_ptr(a);
 }
 
 static double *to_f64(const AArr *a, uint64_t n, const char *what) {
-    if ((uint64_t)a->h.len < n) panicf("%s too short", what);
-    double *out = (double *)malloc((size_t)(n ? n : 1) * sizeof(double));
-    if (!out) panicf("out of memory");
-    for (uint64_t i = 0; i < n; i++) out[i] = arr_num(a, i);
-    return out;
+    return a_arr_to_f64(a, n, what, MATH_EW_NUMMSG);
 }
 
 /* Raw double view of the first `need` elements; *tmp gets a malloc'd copy
    when the list is not already verified all-double (caller frees). */
 static const double *as_f64(const AArr *a, uint64_t need, double **tmp,
                             const char *what) {
-    *tmp = NULL;
-    if ((uint64_t)a->h.len < need) panicf("%s too short", what);
-    const double *view = f64_ptr((AArr *)a);
-    if (view) return view;
-    *tmp = to_f64(a, need, what);
-    return *tmp;
+    return a_arr_as_f64(a, need, tmp, what, MATH_EW_NUMMSG);
 }
 
 /* New [f64] list (ARR_F_F64-marked) from a double buffer. */
 static aval f64_list(uint64_t n, const double *src) {
-    AArr *a = (AArr *)xmalloc(sizeof(AArr));
-    a->h.type = T_LIST;
-    a->h.len = (uint32_t)n;
-    a->h.cap = n;
-    a->items = (aval *)xmalloc((size_t)(n ? n : 1) * sizeof(aval));
-    a->iitems = NULL;
-    a->flags = ARR_F_F64;
-    a_gc_set_noscan(a->items, 1);   /* all-double items: no pointers inside */
-    for (uint64_t i = 0; i < n; i++) a->items[i] = mkdouble(src[i]);
-    return mkobj(a);
+    return a_f64_list(n, src);
 }
 
 /* ------------------------------------------------------------------ */

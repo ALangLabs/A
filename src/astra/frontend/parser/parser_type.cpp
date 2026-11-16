@@ -1,6 +1,39 @@
 #include "parser/parser_internal.hpp"
 
 namespace a {
+
+void Parser::parseTypeParamNames(std::vector<std::string>& typeParams) {
+  // Current token is '<'.
+  advance();
+  while (!check(Tok::Gt) && !check(Tok::Eof)) {
+    const Token& tp = expect(Tok::Ident, "a type parameter name");
+    typeParams.push_back(tp.lexeme);
+    if (!match(Tok::Comma)) break;
+  }
+  expect(Tok::Gt, "'>' after type parameters");
+}
+
+TypeExprPtr Parser::parseTypeArgument(bool allowEllipsis) {
+  // Integer literals are comptime type arguments (e.g. the lane count in
+  // `vector[float, 4]`); `...` is the variadic marker in `tuple[T, ...]`.
+  if (check(Tok::Int)) {
+    const Token& lit = advance();
+    auto konst = std::make_unique<ConstTypeExpr>();
+    konst->span = lit.span;
+    konst->value = lit.intValue;
+    return konst;
+  }
+  if (allowEllipsis && check(Tok::DotDot)) {
+    // `...` lexes as '..' + '.'; consume both halves.
+    const Token& dots = advance();
+    if (check(Tok::Dot)) advance();
+    auto ellipsis = std::make_unique<EllipsisTypeExpr>();
+    ellipsis->span = dots.span;
+    return ellipsis;
+  }
+  return parseTypeExpr();
+}
+
 TypeExprPtr Parser::parseTypeExpr() {
   TypeExprPtr first = parseTypeExprAtom();
   if (!check(Tok::Bar)) return first;
@@ -105,25 +138,7 @@ TypeExprPtr Parser::parseTypeExprAtom() {
       // '>>' lexes as one token but closes two generic levels; the loop
       // stops on it and matchTypeArgGt splits it into two '>' tokens.
       while (!check(Tok::Gt) && !check(Tok::Shr) && !check(Tok::Eof)) {
-        // Integer literals are allowed as type arguments for comptime
-        // parameters such as the lane count in `vector[float, 4]`; `...` is
-        // the variadic marker in `tuple[T, ...]`.
-        if (check(Tok::Int)) {
-          const Token& lit = advance();
-          auto konst = std::make_unique<ConstTypeExpr>();
-          konst->span = lit.span;
-          konst->value = lit.intValue;
-          named->typeArgs.push_back(std::move(konst));
-        } else if (check(Tok::DotDot)) {
-          // `...` lexes as '..' + '.'; consume both halves.
-          const Token& dots = advance();
-          if (check(Tok::Dot)) advance();
-          auto ellipsis = std::make_unique<EllipsisTypeExpr>();
-          ellipsis->span = dots.span;
-          named->typeArgs.push_back(std::move(ellipsis));
-        } else {
-          named->typeArgs.push_back(parseTypeExpr());
-        }
+        named->typeArgs.push_back(parseTypeArgument(/*allowEllipsis=*/true));
         if (!match(Tok::Comma)) break;
       }
       if (!matchTypeArgGt()) {
@@ -156,22 +171,7 @@ TypeExprPtr Parser::parseTypeExprAtom() {
                     "do not mix '<T>' and '[T]' on the same type.");
       }
       while (!check(Tok::RBracket) && !check(Tok::Eof)) {
-        if (check(Tok::Int)) {
-          const Token& lit = advance();
-          auto konst = std::make_unique<ConstTypeExpr>();
-          konst->span = lit.span;
-          konst->value = lit.intValue;
-          namedType->typeArgs.push_back(std::move(konst));
-        } else if (check(Tok::DotDot)) {
-          // `...` lexes as '..' + '.'; consume both halves.
-          const Token& dots = advance();
-          if (check(Tok::Dot)) advance();
-          auto ellipsis = std::make_unique<EllipsisTypeExpr>();
-          ellipsis->span = dots.span;
-          namedType->typeArgs.push_back(std::move(ellipsis));
-        } else {
-          namedType->typeArgs.push_back(parseTypeExpr());
-        }
+        namedType->typeArgs.push_back(parseTypeArgument(/*allowEllipsis=*/true));
         if (!match(Tok::Comma)) break;
       }
       expect(Tok::RBracket, "']' after the type arguments");

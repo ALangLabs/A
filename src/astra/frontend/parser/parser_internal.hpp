@@ -9,6 +9,29 @@ namespace a {
 
 inline Span spanOf(const ExprPtr& expr) { return expr ? expr->span : Span{}; }
 
+// Routes docstrings inside a declaration body (struct/trait/enum/impl):
+// the first docstring seen before any member becomes the declaration's own
+// doc; later docstrings are held until the next member takes them via
+// takePending().
+struct PendingDoc {
+  bool allowTypeDoc = true;
+  std::string typeDoc;
+  bool typeDocSet = false;
+  std::string pending;
+
+  void route(std::string doc, bool hasMembers) {
+    if (allowTypeDoc && !hasMembers && !typeDocSet) {
+      typeDoc = std::move(doc);
+      typeDocSet = true;
+    } else {
+      pending = std::move(doc);
+    }
+  }
+
+  // Returns the pending member doc (empty when none) and clears it.
+  std::string takePending() { return std::exchange(pending, {}); }
+};
+
 inline ExprPtr makeIdent(std::string name, Span span) {
   auto expr = std::make_unique<IdentExpr>();
   expr->name = std::move(name);

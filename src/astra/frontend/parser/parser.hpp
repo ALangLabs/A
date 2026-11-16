@@ -10,6 +10,8 @@
 
 namespace a {
 
+struct PendingDoc;
+
 class Parser {
  public:
   Parser(std::vector<Token> tokens, DiagnosticSink& sink);
@@ -69,6 +71,27 @@ class Parser {
   // a plain (non-interpolated) string literal.
   void parseDocstringStatement(std::string& text);
 
+  // Handles a docstring statement inside a declaration body: consumes it
+  // when the current token is a string literal and routes the text through
+  // `docs` (first docstring before any member becomes the type doc, later
+  // ones attach to the next member). `hasMembers` reports whether any member
+  // has been parsed so far. Returns true when a docstring was consumed.
+  bool consumeBodyDocstring(PendingDoc& docs, bool hasMembers);
+
+  // Parses the `python:<pkg>` / `std:<pkg>` module prefix shared by
+  // `import` and `from ... import` (current token is the 'python'/'std'
+  // identifier). Stores the joined span in `targetSpan` and the dotted
+  // module path in `out`.
+  void parseModulePrefix(Span& targetSpan, std::string& out);
+
+  // Parses the module source shared by `import` and `from ... import`:
+  // a quoted path, a `python:`/`std:` package path, or a bare module name.
+  // Fills the fields common to ImportStmt and FromImportStmt. `keyword` is
+  // the statement keyword ("import"/"from") and `help` the diagnostic help
+  // text for a missing module source.
+  template <typename StmtT>
+  void parseModuleSource(StmtT& stmt, const char* keyword, const char* help);
+
   std::vector<StmtPtr> parseSuite();
   void expectNewline();
 
@@ -84,6 +107,14 @@ class Parser {
   void parseTypeParams(std::vector<std::string>& typeParams,
                        std::vector<std::string>& bounds,
                        std::vector<Span>& boundSpans);
+  // Parses a `<T, U, ...>` type parameter list without trait bounds
+  // (current token is '<'). Used by struct/class and enum declarations.
+  void parseTypeParamNames(std::vector<std::string>& typeParams);
+  // Parses one type argument inside a '<...>' or '[...]' list: an integer
+  // literal (comptime value such as the lane count in `vector[float, 4]`),
+  // `...` (the variadic marker in `tuple[T, ...]`, only when allowEllipsis),
+  // or a full type expression.
+  TypeExprPtr parseTypeArgument(bool allowEllipsis);
 
   ExprPtr parseExpression(int minPrec = 0);
   ExprPtr parsePrefix();

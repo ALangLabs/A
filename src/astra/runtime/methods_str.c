@@ -86,68 +86,15 @@ static AVec ws_split_fwd(const char *d, uint64_t n, int64_t maxsplit) {
     return out;
 }
 
-/* Rightmost byte == c in p[0..n), or NULL — same word-at-a-time backward
-   scan as core_str.c's memrchr8 (kept local: no new header prototypes). */
-static const char *memrchr8_local(const char *p, size_t n, unsigned char c) {
-    const char *base = p;
-    p += n;
-    uint64_t pat = UINT64_C(0x0101010101010101) * c;
-    while ((size_t)(p - base) >= 8) {
-        uint64_t w;
-        memcpy(&w, p - 8, 8);
-        uint64_t x = w ^ pat;
-        uint64_t m = (x - UINT64_C(0x0101010101010101)) & ~x &
-                     UINT64_C(0x8080808080808080);
-        if (m) {
-            for (int k = 7; k >= 0; --k)
-                if (p[-8 + k] == (char)c) return p - 8 + k;
-        }
-        p -= 8;
-    }
-    while (p > base) {
-        --p;
-        if ((unsigned char)*p == c) return p;
-    }
-    return NULL;
-}
-
 /* str.find within a byte prefix [0, lim) without copying the prefix into
-   a temporary AStr (the old code allocated one per call). Mirrors
-   str_find's index/clamp rules on the bounded view. */
+   a temporary AStr (the old code allocated one per call). Same index/
+   clamp rules as str_find — both share a_find_in_bytes in
+   a_runtime_internal.h. */
 static int64_t str_find_bounded(const char *h, uint64_t lim, aval needle,
                                 int64_t start, int reverse) {
     uint64_t nn;
     const char *nd = str_data(needle, &nn);
-    int64_t st = start;
-    if (st < 0) {
-        st += (int64_t)u8_count(h, lim);
-        if (st < 0) st = 0;
-    }
-    if (nn == 0) {
-        if (st > (int64_t)u8_count(h, lim)) return -1;
-        return st;
-    }
-    uint64_t st_byte = st == 0 ? 0 : cp_to_byte(h, lim, st);
-    if (st_byte >= lim) return -1;
-    if (!reverse) {
-        size_t pos = 0;
-        if (!find_bytes(h, (size_t)lim, nd, (size_t)nn, st_byte, &pos))
-            return -1;
-        return (int64_t)u8_count(h, pos);
-    }
-    if (nn > lim) return -1;
-    int64_t i = (int64_t)(lim - nn);
-    while (i >= (int64_t)st_byte) {
-        const char *hit = memrchr8_local(h + st_byte,
-                                         (size_t)(i - (int64_t)st_byte + 1),
-                                         (unsigned char)nd[0]);
-        if (!hit) return -1;
-        size_t cand = (size_t)(hit - h);
-        if (memcmp(h + cand, nd, (size_t)nn) == 0)
-            return (int64_t)u8_count(h, cand);
-        i = (int64_t)cand - 1;
-    }
-    return -1;
+    return a_find_in_bytes(h, lim, nd, nn, start, reverse);
 }
 
 /* Two-pass replace: count matches with find_bytes, size the result
@@ -813,12 +760,9 @@ aval method_str(aval obj, const char *name, uint64_t n, aval *argv) {
             uint64_t i = 0;
             while (i < s->h.len) {
                 uint64_t start = i;
-                unsigned char c = (unsigned char)s->data[i];
-                if (c < 0x80) i += 1;
-                else if ((c & 0xE0) == 0xC0) i += 2;
-                else if ((c & 0xF0) == 0xE0) i += 3;
-                else if ((c & 0xF8) == 0xF0) i += 4;
-                else i += 1;
+                /* u8_len is the same lead-byte length table this loop
+                   inlined (1 for ASCII and invalid leads). */
+                i += (uint64_t)u8_len((unsigned char)s->data[i]);
                 if (i > s->h.len) i = s->h.len;
                 a_list_push(lst, a_char_new(s->data + start, i - start));
             }

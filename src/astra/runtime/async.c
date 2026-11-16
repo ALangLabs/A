@@ -157,9 +157,7 @@ static void fib_idx_free(int idx) {
 /* ------------------------------------------------------------------ */
 
 static int64_t fib_now_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    return a_rt_mono_ms();
 }
 
 static void fib_ready_push(AFib *f) {

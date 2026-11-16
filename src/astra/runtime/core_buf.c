@@ -42,7 +42,7 @@ void buf_addi64(Buf *b, int64_t v) {
     char tmp[24];
     char *end = tmp + sizeof(tmp);
     char *p = end;
-    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    uint64_t u = a_i64_abs_u64(v);
     do {
         *--p = (char)('0' + (u % 10));
         u /= 10;

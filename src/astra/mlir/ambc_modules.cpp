@@ -24,7 +24,6 @@
 #include <set>
 #include <sstream>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -41,6 +40,7 @@
 
 #include "bytecode.hpp"   // readModuleBytecode / bytecodeIsCompatible
 #include "codegen.hpp"    // mlirModuleToObject
+#include "module_merge.hpp" // moveModuleOps / dedupLlvmFuncOps / dedupLlvmGlobalOps
 #include "native.hpp"     // parseMlirText, registerCoreDialects
 #include "pipeline.hpp"   // registerAllDialects, registerAPasses, buildAOptPipeline
 
@@ -254,69 +254,12 @@ void uniquifyModuleGlobals(mlir::ModuleOp module, int moduleId) {
   }
 }
 
-// Move every op out of `src`'s body into `dst`'s body (append order).
-void moveModuleOps(mlir::ModuleOp dst, mlir::ModuleOp src) {
-  mlir::Block* dstBody = &dst.getBodyRegion().front();
-  mlir::Block* srcBody = &src.getBodyRegion().front();
-  while (!srcBody->empty()) {
-    mlir::Operation* op = &srcBody->front();
-    op->moveBefore(dstBody, dstBody->end());
-  }
-}
-
-// Deduplicate `llvm.func` ops by symbol name across the merged module.
-// Every per-module unit re-declares the `a_*` runtime functions (and may
-// re-declare foreign `__a_f_m*`/`__a_m*` symbols) as body-less declarations;
-// the module that owns a symbol also carries its definition. Keep the
-// definition when present, else the first declaration; erase the rest.
-void dedupLlvmFuncDecls(mlir::ModuleOp module) {
-  struct Entry {
-    mlir::LLVM::LLVMFuncOp op;
-    bool hasBody = false;
-  };
-  std::unordered_map<std::string, Entry> best;
-  std::vector<mlir::LLVM::LLVMFuncOp> all;
-  for (mlir::LLVM::LLVMFuncOp fn : module.getOps<mlir::LLVM::LLVMFuncOp>()) {
-    all.push_back(fn);
-  }
-  for (mlir::LLVM::LLVMFuncOp fn : all) {
-    std::string name = fn.getSymName().str();
-    bool hasBody = !fn.getBody().empty();
-    auto it = best.find(name);
-    if (it == best.end()) {
-      best.emplace(name, Entry{fn, hasBody});
-      continue;
-    }
-    Entry& cur = it->second;
-    if (!cur.hasBody && hasBody) {
-      cur.op->erase();
-      cur.op = fn;
-      cur.hasBody = true;
-    } else {
-      fn->erase();
-    }
-  }
-}
-
-// Deduplicate `llvm.mlir.global` ops by symbol name. The synthesized tail
-// re-declares every `__a_g_*` global (external linkage, no initializer) so
-// its `llvm.mlir.addressof` uses resolve at parse time; the per-module units
-// already carry identical declarations. Keep the first occurrence (module
-// decls precede the appended tail ops) and erase the rest. Globals with
-// initializers (the private `__a_cstr`/`__a_str`/`__a_chr` constants) have
-// unique names and are unaffected.
-void dedupLlvmGlobals(mlir::ModuleOp module) {
-  std::unordered_set<std::string> seen;
-  std::vector<mlir::LLVM::GlobalOp> all;
-  for (mlir::LLVM::GlobalOp g : module.getOps<mlir::LLVM::GlobalOp>()) {
-    all.push_back(g);
-  }
-  for (mlir::LLVM::GlobalOp g : all) {
-    if (!seen.insert(g.getSymName().str()).second) {
-      g->erase();
-    }
-  }
-}
+// The ModuleOp merge/dedup helpers (moveModuleOps / dedupLlvmFuncOps /
+// dedupLlvmGlobalOps) live in module_merge.hpp, shared with the .ambc
+// producer in package.cpp. Semantics: dedupLlvmFuncOps keeps a definition
+// over a declaration for each symbol name; dedupLlvmGlobalOps keeps the
+// first `llvm.mlir.global` per symbol name (module decls precede the
+// appended tail ops, so the tail's re-declarations lose).
 
 // ---------------------------------------------------------------------------
 // Tail synthesis (mirrors emitDecls/emitMainBody/emitGcRoots/emitMain in
@@ -378,7 +321,7 @@ std::string synthesizeTailText(const AmbcMeta& meta,
     // Declare each __a_g_* global in the tail so `llvm.mlir.addressof`
     // resolves at parse time (the tail parses in isolation). These are
     // external-linkage declarations identical to the ones the per-module
-    // units already carry; dedupLlvmGlobals removes the duplicates after
+    // units already carry; dedupLlvmGlobalOps removes the duplicates after
     // the splice.
     for (const std::string& sym : rootSyms) {
       t << "llvm.mlir.global external @" << sym
@@ -449,7 +392,7 @@ std::string synthesizeTailText(const AmbcMeta& meta,
     // globals). `__a_tcstr` cannot collide with the per-module
     // `__a_cstr<N>` counters — but uniquify against the merged symbol
     // table anyway for safety. Private linkage keeps them out of
-    // dedupLlvmGlobals (which only sees `__a_g_*`-style externals).
+    // dedupLlvmGlobalOps (which only sees `__a_g_*`-style externals).
     if (!tests.empty()) {
       int g = 0;
       for (TestFn& tf : tests) {
@@ -464,7 +407,7 @@ std::string synthesizeTailText(const AmbcMeta& meta,
         if (testFnSyms) testFnSyms->push_back(tf.sym);
         // The tail parses standalone: `main`'s llvm.mlir.addressof on the
         // test fn requires an in-scope llvm.func declaration. Emit one
-        // (uniform A-fn signature); dedupLlvmFuncDecls keeps the module's
+        // (uniform A-fn signature); dedupLlvmFuncOps keeps the module's
         // real definition after the splice — same pattern as the
         // __a_m*_init decls.
         t << "llvm.func @" << tf.sym << "(%argv: !llvm.ptr) -> i64\n";
@@ -535,7 +478,7 @@ std::string synthesizeTailText(const AmbcMeta& meta,
   // verify that callees/globals exist in scope at parse time; symbols
   // already declared above (runtime sigs, __a_m<id>_init, __a_g_* roots,
   // __a_tcstr* test-name globals) are skipped. Everything else gets a
-  // declaration that dedupLlvmFuncDecls/dedupLlvmGlobals replaces with the
+  // declaration that dedupLlvmFuncOps/dedupLlvmGlobalOps replaces with the
   // real definition after the splice — the same pattern the __a_m*_init
   // and __a_g_* declarations already rely on. Func decls use the uniform
   // A-function signature (!llvm.ptr) -> i64 (every user fn/method/ctor/
@@ -653,7 +596,7 @@ int ambcModulesLoad(const std::string& pkgDir,
     moveModuleOps(anchor, *modules[i]);
   }
 
-  dedupLlvmFuncDecls(anchor);
+  dedupLlvmFuncOps(anchor);
 
   // init_order drives __a_main_body's __a_m<id>_init call sequence. Append
   // any module ids present in the package but missing from init_order so a
@@ -692,8 +635,8 @@ int ambcModulesLoad(const std::string& pkgDir,
   // The synthesized tail adds declaration-only llvm.func ops for the
   // __a_m<id>_init symbols and external llvm.mlir.global decls for the
   // __a_g_* roots; dedup again so the modules' own ops win.
-  dedupLlvmFuncDecls(anchor);
-  dedupLlvmGlobals(anchor);
+  dedupLlvmFuncOps(anchor);
+  dedupLlvmGlobalOps(anchor);
 
   // Fill the result. `anchor` is still owned by modules.front(); moving
   // that OwningOpRef transfers ownership cleanly (the emptied modules[1..]

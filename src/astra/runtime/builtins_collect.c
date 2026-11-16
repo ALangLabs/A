@@ -13,9 +13,7 @@
      are rejected: generated code mutates frame stacks/closure envs that
      are not thread-safe, so calling them from pool workers would race. */
 
-static uint64_t iabs_u64(int64_t v) {
-    return v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
-}
+/* a_i64_abs_u64 lives in a_runtime_internal.h. */
 
 /* chunk partial sums: packed int64 storage */
 typedef struct {
@@ -146,19 +144,19 @@ aval bi_sum(uint64_t n, aval *argv) {
         int allint = 1;
         if (arr_packed(a)) {
             for (int64_t i = 0; i < len; ++i) {
-                uint64_t m = iabs_u64(a->iitems[i]);
+                uint64_t m = a_i64_abs_u64(a->iitems[i]);
                 if (m > mx) mx = m;
             }
         } else if (a->items) {
             for (int64_t i = 0; i < len; ++i) {
                 aval v = a->items[i];
                 if (!is_int_val(v)) { allint = 0; break; }
-                uint64_t m = iabs_u64(int_val_full(v));
+                uint64_t m = a_i64_abs_u64(int_val_full(v));
                 if (m > mx) mx = m;
             }
         } else allint = 0;
         int64_t start = int_val_full(acc);
-        uint64_t smag = iabs_u64(start);
+        uint64_t smag = a_i64_abs_u64(start);
         /* |total| <= mx*len + smag must stay <= INT64_MAX so no partial or
            running sum can overflow (and thus promote to double). */
         if (allint && (mx == 0 || (mx <= (uint64_t)INT64_MAX / (uint64_t)len &&

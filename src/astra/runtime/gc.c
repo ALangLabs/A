@@ -143,14 +143,9 @@ static void gc_hugepage_hint(void *p, size_t n) {
 #endif
 }
 
+/* a_fmix64 (murmur3 fmix64) lives in a_runtime_internal.h. */
 static uint64_t gc_mix(uintptr_t x) {
-    uint64_t h = (uint64_t)x;
-    h ^= h >> 33;
-    h *= UINT64_C(0xff51afd7ed558ccd);
-    h ^= h >> 33;
-    h *= UINT64_C(0xc4ceb9fe1a85ec53);
-    h ^= h >> 33;
-    return h;
+    return a_fmix64((uint64_t)x);
 }
 
 static void ht_rehash(uint32_t ncap) {

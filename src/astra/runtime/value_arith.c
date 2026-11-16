@@ -30,24 +30,8 @@ static int isub_of(int64_t a, int64_t b, int64_t *r) {
     return 0;
 }
 
-static uint64_t iabs_u(int64_t x) {
-    return x < 0 ? (uint64_t)(-(x + 1)) + 1 : (uint64_t)x;
-}
-
-static int imul_of(int64_t a, int64_t b, int64_t *r) {
-    if (a == 0 || b == 0) { *r = 0; return 0; }
-    uint64_t ua = iabs_u(a), ub = iabs_u(b);
-    int neg = (a < 0) != (b < 0);
-    uint64_t limit = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
-    if (ua > limit / ub) return 1;
-    uint64_t m = ua * ub;
-    if (neg) {
-        *r = (m == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)m;
-    } else {
-        *r = (int64_t)m;
-    }
-    return 0;
-}
+/* a_i64_abs_u64 / a_imul_of live in a_runtime_internal.h (shared with
+   fastpath.c's former fp_* copies). */
 
 void panic_binop(const char *op, aval l, aval r) {
     panicf("unsupported operand type(s) for %s: '%s' and '%s'", op,
@@ -87,7 +71,7 @@ static aval arith_int_int(aval l, aval r, char op) {
             if (isub_of(a, b, &res)) return mkdouble((double)a - (double)b);
             return mkint_full(res);
         case '*':
-            if (imul_of(a, b, &res)) return mkdouble((double)a * (double)b);
+            if (a_imul_of(a, b, &res)) return mkdouble((double)a * (double)b);
             return mkint_full(res);
         case '/':
             /* Python parity: `/` is true division — int/int yields float.
@@ -114,11 +98,11 @@ static aval arith_int_int(aval l, aval r, char op) {
                 int64_t base = a, e = b, power = 1;
                 while (e > 0) {
                     if (e & 1) {
-                        if (imul_of(power, base, &power))
+                        if (a_imul_of(power, base, &power))
                             return mkdouble(pow((double)a, (double)b));
                     }
                     e >>= 1;
-                    if (e > 0 && imul_of(base, base, &base))
+                    if (e > 0 && a_imul_of(base, base, &base))
                         return mkdouble(pow((double)a, (double)b));
                 }
                 return mkint_full(power);
@@ -130,7 +114,7 @@ static aval arith_int_int(aval l, aval r, char op) {
 
 /* Decimal digits of |v| written backwards into tmp; returns the count. */
 static size_t i64_digits(int64_t v, char *tmp) {
-    uint64_t u = v < 0 ? (uint64_t)(-(v + 1)) + 1 : (uint64_t)v;
+    uint64_t u = a_i64_abs_u64(v);
     size_t n = 0;
     do {
         tmp[n++] = (char)('0' + (int)(u % 10));

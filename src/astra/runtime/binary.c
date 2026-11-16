@@ -59,19 +59,7 @@ static int utf8_decode_cp(const char *p, uint64_t n, uint64_t *cp) {
     return need;
 }
 
-static int utf8_encode_cp(uint64_t cp, char *out) {
-    if (cp < 0x80) { out[0] = (char)cp; return 1; }
-    if (cp < 0x800) {
-        out[0] = (char)(0xC0 | (cp >> 6)); out[1] = (char)(0x80 | (cp & 0x3F)); return 2;
-    }
-    if (cp < 0x10000) {
-        out[0] = (char)(0xE0 | (cp >> 12)); out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
-        out[2] = (char)(0x80 | (cp & 0x3F)); return 3;
-    }
-    out[0] = (char)(0xF0 | (cp >> 18)); out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
-    out[2] = (char)(0x80 | ((cp >> 6) & 0x3F)); out[3] = (char)(0x80 | (cp & 0x3F));
-    return 4;
-}
+/* a_utf8_encode_cp lives in a_runtime_internal.h. */
 
 static void bin_encode_val(BinBuf *b, aval v) {
     switch (kind_of(v)) {
@@ -208,16 +196,8 @@ static aval bin_string_rd(BinReader *r) {
 
 static aval bin_decode_val(BinReader *r);
 
-aval dict_new_empty(void) {
-    ADict *d = (ADict *)xmalloc(sizeof(ADict));
-    d->h.type = T_DICT;
-    d->h.len = 0;
-    d->h.cap = 0;
-    d->pairs = NULL;
-    d->slots = NULL;
-    d->scap = 0;
-    return mkobj(&d->h);
-}
+/* dict_new_empty was an identical copy of a_dict_new (value_collect.c);
+   callers now use a_dict_new directly. */
 
 static aval bin_decode_val(BinReader *r) {
     uint8_t tag = bin_byte(r);
@@ -247,7 +227,7 @@ static aval bin_decode_val(BinReader *r) {
             return A_NONE;
         }
         char buf[4];
-        int n = utf8_encode_cp(cp, buf);
+        int n = a_utf8_encode_cp(cp, buf);
         return a_char_new(buf, (uint64_t)n);
     }
     case BIN_ARRAY: case BIN_SET: case BIN_TUPLE: {
@@ -276,7 +256,7 @@ static aval bin_decode_val(BinReader *r) {
     case BIN_MAP: {
         uint64_t n = bin_varint_rd(r);
         if (r->err) return A_NONE;
-        aval d = dict_new_empty();
+        aval d = a_dict_new();
         ADict *dd = (ADict *)obj_of(d);
         for (uint64_t i = 0; i < n; ++i) {
             aval k = bin_decode_val(r);
@@ -291,7 +271,7 @@ static aval bin_decode_val(BinReader *r) {
         if (r->err) return A_NONE;
         uint64_t n = bin_varint_rd(r);
         if (r->err) return A_NONE;
-        aval d = dict_new_empty();
+        aval d = a_dict_new();
         ADict *dd = (ADict *)obj_of(d);
         /* "__name" is the key the encoder treats as the struct marker,
            so decode stores the decoded name there for round-trips. */

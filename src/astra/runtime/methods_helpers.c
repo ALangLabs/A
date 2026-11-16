@@ -352,12 +352,8 @@ typedef struct {
     uint64_t mask;   /* capacity - 1 (capacity is a power of two) */
 } ASetHash;
 
-static uint64_t sh_mix(uint64_t x) {
-    x ^= x >> 30; x *= 0xbf58476d1ce4e5b9ULL;
-    x ^= x >> 27; x *= 0x94d049bb133111ebULL;
-    x ^= x >> 31;
-    return x;
-}
+/* a_mix64 (splitmix64 finalizer) and a_fnv1a live in
+   a_runtime_internal.h. */
 
 /* Hash consistent with values_equal for simple kinds:
    - numerics hash the double value of num_to_double (int 1 and float
@@ -373,34 +369,26 @@ static uint64_t aval_hash(aval v) {
         if (d == 0.0) d = 0.0;
         uint64_t u;
         memcpy(&u, &d, sizeof u);
-        return sh_mix(u);
+        return a_mix64(u);
     }
     int k = kind_of(v);
     if (k == K_STR || k == K_CHAR) {
         uint64_t n;
         const char *p = str_data(v, &n);
-        uint64_t h = 0xcbf29ce484222325ULL;
-        for (uint64_t i = 0; i < n; ++i) {
-            h ^= (unsigned char)p[i];
-            h *= 0x100000001b3ULL;
-        }
+        uint64_t h = a_fnv1a(p, n);
         h ^= n;
         h *= 0x100000001b3ULL;
-        return sh_mix(h);
+        return a_mix64(h);
     }
     if (k == K_BYTES) {
         uint64_t n;
         const char *p = a_bytes_data(v, &n);
-        uint64_t h = 0xcbf29ce484222325ULL;
-        for (uint64_t i = 0; i < n; ++i) {
-            h ^= (unsigned char)p[i];
-            h *= 0x100000001b3ULL;
-        }
+        uint64_t h = a_fnv1a(p, n);
         h ^= n;
         h *= 0x100000001b3ULL;
-        return sh_mix(h);
+        return a_mix64(h);
     }
-    return sh_mix(v);
+    return a_mix64(v);
 }
 
 static int aval_simple(aval v) {

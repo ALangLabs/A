@@ -1,7 +1,6 @@
 #include "tooling/docgen_internal.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <initializer_list>
 #include <map>
 #include <sstream>
@@ -22,14 +21,6 @@ std::string moduleStem(const std::string& path) {
   return name.empty() ? "module" : name;
 }
 
-std::string trimText(std::string text) {
-  std::size_t begin = 0;
-  while (begin < text.size() && std::isspace(static_cast<unsigned char>(text[begin]))) ++begin;
-  std::size_t end = text.size();
-  while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1]))) --end;
-  return text.substr(begin, end - begin);
-}
-
 // Python inspect.cleandoc equivalent: drops leading/trailing blank lines,
 // strips the first line's indentation, and removes the common indentation
 // shared by the remaining lines.
@@ -40,7 +31,7 @@ std::string cleanDocstring(const std::string& raw) {
     std::string line;
     while (std::getline(in, line)) lines.push_back(line);
   }
-  auto blank = [](const std::string& l) { return trimText(l).empty(); };
+  auto blank = [](const std::string& l) { return trimCopy(l).empty(); };
   std::size_t begin = 0;
   std::size_t end = lines.size();
   while (begin < end && blank(lines[begin])) ++begin;
@@ -66,7 +57,7 @@ std::string cleanDocstring(const std::string& raw) {
     if (minIndent != std::string::npos && l.size() >= minIndent) l = l.substr(minIndent);
     result += "\n" + l;
   }
-  return trimText(result);
+  return trimCopy(result);
 }
 
 // Python-style docstring: a bare string-literal statement at the top of a

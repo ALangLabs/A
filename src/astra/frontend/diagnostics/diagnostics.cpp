@@ -1,5 +1,7 @@
 #include "diagnostics/diagnostics.hpp"
 
+#include "diagnostics/json_escape.hpp"
+
 #include <algorithm>
 #include <iostream>
 #include <string>
@@ -21,30 +23,6 @@ const Colors kAnsi = {"\x1b[0m", "\x1b[1m", "\x1b[31m", "\x1b[33m", "\x1b[34m"};
 std::string repeat(char c, int count) {
   if (count <= 0) return {};
   return std::string(static_cast<std::size_t>(count), c);
-}
-
-std::string escapeJson(const std::string& text) {
-  std::string out;
-  out.reserve(text.size() + 8);
-  for (char c : text) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\r': out += "\\r"; break;
-      case '\t': out += "\\t"; break;
-      default:
-        if (static_cast<unsigned char>(c) < 0x20) {
-          const char* hex = "0123456789abcdef";
-          out += "\\u00";
-          out += hex[(static_cast<unsigned char>(c) >> 4) & 0xF];
-          out += hex[static_cast<unsigned char>(c) & 0xF];
-        } else {
-          out += c;
-        }
-    }
-  }
-  return out;
 }
 
 }  // namespace

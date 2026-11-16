@@ -13,26 +13,8 @@
  */
 #include "a_runtime_internal.h"
 
-/* int64 multiply with overflow check (same algorithm as imul_of in
- * value_arith.c; kept local because that one is file-static). */
-static uint64_t fp_iabs_u(int64_t x) {
-    return x < 0 ? (uint64_t)(-(x + 1)) + 1 : (uint64_t)x;
-}
-
-static int fp_imul_of(int64_t a, int64_t b, int64_t *r) {
-    if (a == 0 || b == 0) { *r = 0; return 0; }
-    uint64_t ua = fp_iabs_u(a), ub = fp_iabs_u(b);
-    int neg = (a < 0) != (b < 0);
-    uint64_t limit = neg ? (uint64_t)INT64_MAX + 1 : (uint64_t)INT64_MAX;
-    if (ua > limit / ub) return 1;
-    uint64_t m = ua * ub;
-    if (neg) {
-        *r = (m == (uint64_t)INT64_MAX + 1) ? INT64_MIN : -(int64_t)m;
-    } else {
-        *r = (int64_t)m;
-    }
-    return 0;
-}
+/* int64 multiply with overflow check lives in a_runtime_internal.h as
+   a_imul_of (shared with value_arith.c's former imul_of). */
 
 /* "numeric" here means an INLINE int (a_is_int, 47-bit) or a plain double
  * (a_is_double). Boxed T_INT64 ints and every heap object fall through to
@@ -167,11 +149,11 @@ aval a_pow_fast(aval l, aval r) {
             int64_t base = a, e = b, power = 1;
             while (e > 0) {
                 if (e & 1) {
-                    if (fp_imul_of(power, base, &power))
+                    if (a_imul_of(power, base, &power))
                         return mkdouble(pow((double)a, (double)b));
                 }
                 e >>= 1;
-                if (e > 0 && fp_imul_of(base, base, &base))
+                if (e > 0 && a_imul_of(base, base, &base))
                     return mkdouble(pow((double)a, (double)b));
             }
             return mkint_full(power);

@@ -787,16 +787,8 @@ ExprPtr Parser::parsePostfix() {
       advance();  // '<'
       std::vector<TypeExprPtr> typeArgs;
       while (!check(Tok::Gt) && !check(Tok::Shr) && !check(Tok::Eof)) {
-        if (check(Tok::Int)) {
-          // Comptime type argument, e.g. the lane count in `f<vector[float, 4]>`.
-          const Token& lit = advance();
-          auto konst = std::make_unique<ConstTypeExpr>();
-          konst->span = lit.span;
-          konst->value = lit.intValue;
-          typeArgs.push_back(std::move(konst));
-        } else {
-          typeArgs.push_back(parseTypeExpr());
-        }
+        // Comptime type argument, e.g. the lane count in `f<vector[float, 4]>`.
+        typeArgs.push_back(parseTypeArgument(/*allowEllipsis=*/false));
         if (!match(Tok::Comma)) break;
         if (check(Tok::Gt) || check(Tok::Shr)) break;  // trailing comma
       }

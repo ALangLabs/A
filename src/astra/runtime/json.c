@@ -46,23 +46,8 @@ static int jexpect(JParser *ps, char c) {
     return 0;
 }
 
-static void jutf8(Buf *b, uint32_t cp) {
-    if (cp < 0x80) {
-        buf_addc(b, (char)cp);
-    } else if (cp < 0x800) {
-        buf_addc(b, (char)(0xC0 | (cp >> 6)));
-        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
-    } else if (cp < 0x10000) {
-        buf_addc(b, (char)(0xE0 | (cp >> 12)));
-        buf_addc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
-    } else {
-        buf_addc(b, (char)(0xF0 | (cp >> 18)));
-        buf_addc(b, (char)(0x80 | ((cp >> 12) & 0x3F)));
-        buf_addc(b, (char)(0x80 | ((cp >> 6) & 0x3F)));
-        buf_addc(b, (char)(0x80 | (cp & 0x3F)));
-    }
-}
+/* UTF-8 encoding of one code point lives in a_runtime_internal.h as
+   a_utf8_encode_cp (shared with binary.c). */
 
 static int jhex4(JParser *ps) {
     if (ps->end - ps->p < 4) { ps->err = 1; return 0; }
@@ -130,7 +115,11 @@ static aval jstring(JParser *ps) {
                         if (lo >= 0xDC00 && lo <= 0xDFFF)
                             cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
                     }
-                    jutf8(&b, cp);
+                    {
+                        char ub[4];
+                        buf_addn(&b, ub,
+                                 (size_t)a_utf8_encode_cp(cp, ub));
+                    }
                     break;
                 }
                 default: ps->err = 1; break;
@@ -272,43 +261,12 @@ static aval jvalue(JParser *ps) {
 
 /* ---- JSON serializer ---- */
 
-static int json_needs_escape(unsigned char c) {
-    return c == '"' || c == '\\' || c == '\b' || c == '\f' || c == '\n' ||
-           c == '\r' || c == '\t' || c < 0x20;
-}
-
+/* JSON string quoting lives in a_runtime_internal.h as a_buf_json_quote
+   (shared with log.c; byte-identical output). */
 static void json_escape_str(Buf *b, aval v) {
     uint64_t n;
     const char *s = str_data(v, &n);
-    static const char hexd[] = "0123456789abcdef";
-    buf_addc(b, '"');
-    uint64_t i = 0;
-    while (i < n) {
-        /* memcpy runs of unescaped bytes instead of per-byte buf_addc. */
-        uint64_t j = i;
-        while (j < n && !json_needs_escape((unsigned char)s[j])) ++j;
-        if (j > i) buf_addn(b, s + i, (size_t)(j - i));
-        if (j >= n) break;
-        unsigned char c = (unsigned char)s[j];
-        switch (c) {
-            case '"': buf_adds(b, "\\\""); break;
-            case '\\': buf_adds(b, "\\\\"); break;
-            case '\b': buf_adds(b, "\\b"); break;
-            case '\f': buf_adds(b, "\\f"); break;
-            case '\n': buf_adds(b, "\\n"); break;
-            case '\r': buf_adds(b, "\\r"); break;
-            case '\t': buf_adds(b, "\\t"); break;
-            default: {
-                /* c < 0x20 -> \u00XX (lowercase hex, same as %04x) */
-                char tmp[6] = {'\\', 'u', '0', '0',
-                               hexd[c >> 4], hexd[c & 15]};
-                buf_addn(b, tmp, 6);
-                break;
-            }
-        }
-        i = j + 1;
-    }
-    buf_addc(b, '"');
+    a_buf_json_quote(b, s, n);
 }
 
 static void json_write(Buf *b, aval v, int pretty, int depth);

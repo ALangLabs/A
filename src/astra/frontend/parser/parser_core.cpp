@@ -196,4 +196,12 @@ void Parser::parseDocstringStatement(std::string& text) {
   expectNewline();
 }
 
+bool Parser::consumeBodyDocstring(PendingDoc& docs, bool hasMembers) {
+  if (!check(Tok::String)) return false;
+  std::string doc;
+  parseDocstringStatement(doc);
+  docs.route(std::move(doc), hasMembers);
+  return true;
+}
+
 }  // namespace a

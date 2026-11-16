@@ -1,6 +1,7 @@
 #include "pipeline/pipeline.hpp"
 #include "pipeline/comptime.hpp"
 #include "exe_path.hpp"
+#include "toolchain_tools.hpp"
 /* Set by CMake (src/astra/mlir/CMakeLists.txt) when a_mlir_core was
    configured against LLVM/MLIR dev files. The backend probe and its
    fallback stubs are chosen here at compile time instead of with weak
@@ -199,50 +200,12 @@ bool resolveTarget(const std::string& spec, TargetDesc& t, std::ostream& err) {
   return true;
 }
 
-#ifdef _WIN32
-// Spawn `prog` with the given arguments via CreateProcess; the child
+// Spawn `prog` with the given arguments (CreateProcess on Windows,
+// fork/execvp elsewhere — shared impl in toolchain_tools.hpp); the child
 // inherits our stdin/stdout/stderr. Returns the exit code, 127 on failure.
 int runChild(const std::string& prog, const std::vector<std::string>& args){
-  std::string cmd = "\"" + prog + "\"";
-  for (const auto& a : args) {
-    cmd += " \"";
-    for (char c : a) { if (c == '"') cmd += "\\\""; else cmd += c; }
-    cmd += "\"";
-  }
-  std::vector<char> buf(cmd.begin(), cmd.end());
-  buf.push_back('\0');
-  STARTUPINFOA si{}; si.cb = sizeof(si);
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-  si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-  si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-  PROCESS_INFORMATION pi{};
-  if (!CreateProcessA(nullptr, buf.data(), nullptr, nullptr, TRUE,
-                      0, nullptr, nullptr, &si, &pi))
-    return 127;
-  WaitForSingleObject(pi.hProcess, INFINITE);
-  DWORD code = 127;
-  GetExitCodeProcess(pi.hProcess, &code);
-  CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
-  return (int)code;
+  return a::toolchain::runToolProcess(prog, args);
 }
-#else
-// fork/exec `prog` with the given arguments; the child inherits our
-// stdin/stdout/stderr. Returns the exit code, 127 on exec failure.
-int runChild(const std::string& prog, const std::vector<std::string>& args){
-  std::vector<char*> argv;
-  argv.push_back(const_cast<char*>(prog.c_str()));
-  for(const auto& a:args) argv.push_back(const_cast<char*>(a.c_str()));
-  argv.push_back(nullptr);
-  pid_t pid=fork();
-  if(pid<0) return 127;
-  if(pid==0){ execvp(prog.c_str(),argv.data()); _exit(127); }
-  int status=0;
-  while(waitpid(pid,&status,0)<0){ if(errno!=EINTR) return 127; }
-  if(WIFEXITED(status)) return WEXITSTATUS(status);
-  return 128+WTERMSIG(status);
-}
-#endif
 
 #ifdef _WIN32
 // CreateProcess a built binary directly; inherits stdin/stdout/stderr.
@@ -1037,43 +1000,12 @@ std::string findLLVMTool(const char* envName,
         dir = dir.substr(0, pos);
         for (const std::string& base :
              {dir + "/llvm-tools", dir + "/bin", dir}) {
-          for (const char* n : names) {
-            std::string cand = base + "/" + n;
-            std::error_code ec;
-            if (!std::filesystem::exists(cand, ec)) continue;
-#ifndef _WIN32
-            if (access(cand.c_str(), X_OK) != 0) continue;
-#endif
-            found = cand;
-            break;
-          }
+          found = a::toolchain::findToolInDir(base, names);
           if (!found.empty()) break;
         }
       }
     }
-    if (found.empty()) {
-    const char* pathEnv = std::getenv("PATH");
-#ifdef _WIN32
-    const char delim = ';';
-#else
-    const char delim = ':';
-#endif
-    std::istringstream ss(pathEnv ? pathEnv : "");
-    std::string dir;
-    while (found.empty() && std::getline(ss, dir, delim)) {
-      if (dir.empty()) continue;
-      for (const char* n : names) {
-        std::string cand = dir + "/" + n;
-        std::error_code ec;
-        if (!std::filesystem::exists(cand, ec)) continue;
-#ifndef _WIN32
-        if (access(cand.c_str(), X_OK) != 0) continue;
-#endif
-        found = cand;
-        break;
-      }
-    }
-    }
+    if (found.empty()) found = a::toolchain::findToolOnPath(names);
   }
   cache.emplace(key, found);
   return found;
@@ -1224,35 +1156,13 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
     return 1;
   }
   // llc emits a non-PIC object; -no-pie keeps the link consistent with it.
-  std::vector<std::string> args = {objPath, rtLib, "-o", outPath,
-                                   "-no-pie", "-lm", "-lpthread"};
-#ifndef __APPLE__
-  args.push_back("-ldl");
-#endif
+  std::vector<std::string> args =
+      a::toolchain::runtimeLinkArgs(objPath, rtLib, outPath);
   // mold is dramatically faster than ld/lld for the final link; use it
   // when present and retry with the default linker if it fails.
-  bool tryMold = false;
-  {
-    const char* moldEnv = std::getenv("A_NO_MOLD");
-    if (!(moldEnv && *moldEnv)) {
-      const char* path = std::getenv("PATH");
-      std::string p(path ? path : "");
-      size_t pos = 0;
-      while (pos <= p.size()) {
-        size_t colon = p.find(':', pos);
-        std::string dir = p.substr(pos, colon == std::string::npos
-                                              ? std::string::npos : colon - pos);
-        std::error_code mec;
-        if (std::filesystem::exists(dir + "/mold", mec)) { tryMold = true; break; }
-        if (colon == std::string::npos) break;
-        pos = colon + 1;
-      }
-    }
-  }
+  const bool tryMold = a::toolchain::moldAvailable();
   if (tryMold) {
-    std::vector<std::string> margs = args;
-    margs.insert(margs.begin() + 1, "-fuse-ld=mold");
-    int rc = runChild(cc, margs);
+    int rc = runChild(cc, a::toolchain::moldLinkArgs(args));
     if (rc == 0) { cleanup(); return 0; }
     // mold missing/broken: fall through to the default linker.
   }
