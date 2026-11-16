@@ -50,10 +50,16 @@ endforeach()
 # link an archive instead of recompiling every runtime .c per program. Built
 # by the system C compiler on every host OS.
 set(ASTRA_RT_OBJS "")
-set(ASTRA_RT_CC_FLAGS -O3 -std=gnu11 -w -fno-semantic-interposition
-    -I${ASTRA_STAGE})
-if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686")
-    list(APPEND ASTRA_RT_CC_FLAGS -march=native -mtune=native)
+# The prebuild invokes the compiler directly rather than through a CMake
+# target, so each toolchain needs its own flag syntax.
+if(MSVC)
+    set(ASTRA_RT_CC_FLAGS /nologo /O2 /W0 /std:c11 -I${ASTRA_STAGE})
+else()
+    set(ASTRA_RT_CC_FLAGS -O3 -std=gnu11 -w -fno-semantic-interposition
+        -I${ASTRA_STAGE})
+    if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64|amd64|i386|i686")
+        list(APPEND ASTRA_RT_CC_FLAGS -march=native -mtune=native)
+    endif()
 endif()
 file(MAKE_DIRECTORY "${ASTRA_OBJ_DIR}")
 foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
@@ -66,9 +72,15 @@ foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
     if(rt_c_name STREQUAL "math_ew.c" AND NOT MSVC)
         list(APPEND rt_extra_flags -ffp-contract=off)
     endif()
+    if(MSVC)
+        set(rt_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
+                       /c "${rt_c}" /Fo"${rt_obj}")
+    else()
+        set(rt_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
+                       -c "${rt_c}" -o "${rt_obj}")
+    endif()
     add_custom_command(OUTPUT "${rt_obj}"
-        COMMAND ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
-                -c "${rt_c}" -o "${rt_obj}"
+        COMMAND ${rt_compile}
         DEPENDS "${rt_c}"
         COMMENT "system runtime ${rt_c_name}"
         VERBATIM)
@@ -98,8 +110,15 @@ if(EXISTS "${ASTRA_MIMALLOC_SRC}")
     list(APPEND ASTRA_RT_OBJS "${mimalloc_obj}")
 endif()
 set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
+# GNU ar takes "rcs <archive> <objs>"; MSVC's lib.exe takes "/OUT:<archive>
+# <objs>" and rejects the rcs modifiers (LNK1181: cannot open 'rcs').
+if(MSVC)
+    set(ASTRA_AR_COMMAND ${CMAKE_AR} /nologo /OUT:"${ASTRA_RUNTIME_ARCHIVE}")
+else()
+    set(ASTRA_AR_COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}")
+endif()
 add_custom_command(OUTPUT "${ASTRA_RUNTIME_ARCHIVE}"
-    COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}" ${ASTRA_RT_OBJS}
+    COMMAND ${ASTRA_AR_COMMAND} ${ASTRA_RT_OBJS}
     DEPENDS ${ASTRA_RT_OBJS}
     COMMENT "system C runtime libaruntime.a"
     VERBATIM)
