@@ -74,7 +74,7 @@ foreach(rt_c IN LISTS ASTRA_RUNTIME_C_OUTPUTS)
     endif()
     if(MSVC)
         set(rt_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
-                       /c "${rt_c}" /Fo"${rt_obj}")
+                       /c "${rt_c}" /Fo${rt_obj})
     else()
         set(rt_compile ${CMAKE_C_COMPILER} ${ASTRA_RT_CC_FLAGS} ${rt_extra_flags}
                        -c "${rt_c}" -o "${rt_obj}")
@@ -113,7 +113,7 @@ set(ASTRA_RUNTIME_ARCHIVE "${ASTRA_STAGE}/libaruntime.a")
 # GNU ar takes "rcs <archive> <objs>"; MSVC's lib.exe takes "/OUT:<archive>
 # <objs>" and rejects the rcs modifiers (LNK1181: cannot open 'rcs').
 if(MSVC)
-    set(ASTRA_AR_COMMAND ${CMAKE_AR} /nologo /OUT:"${ASTRA_RUNTIME_ARCHIVE}")
+    set(ASTRA_AR_COMMAND ${CMAKE_AR} /nologo /OUT:${ASTRA_RUNTIME_ARCHIVE})
 else()
     set(ASTRA_AR_COMMAND ${CMAKE_AR} rcs "${ASTRA_RUNTIME_ARCHIVE}")
 endif()
