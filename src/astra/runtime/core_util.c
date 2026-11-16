@@ -172,6 +172,10 @@ static void stack_guard_check(void) {
     }
 }
 
+/* Lightweight guard emitted for frame-free typed cores: those skip the
+   traceback/region frame hooks but must still catch unbounded recursion. */
+void a_stack_guard(void) { stack_guard_check(); }
+
 /* Opaque escape for GC-visible stack slots: taking the slot's address in
    an external call keeps LLVM from promoting the alloca to a register, so
    the conservative GC can always see the aval stored there. */
@@ -479,21 +483,23 @@ int snprintf(char *s, size_t n, const char *format, ...) {
 /* FILETIME counts 100 ns intervals since 1601-01-01 UTC; the Unix epoch
    offset is 11644473600 s. */
 int64_t a_win_time_ms(void) {
-    unsigned long long ft = 0;
+    FILETIME ft;
     GetSystemTimeAsFileTime(&ft);
-    return (int64_t)((ft - 116444736000000000ULL) / 10000ULL);
+    unsigned long long v = ((unsigned long long)ft.dwHighDateTime << 32) |
+                           (unsigned long long)ft.dwLowDateTime;
+    return (int64_t)((v - 116444736000000000ULL) / 10000ULL);
 }
 
 int64_t a_win_mono_ms(void) {
-    static long long freq = 0;
-    if (freq <= 0) {
-        long long f = 0;
-        if (!QueryPerformanceFrequency(&f) || f <= 0) return 0;
-        freq = f;
+    static unsigned long long freq = 0;
+    LARGE_INTEGER f, c;
+    if (freq == 0) {
+        if (!QueryPerformanceFrequency(&f) || f.QuadPart <= 0) return 0;
+        freq = (unsigned long long)f.QuadPart;
     }
-    long long c = 0;
-    if (!QueryPerformanceCounter(&c) || c < 0) return 0;
-    return (c / freq) * 1000 + (c % freq) * 1000 / freq;
+    if (!QueryPerformanceCounter(&c) || c.QuadPart < 0) return 0;
+    unsigned long long t = (unsigned long long)c.QuadPart;
+    return (int64_t)(t / freq) * 1000 + (int64_t)((t % freq) * 1000 / freq);
 }
 
 void a_win_sleep_ms(int64_t ms) {

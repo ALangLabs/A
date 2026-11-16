@@ -1,6 +1,14 @@
 #include "pipeline/pipeline.hpp"
 #include "pipeline/comptime.hpp"
 #include "exe_path.hpp"
+/* Set by CMake (src/astra/mlir/CMakeLists.txt) when a_mlir_core was
+   configured against LLVM/MLIR dev files. The backend probe and its
+   fallback stubs are chosen here at compile time instead of with weak
+   symbols: MSVC has none, and Mach-O needs weak_import for undefined
+   weak references. */
+#ifndef A_WITH_MLIR_CORE
+#define A_WITH_MLIR_CORE 0
+#endif
 #include <algorithm>
 #include <cerrno>
 #include <cctype>
@@ -378,12 +386,6 @@ int ambcModulesCompileToObject(const std::string& pkgDir,
                                const std::string& entryBodyMlir,
                                bool testMode, std::ostream& err,
                                const std::string& testFilter = "");
-// Defined only when a_mlir_core is built with MLIR dev files
-// (src/astra/mlir/codegen.cpp). Weak probe: resolves to nullptr in the stub
-// build, letting the env gates below detect backend availability instead of
-// hitting the weak error stubs at the bottom of this file.
-__attribute__((weak)) void initMLIRBackend();
-
 namespace {
 
 namespace run_cache {
@@ -1727,7 +1729,7 @@ bool envFlagDisabled(const char* name) {
 }
 
 // True when a_mlir_core contributed its strong MLIR-backed definitions.
-bool mlirCoreLinked() { return &initMLIRBackend != nullptr; }
+bool mlirCoreLinked() { return A_WITH_MLIR_CORE != 0; }
 
 // A_MLIR_TYPED (default ON; =0/off/no/false disables): emit unboxed
 // i64/f64/i1 scalars for Sema-proven Int/Float/Bool bindings via the
@@ -2667,7 +2669,8 @@ int testPath(const std::string& path, const PipelineConfig& config, std::istream
 // definitions in src/astra/mlir/{native,codegen,ambc,ambc_modules}.cpp
 // always win when present; mlirCoreLinked() keeps these stubs unreachable
 // in normal flows (they remain as a link-time safety net).
-__attribute__((weak)) int nativeCompileMlirTextToObject(
+#if !A_WITH_MLIR_CORE  /* fallbacks for builds without MLIR dev files */
+int nativeCompileMlirTextToObject(
     const std::string& mlirText, const std::string& arch, int optLevel,
     const std::string& objPath, std::ostream& err) {
   (void)mlirText; (void)arch; (void)optLevel; (void)objPath;
@@ -2677,7 +2680,7 @@ __attribute__((weak)) int nativeCompileMlirTextToObject(
   return 1;
 }
 
-__attribute__((weak)) int ambcCompileToObject(
+int ambcCompileToObject(
     const std::string& ambcPath, const std::string& arch, int optLevel,
     const std::string& objPath, std::ostream& err) {
   (void)ambcPath; (void)arch; (void)optLevel; (void)objPath;
@@ -2687,7 +2690,7 @@ __attribute__((weak)) int ambcCompileToObject(
   return 1;
 }
 
-__attribute__((weak)) int ambcModulesCompileToObject(
+int ambcModulesCompileToObject(
     const std::string& pkgDir, const std::string& arch, int optLevel,
     const std::string& objPath, const std::string& entryBodyMlir,
     bool testMode, std::ostream& err, const std::string& testFilter) {
@@ -2699,7 +2702,7 @@ __attribute__((weak)) int ambcModulesCompileToObject(
   return 1;
 }
 
-__attribute__((weak)) int linkWithRuntime(const std::string& objPath,
+int linkWithRuntime(const std::string& objPath,
                                           const std::string& outputPath,
                                           const std::string& runtimeLib,
                                           std::ostream& err) {
@@ -2709,4 +2712,5 @@ __attribute__((weak)) int linkWithRuntime(const std::string& objPath,
          "subprocess toolchain\n";
   return 1;
 }
+#endif /* !A_WITH_MLIR_CORE */
 }

@@ -85,100 +85,37 @@
 #endif
 
 #if defined(_WIN32)
+/* The Win32 surface comes from the platform SDK headers, which every
+   Windows toolchain ships (MSVC, clang-cl, MinGW, TCC). Using the real
+   headers keeps the runtime's types and constants in lockstep with the
+   SDK — hand-maintained prototypes drifted (wrong linkage on x64, mirrors
+   of WIN32_FIND_DATAA / CONSOLE_SCREEN_BUFFER_INFO) and broke as soon as
+   a TU also pulled in <windows.h>. winsock2.h must precede windows.h, so
+   both are included here rather than only in net.c. */
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#include <windows.h>
+#include <io.h>      /* _read, _mktemp, _access */
+#include <process.h> /* _spawnvp */
+#include <stdlib.h>  /* _putenv */
+
 /* msvcrt.dll exports vsnprintf but not snprintf (that lives in libmingwex,
-   which is not shipped); the runtime provides the C99 wrapper. */
+   which is not shipped); the runtime provides the C99 wrapper. MSVC/UCRT
+   already declare it in <stdio.h> (with dllimport linkage), so only the
+   pre-UCRT Windows CRTs need this prototype. */
+#if !defined(_MSC_VER) && !defined(_UCRT)
 int snprintf(char *s, size_t n, const char *format, ...);
+#endif
 /* Win32 timing helpers implemented in core_util.c. */
 int64_t a_win_time_ms(void);    /* wall clock, Unix epoch milliseconds */
 int64_t a_win_mono_ms(void);    /* monotonic milliseconds (QPC) */
 void a_win_sleep_ms(int64_t ms);
-
-/* Win32 API surface used by fs.c and terminal.c. Declared directly (the
-   same approach core_util.c uses for the timing helpers) so runtime TUs
-   do not need windows.h; kernel32 imports resolve through
-   backend/win32/lib/kernel32.def and the CRT helpers (_read, _spawnvp,
-   _putenv) through msvcrt.def. WINAPI is __stdcall on 32-bit Windows
-   and empty on Win64; BOOL is int, HANDLE is void*, DWORD is
-   unsigned long. */
-/* WINAPI is spelled __stdcall on every Windows target — the SDK defines it
-   that way even on Win64, where the attribute is ignored — so these
-   declarations must match exactly or TUs that also include <windows.h>
-   fail with C2375 "redefinition; different linkage". */
-#define A_WINAPI __stdcall
-extern void A_WINAPI GetSystemTimeAsFileTime(void *lpSystemTimeAsFileTime);
-extern int A_WINAPI QueryPerformanceCounter(long long *lpPerformanceCount);
-extern int A_WINAPI QueryPerformanceFrequency(long long *lpPerformanceFrequency);
-extern void A_WINAPI Sleep(unsigned long dwMilliseconds);
-extern void *A_WINAPI GetStdHandle(unsigned long nStdHandle);
-extern int A_WINAPI GetConsoleMode(void *hConsoleHandle, unsigned long *lpMode);
-extern int A_WINAPI SetConsoleMode(void *hConsoleHandle, unsigned long dwMode);
-extern int A_WINAPI GetConsoleScreenBufferInfo(void *hConsoleOutput,
-                                               void *lpConsoleScreenBufferInfo);
-extern unsigned long A_WINAPI WaitForSingleObject(void *hHandle,
-                                                  unsigned long dwMilliseconds);
-extern unsigned long A_WINAPI GetCurrentDirectoryA(unsigned long nBufferLength,
-                                                   char *lpBuffer);
-extern unsigned long A_WINAPI GetTempPathA(unsigned long nBufferLength,
-                                           char *lpBuffer);
-extern unsigned long A_WINAPI GetEnvironmentVariableA(const char *lpName,
-                                                      char *lpBuffer,
-                                                      unsigned long nSize);
-extern unsigned long A_WINAPI GetFileAttributesA(const char *lpFileName);
-extern int A_WINAPI CreateDirectoryA(const char *lpPathName,
-                                     void *lpSecurityAttributes);
-extern int A_WINAPI RemoveDirectoryA(const char *lpPathName);
-extern int A_WINAPI DeleteFileA(const char *lpFileName);
-extern void *A_WINAPI FindFirstFileA(const char *lpFileName,
-                                     void *lpFindFileData);
-extern int A_WINAPI FindNextFileA(void *hFindFile, void *lpFindFileData);
-extern int A_WINAPI FindClose(void *hFindFile);
-extern unsigned long A_WINAPI GetLastError(void);
-/* msvcrt helpers (cdecl, no A_WINAPI): fd-level read for terminal input,
-   PATH-searching child spawn for repl.eval, and env mutation. */
-extern int _read(int _FileHandle, void *_DstBuf, unsigned long _MaxCharCount);
-extern char *_mktemp(char *_TemplateName);
-extern intptr_t _spawnvp(int _Mode, const char *_Filename,
-                         const char * const *_ArgList);
-extern int _putenv(const char *_EnvString);
-
-/* Win32 constants (values from the SDK headers; named A_WIN_* so they
-   cannot collide with winsock2.h macros). */
-#define A_WIN_STDIN_HANDLE   ((unsigned long)-10)
-#define A_WIN_STDOUT_HANDLE  ((unsigned long)-11)
-#define A_WIN_INVALID_HANDLE ((void *)-1)
-#define A_WIN_INVALID_FILE_ATTRIBUTES 0xFFFFFFFFUL
-#define A_WIN_FILE_ATTRIBUTE_DIRECTORY     0x00000010UL
-#define A_WIN_FILE_ATTRIBUTE_REPARSE_POINT 0x00000400UL
-#define A_WIN_ERROR_FILE_EXISTS      80UL
-#define A_WIN_ERROR_ALREADY_EXISTS  183UL
-#define A_WIN_WAIT_OBJECT_0           0UL
-/* ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT: cleared for REPL raw mode. */
-#define A_WIN_CONSOLE_RAW_MASK     0x00000006UL
-
-/* WIN32_FIND_DATAA layout (frozen Win32 ABI). The three FILETIMEs are
-   declared as DWORD pairs so field offsets and 4-byte alignment are
-   identical on 32- and 64-bit Windows; only dwFileAttributes and
-   cFileName are read. */
-typedef struct {
-    unsigned long dwFileAttributes;
-    unsigned long ftCreationTimeLo, ftCreationTimeHi;
-    unsigned long ftLastAccessTimeLo, ftLastAccessTimeHi;
-    unsigned long ftLastWriteTimeLo, ftLastWriteTimeHi;
-    unsigned long nFileSizeHigh, nFileSizeLow;
-    unsigned long dwReserved0, dwReserved1;
-    char cFileName[260];              /* MAX_PATH */
-    char cAlternateFileName[14];      /* MAX_PATH - 246 */
-} AWinFindData;
-
-/* CONSOLE_SCREEN_BUFFER_INFO layout: every field is a 16-bit value, so a
-   flat short array reproduces the struct exactly (dwSize is first). */
-typedef struct {
-    short sizeX, sizeY;          /* dwSize: terminal columns, rows */
-    short cursorX, cursorY;      /* dwCursorPosition */
-    unsigned short attributes;   /* wAttributes */
-    short winLeft, winTop, winRight, winBottom;  /* srWindow */
-    short maxX, maxY;            /* dwMaximumWindowSize */
-} AWinConsoleInfo;
 #endif
 
 /* object model */

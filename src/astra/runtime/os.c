@@ -268,8 +268,8 @@ aval os_access(uint64_t n, aval *argv) {
      * closest safe approximation for F_OK/R_OK/W_OK. X_OK is treated like
      * F_OK on Windows (no execute bit). */
     unsigned long attr = GetFileAttributesA(path);
-    if (attr == A_WIN_INVALID_FILE_ATTRIBUTES) return A_FALSE;
-    if ((mode & 0x2) && (attr & A_WIN_FILE_ATTRIBUTE_READONLY)) return A_FALSE;
+    if (attr == INVALID_FILE_ATTRIBUTES) return A_FALSE;
+    if ((mode & 0x2) && (attr & FILE_ATTRIBUTE_READONLY)) return A_FALSE;
     return A_TRUE;
 #endif
 }
@@ -283,12 +283,12 @@ aval os_chmod(uint64_t n, aval *argv) {
         panicf("os.chmod: cannot chmod '%s': %s", path, strerror(errno));
 #else
     unsigned long attr = GetFileAttributesA(path);
-    if (attr == A_WIN_INVALID_FILE_ATTRIBUTES)
+    if (attr == INVALID_FILE_ATTRIBUTES)
         panicf("os.chmod: cannot chmod '%s'", path);
     if ((mode & 0200) == 0)
-        attr |= A_WIN_FILE_ATTRIBUTE_READONLY;
+        attr |= FILE_ATTRIBUTE_READONLY;
     else
-        attr &= ~A_WIN_FILE_ATTRIBUTE_READONLY;
+        attr &= ~FILE_ATTRIBUTE_READONLY;
     if (!SetFileAttributesA(path, attr))
         panicf("os.chmod: cannot chmod '%s'", path);
 #endif

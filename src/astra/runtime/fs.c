@@ -270,7 +270,7 @@ aval bi_file_exists(uint64_t n, aval *argv) {
     /* fopen() fails on directories under the Windows CRT, so probe with
        GetFileAttributesA instead — matching POSIX semantics where any
        existing path (file or directory) counts. */
-    return GetFileAttributesA(path) != A_WIN_INVALID_FILE_ATTRIBUTES
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES
                ? A_TRUE : A_FALSE;
 #endif
 }
@@ -311,10 +311,10 @@ aval bi_list_dir(uint64_t n, aval *argv) {
     if (need_sep) pat[off++] = '\\';
     pat[off] = '*';
     pat[off + 1] = '\0';
-    AWinFindData fd;
+    WIN32_FIND_DATAA fd;
     void *h = FindFirstFileA(pat, &fd);
     free(pat);
-    if (h == A_WIN_INVALID_HANDLE) panicf("cannot open directory '%s'", path);
+    if (h == INVALID_HANDLE_VALUE) panicf("cannot open directory '%s'", path);
     for (;;) {
         avec_push(&out, a_str_new(fd.cFileName, strlen(fd.cFileName)));
         if (!FindNextFileA(h, &fd)) break;
@@ -395,10 +395,10 @@ aval bi_create_dir(uint64_t n, aval *argv) {
     }
     if (!CreateDirectoryA(tmp, NULL)) {
         unsigned long e = GetLastError();
-        if (e == A_WIN_ERROR_ALREADY_EXISTS || e == A_WIN_ERROR_FILE_EXISTS) {
+        if (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) {
             unsigned long attr = GetFileAttributesA(tmp);
-            if (attr != A_WIN_INVALID_FILE_ATTRIBUTES &&
-                (attr & A_WIN_FILE_ATTRIBUTE_DIRECTORY)) {
+            if (attr != INVALID_FILE_ATTRIBUTES &&
+                (attr & FILE_ATTRIBUTE_DIRECTORY)) {
                 free(tmp);
                 return A_NONE;
             }
@@ -439,9 +439,9 @@ static int remove_tree(const char *path) {
        removed as links, never followed — the same policy the POSIX path
        gets from lstat()+!S_ISLNK. */
     unsigned long attr = GetFileAttributesA(path);
-    if (attr == A_WIN_INVALID_FILE_ATTRIBUTES) return -1;
-    if (!(attr & A_WIN_FILE_ATTRIBUTE_DIRECTORY) ||
-        (attr & A_WIN_FILE_ATTRIBUTE_REPARSE_POINT)) {
+    if (attr == INVALID_FILE_ATTRIBUTES) return -1;
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
         /* File (or link): DeleteFileA covers files and file symlinks;
            RemoveDirectoryA covers directory symlinks and junctions. */
         if (DeleteFileA(path)) return 0;
@@ -457,10 +457,10 @@ static int remove_tree(const char *path) {
     if (need_sep) pat[off++] = '\\';
     pat[off] = '*';
     pat[off + 1] = '\0';
-    AWinFindData fd;
+    WIN32_FIND_DATAA fd;
     void *h = FindFirstFileA(pat, &fd);
     free(pat);
-    if (h == A_WIN_INVALID_HANDLE) return -1;
+    if (h == INVALID_HANDLE_VALUE) return -1;
     int ok = 1;
     for (;;) {
         size_t nlen = strlen(fd.cFileName);

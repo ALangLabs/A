@@ -173,6 +173,13 @@ if(MLIR_FOUND AND LLVM_FOUND)
     get_target_property(_a_mlir_type a_mlir_core TYPE)
     if(_a_mlir_type STREQUAL "STATIC_LIBRARY")
         target_compile_definitions(a_mlir_core PUBLIC A_WITH_MLIR_CORE=1)
+        # pipeline.cpp is compiled as part of a_pipeline, so the flag has to
+        # be set there too: it selects the strong native entry points over
+        # the fallback stubs at compile time (no weak symbols, which MSVC
+        # lacks and Mach-O spells weak_import).
+        if(TARGET a_pipeline)
+            target_compile_definitions(a_pipeline PUBLIC A_WITH_MLIR_CORE=1)
+        endif()
     endif()
     add_library(a::mlir_core ALIAS a_mlir_core)
 else()

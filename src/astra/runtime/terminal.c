@@ -139,14 +139,14 @@ aval bi_terminal_isatty(uint64_t n, aval *argv) {
     (void)argv;
     want_args("isatty", n, 0, 0);
     unsigned long mode;
-    return GetConsoleMode(GetStdHandle(A_WIN_STDIN_HANDLE), &mode)
+    return GetConsoleMode(GetStdHandle(STD_INPUT_HANDLE), &mode)
                ? A_TRUE : A_FALSE;
 }
 
 aval bi_terminal_raw_mode(uint64_t n, aval *argv) {
     want_args("raw_mode", n, 1, 1);
     int on = (argv[0] == A_TRUE);
-    void *h = GetStdHandle(A_WIN_STDIN_HANDLE);
+    void *h = GetStdHandle(STD_INPUT_HANDLE);
     if (on) {
         unsigned long mode;
         if (!GetConsoleMode(h, &mode)) return A_FALSE;
@@ -155,7 +155,7 @@ aval bi_terminal_raw_mode(uint64_t n, aval *argv) {
         /* Clear line input and echo so read_char sees single
            keystrokes; processed input stays on so the CRT _read()
            still delivers a character stream. */
-        return SetConsoleMode(h, mode & ~A_WIN_CONSOLE_RAW_MASK) ? A_TRUE : A_FALSE;
+        return SetConsoleMode(h, mode & ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT)) ? A_TRUE : A_FALSE;
     }
     if (!g_repl_console_saved) return A_TRUE;
     int ok = SetConsoleMode(h, g_repl_console_mode) != 0;
@@ -179,9 +179,9 @@ aval bi_terminal_read_char_ms(uint64_t n, aval *argv) {
     if (ms < 0) ms = 0;
     /* The stdin handle (console input buffer or pipe) is waitable:
        WaitForSingleObject returns once input can be read. */
-    void *h = GetStdHandle(A_WIN_STDIN_HANDLE);
+    void *h = GetStdHandle(STD_INPUT_HANDLE);
     unsigned long w = WaitForSingleObject(h, (unsigned long)ms);
-    if (w != A_WIN_WAIT_OBJECT_0) return A_NONE;
+    if (w != WAIT_OBJECT_0) return A_NONE;
     char c;
     int r;
     do { r = _read(0, &c, 1); } while (r < 0 && errno == EINTR);
@@ -192,16 +192,16 @@ aval bi_terminal_read_char_ms(uint64_t n, aval *argv) {
 aval bi_terminal_size(uint64_t n, aval *argv) {
     (void)argv;
     want_args("size", n, 0, 0);
-    AWinConsoleInfo ci;
+    CONSOLE_SCREEN_BUFFER_INFO ci;
     memset(&ci, 0, sizeof(ci));
-    if (!GetConsoleScreenBufferInfo(GetStdHandle(A_WIN_STDOUT_HANDLE), &ci) ||
-        ci.sizeX <= 0 || ci.sizeY <= 0) {
-        ci.sizeX = 80;
-        ci.sizeY = 24;
+    if (!GetConsoleScreenBufferInfo(GetStdHandle(STD_OUTPUT_HANDLE), &ci) ||
+        ci.dwSize.X <= 0 || ci.dwSize.Y <= 0) {
+        ci.dwSize.X = 80;
+        ci.dwSize.Y = 24;
     }
     aval arr[2];
-    arr[0] = a_mkint((int64_t)ci.sizeX);
-    arr[1] = a_mkint((int64_t)ci.sizeY);
+    arr[0] = a_mkint((int64_t)ci.dwSize.X);
+    arr[1] = a_mkint((int64_t)ci.dwSize.Y);
     return list_from_vec(arr, 2, 0);
 }
 #endif /* _WIN32 */
@@ -283,6 +283,12 @@ aval bi_repl_eval(uint64_t n, aval *argv) {
     }
     char tmpl[1200];
     snprintf(tmpl, sizeof(tmpl), "%sa_repl_XXXXXX", dir);
+#if defined(_MSC_VER)
+    /* UCRT marks _mktemp deprecated (C4996) in favour of _mktemp_s, which
+       MinGW-msvcrt does not provide; suppress at the call site instead of
+       giving up the single implementation. */
+#pragma warning(suppress : 4996)
+#endif
     if (!_mktemp(tmpl)) panicf("repl.eval: cannot create temp file name");
     FILE *f = fopen(tmpl, "wb");
     if (!f) panicf("repl.eval: cannot create temp file");
