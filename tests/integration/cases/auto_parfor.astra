@@ -1,0 +1,27 @@
+fn work(i, ms):
+    sleep(ms)
+    return i * 10
+
+entry main():
+    n = 6
+    xs = [0] * n
+    t0 = now()
+    # Eligible loop: disjoint xs[i] writes -> auto-parfor overlaps sleeps.
+    for i in range(n):
+        xs[i] = work(i, 80)
+    el = now() - t0
+    # Two+ serial would be >= 160ms per pair; 6x80 serial = 480ms.
+    if el >= 400:
+        print("FAIL serial")
+    else:
+        print("ok")
+    good = true
+    for i in range(n):
+        if xs[i] != i * 10:
+            good = false
+    print("values", good)
+    # Ineligible loop (shared scalar write) stays sequential & correct.
+    total = 0
+    for i in range(5):
+        total += i
+    print("total", total)

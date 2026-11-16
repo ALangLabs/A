@@ -1,0 +1,33 @@
+# async_fibers.astra — cooperative fibers with zero new syntax.
+#
+# The runtime automatically runs `entry main` (and module init) inside a
+# fiber and multiplexes blocking builtins (sleep, socket I/O, file I/O,
+# os.system/popen, stdin) through a poll(2) event loop plus a small pool
+# of real worker threads for non-pollable calls. async.spawn/join give
+# explicit task handles when you want concurrency; everything else stays
+# plain synchronous code.
+#
+# Knobs: A_ASYNC=0 disables fibers entirely, A_FIB_STACK=<bytes> sets the
+# per-fiber stack size (default 512 KiB), A_BLOCK_THREADS=<n> sizes the
+# blocking-op pool (default 8).
+
+import async
+
+fn fetch(name: str, ms: int) -> str:
+    sleep(ms)
+    return name + " done"
+
+entry main():
+    t0 = now()
+    # Two "requests" overlap: ~150 ms total, not ~300 ms serial.
+    a = async.spawn(fetch, "req-A", 150)
+    b = async.spawn(fetch, "req-B", 150)
+    print(async.join(a))
+    print(async.join(b))
+    print("elapsed:", now() - t0, "ms")
+
+    # done() polls completion without blocking.
+    c = async.spawn(fetch, "req-C", 10)
+    print("done?", async.done(c))
+    async.join(c)
+    print("done?", async.done(c))

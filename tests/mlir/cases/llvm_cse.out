@@ -1,0 +1,8 @@
+module {
+  llvm.func @cse_demo(%arg0: i64, %arg1: i64) -> i64 {
+    %0 = llvm.add %arg0, %arg1  : i64
+    %1 = llvm.mul %0, %0  : i64
+    %2 = llvm.sub %1, %1  : i64
+    llvm.return %2 : i64
+  }
+}

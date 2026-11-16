@@ -190,21 +190,19 @@ function quotedImportCandidates(rawPath, currentFile, config, env = process.env)
 
 // Where a bare `import name` may live, mirroring ModuleLoader::resolveBare:
 // <root>/name.astra, <root>/name/name.astra, <root>/name/__init__.astra under
-// the stdlib root and each module path (.a kept as legacy fallback).
+// the stdlib root and each module path.
 function bareImportCandidates(name, config) {
     const roots = [];
     if (config.stdlib) roots.push(config.stdlib);
     for (const dir of config.modulePaths) roots.push(dir);
     const candidates = [];
     for (const root of roots) {
-        for (const ext of ['astra', 'a']) {
-            candidates.push(path.join(root, `${name}.${ext}`));
-            candidates.push(path.join(root, name, `${name}.${ext}`));
-            candidates.push(path.join(root, name, `__init__.${ext}`));
-            candidates.push(path.join(root, 'std', `${name}.${ext}`));
-            candidates.push(path.join(root, 'std', name, `${name}.${ext}`));
-            candidates.push(path.join(root, 'std', name, `__init__.${ext}`));
-        }
+        candidates.push(path.join(root, `${name}.astra`));
+        candidates.push(path.join(root, name, `${name}.astra`));
+        candidates.push(path.join(root, name, '__init__.astra'));
+        candidates.push(path.join(root, 'std', `${name}.astra`));
+        candidates.push(path.join(root, 'std', name, `${name}.astra`));
+        candidates.push(path.join(root, 'std', name, '__init__.astra'));
     }
     return candidates;
 }

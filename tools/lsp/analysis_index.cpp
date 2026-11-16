@@ -3,7 +3,7 @@
 namespace a::lsp {
 class IndexBuilder {
  public:
-  IndexBuilder(FileIndex& file, int moduleId) : file_(file), moduleId_(moduleId) {}
+  IndexBuilder(FileIndex& file, int moduleId) : file_(file) { (void)moduleId; }
 
   void build(Program& program) {
     file_.scopes.push_back(ScopeInfo{-1, 0, kWholeFileSpan, {}, {}});
@@ -331,6 +331,13 @@ class IndexBuilder {
         walkExpr(slice.step.get(), scope);
         return;
       }
+      case ExprKind::SliceSpec: {
+        auto& spec = static_cast<SliceSpecExpr&>(*expr);
+        walkExpr(spec.start.get(), scope);
+        walkExpr(spec.end.get(), scope);
+        walkExpr(spec.step.get(), scope);
+        return;
+      }
       case ExprKind::Field:
         walkExpr(static_cast<FieldExpr&>(*expr).object.get(), scope);
         return;
@@ -409,7 +416,6 @@ class IndexBuilder {
   }
 
   FileIndex& file_;
-  int moduleId_ = -1;
 };
 
 namespace {

@@ -20,7 +20,9 @@
 //   src/status.js         status bar items
 
 const vscode = require('vscode');
-const { settings } = require('./config');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const { settings, compilerPath, serverPath, isExecutable } = require('./config');
 const { isA } = require('./src/util');
 const { CheckQueue } = require('./src/check-queue');
 const { createFallbackController } = require('./src/fallback');
@@ -29,6 +31,7 @@ const { registerProviders } = require('./src/lsp-providers');
 const { registerCommands } = require('./src/commands');
 const { registerTaskProvider, generateStarterTasks } = require('./src/tasks');
 const { registerRunTestCodeLens } = require('./src/codelens');
+const { registerTestController } = require('./src/tests');
 const { createStatusBars } = require('./src/status');
 
 async function activate(context) {
@@ -88,7 +91,81 @@ async function activate(context) {
 
     registerTaskProvider(context, env);
     registerCommands(context, env);
+    registerTestController(context, env);
     server.attachDocumentSync();
+
+    // a.formatOnSave: run whichever formatting provider is active (a-lsp, or
+    // the `a fmt` fallback) before the document is written to disk.
+    context.subscriptions.push(
+        vscode.workspace.onWillSaveTextDocument(async event => {
+            if (!isA(event.document)) return;
+            try {
+                const config = vscode.workspace.getConfiguration('a', event.document.uri);
+                if (!config.get('formatOnSave', false)) return;
+                const edits = await vscode.commands.executeCommand(
+                    'vscode.executeDocumentFormattingProvider', event.document.uri);
+                if (Array.isArray(edits) && edits.length) {
+                    const we = new vscode.WorkspaceEdit();
+                    we.set(event.document.uri, edits);
+                    await vscode.workspace.applyEdit(we);
+                }
+            } catch { /* formatting is best-effort; never block a save */ }
+        })
+    );
+
+    // One-time toolchain hints (Python-extension style): only when the
+    // workspace actually has A files, warn if `a` cannot run or `a-lsp`
+    // cannot be found, with shortcuts to the relevant settings.
+    let toolchainChecked = false;
+    async function checkToolchain() {
+        if (toolchainChecked || disposed) return;
+        try {
+            const hasA = vscode.workspace.textDocuments.some(isA) ||
+                (await vscode.workspace.findFiles('**/*.astra',
+                    '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}', 1)).length > 0;
+            if (!hasA || disposed) return;
+            toolchainChecked = true;
+            const folder = (vscode.workspace.workspaceFolders || [])[0];
+            const doc = vscode.window.activeTextEditor && vscode.window.activeTextEditor.document;
+            const uri = folder ? folder.uri : doc && doc.uri;
+            const config = vscode.workspace.getConfiguration('a', uri);
+            const cwd = folder ? folder.uri.fsPath
+                : uri && uri.fsPath ? path.dirname(uri.fsPath) : process.cwd();
+            const openSettings = key => vscode.commands.executeCommand(
+                'workbench.action.openSettings', `a.${key}`);
+
+            const compiler = compilerPath(config.get('compilerPath', ''), cwd);
+            const ver = spawnSync(compiler, ['version'],
+                { timeout: 10000, windowsHide: true, encoding: 'utf8' });
+            if (ver.error || ver.status !== 0) {
+                const pick = await vscode.window.showWarningMessage(
+                    `The A compiler '${compiler}' did not run` +
+                    `${ver.error ? ` (${ver.error.message})` : ` (exit ${ver.status})`}. ` +
+                    'Install the A toolchain or set "a.compilerPath".',
+                    'Open Settings', 'Show Output');
+                if (pick === 'Open Settings') void openSettings('compilerPath');
+                else if (pick === 'Show Output') output.show(true);
+                return;
+            }
+
+            if (vscode.workspace.isTrusted && config.get('useLanguageServer', true)
+                && server.server.status === 'off') {
+                const configured = config.get('server.path', '') || process.env.A_LSP_PATH || '';
+                const lsp = serverPath(configured, cwd, context.extensionPath);
+                const beside = /[\\/]/.test(compiler)
+                    ? path.join(path.dirname(compiler), process.platform === 'win32' ? 'a-lsp.exe' : 'a-lsp')
+                    : '';
+                if (!lsp && !(beside && isExecutable(beside))) {
+                    const pick = await vscode.window.showInformationMessage(
+                        'a-lsp was not found; using check-on-save with fallback completions. ' +
+                        'Build a-lsp or set "a.server.path".',
+                        'Open Settings', 'Show Output');
+                    if (pick === 'Open Settings') void openSettings('server.path');
+                    else if (pick === 'Show Output') output.show(true);
+                }
+            }
+        } catch { /* hints are best-effort */ }
+    }
 
     // Workspace/config changes re-decide server vs fallback and re-check.
     context.subscriptions.push(
@@ -102,13 +179,14 @@ async function activate(context) {
             void server.decide();
             void generateStarterTasks(context);
         }),
-        vscode.window.onDidChangeActiveTextEditor(() => { bars.updateRunStatus(); bars.updateCheckStatus(); }),
+        vscode.window.onDidChangeActiveTextEditor(() => { bars.updateRunStatus(); bars.updateCheckStatus(); void checkToolchain(); }),
         vscode.workspace.onDidGrantWorkspaceTrust(() => { bars.updateRunStatus(); bars.updateCheckStatus(); void server.decide(); })
     );
 
     bars.updateRunStatus(); bars.updateCheckStatus();
     void generateStarterTasks(context);
     await server.decide();
+    void checkToolchain();
 }
 
 let stopOnDeactivate = async () => {};

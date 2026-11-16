@@ -15,17 +15,33 @@ if(A_ENABLE_LTO AND CMAKE_BUILD_TYPE STREQUAL "Release")
 endif()
 add_library(a_project_options INTERFACE)
 target_include_directories(a_project_options INTERFACE
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/compiler/astra/frontend>
-  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/compiler/astra/runtime>
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/astra/frontend>
+  $<BUILD_INTERFACE:${CMAKE_SOURCE_DIR}/src/astra/runtime>
   $<INSTALL_INTERFACE:include/a/compiler>
   $<INSTALL_INTERFACE:include/a/runtime>)
 if(MSVC)
   target_compile_options(a_project_options INTERFACE /W4)
+  # This codebase deliberately uses the classic, portable CRT surface
+  # (getenv, strncpy, fopen, ...). MSVC's C4996 "unsafe function" notes point
+  # at its _s replacements, not at bugs here, so silence them project-wide
+  # instead of rewriting each call site.
+  target_compile_definitions(a_project_options INTERFACE
+    _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+  # MSVC /W4 warns (C4456-C4459) when a declaration hides an outer name —
+  # e.g. a `name` parameter shadowing a struct member. The GCC/Clang side
+  # does not enable -Wshadow, so these are MSVC-only noise here; silence
+  # them project-wide rather than renaming every shadowing identifier.
+  target_compile_options(a_project_options INTERFACE /wd4456 /wd4457 /wd4458 /wd4459)
   if(A_WARNINGS_AS_ERRORS)
     target_compile_options(a_project_options INTERFACE /WX)
   endif()
 else()
   target_compile_options(a_project_options INTERFACE -Wall -Wextra -Wpedantic)
+  # fastpath_mlir.hpp embeds a ~94 KB generated MLIR literal; AppleClang
+  # rejects literals over 65536 bytes under -Werror,-Woverlength-strings.
+  if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(a_project_options INTERFACE -Wno-overlength-strings)
+  endif()
   if(A_WARNINGS_AS_ERRORS)
     target_compile_options(a_project_options INTERFACE -Werror)
   endif()

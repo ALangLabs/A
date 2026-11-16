@@ -1,9 +1,10 @@
 # A language overview
 
 A is a statically typed, indentation-sensitive systems language with
-Python-flavored syntax. It compiles to native machine code through the bundled
-**Astra** backend (a TinyCC fork): `a build` produces a real executable, `a run`
-compiles and executes it, `a check` type-checks without codegen.
+Python-flavored syntax. It compiles to native machine code through the LLVM
+backend (`opt`/`llc`/`clang` plus a staged C runtime): `a build` produces a
+real executable, `a run` compiles and executes it, `a check` type-checks
+without codegen.
 
 ## First program
 

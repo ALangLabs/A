@@ -1,0 +1,41 @@
+# NDArray multi-dimensional indexing (NumPy-style bracket syntax).
+#
+#   x[i, j, ...]  all-integer indices -> f64 element (negative indices wrap)
+#   x[i]          integer index -> NDArray keeping the trailing axes
+#   x[a..b, i]    slice specs (`..` or `:` separators, step via a..b..s)
+#                 mixed with integers -> NDArray copy (no aliasing)
+#   x[a..b]       single-axis slice -> NDArray copy
+#   x[i, j] = v   item assignment (full integer index only)
+#
+# Run with: ./build/a run examples/stdlib/ndarray_indexing.astra
+
+from "std/math/ndarray.astra" import NDArray, zeros
+
+entry main():
+    # 2x3 array, C-order flat storage [1..6]
+    x = NDArray([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], [2, 3])
+
+    # Scalar indexing
+    print(x[0, 0])      # 1.0
+    print(x[1, 2])      # 6.0
+    print(x[-1, -1])    # 6.0 (negative wraps)
+
+    # Fewer indices than ndim keeps trailing axes -> sub-arrays
+    print(x[0])         # row 0: NDArray shape [3]
+    print(x[0].shape)
+
+    # Slice specs: `:` or `..` separators, `a..b..step` for steps
+    print(x[:, 1])      # column 1: [2.0, 5.0]
+    print(x[:, ::2])    # columns 0 and 2
+    print(x[0, ::-1])   # reversed row 0: [3.0, 2.0, 1.0]
+    print(x[1.., 0..2]) # bottom-left 1x2 block
+
+    # Assignment
+    x[0, 1] = 42.0
+    print(x[0, 1])      # 42.0
+
+    # Works on any rank
+    cube = zeros([2, 2, 2])
+    cube[1, 0, 1] = 9.0
+    print(cube[1, 0, 1])
+    print(cube[:, 0, :])

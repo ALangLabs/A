@@ -1,0 +1,40 @@
+# dict/list/set subclass instances returned from CPython must stay opaque
+# Python objects: draining them through the generic-iterable path would
+# silently drop their methods (Counter iterates as a dict -> its keys).
+import python:builtins
+import python:collections
+import python:json
+import std:py
+
+# Counter keeps its mapping type and methods
+c = collections.Counter("aabbc")
+print(py.is_pyobject(c))
+print(c)
+print(c.most_common(2))
+print(c["a"], len(c))
+
+# mixed equality: pyobj == A value converts the A side for Py_EQ
+print(c == collections.Counter("aabbc"))
+print(c == {"a": 2, "b": 2, "c": 1})
+print(c != {"a": 1})
+print({"a": 2, "b": 2, "c": 1} == c)
+
+c["d"] = 5
+print(c["d"], "d" in c)
+
+# OrderedDict / defaultdict keep attribute access too
+od = collections.OrderedDict()
+od["x"] = 1
+od["y"] = 2
+print(list(od.keys()))
+pyint = py.getattr(builtins, "int")
+dd = collections.defaultdict(pyint)
+dd["k"] += 3
+print(dd["k"], dd["missing"])
+
+# subclass survives a round trip through json.loads kwargs
+s = json.dumps({"a": 1, "b": 2})
+d = json.loads(s, object_pairs_hook=collections.OrderedDict)
+print(py.is_pyobject(d))
+print(d)
+print(d["a"], len(d))

@@ -1,0 +1,50 @@
+module {
+  llvm.func @a_add_slow(i64, i64) -> i64
+  llvm.func @a_i64n(i64) -> i64
+  llvm.func @box_i64(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(-281474976710656 : i64) : i64
+    %1 = llvm.mlir.constant(281474976710655 : i64) : i64
+    %2 = llvm.mlir.constant(70368744177664 : i64) : i64
+    %3 = llvm.mlir.constant(-70368744177664 : i64) : i64
+    %4 = llvm.mlir.constant(1 : i64) : i64
+    %5 = llvm.getelementptr %arg0[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    %6 = llvm.load %5 : !llvm.ptr -> i64
+    %7 = llvm.icmp "sge" %6, %3 : i64
+    %8 = llvm.icmp "slt" %6, %2 : i64
+    %9 = llvm.and %7, %8  : i1
+    %10 = llvm.shl %6, %4  : i64
+    %11 = llvm.or %10, %4  : i64
+    %12 = llvm.and %11, %1  : i64
+    %13 = llvm.or %0, %12  : i64
+    %14 = llvm.call @a_i64n(%6) : (i64) -> i64
+    %15 = llvm.select %9, %13, %14 : i1, i64
+    %16 = llvm.call @a_add_slow(%15, %15) : (i64, i64) -> i64
+    llvm.return %16 : i64
+  }
+  llvm.func @box_f64(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(9221120237041090560 : i64) : i64
+    %1 = llvm.getelementptr %arg0[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    %2 = llvm.load %1 : !llvm.ptr -> i64
+    %3 = arith.sitofp %2 : i64 to f64
+    %4 = llvm.fcmp "uno" %3, %3 : f64
+    %5 = llvm.bitcast %0 : i64 to f64
+    %6 = llvm.select %4, %5, %3 : i1, f64
+    %7 = llvm.bitcast %6 : f64 to i64
+    %8 = llvm.call @a_add_slow(%7, %7) : (i64, i64) -> i64
+    llvm.return %8 : i64
+  }
+  llvm.func @box_i1(%arg0: !llvm.ptr) -> i64 {
+    %0 = llvm.mlir.constant(-281474976710652 : i64) : i64
+    %1 = llvm.mlir.constant(-281474976710650 : i64) : i64
+    %2 = llvm.mlir.constant(true) : i1
+    %3 = llvm.getelementptr %arg0[1] : (!llvm.ptr) -> !llvm.ptr, i64
+    %4 = llvm.load %3 : !llvm.ptr -> i64
+    %5 = llvm.getelementptr %arg0[2] : (!llvm.ptr) -> !llvm.ptr, i64
+    %6 = llvm.load %5 : !llvm.ptr -> i64
+    %7 = arith.cmpi eq, %4, %6 : i64
+    %8 = llvm.icmp "eq" %7, %2 : i1
+    %9 = llvm.select %8, %1, %0 : i1, i64
+    %10 = llvm.call @a_add_slow(%9, %9) : (i64, i64) -> i64
+    llvm.return %10 : i64
+  }
+}

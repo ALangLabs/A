@@ -132,6 +132,18 @@ fn test_escape_and_dot():
     assert_eq(re.findall("a.c", "abc\naxc"), ["abc", "axc"])
     assert_eq(re.findall(".", "héllo"), ["h", "é", "l", "l", "o"])
 
+fn test_lookahead():
+    # zero-width (?=...) / (?!...) assertions
+    assert_eq(re.findall("a(?!b)", "ab ac ad"), ["a", "a"])
+    assert_eq(re.findall("a(?=b)", "ab ac"), ["a"])
+    assert_eq(re.findall("\\s+(?!\\S)", "a  b   "), [" ", "   "])
+    m = re.search("x(?!y)", "xxy")
+    assert(m != None)
+    assert_eq(m!.group(0) ?? "", "x")
+    assert_eq(m!.span(0), [0, 1])
+    assert(re.search("foo(?!bar)", "foobar") == None)
+    assert(re.search("foo(?=bar)", "foobar") != None)
+
 fn test_compiled_pattern():
     p = re.compile("colou?r")
     m = p.search("my colour")

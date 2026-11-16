@@ -200,6 +200,13 @@ class CallSiteCollector {
         walkExpr(slice.step.get());
         return;
       }
+      case ExprKind::SliceSpec: {
+        auto& spec = static_cast<SliceSpecExpr&>(*expr);
+        walkExpr(spec.start.get());
+        walkExpr(spec.end.get());
+        walkExpr(spec.step.get());
+        return;
+      }
       case ExprKind::Field:
         walkExpr(static_cast<FieldExpr&>(*expr).object.get());
         return;

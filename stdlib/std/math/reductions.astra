@@ -17,6 +17,7 @@
 # caller variables — a local named e.g. `data` or `m` silently overwrites a
 # same-named variable in the calling scope. Keep the prefix.
 #
+from math import ew_reduce as _kew_reduce
 from "ndarray.astra" import NDArray, _shape_size, _row_major_index, _ew_bin, ravel
 
 fn _nan() -> f64:
@@ -31,12 +32,16 @@ fn _norm_axis(axis: i64, nd: i64) -> i64:
 # Generic single-axis reduction.
 # op: "sum" | "prod" | "min" | "max" | "mean" | "var" | "std"
 # skip_nan: when true, NaN elements are excluded (and excluded from counts).
-fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
+fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool, keepdims: bool) -> NDArray:
+    opi = _ropi(op)
+    ad = a.data
     _rnd = len(a.shape)
     _rax = _norm_axis(axis, _rnd)
     if _rax < 0 or _rax >= _rnd:
         return NDArray([], [])
     _rdim = a.shape[_rax]
+    # _rout_shape always drops the axis (the flat C-order data is identical
+    # either way); keepdims only relabels the result shape at the end.
     _rout_shape = []
     _ri = 0
     while _ri < _rnd:
@@ -80,7 +85,7 @@ fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
         _rcnt = 0
         _rk = 0
         while _rk < _rdim:
-            _rv = a.data[_rbase + _rk * _raxstride]
+            _rv = ad[_rbase + _rk * _raxstride]
             # All locals in this file are _r-prefixed: the A backend lets a
             # function-local variable clobber a same-named variable in the
             # caller (flat name->slot namespace). Do not rename them back.
@@ -88,37 +93,37 @@ fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
                 pass
             else:
                 _rcnt = _rcnt + 1
-                if op == "prod":
+                if opi == 1:
                     if _rcnt == 1:
                         _racc = _rv
                     else:
                         _racc = _racc * _rv
-                elif op == "min":
+                elif opi == 2:
                     if _rcnt == 1 or _rv < _racc:
                         _racc = _rv
-                elif op == "max":
+                elif opi == 3:
                     if _rcnt == 1 or _rv > _racc:
                         _racc = _rv
                 else:
                     _rs = _rs + _rv
             _rk = _rk + 1
         # finalize this output slot
-        if op == "prod":
+        if opi == 1:
             if _rcnt == 0:
                 _rdata.append(1.0)
             else:
                 _rdata.append(_racc)
-        elif op == "min" or op == "max":
+        elif opi == 2 or opi == 3:
             if _rcnt == 0:
                 _rdata.append(_nan())
             else:
                 _rdata.append(_racc)
-        elif op == "mean":
+        elif opi == 4:
             if _rcnt == 0:
                 _rdata.append(_nan())
             else:
                 _rdata.append(_rs / _rcnt)
-        elif op == "var" or op == "std":
+        elif opi == 5 or opi == 6:
             if _rcnt == 0:
                 _rdata.append(_nan())
             else:
@@ -126,7 +131,7 @@ fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
                 _rss = 0.0
                 _rk = 0
                 while _rk < _rdim:
-                    _rv = a.data[_rbase + _rk * _raxstride]
+                    _rv = ad[_rbase + _rk * _raxstride]
                     if skip_nan and _rv != _rv:
                         pass
                     else:
@@ -134,7 +139,7 @@ fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
                         _rss = _rss + _rd * _rd
                     _rk = _rk + 1
                 _rvvar = _rss / _rcnt
-                if op == "var":
+                if opi == 5:
                     _rdata.append(_rvvar)
                 else:
                     _rdata.append(sqrt(_rvvar))
@@ -142,107 +147,80 @@ fn _reduce_axis(a: NDArray, axis: i64, op: str, skip_nan: bool) -> NDArray:
             # sum family: empty/all-NaN -> 0.0 (NumPy sum/nansum semantics)
             _rdata.append(_rs)
         _roi = _roi + 1
+    if keepdims:
+        _rkshape = []
+        _ri = 0
+        while _ri < _rnd:
+            if _ri == _rax:
+                _rkshape.append(1)
+            else:
+                _rkshape.append(a.shape[_ri])
+            _ri = _ri + 1
+        return NDArray(_rdata, _rkshape)
     return NDArray(_rdata, _rout_shape)
 
 # Generic all-axis (flat) reduction -> scalar f64.
+fn _ropi(op: str) -> i64:
+    # Integer opcode for the flat/axis reduction hot loops: the string->int
+    # mapping runs once per call instead of a boxed str compare per element.
+    if op == "prod": return 1
+    if op == "min": return 2
+    if op == "max": return 3
+    if op == "mean": return 4
+    if op == "var": return 5
+    if op == "std": return 6
+    return 0  # sum and anything else
+
 fn _reduce_flat(a: NDArray, op: str, skip_nan: bool) -> f64:
-    _rs = 0.0
-    _racc = 0.0
-    _rcnt = 0
-    _ri = 0
-    _rn = len(a.data)
-    while _ri < _rn:
-        _rv = a.data[_ri]
-        if skip_nan and _rv != _rv:
-            pass
-        else:
-            _rcnt = _rcnt + 1
-            if op == "prod":
-                if _rcnt == 1:
-                    _racc = _rv
-                else:
-                    _racc = _racc * _rv
-            elif op == "min":
-                if _rcnt == 1 or _rv < _racc:
-                    _racc = _rv
-            elif op == "max":
-                if _rcnt == 1 or _rv > _racc:
-                    _racc = _rv
-            else:
-                _rs = _rs + _rv
-        _ri = _ri + 1
-    if op == "prod":
-        if _rcnt == 0:
-            return 1.0
-        return _racc
-    if op == "min" or op == "max":
-        if _rcnt == 0:
-            return _nan()
-        return _racc
-    if op == "mean":
-        if _rcnt == 0:
-            return _nan()
-        return _rs / _rcnt
-    if op == "var" or op == "std":
-        if _rcnt == 0:
-            return _nan()
-        _rm = _rs / _rcnt
-        _rss = 0.0
-        _ri = 0
-        while _ri < _rn:
-            _rv = a.data[_ri]
-            if skip_nan and _rv != _rv:
-                pass
-            else:
-                _rd = _rv - _rm
-                _rss = _rss + _rd * _rd
-            _ri = _ri + 1
-        _rvvar = _rss / _rcnt
-        if op == "var":
-            return _rvvar
-        return sqrt(_rvvar)
-    return _rs
+    opi = _ropi(op)
+    ad = a.data
+    # Native kernel (math_ew.c): bit-identical port of the original A loop
+    # (same left-to-right accumulation order, same NaN/empty semantics —
+    # prod empty -> 1.0, min/max/mean/var/std empty -> NaN, sum empty -> 0,
+    # skip_nan excludes NaN from values AND counts). data is always a flat
+    # [f64] buffer, so there is no fallback case.
+    return _kew_reduce(opi, ad, skip_nan)
 
 # --- axis reductions -----------------------------------------------------------
 
-fn sum(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "sum", false)
+fn sum(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "sum", false, keepdims)
 
-fn nansum(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "sum", true)
+fn nansum(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "sum", true, keepdims)
 
-fn prod(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "prod", false)
+fn prod(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "prod", false, keepdims)
 
-fn mean(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "mean", false)
+fn mean(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "mean", false, keepdims)
 
-fn nanmean(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "mean", true)
+fn nanmean(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "mean", true, keepdims)
 
-fn var(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "var", false)
+fn var(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "var", false, keepdims)
 
-fn nanvar(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "var", true)
+fn nanvar(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "var", true, keepdims)
 
-fn std(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "std", false)
+fn std(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "std", false, keepdims)
 
-fn nanstd(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "std", true)
+fn nanstd(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "std", true, keepdims)
 
-fn min(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "min", false)
+fn min(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "min", false, keepdims)
 
-fn nanmin(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "min", true)
+fn nanmin(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "min", true, keepdims)
 
-fn max(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "max", false)
+fn max(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "max", false, keepdims)
 
-fn nanmax(a: NDArray, axis: i64) -> NDArray:
-    return _reduce_axis(a, axis, "max", true)
+fn nanmax(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _reduce_axis(a, axis, "max", true, keepdims)
 
 # --- all-axis (scalar) reductions ----------------------------------------------
 
@@ -289,7 +267,7 @@ fn nanmax_all(a: NDArray) -> f64:
 # Indices of extrema along an axis; first occurrence wins on ties.
 # Result dtype is f64 (NDArray.data is [f64]).
 
-fn _arg_axis(a: NDArray, axis: i64, find_min: bool) -> NDArray:
+fn _arg_axis(a: NDArray, axis: i64, find_min: bool, keepdims: bool) -> NDArray:
     _rnd = len(a.shape)
     _rax = _norm_axis(axis, _rnd)
     if _rax < 0 or _rax >= _rnd:
@@ -351,13 +329,23 @@ fn _arg_axis(a: NDArray, axis: i64, find_min: bool) -> NDArray:
         else:
             _rdata.append(_nan())
         _roi = _roi + 1
+    if keepdims:
+        _rkshape = []
+        _ri = 0
+        while _ri < _rnd:
+            if _ri == _rax:
+                _rkshape.append(1)
+            else:
+                _rkshape.append(a.shape[_ri])
+            _ri = _ri + 1
+        return NDArray(_rdata, _rkshape)
     return NDArray(_rdata, _rout_shape)
 
-fn argmin(a: NDArray, axis: i64) -> NDArray:
-    return _arg_axis(a, axis, true)
+fn argmin(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _arg_axis(a, axis, true, keepdims)
 
-fn argmax(a: NDArray, axis: i64) -> NDArray:
-    return _arg_axis(a, axis, false)
+fn argmax(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    return _arg_axis(a, axis, false, keepdims)
 
 fn argmin_all(a: NDArray) -> i64:
     if len(a.data) == 0:
@@ -383,9 +371,9 @@ fn argmax_all(a: NDArray) -> i64:
 
 # --- ptp (peak-to-peak = max - min) ----------------------------------------------
 
-fn ptp(a: NDArray, axis: i64) -> NDArray:
-    _rmx = _reduce_axis(a, axis, "max", false)
-    _rmn = _reduce_axis(a, axis, "min", false)
+fn ptp(a: NDArray, axis: i64, keepdims: bool = false) -> NDArray:
+    _rmx = _reduce_axis(a, axis, "max", false, keepdims)
+    _rmn = _reduce_axis(a, axis, "min", false, keepdims)
     return _ew_bin("sub", _rmx, _rmn)
 
 fn ptp_all(a: NDArray) -> f64:
@@ -442,9 +430,10 @@ fn _cum_axis(a: NDArray, axis: i64, is_prod: bool) -> NDArray:
         if is_prod:
             _racc = 1.0
         _rk = 0
+        _ad = a.data
         while _rk < _rdim:
             _roff = _rbase + _rk * _raxstride
-            _rv = a.data[_roff]
+            _rv = _ad[_roff]
             if is_prod:
                 _racc = _racc * _rv
             else:
@@ -480,8 +469,9 @@ fn trace(a: NDArray) -> f64:
         _rn = _rcols
     _rs = 0.0
     _ri = 0
+    _ad = a.data
     while _ri < _rn:
-        _rs = _rs + a.data[_ri * _rcols + _ri]
+        _rs = _rs + _ad[_ri * _rcols + _ri]
         _ri = _ri + 1
     return _rs
 
@@ -500,9 +490,11 @@ fn average_w(a: NDArray, w: NDArray) -> f64:
     _rden = 0.0
     _ri = 0
     _rn = a.size()
+    _ad = a.data
+    _wd = w.data
     while _ri < _rn:
-        _rwv = w.data[_ri]
-        _rnum = _rnum + a.data[_ri] * _rwv
+        _rwv = _wd[_ri]
+        _rnum = _rnum + _ad[_ri] * _rwv
         _rden = _rden + _rwv
         _ri = _ri + 1
     if _rden == 0.0:

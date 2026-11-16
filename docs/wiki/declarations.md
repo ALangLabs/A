@@ -1,7 +1,7 @@
 # Declarations
 
 Top-level and member declarations, verified against
-`compiler/astra/frontend/parser/parser_decl.cpp`, `ast/stmts.hpp`, and
+`src/astra/frontend/parser/parser_decl.cpp`, `ast/stmts.hpp`, and
 `examples/`.
 
 ## Functions

@@ -1,0 +1,62 @@
+# std.re lookahead checks — '(?=...)' / '(?!...)' zero-width assertions plus
+# the GPT-2 BPE pre-tokenizer pattern that needs them.
+# Run: ./build/a test stdlib/std/re/_check_lookahead.astra
+import std:re
+
+fn test_lookahead_basics():
+    # negative lookahead
+    assert_eq(re.findall("a(?!b)", "ab ac ad"), ["a", "a"])
+    # positive lookahead
+    assert_eq(re.findall("a(?=b)", "ab ac"), ["a"])
+    # lookahead is zero-width: match span is just the consuming part
+    m = re.search("x(?!y)", "xxy")
+    assert(m != None)
+    assert_eq(m!.group(0) ?? "", "x")
+    assert_eq(m!.span(0), [0, 1])
+    # lookahead can contain alternation and classes
+    assert_eq(re.findall("\\d+(?!\\d)", "a12b345"), ["12", "345"])
+    assert(re.search("foo(?!bar)", "foobar") == None)
+    assert(re.search("foo(?!bar)", "foobaz") != None)
+    assert(re.search("foo(?=bar)", "foobar") != None)
+    # captures inside lookahead are discarded (state unchanged)
+    m2 = re.search("(a)(?=(b))b", "ab")
+    assert(m2 != None)
+    assert_eq(m2!.group(1) ?? "", "a")
+    # quantified lookahead degenerates to empty (zero-width)
+    assert(re.search("a(?!b)*c", "ac") != None)
+
+fn test_gpt2_pattern_units():
+    # ' ?\w+' must keep the optional leading space
+    assert_eq(re.findall(" ?\\w+", " hello world"), [" hello", " world"])
+    # contractions tried before the generic word branch
+    pat = "'s|'t|'re|'ve|'m|'ll|'d"
+    assert_eq(re.findall(pat, "it's you're we'll"), ["'s", "'re", "'ll"])
+    # \s+(?!\S): whitespace run NOT followed by non-space loses its last
+    # char to the trailing \s+ branch (the demo/gpt2 pretokenizer rule)
+    assert_eq(re.findall("\\s+(?!\\S)", "a  b   "), [" ", "   "])
+    assert_eq(re.findall("\\s+(?!\\S)|\\s+", "a  b   "), [" ", " ", "   "])
+    assert_eq(re.findall("\\s+", "a  b   "), ["  ", "   "])
+
+fn test_gpt2_full_pattern():
+    pat = "'s|'t|'re|'ve|'m|'ll|'d| ?\\w+| ?\\d+| ?[^\\s\\w]+|\\s+(?!\\S)|\\s+"
+    p = re.compile(pat)
+    toks = p.findall("Hello world, this is GPT-2!")
+    want = ["Hello", " world", ",", " this", " is", " GPT", "-", "2", "!"]
+    assert_eq(toks, want)
+    # contractions + punctuation + digit runs
+    toks2 = p.findall("Hello, world! It's GPT-2's 123rd test.")
+    # NOTE: ASCII \w includes digits, so ' ?\w+' claims " 123rd" whole —
+    # the real GPT-2 pattern uses \p{L}/\p{N} which this engine does not
+    # have (documented ASCII-only deviation).
+    want2 = ["Hello", ",", " world", "!", " It", "'s", " GPT", "-", "2", "'s", " 123rd", " test", "."]
+    assert_eq(toks2, want2)
+    # finditer spans line up with the tokens
+    it = p.finditer("a b")
+    assert_eq(len(it), 2)
+    assert_eq(it[0].group(0) ?? "", "a")
+    assert_eq(it[1].group(0) ?? "", " b")
+    assert_eq(it[1].start(0), 1)
+    assert_eq(it[1].end(0), 3)
+
+fn assert_eq(a, b):
+    assert(a == b)

@@ -16,7 +16,7 @@ function cwdOf(doc) { return path.dirname(doc.uri.fsPath); }
 function shellQuote(arg) {
     const s = String(arg);
     if (!s) return "''";
-    if (!/[ \t$"'`\\;|&<>(){}\[\]*?!#]/.test(s)) return s;
+    if (!/[ \t\n\r$"'`\\;|&<>(){}\[\]*?!#]/.test(s)) return s;
     return '"' + s.replace(/(["\\$`])/g, '\\$1') + '"';
 }
 

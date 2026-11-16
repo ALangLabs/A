@@ -2,7 +2,7 @@
 
 This page is a concise, practical grammar-oriented summary of A's surface
 syntax. It complements the detailed reference pages; when it disagrees with
-`a run`/`a check` or the implementation (`compiler/astra/frontend/`), the
+`a run`/`a check` or the implementation (`src/astra/frontend/`), the
 compiler is authoritative.
 
 ## Lexical elements

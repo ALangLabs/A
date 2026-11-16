@@ -1,0 +1,387 @@
+#pragma once
+
+#include <algorithm>
+#include <initializer_list>
+#include <string>
+#include <string_view>
+#include <utility>
+#include <vector>
+
+#include "collections/transparent_map.hpp"
+
+namespace a {
+
+// Native modules are thin namespaces over interpreter builtins. Each member
+// name maps to the builtin function or constant that implements it.
+struct NativeModuleSpec {
+  StringMap<std::string> functions;
+  StringMap<std::string> constants;
+};
+
+namespace native_modules_detail {
+
+using Entries = std::initializer_list<std::pair<const char*, const char*>>;
+
+inline NativeModuleSpec makeSpec(Entries functions, Entries constants) {
+  NativeModuleSpec spec;
+  for (const auto& entry : functions) spec.functions.emplace(entry.first, entry.second);
+  for (const auto& entry : constants) spec.constants.emplace(entry.first, entry.second);
+  return spec;
+}
+
+}  // namespace native_modules_detail
+
+inline const StringMap<NativeModuleSpec>& nativeModules() {
+  using native_modules_detail::makeSpec;
+  static const StringMap<NativeModuleSpec> modules = {
+      {"math", makeSpec({{"sqrt", "sqrt"},   {"abs", "abs"},       {"min", "min"},
+                         {"max", "max"},     {"pow", "pow"},       {"sin", "sin"},
+                         {"cos", "cos"},     {"tan", "tan"},       {"asin", "asin"},
+                         {"acos", "acos"},   {"atan", "atan"},     {"atan2", "atan2"},
+                         {"exp", "exp"},     {"log", "log"},       {"log2", "log2"},
+                         {"log10", "log10"}, {"floor", "floor"},   {"ceil", "ceil"},
+                         {"round", "round"}, {"trunc", "trunc"},   {"random", "random"},
+                         {"random_int", "random_int"},
+                         /* internal kernels backing std.math ufuncs /
+                            reductions (called from ufuncs.astra /
+                            reductions.astra fast paths) */
+                         {"ew_un", "math_ew_un"},
+                         {"ew_bin", "math_ew_bin"},
+                         {"ew_bin_scalar", "math_ew_bin_scalar"},
+                         {"ew_reduce", "math_ew_reduce"}},
+                        {{"PI", "PI"}, {"E", "E"}})},
+      {"io",
+       makeSpec({{"print", "print"}, {"eprint", "eprint"}, {"input", "input"}, {"flush", "flush"}},
+                {})},
+      {"fs", makeSpec({{"read_file", "read_file"},
+                       {"write_file", "write_file"},
+                       {"append_file", "append_file"},
+                       {"file_exists", "file_exists"},
+                       {"file_size", "file_size"},
+                       {"list_dir", "list_dir"},
+                       {"remove_file", "remove_file"},
+                       {"create_dir", "create_dir"},
+                       {"remove_dir", "remove_dir"},
+                       {"rename", "rename"},
+                       {"current_dir", "current_dir"},
+                       {"read_bytes", "read_bytes"},
+                       {"write_bytes", "write_bytes"},
+                       /* os primitives (runtime/os.c) */
+                       {"chdir", "os_chdir"},
+                       {"getpid", "os_getpid"},
+                       {"getppid", "os_getppid"},
+                       {"getuid", "os_getuid"},
+                       {"geteuid", "os_geteuid"},
+                       {"getgid", "os_getgid"},
+                       {"getegid", "os_getegid"},
+                       {"getlogin", "os_getlogin"},
+                       {"cpu_count", "os_cpu_count"},
+                       {"uname", "os_uname"},
+                       {"stat", "os_stat"},
+                       {"lstat", "os_lstat"},
+                       {"access", "os_access"},
+                       {"chmod", "os_chmod"},
+                       {"symlink", "os_symlink"},
+                       {"link", "os_link"},
+                       {"readlink", "os_readlink"},
+                       {"utime", "os_utime"},
+                       {"mkdir", "os_mkdir"},
+                       {"rmdir", "os_rmdir"},
+                       {"truncate", "os_truncate"},
+                       {"environ", "os_environ"},
+                       {"getenv", "os_getenv"},
+                       {"setenv", "os_setenv"},
+                       {"unsetenv", "os_unsetenv"},
+                       {"system", "os_system"},
+                       {"urandom", "os_urandom"},
+                       {"getloadavg", "os_getloadavg"},
+                       {"gethostname", "os_gethostname"},
+                       {"umask", "os_umask"},
+                       {"getpagesize", "os_getpagesize"},
+                       {"chown", "os_chown"},
+                       {"ismount", "os_ismount"},
+                       {"disk_usage", "os_disk_usage"},
+                       {"popen", "os_popen"},
+                       {"kill", "os_kill"},
+                       {"exit", "os_exit"}},
+                      {})},
+      {"strings", makeSpec({{"len", "len"}, {"str", "str"}, {"join", "join"}}, {})},
+      {"collections", makeSpec({{"len", "len"},
+                                {"map", "map"},
+                                {"filter", "filter"},
+                                {"reduce", "reduce"},
+                                {"any", "any"},
+                                {"all", "all"},
+                                {"sum", "sum"},
+                                {"join", "join"},
+                                {"set", "set"}},
+                               {})},
+      {"unsafe", makeSpec({{"get", "unsafe_get"},
+                           {"set", "unsafe_set"},
+                           {"address_of", "unsafe_address_of"},
+                           {"load", "unsafe_load"},
+                           {"store", "unsafe_store"},
+                           {"offset", "unsafe_offset"},
+                           {"dot", "linalg_dot"},
+                           {"matvec", "linalg_matvec"},
+                           {"matvec_t", "linalg_matvec_t"},
+                           {"matmul", "linalg_matmul"},
+                           {"softmax", "linalg_softmax"},
+                           {"attention", "linalg_attention"}},
+                          {})},
+      {"arena", makeSpec({{"new", "arena_new"},
+                          {"pool", "arena_pool"},
+                          {"region", "arena_region"},
+                          {"alloc", "arena_alloc"},
+                          {"release", "arena_release"},
+                          {"reset", "arena_reset"},
+                          {"used", "arena_used"},
+                          {"total", "arena_total"}},
+                         {})},
+      {"core",
+       makeSpec({{"panic", "panic"}, {"assert", "assert"}, {"assert_eq", "assert_eq"},
+                 {"struct_name", "struct_name"}, {"struct_methods", "struct_methods"},
+                 {"fn_signature", "fn_signature"}, {"fn_doc", "fn_doc"},
+                 {"bytes_utf8_decode", "bytes_decode_utf8"},
+                 {"bytes_utf8_encode", "str_encode_utf8"},
+                 {"bytes_new", "bytes_new"},
+                 {"bytes_append", "bytes_append"},
+                 {"bytes_to_str", "bytes_to_str"}}, {})},
+      {"time", makeSpec({{"now", "now"}, {"sleep", "sleep"}}, {})},
+      {"async", makeSpec({{"spawn", "fib_spawn"}, {"join", "fib_join"},
+                          {"done", "fib_done"}, {"cancel", "fib_cancel"},
+                          {"sleep", "sleep"}}, {})},
+      {"json", makeSpec({{"parse", "json_parse"},
+                         {"stringify", "json_stringify"},
+                         {"pretty", "json_pretty"},
+                         {"is_valid", "json_is_valid"},
+                         {"get", "json_get"},
+                         {"at", "json_at"},
+                         {"len", "json_len"},
+                         {"has", "json_has"},
+                         {"keys", "json_keys"},
+                         {"kind", "json_type"},
+                         {"as_str", "json_as_str"},
+                         {"as_int", "json_as_int"},
+                         {"as_float", "json_as_float"},
+                         {"as_bool", "json_as_bool"},
+                         {"as_array", "json_as_array"},
+                         {"as_map", "json_as_map"},
+                         {"set", "json_set"},
+                         {"delete", "json_delete"}},
+                        {})},
+      {"binary", makeSpec({{"encode", "binary_encode"}, {"decode", "binary_decode"}}, {})},
+      {"testing", makeSpec({{"seed", "testing_seed"},
+                            {"for_all_int", "testing_for_all_int"},
+                            {"for_all_float", "testing_for_all_float"},
+                            {"for_all_bool", "testing_for_all_bool"},
+                            {"for_all_string", "testing_for_all_string"},
+                            {"for_all_elem", "testing_for_all_elem"}},
+                           {})},
+      {"log", makeSpec({{"set_level", "log_set_level"},
+                        {"set_json", "log_set_json"},
+                        {"debug", "log_debug"},
+                        {"info", "log_info"},
+                        {"warn", "log_warn"},
+                        {"error", "log_error"}},
+                       {})},
+      {"metrics", makeSpec({{"counter", "metrics_counter"},
+                            {"gauge", "metrics_gauge"},
+                            {"histogram", "metrics_histogram"},
+                            {"render", "metrics_render"},
+                            {"reset", "metrics_reset"}},
+                           {})},
+      {"trace", makeSpec({{"start", "trace_start"},
+                          {"end", "trace_end"},
+                          {"current", "trace_current"},
+                          {"set_attribute", "trace_set_attribute"},
+                          {"add_event", "trace_add_event"},
+                          {"inject", "trace_inject"},
+                          {"extract", "trace_extract"},
+                          {"spans", "trace_spans"},
+                          {"reset", "trace_reset"}},
+                         {})},
+      {"net", makeSpec({{"resolve", "net_resolve"},
+                        {"tcp_listen", "net_tcp_listen"},
+                        {"tcp_connect", "net_tcp_connect"},
+                        {"accept", "net_accept"},
+                        {"send", "net_send"},
+                        {"recv", "net_recv"},
+                        {"close", "net_close"},
+                        {"local_port", "net_local_port"},
+                        {"set_timeout", "net_set_timeout"},
+                        {"set_nonblocking", "net_set_nonblocking"},
+                        {"poll", "net_poll"},
+                        {"udp_socket", "net_udp_socket"},
+                        {"udp_bind", "net_udp_bind"},
+                        {"udp_send", "net_udp_send"},
+                        {"udp_recv", "net_udp_recv"},
+                        {"tls_connect", "net_tls_connect"},
+                        {"tls_wrap", "net_tls_wrap"},
+                        {"tls_available", "net_tls_available"},
+                        {"send_bytes", "net_send_bytes"},
+                        {"recv_bytes", "net_recv_bytes"},
+                        {"recv_exact", "net_recv_exact"},
+                        {"recv_body", "net_recv_body"},
+                        {"recv_body_all", "net_recv_body_all"},
+                        {"recv_buf", "net_recv_buf"},
+                        {"recv_buf_all", "net_recv_buf_all"},
+                        {"inflate_bytes", "net_inflate_bytes"},
+                        {"inflate_available", "net_inflate_available"},
+                        {"recv_status", "net_recv_status"}},
+                       {})},
+      {"terminal", makeSpec({{"isatty", "terminal_isatty"},
+                             {"raw_mode", "terminal_raw_mode"},
+                             {"read_char", "terminal_read_char"},
+                             {"read_char_ms", "terminal_read_char_ms"},
+                             {"write", "terminal_write"},
+                             {"flush", "terminal_flush"},
+                             {"size", "terminal_size"},
+                             {"home", "terminal_home"}},
+                            {})},
+      {"env", makeSpec({{"get", "env_get"},
+                        {"getenv", "os_getenv"},
+                        {"all", "os_environ"},
+                        {"set", "os_setenv"},
+                        {"unset", "os_unsetenv"}}, {})},
+      {"repl", makeSpec({{"eval", "repl_eval"}, {"quiet", "repl_quiet"}}, {})},
+      {"py", makeSpec({{"buffer", "py_buffer"},
+                       {"buffer_info", "py_buffer_info"},
+                       {"import_module", "py_import_module"},
+                       {"module", "py_import_module"},
+                       {"try_import", "py_try_import_module"},
+                       {"getattr", "py_getattr"},
+                       {"try_getattr", "py_try_getattr"},
+                       {"setattr", "py_setattr"},
+                       {"hasattr", "py_hasattr"},
+                       {"delattr", "py_delattr"},
+                       {"getitem", "py_getitem"},
+                       {"setitem", "py_setitem"},
+                       {"delitem", "py_delitem"},
+                       {"call", "py_call_obj"},
+                       {"try_call", "py_try_call_obj"},
+                       {"call_method", "py_call_method"},
+                       {"try_call_method", "py_try_call_method"},
+                       {"is_pyobject", "py_is_pyobject"},
+                       {"is_object", "py_is_pyobject"},
+                       {"str", "py_str"},
+                       {"repr", "py_repr"},
+                       {"len", "py_len"},
+                       {"contains", "py_contains"},
+                       {"truthy", "py_truthy"},
+                       {"type_name", "py_type"}},
+                      {})},
+      {"kernel_ops",
+       makeSpec({{"fused_add", "kernels_fused_add"},
+                 {"fused_sub", "kernels_fused_sub"},
+                 {"fused_mul", "kernels_fused_mul"},
+                 {"fused_div", "kernels_fused_div"},
+                 {"fused_mul_add", "kernels_fused_mul_add"},
+                 {"fused_scale", "kernels_fused_scale"},
+                 {"fused_clamp", "kernels_fused_clamp"},
+                 {"dot", "kernels_dot"},
+                 {"reduce_sum", "kernels_reduce_sum"},
+                 {"reduce_max", "kernels_reduce_max"},
+                 {"reduce_min", "kernels_reduce_min"},
+                 {"reduce_mean", "kernels_reduce_mean"},
+                 {"argmax", "kernels_reduce_argmax"},
+                 {"argmin", "kernels_reduce_argmin"},
+                 {"matvec", "kernels_matvec"},
+                 {"matmul", "kernels_matmul"},
+                 {"transpose", "kernels_transpose"},
+                 {"relu", "kernels_relu"},
+                 {"sigmoid", "kernels_sigmoid"},
+                 {"tanh", "kernels_tanh"},
+                 {"normalize", "kernels_normalize"},
+                 {"bias_relu", "kernels_bias_relu"},
+                 {"softmax", "kernels_softmax"},
+                 {"softmax_rows", "kernels_softmax_rows"},
+                 {"fused_pow", "kernels_fused_pow"},
+                 {"fused_min", "kernels_fused_min"},
+                 {"fused_max", "kernels_fused_max"},
+                 {"fused_sqrt", "kernels_fused_sqrt"},
+                 {"fused_exp", "kernels_fused_exp"},
+                 {"fused_log", "kernels_fused_log"},
+                 {"fused_reciprocal", "kernels_fused_reciprocal"},
+                 {"reduce_prod", "kernels_reduce_prod"},
+                 {"reduce_var", "kernels_reduce_var"},
+                 {"reduce_std", "kernels_reduce_std"},
+                 {"reduce_norm", "kernels_reduce_norm"},
+                 {"outer", "kernels_outer"},
+                 {"eye", "kernels_eye"},
+                 {"zeros", "kernels_zeros"},
+                 {"ones", "kernels_ones"},
+                 {"full", "kernels_full"},
+                 {"trace", "kernels_trace"},
+                 {"diag", "kernels_diag"},
+                 {"reshape", "kernels_reshape"},
+                 {"gelu", "kernels_gelu"},
+                 {"silu", "kernels_silu"},
+                 {"elu", "kernels_elu"},
+                 {"leaky_relu", "kernels_leaky_relu"},
+                 {"softplus", "kernels_softplus"},
+                 {"mish", "kernels_mish"},
+                 {"rms_norm", "kernels_rms_norm"},
+                 {"layer_norm", "kernels_layer_norm"},
+                 {"layer_norm_rows", "kernels_layer_norm_rows"},
+                 {"attention_scores", "kernels_attention_scores"},
+                 {"attention", "kernels_attention"},
+                 {"conv1d", "kernels_conv1d"},
+                 {"max_pool1d", "kernels_max_pool1d"},
+                 {"avg_pool1d", "kernels_avg_pool1d"},
+                 {"quantize_int8", "kernels_quantize_int8"},
+                 {"dequantize_int8", "kernels_dequantize_int8"}},
+                {})},
+  };
+  return modules;
+}
+
+// Builtins implemented by the standard-library layer in the interpreter. The
+// LLVM and native backends cannot lower these and fall back to the interpreter.
+inline bool isStdlibBuiltin(const std::string& name) {
+  static const char* prefixes[] = {"json_",     "binary_",   "testing_", "log_",
+                                   "metrics_",  "trace_",    "net_",    "terminal_",
+                                   "env_",      "repl_",     "kernels_"};
+  for (const char* prefix : prefixes) {
+    const std::string_view p(prefix);
+    if (name.size() >= p.size() && name.compare(0, p.size(), p) == 0) return true;
+  }
+  return false;
+}
+
+inline const NativeModuleSpec* nativeModuleSpec(const std::string& name) {
+  auto found = nativeModules().find(name);
+  return found == nativeModules().end() ? nullptr : &found->second;
+}
+
+inline bool isNativeModule(const std::string& name) { return nativeModuleSpec(name) != nullptr; }
+
+// Comma-separated list of every native module name (sorted), for diagnostics.
+inline std::string nativeModuleNames() {
+  std::vector<std::string> names;
+  names.reserve(nativeModules().size());
+  for (const auto& entry : nativeModules()) names.push_back(entry.first);
+  std::sort(names.begin(), names.end());
+  std::string out;
+  for (const std::string& name : names) {
+    if (!out.empty()) out += ", ";
+    out += name;
+  }
+  return out;
+}
+
+inline const std::string* nativeFunction(const std::string& module, const std::string& member) {
+  const NativeModuleSpec* spec = nativeModuleSpec(module);
+  if (!spec) return nullptr;
+  auto found = spec->functions.find(member);
+  return found == spec->functions.end() ? nullptr : &found->second;
+}
+
+inline const std::string* nativeConstant(const std::string& module, const std::string& member) {
+  const NativeModuleSpec* spec = nativeModuleSpec(module);
+  if (!spec) return nullptr;
+  auto found = spec->constants.find(member);
+  return found == spec->constants.end() ? nullptr : &found->second;
+}
+
+}  // namespace a

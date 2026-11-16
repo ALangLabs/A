@@ -1,0 +1,28 @@
+#include "a_runtime_internal.h"
+
+/* ------------------------------------------------------------------ */
+/* time module                                                         */
+/* ------------------------------------------------------------------ */
+
+aval bi_time_now(uint64_t n, aval *argv) {
+    (void)argv;
+    want_args("now", n, 0, 0);
+#if defined(_WIN32)
+    return mkint_full(a_win_time_ms());
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return mkint_full((int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+#endif
+}
+
+aval bi_time_sleep(uint64_t n, aval *argv) {
+    want_args("sleep", n, 1, 1);
+    int64_t ms = expect_int64(argv[0], "sleep() milliseconds");
+    if (ms < 0) ms = 0;
+    /* Inside a fiber this yields to the scheduler (other fibers keep
+       running); outside a fiber a_fib_sleep_ms degrades to nanosleep. */
+    a_fib_sleep_ms(ms);
+    return A_NONE;
+}
+

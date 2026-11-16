@@ -1,7 +1,7 @@
 {
   "name": "a-language",
   "displayName": "A Language",
-  "description": "Syntax highlighting, the A language server (diagnostics as you type, hover, go to definition, symbols, formatting, signature help), check-on-save fallback, and Run/Build/Test/Check/Format tasks for the A programming language.",
+  "description": "Syntax highlighting, the A language server (diagnostics as you type, hover, go to definition, symbols, formatting, signature help), Test Explorer integration, REPL and run-selection, check-on-save fallback, and Run/Build/Test/Check/Format tasks for the A programming language.",
   "version": "0.0.1",
   "publisher": "a-lang",
   "license": "MIT",
@@ -31,6 +31,8 @@
     "onCommand:a.test",
     "onCommand:a.check",
     "onCommand:a.fmt",
+    "onCommand:a.repl",
+    "onCommand:a.runSelection",
     "onCommand:a.showOutput",
     "onCommand:a.restartServer",
     "onCommand:a.restart",
@@ -71,8 +73,7 @@
           "light": "./fileicons/a-dark.png"
         },
         "extensions": [
-          ".astra",
-          ".a"
+          ".astra"
         ],
         "configuration": "./language-configuration.json"
       }
@@ -133,6 +134,20 @@
         "enablement": "editorLangId == a && isWorkspaceTrusted"
       },
       {
+        "command": "a.repl",
+        "title": "Start REPL",
+        "category": "A",
+        "icon": "$(terminal)",
+        "enablement": "isWorkspaceTrusted"
+      },
+      {
+        "command": "a.runSelection",
+        "title": "Run Selection/Line",
+        "category": "A",
+        "icon": "$(play)",
+        "enablement": "editorLangId == a && isWorkspaceTrusted"
+      },
+      {
         "command": "a.showOutput",
         "title": "Show Compiler Output",
         "category": "A"
@@ -175,6 +190,11 @@
         "command": "a.run",
         "key": "f5",
         "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings && debugState == inactive"
+      },
+      {
+        "command": "a.runSelection",
+        "key": "shift+enter",
+        "when": "editorLangId == a && editorTextFocus && isWorkspaceTrusted && config.a.useRunKeybindings"
       },
       {
         "command": "a.restartServer",
@@ -283,6 +303,12 @@
           "default": true,
           "scope": "resource",
           "description": "Without the language server: check saved A files on open and save. Checks wait until open A files in the same workspace folder are saved."
+        },
+        "a.formatOnSave": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Format A files before saving, using a-lsp formatting or 'a fmt' when the language server is off."
         },
         "a.checkTimeout": {
           "type": "number",

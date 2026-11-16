@@ -170,6 +170,13 @@ struct FnBodyScan {
         sub(e.step);
         break;
       }
+      case a::ExprKind::SliceSpec: {
+        const auto& e = static_cast<const a::SliceSpecExpr&>(expr);
+        sub(e.start);
+        sub(e.end);
+        sub(e.step);
+        break;
+      }
       case a::ExprKind::Field:
         sub(static_cast<const a::FieldExpr&>(expr).object);
         break;

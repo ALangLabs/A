@@ -20,7 +20,7 @@ astra. Nothing in the product path compiles C anymore.
 
 ## Why the C frontend exists today (must be replaced first)
 
-1. `compiler/astra/runtime/*.c` (~40 files) — the A runtime is C.
+1. `src/astra/runtime/*.c` (~40 files) — the A runtime is C.
    - Host: prebuilt to `libaruntime.a` by **system cc**
      (`A_RUNTIME_SYSTEM_CC=ON`, `cmake/libastra.cmake:259`).
    - Cross: **no archive is built** (`libastra.cmake:576`); the `a`
@@ -46,7 +46,7 @@ astra. Nothing in the product path compiles C anymore.
   - If no cross cc is found: `message(WARNING)` at configure time and
     skip the archives; `a build --target` then fails with a clear
     "install <triplet>-gcc" error (see Phase 2).
-- `compiler/astra/frontend/pipeline/pipeline.cpp`
+- `src/astra/frontend/pipeline/pipeline.cpp`
   - Delete `buildRuntimeArchiveCC`, the `rtSrcs` directory scan, and the
     per-program `.c` compile/`-ar` fallback in `astraBuild` and
     `prepareAstraPlan`. Always link the staged

@@ -4,7 +4,7 @@
 # meshgrid, diag/tril/triu indices, i0.
 
 from "ndarray.astra" import NDArray, zeros, ones, arange, linspace, array_from_list, get, set, tolist, str_arr
-from "statslib.astra" import histogram, histogram2d, histogram2d_edges, bincount, percentile, percentile_list, quantile, quantile_list, percentile_axis, quantile_axis, percentile_axis_list, median, median_axis, cov, corrcoef, digitize, interp, interp_scalar, gradient, gradient_axis, trapz, trapz_axis, diff, ediff1d, unwrap, bartlett, blackman, hamming, hann, hanning, kaiser, i0, i0_arr, meshgrid, meshgrid_ij, meshgrid_list, diag_indices, tril_indices, triu_indices
+from "statslib.astra" import softmax, layernorm, gelu, gelu_tanh, argsort, sort, histogram, histogram2d, histogram2d_edges, bincount, percentile, percentile_list, quantile, quantile_list, percentile_axis, quantile_axis, percentile_axis_list, median, median_axis, cov, corrcoef, digitize, interp, interp_scalar, gradient, gradient_axis, trapz, trapz_axis, diff, ediff1d, unwrap, bartlett, blackman, hamming, hann, hanning, kaiser, i0, i0_arr, meshgrid, meshgrid_ij, meshgrid_list, diag_indices, tril_indices, triu_indices
 
 fn _approx(a: f64, b: f64, tol: f64) -> bool:
     d = abs(a - b)
@@ -262,5 +262,66 @@ entry main():
     _check_shape("triu m", tum[0], [7])
     _check_arr("triu m rows", tum[0], [0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0], 1e-12)
     _check_arr("triu m cols", tum[1], [0.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0], 1e-12)
+
+    # --- NN helpers: softmax / layernorm / gelu -----------------------------------------
+    # softmax([1,2,3]) sums to 1 and matches the closed form
+    sm = softmax(NDArray([1.0, 2.0, 3.0], [3]))
+    _check_arr("softmax vals", sm,
+               [0.09003057317038046, 0.24472847105479764, 0.6652409557748218], 1e-12)
+    ssum = 0.0
+    for v in sm.data:
+        ssum = ssum + v
+    _check("softmax sum", ssum, 1.0)
+    # 2-D softmax normalizes each row independently
+    sm2 = softmax(NDArray([1.0, 2.0, 3.0, 1.0, 1.0, 1.0], [2, 3]))
+    _check_shape("softmax 2d", sm2, [2, 3])
+    r1 = sm2.data[3] + sm2.data[4] + sm2.data[5]
+    _check("softmax 2d row1 sum", r1, 1.0)
+    _check("softmax 2d uniform", sm2.data[3], 1.0 / 3.0)
+    # large logits stay finite (max-subtraction)
+    sml = softmax(NDArray([1000.0, 1001.0, 1002.0], [3]))
+    _check("softmax stable", sml.data[2], 0.6652409557748218)
+    # layernorm([1,2,3], g=1, b=0): mean 2, var 2/3 -> +-1.2247...
+    ln = layernorm(NDArray([1.0, 2.0, 3.0], [3]), ones([3]), zeros([3]), 1e-5)
+    _check_arr("layernorm", ln, [-1.2247356859083902, 0.0, 1.2247356859083902], 1e-9)
+    # gamma/beta: y*g+b applied after normalization
+    lng = layernorm(NDArray([1.0, 2.0, 3.0], [3]),
+                    NDArray([2.0, 2.0, 2.0], [3]), NDArray([1.0, 1.0, 1.0], [3]), 1e-5)
+    _check("layernorm g", lng.data[0], 2.0 * -1.2247356859083902 + 1.0)
+    # 2-D: each row normalized independently over last dim
+    ln2 = layernorm(NDArray([1.0, 2.0, 3.0, 5.0, 5.0, 5.0], [2, 3]),
+                    ones([3]), zeros([3]), 1e-5)
+    _check("layernorm 2d row1", ln2.data[4], 0.0)
+    # gelu_tanh matches torch's tanh approximation; gelu is the erf version
+    gt = gelu_tanh(NDArray([0.0], [1]))
+    _check("gelu_tanh(0)", gt.data[0], 0.0)
+    ge = gelu(NDArray([0.0], [1]))
+    _check("gelu(0)", ge.data[0], 0.0)
+    gm = gelu_tanh(NDArray([-1.0, 0.0, 1.0], [3]))
+    _check_arr("gelu_tanh vals", gm, [-0.15880800939172324, 0.0, 0.8411919906082768], 1e-12)
+    gx = gelu(NDArray([-1.0, 0.0, 1.0], [3]))
+    _check_arr("gelu vals", gx, [-0.15865526383236372, 0.0, 0.8413447361676363], 1e-9)
+    # gelu and gelu_tanh agree to ~1e-3 (documented approximation gap)
+    if abs(gx.data[2] - gm.data[2]) > 0.001:
+        print("FAIL gelu~tanh")
+        panic("check failed")
+
+    # --- argsort / sort ---------------------------------------------------------------------
+    ao = argsort(NDArray([3.0, 1.0, 2.0], [3]))
+    _check_arr("argsort", ao, [1.0, 2.0, 0.0], 1e-12)
+    so = sort(NDArray([3.0, 1.0, 2.0], [3]))
+    _check_arr("sort", so, [1.0, 2.0, 3.0], 1e-12)
+    # ties keep original order (stable)
+    aot = argsort(NDArray([2.0, 1.0, 2.0, 1.0], [4]))
+    _check_arr("argsort stable", aot, [1.0, 3.0, 0.0, 2.0], 1e-12)
+    # 2-D last axis: each row sorted independently
+    so2 = sort(NDArray([3.0, 1.0, 2.0, 0.0, 2.0, 1.0], [2, 3]))
+    _check_shape("sort 2d", so2, [2, 3])
+    _check_arr("sort 2d flat", so2, [1.0, 2.0, 3.0, 0.0, 1.0, 2.0], 1e-12)
+    # axis=0 sorts columns
+    so0 = sort(NDArray([3.0, 1.0, 2.0, 0.0], [2, 2]), 0)
+    _check_arr("sort ax0", so0, [2.0, 0.0, 3.0, 1.0], 1e-12)
+    ao0 = argsort(NDArray([3.0, 1.0, 2.0, 0.0], [2, 2]), 0)
+    _check_arr("argsort ax0", ao0, [1.0, 1.0, 0.0, 0.0], 1e-12)
 
     print("statslib self-check: all passed")

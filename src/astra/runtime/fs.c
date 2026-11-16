@@ -1,0 +1,590 @@
+#include "a_runtime_internal.h"
+
+static char *read_all_file(const char *path, size_t *out_len) {
+    FILE *f = fopen(path, "rb");
+    if (!f) panicf("cannot read file '%s'", path);
+    /* Regular files: take the size from fseek/ftell and do one allocation
+       plus (usually) one read. The old doubling-realloc loop re-copied the
+       whole buffer on every growth step — ~6x slower on hundred-MB files. */
+    size_t cap = 4096, len = 0;
+    char *buf = NULL;
+    int done = 0;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            cap = (size_t)sz;
+            buf = (char *)xmalloc(cap + 1);
+            len = fread(buf, 1, cap, f);
+            if (len < cap) {
+                done = 1;   /* fread only stops short at EOF or error */
+            } else {
+                /* Exact fit is ambiguous: probe once so a file that ends
+                   exactly at `cap` does not trigger a pointless 2x realloc
+                   plus a final EOF fread. */
+                int c = fgetc(f);
+                if (c == EOF) done = 1;
+                else ungetc(c, f);
+            }
+        }
+    }
+    if (!buf) buf = (char *)xmalloc(cap + 1);   /* non-seekable stream */
+    while (!done) {
+        if (len == cap) { cap *= 2; buf = (char *)xrealloc(buf, cap + 1); }
+        size_t r = fread(buf + len, 1, cap - len, f);
+        len += r;
+        if (r == 0) break;
+    }
+    if (ferror(f)) { fclose(f); free(buf); panicf("cannot read file '%s'", path); }
+    fclose(f);
+    buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+
+const char *path_arg(aval v, const char *what) {
+    return str_of(v, what)->data;
+}
+
+#if A_FIBERS
+/* Blocking-op worker jobs (defined at file end). Job structs live on the
+   calling fiber's stack — valid while the fiber is suspended. Worker
+   threads use raw libc malloc only: the GC registry is not thread-safe. */
+typedef struct {
+    const char *path;
+    char *buf;       /* out: raw malloc'd file contents */
+    size_t len;
+    int err;
+} FsReadJob;
+static void *fs_read_job(void *p);
+
+typedef struct {
+    const char *path;
+    const char *mode;
+    const char *data;
+    size_t len;
+    int rc;          /* 0 ok, -1 open error, -2 short write */
+} FsWriteJob;
+static void *fs_write_job(void *p);
+#endif
+
+aval bi_read_file(uint64_t n, aval *argv) {
+    want_args("read_file", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+#if A_FIBERS
+    if (a_fib_on()) {
+        /* Whole read+alloc runs on a blocking-pool worker; only the
+           String construction (xmalloc) happens here on the fiber. */
+        FsReadJob j;
+        j.path = path; j.buf = NULL; j.len = 0; j.err = 0;
+        a_fib_blocking(fs_read_job, &j);
+        if (j.err || !j.buf) panicf("cannot read file '%s'", path);
+        aval r = a_str_new(j.buf, (uint64_t)j.len);
+        free(j.buf);   /* raw malloc: a_gc_free passes untracked ptrs through */
+        return r;
+    }
+#endif
+    /* Fast path: a seekable file of known size is read straight into the
+       string's own storage — no intermediate buffer and no second copy.
+       This is what makes multi-hundred-MB reads (model weights, etc.)
+       practical. Anything unusual falls back to read_all_file. */
+    FILE *f = fopen(path, "rb");
+    if (!f) panicf("cannot read file '%s'", path);
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && (uint64_t)sz <= UINT32_MAX &&
+            fseek(f, 0, SEEK_SET) == 0) {
+            aval s = a_str_new_uninit((uint64_t)sz);
+            AStr *as = (AStr *)obj_of(s);
+            size_t got = fread(as->data, 1, (size_t)sz, f);
+            if (!ferror(f) && got == (size_t)sz) {
+                int c = fgetc(f);
+                if (c == EOF) { fclose(f); return s; }
+                ungetc(c, f);
+                /* File grew past ftell: keep the string and concat the
+                   tail (rope concat is lazy — no copy unless read). */
+                size_t tcap = 4096, tlen = 0;
+                char *tbuf = (char *)xmalloc(tcap + 1);
+                for (;;) {
+                    if (tlen == tcap) { tcap *= 2; tbuf = (char *)xrealloc(tbuf, tcap + 1); }
+                    size_t r = fread(tbuf + tlen, 1, tcap - tlen, f);
+                    tlen += r;
+                    if (r == 0) break;
+                }
+                int ferr = ferror(f);
+                fclose(f);
+                if (ferr) { free(tbuf); panicf("cannot read file '%s'", path); }
+                tbuf[tlen] = '\0';
+                aval tail = a_str_new(tbuf, (uint64_t)tlen);
+                free(tbuf);
+                return a_str_cat(s, tail);
+            }
+            /* Short read or error: discard and use the generic path. */
+            fclose(f);
+        } else {
+            fclose(f);
+        }
+    } else {
+        fclose(f);
+    }
+    size_t len;
+    char *data = read_all_file(path, &len);
+    aval r = a_str_new(data, (uint64_t)len);
+    free(data);
+    return r;
+}
+
+static aval write_file_impl(aval pathv, aval textv, const char *mode, const char *name) {
+    const char *path = path_arg(pathv, "path");
+    const char *p;
+    uint64_t len;
+    AObj *o = obj_of(textv);
+    if (o && o->type == T_BYTES) {
+        ABytes *b = (ABytes *)o;
+        p = b->data;
+        len = b->h.len;
+    } else {
+        if (kind_of(textv) != K_STR) panicf("%s() text must be str or Bytes", name);
+        p = str_data(textv, &len);
+    }
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsWriteJob j;
+        j.path = path; j.mode = mode; j.data = p; j.len = len; j.rc = 0;
+        a_fib_blocking(fs_write_job, &j);
+        if (j.rc == -1) panicf("cannot open file '%s'", path);
+        if (j.rc == -2) panicf("cannot write file '%s'", path);
+        return A_NONE;
+    }
+#endif
+    FILE *f = fopen(path, mode);
+    if (!f) panicf("cannot open file '%s'", path);
+    if (len && fwrite(p, 1, (size_t)len, f) != len) {
+        fclose(f);
+        panicf("cannot write file '%s'", path);
+    }
+    fclose(f);
+    return A_NONE;
+}
+
+aval bi_write_file(uint64_t n, aval *argv) { want_args("write_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "wb", "write_file"); }
+aval bi_append_file(uint64_t n, aval *argv) { want_args("append_file", n, 2, 2); return write_file_impl(argv[0], argv[1], "ab", "append_file"); }
+
+aval bi_read_bytes(uint64_t n, aval *argv) {
+    want_args("read_bytes", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+    size_t len = 0;
+    char *data = NULL;
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsReadJob j;
+        j.path = path; j.buf = NULL; j.len = 0; j.err = 0;
+        a_fib_blocking(fs_read_job, &j);
+        if (j.err || !j.buf) panicf("cannot read file '%s'", path);
+        data = j.buf; len = j.len;
+    } else
+#endif
+    {
+        data = read_all_file(path, &len);
+    }
+    /* Straight into packed int64 storage: no AVec regrowth, no aval
+       round-trip — one pass over the bytes, 8x less memory than the
+       tagged-value path. */
+    int64_t *v = (int64_t *)xmalloc((len ? len : 1) * sizeof(int64_t));
+    for (size_t i = 0; i < len; ++i) v[i] = (unsigned char)data[i];
+    aval r = a_list_take_i64(v, (uint64_t)len);
+    free(data);
+    return r;
+}
+
+aval bi_write_bytes(uint64_t n, aval *argv) {
+    want_args("write_bytes", n, 2, 2);
+    const char *path = path_arg(argv[0], "path");
+    AArr *a = arr_of(argv[1], "write_bytes bytes");
+    uint64_t len = a->h.len;
+    char *buf = (char *)xmalloc(len ? len : 1);
+    if (arr_packed(a)) {
+        /* Packed int64 storage: values are already raw, no aval decode. */
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t v = a->iitems[i];
+            if (v < 0 || v > 255) {
+                free(buf);
+                panicf("write_bytes: byte value %lld out of range 0-255",
+                       (long long)v);
+            }
+            buf[i] = (char)v;
+        }
+    } else {
+        for (uint64_t i = 0; i < len; ++i) {
+            int64_t v = expect_int64(arr_elem(a, i), "write_bytes byte");
+            if (v < 0 || v > 255) {
+                free(buf);
+                panicf("write_bytes: byte value %lld out of range 0-255",
+                       (long long)v);
+            }
+            buf[i] = (char)v;
+        }
+    }
+#if A_FIBERS
+    if (a_fib_on()) {
+        FsWriteJob j;
+        j.path = path; j.mode = "wb"; j.data = buf; j.len = len; j.rc = 0;
+        a_fib_blocking(fs_write_job, &j);
+        free(buf);
+        if (j.rc == -1) panicf("cannot open file '%s'", path);
+        if (j.rc == -2) panicf("cannot write file '%s'", path);
+        return A_NONE;
+    }
+#endif
+    FILE *f = fopen(path, "wb");
+    if (!f) { free(buf); panicf("cannot open file '%s'", path); }
+    if (len && fwrite(buf, 1, (size_t)len, f) != len) {
+        fclose(f);
+        free(buf);
+        panicf("cannot write file '%s'", path);
+    }
+    fclose(f);
+    free(buf);
+    return A_NONE;
+}
+
+aval bi_file_size(uint64_t n, aval *argv) {
+    want_args("file_size", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+    FILE *f = fopen(path, "rb");
+    if (!f) return mkint_full(-1);
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return mkint_full(-1); }
+    long sz = ftell(f);
+    fclose(f);
+    return mkint_full(sz < 0 ? -1 : (int64_t)sz);
+}
+
+aval bi_file_exists(uint64_t n, aval *argv) {
+    want_args("file_exists", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    FILE *f = fopen(path, "rb");
+    if (!f) return A_FALSE;
+    fclose(f);
+    return A_TRUE;
+#else
+    /* fopen() fails on directories under the Windows CRT, so probe with
+       GetFileAttributesA instead — matching POSIX semantics where any
+       existing path (file or directory) counts. */
+    return GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES
+               ? A_TRUE : A_FALSE;
+#endif
+}
+
+static int str_ptr_cmp(const void *a, const void *b) {
+    aval x = *(const aval *)a, y = *(const aval *)b;
+    uint64_t lx, ly;
+    const char *px = str_data(x, &lx), *py = str_data(y, &ly);
+    size_t m = lx < ly ? (size_t)lx : (size_t)ly;
+    int c = m ? memcmp(px, py, m) : 0;
+    if (c) return c;
+    return lx < ly ? -1 : lx > ly ? 1 : 0;
+}
+
+aval bi_list_dir(uint64_t n, aval *argv) {
+    want_args("list_dir", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+    AVec out = { NULL, 0, 0 };
+#if !defined(_WIN32)
+    DIR *d = opendir(path);
+    if (!d) panicf("cannot open directory '%s'", path);
+    struct dirent *de;
+    while ((de = readdir(d)) != NULL) {
+        if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+        avec_push(&out, a_str_new(de->d_name, strlen(de->d_name)));
+    }
+    closedir(d);
+#else
+    /* FindFirstFileA("dir\*") enumerates every entry except "." and
+       "..", matching the POSIX listing. Both '/' and '\' are accepted
+       as separators by the Win32 file APIs. */
+    size_t plen = strlen(path);
+    if (plen == 0) panicf("cannot open directory '%s'", path);
+    int need_sep = plen > 0 && path[plen - 1] != '/' && path[plen - 1] != '\\';
+    char *pat = (char *)xmalloc(plen + (size_t)need_sep + 2);
+    memcpy(pat, path, plen);
+    size_t off = plen;
+    if (need_sep) pat[off++] = '\\';
+    pat[off] = '*';
+    pat[off + 1] = '\0';
+    WIN32_FIND_DATAA fd;
+    void *h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == INVALID_HANDLE_VALUE) panicf("cannot open directory '%s'", path);
+    for (;;) {
+        avec_push(&out, a_str_new(fd.cFileName, strlen(fd.cFileName)));
+        if (!FindNextFileA(h, &fd)) break;
+    }
+    FindClose(h);
+#endif
+    /* insertion sort using the same comparator as qsort would need context; simple shell sort */
+    for (size_t gap = out.len / 2; gap > 0; gap /= 2) {
+        for (size_t i = gap; i < out.len; ++i) {
+            aval t = out.p[i];
+            size_t j = i;
+            while (j >= gap && str_ptr_cmp(&out.p[j - gap], &t) > 0) {
+                out.p[j] = out.p[j - gap];
+                j -= gap;
+            }
+            out.p[j] = t;
+        }
+    }
+    aval r = list_from_vec(out.p, out.len, 0);
+    free(out.p);
+    return r;
+}
+
+aval bi_remove_file(uint64_t n, aval *argv) {
+    want_args("remove_file", n, 1, 1);
+    const char *path = path_arg(argv[0], "path");
+#if !defined(_WIN32)
+    if (remove(path) != 0) panicf("cannot remove file '%s'", path);
+#else
+    /* POSIX remove() unlinks files and removes empty directories; the
+       CRT remove() on Windows only handles files. */
+    if (DeleteFileA(path) == 0 && RemoveDirectoryA(path) == 0)
+        panicf("cannot remove file '%s'", path);
+#endif
+    return A_NONE;
+}
+
+aval bi_create_dir(uint64_t n, aval *argv) {
+    want_args("create_dir", n, 1, 1);
+#if !defined(_WIN32)
+    const char *path = path_arg(argv[0], "path");
+    char *tmp = xstrdup(path);
+    size_t len = strlen(tmp);
+    for (size_t i = 1; i < len; ++i) {
+        if (tmp[i] == '/') {
+            tmp[i] = '\0';
+            if (mkdir(tmp, 0777) != 0 && errno != EEXIST)
+                panicf("cannot create directory '%s'", tmp);
+            tmp[i] = '/';
+        }
+    }
+    if (mkdir(tmp, 0777) != 0) {
+        if (errno == EEXIST) {
+            struct stat st;
+            if (stat(tmp, &st) == 0 && S_ISDIR(st.st_mode)) { free(tmp); return A_NONE; }
+        }
+        panicf("cannot create directory '%s'", path);
+    }
+    free(tmp);
+    return A_NONE;
+#else
+    /* Win32 equivalent of the POSIX parents-first mkdir above: normalize
+       '/' to '\', pre-create each ancestor (failures are ignored — the
+       final CreateDirectoryA reports the real error), then create the
+       leaf. A bare drive prefix like "C:" is skipped: "C:\" already
+       exists and CreateDirectoryA on it is meaningless. */
+    const char *path = path_arg(argv[0], "path");
+    char *tmp = xstrdup(path);
+    size_t len = strlen(tmp);
+    for (size_t i = 0; i < len; ++i)
+        if (tmp[i] == '/') tmp[i] = '\\';
+    for (size_t i = 1; i < len; ++i) {
+        if (tmp[i] == '\\' && !(i == 2 && tmp[1] == ':')) {
+            tmp[i] = '\0';
+            CreateDirectoryA(tmp, NULL);
+            tmp[i] = '\\';
+        }
+    }
+    if (!CreateDirectoryA(tmp, NULL)) {
+        unsigned long e = GetLastError();
+        if (e == ERROR_ALREADY_EXISTS || e == ERROR_FILE_EXISTS) {
+            unsigned long attr = GetFileAttributesA(tmp);
+            if (attr != INVALID_FILE_ATTRIBUTES &&
+                (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                free(tmp);
+                return A_NONE;
+            }
+        }
+        free(tmp);
+        panicf("cannot create directory '%s'", path);
+    }
+    free(tmp);
+    return A_NONE;
+#endif
+}
+
+static int remove_tree(const char *path) {
+#if !defined(_WIN32)
+    struct stat st;
+    if (lstat(path, &st) != 0) return -1;
+    if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) {
+        DIR *d = opendir(path);
+        if (!d) return -1;
+        struct dirent *de;
+        int ok = 1;
+        while ((de = readdir(d)) != NULL) {
+            if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
+            size_t need = strlen(path) + strlen(de->d_name) + 2;
+            char *child = (char *)xmalloc(need);
+            snprintf(child, need, "%s/%s", path, de->d_name);
+            if (remove_tree(child) != 0) ok = 0;
+            free(child);
+            if (!ok) break;
+        }
+        closedir(d);
+        if (!ok) return -1;
+        return rmdir(path);
+    }
+    return remove(path);
+#else
+    /* Win32 recursive delete. Reparse points (symlinks, junctions) are
+       removed as links, never followed — the same policy the POSIX path
+       gets from lstat()+!S_ISLNK. */
+    unsigned long attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) return -1;
+    if (!(attr & FILE_ATTRIBUTE_DIRECTORY) ||
+        (attr & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        /* File (or link): DeleteFileA covers files and file symlinks;
+           RemoveDirectoryA covers directory symlinks and junctions. */
+        if (DeleteFileA(path)) return 0;
+        return RemoveDirectoryA(path) ? 0 : -1;
+    }
+    /* Real directory: enumerate children with FindFirstFileA and recurse.
+       Trailing separators are tolerated when joining child paths. */
+    size_t plen = strlen(path);
+    int need_sep = plen > 0 && path[plen - 1] != '/' && path[plen - 1] != '\\';
+    char *pat = (char *)xmalloc(plen + (size_t)need_sep + 2);
+    memcpy(pat, path, plen);
+    size_t off = plen;
+    if (need_sep) pat[off++] = '\\';
+    pat[off] = '*';
+    pat[off + 1] = '\0';
+    WIN32_FIND_DATAA fd;
+    void *h = FindFirstFileA(pat, &fd);
+    free(pat);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    int ok = 1;
+    for (;;) {
+        size_t nlen = strlen(fd.cFileName);
+        size_t need = plen + (size_t)need_sep + nlen + 2;
+        char *child = (char *)xmalloc(need);
+        memcpy(child, path, plen);
+        size_t coff = plen;
+        if (need_sep) child[coff++] = '\\';
+        memcpy(child + coff, fd.cFileName, nlen);
+        child[coff + nlen] = '\0';
+        if (remove_tree(child) != 0) { ok = 0; free(child); break; }
+        free(child);
+        if (!FindNextFileA(h, &fd)) break;
+    }
+    FindClose(h);
+    if (!ok) return -1;
+    return RemoveDirectoryA(path) ? 0 : -1;
+#endif
+}
+
+aval bi_remove_dir(uint64_t n, aval *argv) {
+    want_args("remove_dir", n, 1, 1);
+    if (remove_tree(path_arg(argv[0], "path")) != 0)
+        panicf("cannot remove directory '%s'", path_arg(argv[0], "path"));
+    return A_NONE;
+}
+
+aval bi_rename(uint64_t n, aval *argv) {
+    want_args("rename", n, 2, 2);
+    if (rename(path_arg(argv[0], "old"), path_arg(argv[1], "new")) != 0)
+        panicf("cannot rename '%s' to '%s'", path_arg(argv[0], "old"), path_arg(argv[1], "new"));
+    return A_NONE;
+}
+
+aval bi_current_dir(uint64_t n, aval *argv) {
+    want_args("current_dir", n, 0, 0);
+    (void)argv;
+#if !defined(_WIN32)
+    char buf[4096];
+    if (!getcwd(buf, sizeof(buf))) panicf("cannot get current directory");
+    return a_str_new(buf, strlen(buf));
+#else
+    char buf[4096];
+    if (!GetCurrentDirectoryA(sizeof(buf), buf))
+        panicf("cannot get current directory");
+    return a_str_new(buf, strlen(buf));
+#endif
+}
+
+#if A_FIBERS
+/* ------------------------------------------------------------------ */
+/* blocking-pool workers (raw libc alloc ONLY — never xmalloc/a_gc_*)  */
+/* ------------------------------------------------------------------ */
+#undef free   /* libc free: worker allocations are raw malloc, not GC blocks */
+
+static void *fs_read_job(void *p) {
+    FsReadJob *j = (FsReadJob *)p;
+    FILE *f = fopen(j->path, "rb");
+    if (!f) { j->err = 1; return NULL; }
+    size_t cap = 4096, len = 0;
+    char *buf = (char *)malloc(cap + 1);
+    if (!buf) { fclose(f); j->err = 1; return NULL; }
+    if (fseek(f, 0, SEEK_END) == 0) {
+        long sz = ftell(f);
+        if (sz >= 0 && fseek(f, 0, SEEK_SET) == 0) {
+            free(buf);
+            cap = (size_t)sz;
+            buf = (char *)malloc(cap + 1);
+            if (!buf) { fclose(f); j->err = 1; return NULL; }
+            len = fread(buf, 1, cap, f);
+            if (len == cap) {
+                int c = fgetc(f);
+                if (c != EOF) {
+                    /* grew past ftell: keep reading */
+                    while (!feof(f)) {
+                        if (len == cap) {
+                            cap *= 2;
+                            char *nb = (char *)realloc(buf, cap + 1);
+                            if (!nb) { free(buf); fclose(f); j->err = 1; return NULL; }
+                            buf = nb;
+                        }
+                        len += fread(buf + len, 1, cap - len, f);
+                    }
+                }
+            }
+        }
+    } else {
+        /* non-seekable: doubling reads */
+        for (;;) {
+            if (len == cap) {
+                cap *= 2;
+                char *nb = (char *)realloc(buf, cap + 1);
+                if (!nb) { free(buf); fclose(f); j->err = 1; return NULL; }
+                buf = nb;
+            }
+            size_t r = fread(buf + len, 1, cap - len, f);
+            len += r;
+            if (r == 0) break;
+        }
+    }
+    int ferr = ferror(f);
+    fclose(f);
+    if (ferr) { free(buf); j->err = 1; return NULL; }
+    buf[len] = '\0';
+    j->buf = buf;
+    j->len = len;
+    j->err = 0;
+    return NULL;
+}
+
+static void *fs_write_job(void *p) {
+    FsWriteJob *j = (FsWriteJob *)p;
+    FILE *f = fopen(j->path, j->mode);
+    if (!f) { j->rc = -1; return NULL; }
+    if (j->len && fwrite(j->data, 1, j->len, f) != j->len) {
+        fclose(f);
+        j->rc = -2;
+        return NULL;
+    }
+    fclose(f);
+    j->rc = 0;
+    return NULL;
+}
+
+#define free(p) a_gc_free(p)   /* restore the runtime macro for anything below */
+#endif
+

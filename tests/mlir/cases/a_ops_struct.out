@@ -1,0 +1,11 @@
+module {
+  %c2_i64 = arith.constant 2 : i64
+  %c1_i64 = arith.constant 1 : i64
+  a.func @main(%arg0: !a.aval) -> !a.aval {
+    %0 = a.struct.getfield %arg0[%c1_i64] : !a.aval, i64 -> !a.aval
+    %1 = a.struct.setfield %arg0[%c2_i64] = %0 : !a.aval, i64, !a.aval -> !a.aval
+    %2 = a.array.get %1[%0] : !a.aval, !a.aval -> !a.aval
+    %3 = a.array.set %1[%0] = %2 : !a.aval, !a.aval, !a.aval -> !a.aval
+    return %3 : !a.aval
+  }
+}

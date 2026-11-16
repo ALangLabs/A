@@ -14,44 +14,31 @@ set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
 # Modules in dependency order (each owns its CMakeLists.txt)
-add_subdirectory(compiler/astra)
+add_subdirectory(src/astra)
 add_subdirectory(tools/lsp)
-# In-process JIT backend (Goose-style): the Astra (compiler/astra/)
-# compiles the C
-# emitter's output into memory for `a run`.
-include(cmake/libastra.cmake)
+# Stage the A runtime (src/astra/runtime/*.c) into build/astralib as
+# libaruntime.a; `a run`/`a build` link it and the run-cache fingerprints it —
+# keep the staged runtime fresh whenever `a` is rebuilt so `--target a` builds
+# cannot serve binaries linked against a stale runtime.
+include(cmake/aruntime.cmake)
+add_dependencies(a aruntime)
 # Packaging
 include(GNUInstallDirs)
 install(TARGETS a RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS a-lsp RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(DIRECTORY compiler/astra/frontend/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/compiler
+install(DIRECTORY src/astra/frontend/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/compiler
   FILES_MATCHING PATTERN "*.hpp")
-install(DIRECTORY compiler/astra/runtime/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/runtime
+install(DIRECTORY src/astra/runtime/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/runtime
   FILES_MATCHING PATTERN "*.hpp")
-
-# Backend + runtime payload. An installed `a` locates both relative to its own
-# executable (findAstra/findRuntime in pipeline.cpp), so the staged drivers go
-# under <bindir>/astra/ and the staged runtime dirs (headers, runtime .c files,
-# libastra1.a, libaruntime.a) under <bindir>/astralib*/. Without these the
-# installed compiler cannot build or run a single program.
-install(PROGRAMS "${ASTRA_BUILD}/astra${CMAKE_EXECUTABLE_SUFFIX}"
-        DESTINATION ${CMAKE_INSTALL_BINDIR}/astra)
-foreach(arch IN LISTS ASTRA_ALL_ARCHES)
-  if(EXISTS "${ASTRA_BUILD}/astra-${arch}${CMAKE_EXECUTABLE_SUFFIX}")
-    install(PROGRAMS "${ASTRA_BUILD}/astra-${arch}${CMAKE_EXECUTABLE_SUFFIX}"
-            DESTINATION ${CMAKE_INSTALL_BINDIR}/astra)
-  endif()
-endforeach()
-install(DIRECTORY "${ASTRA_STAGE}/" DESTINATION ${CMAKE_INSTALL_BINDIR}/astralib)
-foreach(arch IN LISTS ASTRA_ALL_ARCHES)
-  if(EXISTS "${CMAKE_BINARY_DIR}/astralib-${arch}")
-    install(DIRECTORY "${CMAKE_BINARY_DIR}/astralib-${arch}/"
-            DESTINATION ${CMAKE_INSTALL_BINDIR}/astralib-${arch})
-  endif()
-endforeach()
-# The stdlib is resolved from <bindir>/../share/a/stdlib (defaultStdlibRoot).
+# Runtime + stdlib payload: an installed `a` locates both relative to its own
+# executable — <prefix>/astralib (bin/../astralib in findRuntime) and
+# <prefix>/share/a/stdlib (bin/../share/a/stdlib in defaultStdlibRoot). Without
+# these the installed compiler cannot build or run a single program.
+if(EXISTS "${CMAKE_BINARY_DIR}/astralib/libaruntime.a")
+  install(DIRECTORY "${CMAKE_BINARY_DIR}/astralib/"
+          DESTINATION astralib)
+endif()
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
-        DESTINATION ${CMAKE_INSTALL_DATADIR}/a/stdlib
+        DESTINATION share/a/stdlib
         PATTERN "_acache_" EXCLUDE)
-
 add_subdirectory(tests)

@@ -96,7 +96,6 @@ done
 rm -rf "$PREFIX/stdlib"
 cp -R "$root/stdlib" "$PREFIX/stdlib"
 chmod +x "$PREFIX/bin/a" "$PREFIX/bin/a-lsp" 2>/dev/null || true
-for f in "$PREFIX"/bin/astra*; do chmod +x "$f" 2>/dev/null || true; done
 
 # --- PATH -------------------------------------------------------------------
 case ":$PATH:" in

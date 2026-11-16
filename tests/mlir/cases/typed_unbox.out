@@ -1,0 +1,26 @@
+module {
+  %false = arith.constant false
+  %cst = arith.constant 5.000000e-01 : f64
+  %c1_i64 = arith.constant 1 : i64
+  a.func @unbox_i64(%arg0: !a.aval) -> !a.aval {
+    %0 = to_aval %c1_i64 : i64 -> !a.aval
+    %1 = from_aval %0 : !a.aval -> i64
+    %2 = arith.addi %1, %1 : i64
+    %3 = to_aval %2 : i64 -> !a.aval
+    %4 = a.runtime.call "a_add_slow"(%3, %arg0) : (!a.aval, !a.aval) -> !a.aval
+    return %4 : !a.aval
+  }
+  a.func @unbox_f64(%arg0: !a.aval) -> !a.aval {
+    %0 = to_aval %cst : f64 -> !a.aval
+    %1 = from_aval %0 : !a.aval -> f64
+    %2 = arith.addf %1, %1 : f64
+    %3 = to_aval %2 : f64 -> !a.aval
+    %4 = a.runtime.call "a_add_slow"(%3, %arg0) : (!a.aval, !a.aval) -> !a.aval
+    return %4 : !a.aval
+  }
+  a.func @unbox_i1(%arg0: !a.aval) -> !a.aval {
+    %0 = to_aval %false : i1 -> !a.aval
+    %1 = a.runtime.call "a_add_slow"(%0, %arg0) : (!a.aval, !a.aval) -> !a.aval
+    return %1 : !a.aval
+  }
+}

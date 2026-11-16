@@ -67,7 +67,7 @@ const STARTER_TASKS = {
 async function folderHasAFile(folder) {
     try {
         const files = await vscode.workspace.findFiles(
-            new vscode.RelativePattern(folder, '**/*.{a,astra}'),
+            new vscode.RelativePattern(folder, '**/*.astra'),
             '{**/node_modules/**,**/.git/**,**/build/**,**/build-*/**}', 1);
         return files.length > 0;
     } catch {

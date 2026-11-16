@@ -1,6 +1,6 @@
 # Modules and imports
 
-Verified against `compiler/astra/frontend/parser` (ImportStmt/FromImportStmt),
+Verified against `src/astra/frontend/parser` (ImportStmt/FromImportStmt),
 `examples/modules/imports.astra`, and `tests/integration/cases/modules/`.
 
 ## Import forms

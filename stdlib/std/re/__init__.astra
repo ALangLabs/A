@@ -5,7 +5,8 @@
 #   literals, '.', '^', '$', '*', '+', '?', '{m}', '{m,}', '{m,n}',
 #   groups '(...)' and '(?:...)', alternation '|', character classes
 #   '[...]' / '[^...]' with ranges and escapes, anchors '\\A' '\\Z' '\\z'
-#   '\\b' '\\B', and the class escapes '\\d' '\\D' '\\w' '\\W' '\\s' '\\S'.
+#   '\\b' '\\B', the class escapes '\\d' '\\D' '\\w' '\\W' '\\s' '\\S',
+#   and zero-width lookaheads '(?=...)' / '(?!...)'.
 #
 #   import std:re
 #   m = re.search("a(b*)c", "xxabbc")   # Match or None
@@ -21,9 +22,12 @@
 # Deviations from Python (documented):
 #   * ASCII-only classes: \\w is [0-9A-Za-z_], \\d is [0-9], \\s is
 #     [\\t\\n\\v\\f\\r ]. Python's Unicode-aware classes are not ported.
-#   * No flags (no (?i), no re.I/M/S/X), no lookaround, no backreferences
+#   * No flags (no (?i), no re.I/M/S/X), no backreferences
 #     in the PATTERN (\\1 inside the pattern panics), no lazy quantifiers
 #     (*?, +?), no possessive quantifiers, no named groups (?P<..>).
+#   * Lookaheads '(?=...)' and '(?!...)' ARE supported as zero-width
+#     assertions; capture groups inside them are evaluated but their
+#     captures are discarded (Python <3.11 semantics for (?=..)).
 #   * \\b and \\B ARE supported as zero-width word-boundary assertions;
 #     \\A \\Z \\z are anchors. Other letter escapes panic ("bad escape").
 #   * No inline flag groups '(?i)' etc — unsupported group extensions panic.
@@ -49,6 +53,8 @@ import std:bytes
 #   ["group", idx, alts]     idx = capture index (0 = non-capturing);
 #                            alts = array of seqs (each seq = array of nodes)
 #   ["quant", atom, min, max]  max = -1 means unbounded
+#   ["look", neg, alts]        zero-width lookahead (neg = (?!...),
+#                              non-neg = (?=...)); captures discarded
 #   ["bol"] ["eol"] ["wb"] ["nwb"]   zero-width assertions
 # A pattern is an array of alternatives (seqs).
 # ---------------------------------------------------------------------------
@@ -89,6 +95,15 @@ fn _n_quant(atom, mn, mx):
 fn _n_anchor(kind):
     n = []
     n.append(kind)
+    return n
+
+fn _n_look(neg, alts):
+    # zero-width lookahead: ["look", negated, alts]; negated = (?!...),
+    # plain = (?=...). Captures inside are evaluated but discarded.
+    n = []
+    n.append("look")
+    n.append(neg)
+    n.append(alts)
     return n
 
 # -- parser ------------------------------------------------------------------
@@ -218,6 +233,14 @@ class _Parser:
             c2 = self._take()
             if c2 == ":":
                 idx = 0
+            elif c2 == "=" or c2 == "!":
+                neg = false
+                if c2 == "!":
+                    neg = true
+                alts = self._alt()
+                if self._take() != ")":
+                    core.panic("re: missing ')' in lookahead")
+                return _n_look(neg, alts)
             else:
                 core.panic("re: unsupported group extension '(?" + c2 + "...)'")
         else:
@@ -496,6 +519,23 @@ fn _node_all(text, node, st):
             if before == after:
                 ok = true
         if ok:
+            out.append(st)
+        return out
+    if kind == "look":
+        # zero-width lookahead: succeeds iff the sub-pattern has a match
+        # starting exactly at pos. State is unchanged (captures discarded).
+        neg = node[1]
+        alts = node[2]
+        found = false
+        i = 0
+        while i < len(alts):
+            g2 = st.copy()
+            r = _first_seq(text, alts[i], 0, g2)
+            if len(r) > 0:
+                found = true
+                break
+            i = i + 1
+        if found != neg:
             out.append(st)
         return out
     if kind == "group":

@@ -1,0 +1,22 @@
+import async
+
+fn work(name, ms):
+    sleep(ms)
+    return name + "-ok"
+
+entry main():
+    t0 = now()
+    a = async.spawn(work, "A", 80)
+    b = async.spawn(work, "B", 80)
+    ra = async.join(a)
+    rb = async.join(b)
+    el = now() - t0
+    # Two 80 ms sleeps must overlap: serial would be >= 160 ms.
+    if el >= 150:
+        print("FAIL serial")
+    else:
+        print("ok", ra, rb)
+    c = async.spawn(work, "C", 5)
+    print("d0", async.done(c))
+    async.join(c)
+    print("d1", async.done(c))
