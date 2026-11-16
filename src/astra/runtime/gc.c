@@ -676,9 +676,14 @@ static double p_t_build, p_t_roots, p_t_regs, p_t_stack, p_t_fix,
               p_t_sweep, p_t_live;
 
 static double gc_now_s(void) {
+#if defined(_WIN32)
+    /* No clock_gettime on MSVC; the runtime's QPC helper is monotonic. */
+    return (double)a_win_mono_ms() / 1000.0;
+#else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (double)ts.tv_sec + (double)ts.tv_nsec * 1e-9;
+#endif
 }
 
 /* LSD radix sort of g_ord[0..n) by start address: O(n) regardless of

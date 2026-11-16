@@ -194,7 +194,7 @@ SemaResult Sema::analyzeParallel(int jobs) {
     std::vector<std::thread> workers;
     int threads = static_cast<int>(std::min<std::size_t>(static_cast<std::size_t>(jobs), n));
     for (int t = 0; t < threads; ++t) {
-      workers.emplace_back([this, &next, &mergeMutex, t, threads] {
+      workers.emplace_back([this, &next, &mergeMutex] {
         Sema worker(graph_, sink_);
         worker.functionsByName_ = functionsByName_;
         worker.structsByName_ = structsByName_;
