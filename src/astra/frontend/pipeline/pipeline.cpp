@@ -604,6 +604,13 @@ inline Plan plan(CompiledModule& m, const TargetDesc& td, bool testMode,
     const char* typed = std::getenv("A_MLIR_TYPED");
     h = mixBytes(h, typed ? typed : "");
   }
+  // These knobs change the produced object code without changing any file
+  // stat: opt level override, target CPU/features, parfor lowering.
+  for (const char* name : {"A_MLIR_OPT", "A_LLVM_CPU", "A_LLVM_ATTRS",
+                           "A_PARFOR"}) {
+    const char* v = std::getenv(name);
+    h = mixBytes(h, v ? v : "");
+  }
   {
     const std::string self = selfExePath();
     if (!self.empty()) h = mixFileStat(h, self);
@@ -829,6 +836,11 @@ inline std::string precheckKey(const std::string& path,
     const char* typed = std::getenv("A_MLIR_TYPED");
     h = mixBytes(h, typed ? typed : "");
   }
+  for (const char* name : {"A_MLIR_OPT", "A_LLVM_CPU", "A_LLVM_ATTRS",
+                           "A_PARFOR"}) {
+    const char* v = std::getenv(name);
+    h = mixBytes(h, v ? v : "");
+  }
   const char* apath = std::getenv("A_PATH");
   h = mixBytes(h, apath ? apath : "");
   h = mixBytes(h, source);
@@ -897,6 +909,36 @@ inline std::string precheckKey(const std::string& path,
 }
 
 }  // namespace run_cache
+
+// Fingerprint of everything that determines the code an .ambc package
+// produces: the compiler binary (stat), the backend/typed/opt env knobs, and
+// the LLVM tool stats. Written into ambc.meta / <pkg>.srcs as `key <hex>` at
+// `a precompile` time; ambcSrcsStale treats a package whose key differs (or
+// is absent while src records exist) as stale so a rebuilt compiler or a
+// changed A_BACKEND/A_MLIR_* flag can't silently link old objects.
+std::string codegenFingerprintImpl() {
+  static const std::string fp = [] {
+    std::uint64_t h = 1469598103934665603ULL;
+    h = run_cache::mixBytes(h, "ambc-key-v1");
+    h = run_cache::mixBytes(h, kVersion);
+    {
+      const std::string self = run_cache::selfExePath();
+      if (!self.empty()) h = run_cache::mixFileStat(h, self);
+    }
+    for (const char* name :
+         {"A_BACKEND", "A_MLIR_NATIVE", "A_AMBC", "A_MLIR_TYPED",
+          "A_MLIR_OPT", "A_LLVM_CPU", "A_LLVM_ATTRS", "A_PARFOR"}) {
+      const char* v = std::getenv(name);
+      h = run_cache::mixBytes(h, v ? v : "");
+    }
+    run_cache::mixLLVMToolStats(h);
+    char hex[17];
+    std::snprintf(hex, sizeof hex, "%016llx",
+                  static_cast<unsigned long long>(h));
+    return std::string(hex);
+  }();
+  return fp;
+}
 
 namespace objcache {
 
@@ -1837,22 +1879,42 @@ bool ambcSrcsStale(const std::string& recordsPath) {
   std::ifstream in(recordsPath, std::ios::binary);
   if (!in) return false;
   std::string line;
+  bool sawSrc = false;
+  bool sawKey = false;
+  bool keyOk = false;
+  const std::string wantKey = codegenFingerprint();
   while (std::getline(in, line)) {
     const size_t b = line.find_first_not_of(" \t\r\n");
     if (b == std::string::npos) continue;
-    if (line.compare(b, 4, "src ") != 0) continue;
-    const std::string rec = line.substr(b + 4);
-    const size_t tab = rec.rfind('\t');
-    if (tab == std::string::npos) continue;
-    const std::string srcPath = rec.substr(0, tab);
-    long long recMt = 0;
-    try { recMt = std::stoll(rec.substr(tab + 1)); } catch (...) { continue; }
-    std::error_code ec;
-    const auto ft = std::filesystem::last_write_time(srcPath, ec);
-    if (ec) return true;  // recorded source vanished -> stale
-    if (static_cast<long long>(ft.time_since_epoch().count()) != recMt)
-      return true;
+    if (line.compare(b, 4, "src ") == 0) {
+      sawSrc = true;
+      const std::string rec = line.substr(b + 4);
+      const size_t tab = rec.rfind('\t');
+      if (tab == std::string::npos) continue;
+      const std::string srcPath = rec.substr(0, tab);
+      long long recMt = 0;
+      try { recMt = std::stoll(rec.substr(tab + 1)); } catch (...) { continue; }
+      std::error_code ec;
+      const auto ft = std::filesystem::last_write_time(srcPath, ec);
+      if (ec) return true;  // recorded source vanished -> stale
+      if (static_cast<long long>(ft.time_since_epoch().count()) != recMt)
+        return true;
+      continue;
+    }
+    if (line.compare(b, 4, "key ") == 0) {
+      sawKey = true;
+      // `key <hex>` must match the current compiler/env fingerprint.
+      const std::string rec = line.substr(b + 4);
+      const size_t e = rec.find_first_of(" \t\r\n");
+      keyOk = rec.substr(0, e) == wantKey;
+    }
   }
+  // A package written by a different compiler or with different codegen env
+  // knobs is stale. Packages with src records but no key line predate
+  // fingerprinting — treat them as stale once (they rebuild on next use);
+  // packages with no src records at all keep the old trust behavior.
+  if (sawSrc && sawKey && !keyOk) return true;
+  if (sawSrc && !sawKey) return true;
   return false;
 }
 
@@ -2037,8 +2099,12 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
       if (rc != 0 && std::getenv("A_LLVM_DEBUG"))
         err << "llvm-cc failed; kept " << llPath << "\n";
       else if (!useNative) {
-        std::error_code ec;
-        std::filesystem::remove(llPath, ec);
+        // A_LLVM_KEEP_LL=1 keeps the staged .ll for inspection (opt/llc
+        // inputs) instead of deleting it after llvmBuild.
+        if (!std::getenv("A_LLVM_KEEP_LL")) {
+          std::error_code ec;
+          std::filesystem::remove(llPath, ec);
+        }
       }
       if (cache.active && rc == 0) {
         std::error_code ec2;
@@ -2389,7 +2455,7 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   int rc = llvmBuild(td.arch, llPath, outputPath,
                      config.optimizationLevel, err);
   std::error_code ec;
-  std::filesystem::remove(llPath, ec);
+  if (!std::getenv("A_LLVM_KEEP_LL")) std::filesystem::remove(llPath, ec);
   if (rc != 0) {
     std::filesystem::remove(outputPath, ec);
     return kCErr;
@@ -2486,6 +2552,11 @@ bool parseTestSummary(const std::string& s, int& passed, int& failed){
 // Public wrapper for the anonymous-namespace typedMlirEnabled() so the
 // .ambc precompile path (a_mlir_core) can pick the matching emitter.
 bool mlirTypedEmissionEnabled() { return typedMlirEnabled(); }
+
+// Public wrapper for the anonymous-namespace codegenFingerprint() so
+// a_mlir_core (package.cpp) can stamp .ambc packages with the same key
+// ambcFastBuild checks.
+std::string codegenFingerprint() { return codegenFingerprintImpl(); }
 
 int testPath(const std::string& path, const PipelineConfig& config, std::istream& in, std::ostream& out, std::ostream& err){
   const std::string target = path.empty() ? "." : path;

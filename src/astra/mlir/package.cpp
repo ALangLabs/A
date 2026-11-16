@@ -366,6 +366,9 @@ bool writeAmbcMeta(const fs::path& outDir, const ModuleGraph& graph,
     const std::int64_t mt = fileMtimeCount(sourcePaths[id], ok);
     if (ok) meta << "src " << sourcePaths[id] << "\t" << mt << "\n";
   }
+  // `key` record: compiler/env fingerprint so ambcFastBuild rejects the
+  // package after a compiler rebuild or A_BACKEND/A_MLIR_* change.
+  meta << "key " << codegenFingerprint() << "\n";
   return static_cast<bool>(meta);
 }
 
@@ -625,6 +628,7 @@ int precompilePackage(const std::string& packageDirOrFile,
         const std::int64_t mt = fileMtimeCount(ap, ok);
         if (ok) srcs << "src " << ap << "\t" << mt << "\n";
       }
+      srcs << "key " << codegenFingerprint() << "\n";
     }
   }
   return kOk;

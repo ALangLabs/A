@@ -46,6 +46,10 @@ int testPath(const std::string& path, const PipelineConfig& config, std::istream
 // emitModuleMLIRDialect / the entry-body dialect variants over the boxed
 // llvm-dialect emitters so precompiled packages match `a run`/`a build`.
 bool mlirTypedEmissionEnabled();
+// Fingerprint of compiler binary + codegen env knobs; `a precompile`
+// records it in ambc.meta/.srcs and ambcFastBuild rejects packages whose
+// recorded key no longer matches (compiler rebuilt, A_BACKEND changed, ...).
+std::string codegenFingerprint();
 int buildPipeline(const std::string& path, const std::string& outputPath, const PipelineConfig& config, std::ostream& err);
 
 // Interactive REPL session. The driver feeds the full accumulated source on

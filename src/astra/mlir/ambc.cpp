@@ -24,6 +24,7 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OwningOpRef.h"
+#include "mlir/Pass/PassManager.h"
 
 namespace a {
 
@@ -54,6 +55,18 @@ int ambcCompileToObject(const std::string& ambcPath, const std::string& arch,
   if (!module) {
     err << "error: failed to read bytecode package '" << ambcPath << "': "
         << readError << "\n";
+    return 1;
+  }
+
+  // Packages may carry `a`-dialect ops (a.runtime.call, a.* boxes): run the
+  // same lowering pipeline nativeCompileMlirTextToObject uses so only the
+  // llvm dialect reaches translateModuleToLLVMIR.
+  mlir::PassManager pm(module->getContext());
+  registerAPasses();
+  buildAOptPipeline(pm, optLevel, /*emitLlvmDialect=*/true);
+  if (failed(pm.run(module->getOperation()))) {
+    err << "error: ambc package '" << ambcPath
+        << "': MLIR pass pipeline failed\n";
     return 1;
   }
 

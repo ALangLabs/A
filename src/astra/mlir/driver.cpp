@@ -324,9 +324,18 @@ int runMlirOptCli(int argc, char **argv, std::ostream &out, std::ostream &err) {
 
   mlir::ModuleOp moduleOp = module.get();
 
-  // --emit-llvmir: translate straight to LLVM IR text and skip the pass
-  // pipeline entirely (equivalent of `mlir-translate --mlir-to-llvmir`).
+  // --emit-llvmir: translate to LLVM IR text and skip the user pass list,
+  // but still run the lowering pipeline — .ambc packages and .mlir files
+  // may carry `a`-dialect ops (a.runtime.call etc.) that have no LLVM
+  // translation of their own.
   if (emitLlvmIr) {
+    mlir::PassManager lowerPm(ctxOwner);
+    a::registerAPasses();
+    a::buildAOptPipeline(lowerPm, optLevel, /*emitLlvmDialect=*/true);
+    if (failed(lowerPm.run(moduleOp.getOperation()))) {
+      err << "error: mlir-opt: lowering pipeline failed\n";
+      return 1;
+    }
     std::string llvmError;
     std::string llvmIr = mlirModuleToLlvmIrText(moduleOp, llvmError);
     if (llvmIr.empty()) {

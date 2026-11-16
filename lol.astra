@@ -1,4 +1,4 @@
 fn add(a, b):
     return a + b
 
-print(add(5, "3"))  # Output: 8
+print(add(5, int("3")))  # Output: 8

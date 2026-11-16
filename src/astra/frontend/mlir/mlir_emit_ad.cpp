@@ -352,6 +352,12 @@ class MlirDialectEmitter {
   // bindings rebind freely, so `x = 5; x = "s"` must stay aval).
   std::unordered_map<std::string, int> assignKindMask_;
   bool assignScanPending_ = false;
+  // Typed-call ABI: eligible fns emit a `__a_tc_<cname>` core taking/returning
+  // raw scalars plus a boxed-ABI thunk under `<cname>`. inTypedCore_ marks
+  // body emission inside a core (typed returns, no argv params).
+  bool inTypedCore_ = false;
+  std::string typedCoreRetKind_;
+  std::unordered_map<const FnDecl*, int> typedCoreCache_;  // 1=yes, -1=no
   bool testMode_ = false;
   std::string testFilter_;
 
@@ -1037,6 +1043,7 @@ class MlirDialectEmitter {
     contLabels_.clear();
     pendingDefers_.clear();
     terminated_ = false;
+    inTypedCore_ = false;
     // typed-binding safety scan runs on the first emitStatements of this fn
     assignScanPending_ = true;
     assignKindMask_.clear();
@@ -1143,6 +1150,235 @@ class MlirDialectEmitter {
     flushFunction();
   }
 
+  // ---- typed-call ABI ---------------------------------------------------------
+  // Fns whose params and return are all Sema-proven scalars get a second
+  // entry point `__a_tc_<cname>` with a raw-scalar signature; direct calls
+  // with matching arity emit `llvm.call` straight to it, skipping the argv
+  // pack/unpack and per-arg box/unbox round-trips. The original `<cname>`
+  // symbol remains as a thin boxed-ABI thunk so fn values, indirect calls,
+  // and non-typed call sites keep working unchanged.
+
+  static const char* kindLLVMType(const std::string& k) {
+    return k == "f64" ? "f64" : k == "i1" ? "i1" : "i64";
+  }
+
+  // Recursive bare-`return` scan: a typed core returns a raw scalar and
+  // cannot produce the A_NONE aval a bare `return` yields, so such fns
+  // must keep the boxed ABI. Nested FnDecls have their own returns.
+  bool stmtsHaveBareReturn(const std::vector<StmtPtr>& stmts) {
+    for (const StmtPtr& s : stmts)
+      if (s && stmtHasBareReturn(*s)) return true;
+    return false;
+  }
+  bool stmtHasBareReturn(const Stmt& s) {
+    switch (s.kind) {
+      case StmtKind::Return:
+        return !static_cast<const ReturnStmt&>(s).value;
+      case StmtKind::FnDecl:
+        return false;
+      case StmtKind::If: {
+        const IfStmt& is = static_cast<const IfStmt&>(s);
+        for (const auto& br : is.branches)
+          if (stmtsHaveBareReturn(br.body)) return true;
+        return stmtsHaveBareReturn(is.elseBody);
+      }
+      case StmtKind::While:
+        return stmtsHaveBareReturn(static_cast<const WhileStmt&>(s).body);
+      case StmtKind::DoWhile:
+        return stmtsHaveBareReturn(static_cast<const DoWhileStmt&>(s).body);
+      case StmtKind::For:
+        return stmtsHaveBareReturn(static_cast<const ForStmt&>(s).body);
+      case StmtKind::Loop:
+        return stmtsHaveBareReturn(static_cast<const LoopStmt&>(s).body);
+      case StmtKind::Defer: {
+        const DeferStmt& ds = static_cast<const DeferStmt&>(s);
+        return ds.body && stmtHasBareReturn(*ds.body);
+      }
+      default:
+        return false;
+    }
+  }
+
+  bool typedCoreEligible(const FnDecl* fn) {
+    if (!typed_ || !fn || fn->isExtern || fn->isEntry) return false;
+    if (!fn->typeParams.empty() || !fn->comptimeParams.empty() ||
+        !fn->whereClause.empty())
+      return false;
+    auto pit = sema_.fnParamTypes.find(fn);
+    auto rit = sema_.fnReturnTypes.find(fn);
+    if (pit == sema_.fnParamTypes.end() || rit == sema_.fnReturnTypes.end())
+      return false;
+    if (pit->second.size() != fn->params.size()) return false;
+    if (scalarKindOfT(rit->second).empty()) return false;
+    if (stmtsHaveBareReturn(fn->body)) return false;
+    // Params must be explicitly annotated: unannotated params accept any
+    // runtime type (Sema's inferred scalar kind is not a guarantee — e.g.
+    // `fn id(x): return x` called with a string). This mirrors the boxed
+    // prologue's pr.type requirement. canTypeBind additionally requires
+    // every reassign in the body to keep the same scalar kind.
+    // The mask scan runs on a saved/restored assignKindMask_ because this
+    // check can fire mid-emission of an unrelated function (tryTypedCall).
+    auto savedMask = std::move(assignKindMask_);
+    assignKindMask_.clear();
+    scanAssignKinds(fn->body);
+    bool ok = true;
+    for (size_t i = 0; i < fn->params.size() && ok; ++i) {
+      const ParamDecl& pr = fn->params[i];
+      std::string pk = scalarKindOfT(pit->second[i]);
+      if (!pr.type || pr.defaultValue || pr.variadic || pk.empty() ||
+          !canTypeBind(pr.name, pk))
+        ok = false;
+    }
+    assignKindMask_ = std::move(savedMask);
+    return ok;
+  }
+  int typedCoreStatus(const FnDecl* fn) {
+    auto it = typedCoreCache_.find(fn);
+    if (it != typedCoreCache_.end()) return it->second;
+    int v = typedCoreEligible(fn) ? 1 : -1;
+    typedCoreCache_[fn] = v;
+    return v;
+  }
+  static std::string typedCoreSym(const std::string& cname) {
+    return "__a_tc_" + cname;
+  }
+
+  // beginFunction variant for the typed core: params arrive as unboxed
+  // scalar SSA args (bound directly into typed slots), returns are raw.
+  void beginFunctionTyped(const std::string& sym, const FnDecl* fn,
+                          const std::vector<std::string>& pkinds,
+                          const std::string& retkind) {
+    curModuleId_ = fn->moduleId;
+    curFnName_ = (!fn->name.empty()) ? fn->name : sym;
+    curFnFile_ = (fn->moduleId >= 0 && fn->moduleId < (int)graph_.modules.size())
+                     ? graph_.at(fn->moduleId).path
+                     : "";
+    curFnLine_ = fn->span.line > 0 ? fn->span.line : 0;
+    fn_.str("");
+    fnAllocs_.str("");
+    constCache_.clear();
+    vCounter_ = 0;
+    labelCounter_ = 0;
+    scopes_.clear();
+    breakLabels_.clear();
+    contLabels_.clear();
+    pendingDefers_.clear();
+    terminated_ = false;
+    assignScanPending_ = true;
+    assignKindMask_.clear();
+    inTypedCore_ = true;
+    typedCoreRetKind_ = retkind;
+    pushScope();
+    fn_ << "llvm.func @" << sym << "(";
+    for (size_t i = 0; i < fn->params.size(); ++i) {
+      if (i) fn_ << ", ";
+      fn_ << "%p" << i << ": " << kindLLVMType(pkinds[i]);
+    }
+    fn_ << ") -> " << kindLLVMType(retkind) << " {\n";
+    if (fn) scanAssignKinds(fn->body);
+    assignScanPending_ = false;
+    for (size_t i = 0; i < fn->params.size(); ++i) {
+      const ParamDecl& pr = fn->params[i];
+      const std::string& pk = pkinds[i];
+      MlBinding b;
+      b.type = pk;
+      b.slot = (pk == "f64") ? allocaF64() : allocaI64();
+      storeTypedVal(b, TypedVal{"%p" + std::to_string(i), pk});
+      scopes_.back()[pr.name] = b;
+    }
+    emitFramePush();
+  }
+
+  // Return inside a typed core: coerce the expr's TypedVal to the declared
+  // scalar return kind (aval/other-kind values round-trip through the boxed
+  // representation so the callee-side unbox sees the same value the boxed
+  // ABI would have carried).
+  void emitReturnTyped(const TypedVal& tv) {
+    emitFramePop();
+    const std::string& rk = typedCoreRetKind_;
+    std::string val;
+    if (tv.isConst && tv.kind == rk) {
+      val = tvalSSA(tv);
+    } else if (tv.kind == rk && !tv.name.empty()) {
+      val = tvalSSA(tv);
+    } else if (tv.kind == "aval" && !tv.name.empty()) {
+      val = tvalSSA(unboxFromAval(tv.name, rk));
+    } else {
+      // unreachable in practice (eligibility rejects bare returns); emit a
+      // zero rather than malformed IR if it ever slips through.
+      TypedVal z{"", rk, true, 0, 0.0};
+      val = tvalSSA(z);
+    }
+    fn_ << "  llvm.return " << val << " : " << kindLLVMType(rk) << "\n";
+  }
+
+  void endFunctionTyped() {
+    if (!terminated_) {
+      emitPendingDefers();
+      emitAllDrops();
+      TypedVal z{"", typedCoreRetKind_, true, 0, 0.0};
+      emitReturnTyped(z);
+    }
+    fn_ << "}\n\n";
+    flushFunction();
+    inTypedCore_ = false;
+  }
+
+  // Boxed-ABI thunk for a typed core: unboxes each argv param, calls the
+  // core, boxes the scalar result. No frame of its own — the core owns the
+  // call frame, so traceback depth matches the old single-function shape.
+  void emitTypedThunk(const std::string& cname, const FnDecl* fn,
+                      const std::vector<std::string>& pkinds,
+                      const std::string& retkind,
+                      const std::string& core) {
+    fn_.str("");
+    fnAllocs_.str("");
+    constCache_.clear();
+    vCounter_ = 0;
+    labelCounter_ = 0;
+    fn_ << "llvm.func @" << cname << "(%argv: !llvm.ptr) -> i64 {\n";
+    std::vector<std::string> argssa;
+    for (size_t i = 0; i < fn->params.size(); ++i) {
+      std::string av = load(gepIdx("%argv", c64((std::int64_t)i + 1)));
+      TypedVal tv = unboxFromAval(av, pkinds[i]);
+      argssa.push_back(tvalSSA(tv));
+    }
+    std::string csig;
+    for (size_t i = 0; i < pkinds.size(); ++i) {
+      if (i) csig += ", ";
+      csig += kindLLVMType(pkinds[i]);
+    }
+    std::string r = nv();
+    fn_ << "  " << r << " = llvm.call @" << core << "(";
+    for (size_t i = 0; i < argssa.size(); ++i) {
+      if (i) fn_ << ", ";
+      fn_ << argssa[i];
+    }
+    fn_ << ") : (" << csig << ") -> " << kindLLVMType(retkind) << "\n";
+    std::string boxed = boxToAval(TypedVal{r, retkind});
+    fn_ << "  llvm.return " << boxed << " : i64\n";
+    fn_ << "}\n\n";
+    body_ << fn_.str();
+  }
+
+  void emitTypedCoreAndThunk(const FnDecl* fn) {
+    const std::string& cname = fnDeclCnames_[fn];
+    auto pit = sema_.fnParamTypes.find(fn);
+    std::vector<std::string> pkinds;
+    for (size_t i = 0; i < fn->params.size(); ++i)
+      pkinds.push_back(scalarKindOfT(pit->second[i]));
+    const std::string retkind = scalarKindOfT(sema_.fnReturnTypes.at(fn));
+    const std::string core = typedCoreSym(cname);
+    beginFunctionTyped(core, fn, pkinds, retkind);
+    bool sv = inFnBody_; inFnBody_ = true;
+    bool suv = inUserFn_; inUserFn_ = true;
+    emitStatements(fn->body);
+    inUserFn_ = suv; inFnBody_ = sv;
+    endFunctionTyped();
+    if (failed_) return;
+    emitTypedThunk(cname, fn, pkinds, retkind, core);
+  }
+
   // splice hoisted allocas into the entry block (right after the func
   // header) — allocas emitted mid-loop would allocate fresh stack every
   // iteration since their address escapes into runtime calls.
@@ -1168,6 +1404,11 @@ class MlirDialectEmitter {
     for (auto& kv : fnDecls_) {
       if (emitOnlyModule_ >= 0 && kv.second != emitOnlyModule_) continue;
       const FnDecl* fn = kv.first;
+      if (typedCoreStatus(fn) == 1) {
+        emitTypedCoreAndThunk(fn);
+        if (failed_) return;
+        continue;
+      }
       beginFunction(fnDeclCnames_[fn], fn);
       bool sv = inFnBody_; inFnBody_ = true;
       bool suv = inUserFn_; inUserFn_ = true;
@@ -1442,10 +1683,17 @@ class MlirDialectEmitter {
       }
       case StmtKind::Return: {
         const ReturnStmt& rs = static_cast<const ReturnStmt&>(s);
-        std::string v = rs.value ? evalExpr(*rs.value) : c64(kAvalTag | 0x2);
-        emitPendingDefers();
-        emitAllDrops();
-        emitReturn(v);
+        if (inTypedCore_) {
+          TypedVal tv = rs.value ? evalExprT(*rs.value) : TypedVal{"", "aval"};
+          emitPendingDefers();
+          emitAllDrops();
+          emitReturnTyped(tv);
+        } else {
+          std::string v = rs.value ? evalExpr(*rs.value) : c64(kAvalTag | 0x2);
+          emitPendingDefers();
+          emitAllDrops();
+          emitReturn(v);
+        }
         terminated_ = true;
         break;
       }
@@ -2225,9 +2473,85 @@ class MlirDialectEmitter {
         return evalUnaryT(static_cast<const UnaryExpr&>(e));
       case ExprKind::Binary:
         return evalBinaryT(static_cast<const BinaryExpr&>(e));
+      case ExprKind::Call: {
+        TypedVal tv = tryTypedCall(static_cast<const CallExpr&>(e));
+        if (!tv.kind.empty()) return tv;
+        return {evalExprImpl(e), "aval"};
+      }
       default:
         return {evalExprImpl(e), "aval"};
     }
+  }
+
+  // Attempt a typed-ABI direct call to a `__a_tc_<cname>` core. Every
+  // bail-out check that doesn't need arg values runs BEFORE any arg is
+  // evaluated, so a rejected call leaves no partially-emitted IR for the
+  // boxed fallback to duplicate. Returns kind=="" on bail.
+  TypedVal tryTypedCall(const CallExpr& c) {
+    if (c.typeArgs.size() || c.calleeIsBuiltin ||
+        c.builtinId != BuiltinId::None)
+      return {"", ""};
+    const FnDecl* fd = nullptr;
+    if (c.calleeFunction) {
+      fd = c.calleeFunction;
+    } else if (c.callee->kind == ExprKind::Ident) {
+      const IdentExpr& cid = static_cast<const IdentExpr&>(*c.callee);
+      // `cast` is a parser-desugared pseudo-call handled specially by
+      // evalCall; never route it through the typed ABI.
+      if (cid.name == "cast") return {"", ""};
+      auto fn = fnCnames_.find(cid.name);
+      if (fn == fnCnames_.end()) return {"", ""};
+      auto fit = fnByCname_.find(fn->second);
+      if (fit == fnByCname_.end()) return {"", ""};
+      fd = fit->second;
+    } else {
+      return {"", ""};
+    }
+    if (typedCoreStatus(fd) != 1) return {"", ""};
+    auto cit = fnDeclCnames_.find(fd);
+    if (cit == fnDeclCnames_.end()) return {"", ""};
+    if (c.args.size() != fd->params.size()) return {"", ""};
+    for (const CallArg& a : c.args)
+      if (!a.name.empty() || !a.value) return {"", ""};
+    auto pit = sema_.fnParamTypes.find(fd);
+    auto rit = sema_.fnReturnTypes.find(fd);
+    if (pit == sema_.fnParamTypes.end() || rit == sema_.fnReturnTypes.end())
+      return {"", ""};
+    const std::string retkind = scalarKindOfT(rit->second);
+    if (retkind.empty()) return {"", ""};
+    std::vector<std::string> argssa;
+    argssa.reserve(c.args.size());
+    for (size_t i = 0; i < c.args.size(); ++i) {
+      const std::string want = scalarKindOfT(pit->second[i]);
+      TypedVal tv = evalExprT(*c.args[i].value);
+      if (failed_) return {"", "aval"};
+      if (tv.kind == want) {
+        argssa.push_back(tvalSSA(tv));
+      } else if (tv.kind == "aval" && !tv.name.empty()) {
+        argssa.push_back(tvalSSA(unboxFromAval(tv.name, want)));
+      } else if (!tv.name.empty() || tv.isConst) {
+        // Different scalar kind: round-trip through aval so the core sees
+        // exactly what the boxed ABI would have delivered (and the same
+        // unbox panic on true type mismatches).
+        argssa.push_back(tvalSSA(unboxFromAval(boxToAval(tv), want)));
+      } else {
+        return {"", "aval"};
+      }
+    }
+    const std::string core = typedCoreSym(cit->second);
+    std::string csig;
+    for (size_t i = 0; i < c.args.size(); ++i) {
+      if (i) csig += ", ";
+      csig += kindLLVMType(scalarKindOfT(pit->second[i]));
+    }
+    std::string r = nv();
+    fn_ << "  " << r << " = llvm.call @" << core << "(";
+    for (size_t i = 0; i < argssa.size(); ++i) {
+      if (i) fn_ << ", ";
+      fn_ << argssa[i];
+    }
+    fn_ << ") : (" << csig << ") -> " << kindLLVMType(retkind) << "\n";
+    return {r, retkind};
   }
 
   TypedVal evalUnaryT(const UnaryExpr& u) {
@@ -4277,6 +4601,25 @@ class MlirDialectEmitter {
     std::vector<std::string> funcDecls, globalDecls;
     for (const std::string& sym : referenced) {
       if (defined.count(sym)) continue;
+      if (sym.rfind("__a_tc_", 0) == 0) {
+        // Typed-call core owned by another module: redeclare with its real
+        // scalar signature — the generic boxed decl below would mismatch.
+        auto fit = fnByCname_.find(sym.substr(6));
+        if (fit == fnByCname_.end() || typedCoreStatus(fit->second) != 1)
+          continue;  // leave undeclared: a loud link error beats a wrong sig
+        const FnDecl* tf = fit->second;
+        auto pit = sema_.fnParamTypes.find(tf);
+        auto rit = sema_.fnReturnTypes.find(tf);
+        std::string tsig;
+        for (size_t i = 0; i < tf->params.size(); ++i) {
+          if (i) tsig += ", ";
+          tsig += "%p" + std::to_string(i) + ": " +
+                  kindLLVMType(scalarKindOfT(pit->second[i]));
+        }
+        funcDecls.push_back("  llvm.func @" + sym + "(" + tsig + ") -> " +
+                            kindLLVMType(scalarKindOfT(rit->second)) + "\n");
+        continue;
+      }
       if (sym.rfind("__a_g_", 0) == 0) {
         // Foreign module global: declare it exactly like the owning unit's
         // definition (external linkage + zero initializer — the real init
