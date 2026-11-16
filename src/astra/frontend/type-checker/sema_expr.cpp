@@ -671,6 +671,7 @@ TypePtr Sema::inferCall(CallExpr& expr) {
       if (binding.kind == FromBinding::Kind::Function && !binding.native) {
         auto sigIt = signatures_.find(binding.fn);
         if (sigIt == signatures_.end()) return typeError();
+        checkOffloadCall(*binding.fn, expr);
         return checkFunctionCall(sigIt->second, expr);
       }
       if (binding.kind == FromBinding::Kind::Function && binding.native) {
@@ -703,6 +704,7 @@ TypePtr Sema::inferCall(CallExpr& expr) {
       // of re-resolving the name through the scope chain on every call.
       expr.calleeFunction = fnIt->second;
       expr.calleeResolved = true;
+      checkOffloadCall(*fnIt->second, expr);
       auto sigIt = signatures_.find(fnIt->second);
       if (sigIt == signatures_.end()) return typeError();
       return checkFunctionCall(sigIt->second, expr);
@@ -722,6 +724,7 @@ TypePtr Sema::inferCall(CallExpr& expr) {
     if (const FnDecl* preludeFn = findPreludeFunction(name)) {
       expr.calleeFunction = preludeFn;
       expr.calleeResolved = true;
+      checkOffloadCall(*preludeFn, expr);
       auto sigIt = signatures_.find(preludeFn);
       if (sigIt == signatures_.end()) return typeError();
       return checkFunctionCall(sigIt->second, expr);

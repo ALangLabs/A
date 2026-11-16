@@ -29,6 +29,20 @@ TypePtr Sema::checkBuiltinCall(const std::string& name, CallExpr& call) {
   // print/eprint take *objects plus Python-style keyword options
   // (sep/end/file/flush); every other builtin stays positional-only.
 
+  // Builtins lower to host-runtime calls; none exist on the device.
+  if (currentFunction_ &&
+      currentFunction_->offload != FnDecl::OffloadKind::None &&
+      name != "cast") {
+    sink_.error(call.span,
+                "Builtin '" + name +
+                    "' is not available inside kernel/device functions.",
+                "Offload functions compile to GPU code and can only use "
+                "scalar arithmetic on their parameters and locals.");
+    for (auto& arg : call.args) inferExpr(*arg.value);
+    for (auto& ta : call.typeArgs) resolveTypeExpr(*ta);
+    return typeError();
+  }
+
   // `cast` is the one builtin that takes type arguments: `cast<T>(x)` (also
   // spelled `x as T`), a compile-time-only annotation like Python's
   // typing.cast. It is handled before the generic type-argument rejection.

@@ -51,6 +51,7 @@
 #include "ast/ast.hpp"
 #include "codegen/codegen_internal.hpp"
 #include "fastpath_mlir.hpp"
+#include "mlir/mlir_util.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
@@ -58,31 +59,14 @@
 namespace a {
 namespace {
 
-const std::int64_t kAvalTag = -281474976710656LL;  // A_TAG
-constexpr std::int64_t kInlineLim = INT64_C(1) << 46;
-
-std::int64_t avalIntEncode(std::int64_t v) {
-  std::uint64_t p = ((std::uint64_t)v << 1) | 1ULL;
-  p &= 281474976710655ULL;
-  return (std::int64_t)(kAvalTag | (std::int64_t)p);
-}
-
-// filename stem of a module path: "lib/mathx.astra" -> "mathx",
-// "pkg/__init__.astra" -> "pkg" (mirrors LlvmEmitter::stemOf)
-std::string stemOf(const std::string& p) {
-  std::string s = p;
-  auto slash = s.find_last_of('/');
-  if (slash != std::string::npos) s = s.substr(slash + 1);
-  auto dot = s.find_last_of('.');
-  if (dot != std::string::npos) s = s.substr(0, dot);
-  if (s == "__init__") {
-    std::string d = p.substr(0, slash == std::string::npos ? 0 : slash);
-    auto s2 = d.find_last_of('/');
-    d = s2 == std::string::npos ? d : d.substr(s2 + 1);
-    return d;
-  }
-  return s;
-}
+// Shared with mlir_emit.cpp via mlir_util.hpp.
+using mlirutil::avalIntEncode;
+using mlirutil::kAvalTag;
+using mlirutil::kInlineLim;
+using mlirutil::parforEnabled;
+using mlirutil::pfDenyName;
+using mlirutil::runtimeDeclText;
+using mlirutil::stemOf;
 
 struct MlBinding {
   std::string slot;   // alloca SSA name (a !llvm.ptr value)
@@ -364,6 +348,10 @@ class MlirDialectEmitter {
   // — without this, a call in a hot loop keeps two runtime calls per iteration
   // even after the callee body is inlined (100x+ slowdown on call-heavy code).
   bool curFnFrameFree_ = false;
+  // Non-empty while emitting a kernel/device fn's typed core: the value is
+  // the `a.offload` attribute string ("kernel"/"device") stamped on the
+  // llvm.func so the MLIR backend can slice it out for device compilation.
+  std::string curOffloadAttr_;
   std::unordered_map<const FnDecl*, bool> frameFreeMemo_;
   std::unordered_set<const FnDecl*> frameFreeVisiting_;
   std::string typedCoreRetKind_;
@@ -947,33 +935,8 @@ class MlirDialectEmitter {
         {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
         {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
     };
-    for (const auto& kv : sigs) {
-      std::string sig = kv.second;
-      std::string args = sig.substr(1, sig.find(')') - 1);
-      std::string ret = sig.substr(sig.find("->") + 3);
-      while (!ret.empty() && ret.front() == ' ') ret.erase(ret.begin());
-      // split arg types on commas not inside <>
-      std::vector<std::string> tys;
-      {
-        std::string cur;
-        int depth = 0;
-        for (char ch : args) {
-          if (ch == '<') ++depth;
-          if (ch == '>') --depth;
-          if (ch == ',' && depth == 0) { tys.push_back(cur); cur.clear(); }
-          else cur += ch;
-        }
-        if (!cur.empty()) tys.push_back(cur);
-      }
-      std::string decl = "  llvm.func @" + std::string(kv.first) + "(";
-      for (size_t i = 0; i < tys.size(); ++i) {
-        if (i) decl += ", ";
-        decl += "%a" + std::to_string(i) + ": " + tys[i];
-      }
-      decl += ")";
-      if (ret != "()") decl += " -> " + ret;
-      pre_ << decl << "\n";
-    }
+    for (const auto& kv : sigs)
+      pre_ << runtimeDeclText(kv.first, kv.second) << "\n";
     if (typed_) {
       // aval -> f64 decode for typed float slots (core_util.c num_to_double:
       // int avals convert, double avals bitcast, else panic).
@@ -1427,7 +1390,10 @@ class MlirDialectEmitter {
     assignScanPending_ = true;
     assignKindMask_.clear();
     inTypedCore_ = true;
-    curFnFrameFree_ = typed_ && fnFrameFree(fn);
+    // Offload cores never touch the host runtime: no frame hooks regardless
+    // of the body scan (the scan only gates the host fast path).
+    curFnFrameFree_ =
+        typed_ && (fnFrameFree(fn) || !curOffloadAttr_.empty());
     typedCoreRetKind_ = retkind;
     pushScope();
     fn_ << "llvm.func @" << sym << "(";
@@ -1435,7 +1401,10 @@ class MlirDialectEmitter {
       if (i) fn_ << ", ";
       fn_ << "%p" << i << ": " << kindLLVMType(pkinds[i]);
     }
-    fn_ << ") -> " << kindLLVMType(retkind) << " {\n";
+    fn_ << ") -> " << kindLLVMType(retkind);
+    if (!curOffloadAttr_.empty())
+      fn_ << " attributes {a.offload = \"" << curOffloadAttr_ << "\"}";
+    fn_ << " {\n";
     if (fn) scanAssignKinds(fn->body);
     assignScanPending_ = false;
     for (size_t i = 0; i < fn->params.size(); ++i) {
@@ -1541,6 +1510,44 @@ class MlirDialectEmitter {
     emitTypedThunk(cname, fn, pkinds, retkind, core);
   }
 
+  // kernel/device fn: emit ONLY the typed core (unboxed scalar signature)
+  // stamped with `a.offload` — no boxed thunk (host code cannot call it) and
+  // no frame hooks. The MLIR backend slices these funcs into a device module
+  // compiled for the GPU target (Mojo-style compile_offload).
+  void emitOffloadCore(const FnDecl* fn) {
+    if (typedCoreStatus(fn) != 1) {
+      failAt("'" + fn->name +
+                 "' cannot be a kernel/device function: every parameter "
+                 "and the return type must be explicitly annotated scalar "
+                 "types (int/float/bool).",
+             fn);
+      return;
+    }
+    if (!fnFrameFree(fn)) {
+      failAt("'" + fn->name +
+                 "' cannot be a kernel/device function: its body uses "
+                 "operations that require the host runtime.",
+             fn);
+      return;
+    }
+    const std::string& cname = fnDeclCnames_[fn];
+    auto pit = sema_.fnParamTypes.find(fn);
+    std::vector<std::string> pkinds;
+    for (size_t i = 0; i < fn->params.size(); ++i)
+      pkinds.push_back(scalarKindOfT(pit->second[i]));
+    const std::string retkind = scalarKindOfT(sema_.fnReturnTypes.at(fn));
+    const std::string core = typedCoreSym(cname);
+    curOffloadAttr_ = fn->offload == FnDecl::OffloadKind::Kernel ? "kernel"
+                                                                 : "device";
+    beginFunctionTyped(core, fn, pkinds, retkind);
+    bool sv = inFnBody_; inFnBody_ = true;
+    bool suv = inUserFn_; inUserFn_ = true;
+    emitStatements(fn->body);
+    inUserFn_ = suv; inFnBody_ = sv;
+    endFunctionTyped();
+    curOffloadAttr_.clear();
+  }
+
   // splice hoisted allocas into the entry block (right after the func
   // header) — allocas emitted mid-loop would allocate fresh stack every
   // iteration since their address escapes into runtime calls.
@@ -1566,6 +1573,11 @@ class MlirDialectEmitter {
     for (auto& kv : fnDecls_) {
       if (emitOnlyModule_ >= 0 && kv.second != emitOnlyModule_) continue;
       const FnDecl* fn = kv.first;
+      if (fn->offload != FnDecl::OffloadKind::None) {
+        emitOffloadCore(fn);
+        if (failed_) return;
+        continue;
+      }
       if (typedCoreStatus(fn) == 1) {
         emitTypedCoreAndThunk(fn);
         if (failed_) return;
@@ -2419,17 +2431,8 @@ class MlirDialectEmitter {
         if (id.name == "True") return c64(kAvalTag | 0x6);
         if (id.name == "False") return c64(kAvalTag | 0x4);
         // builtin constants (mirrors LlvmEmitter::evalIdent kConsts)
-        static const std::unordered_map<std::string, double> kDConsts = {
-            {"PI", 3.14159265358979323846}, {"E", 2.71828182845904523536},
-            {"F32_MIN", -3.4028234663852886e38}, {"F32_MAX", 3.4028234663852886e38},
-            {"F64_MIN", -1.7976931348623157e308}, {"F64_MAX", 1.7976931348623157e308},
-        };
-        static const std::unordered_map<std::string, std::int64_t> kIConsts = {
-            {"I8_MIN", -128}, {"I8_MAX", 127},
-            {"I16_MIN", -32768}, {"I16_MAX", 32767},
-            {"I32_MIN", -2147483648LL}, {"I32_MAX", 2147483647LL},
-            {"U8_MAX", 255}, {"U16_MAX", 65535}, {"U32_MAX", 4294967295LL},
-        };
+        const auto& kDConsts = mlirutil::kBuiltinDConsts;
+        const auto& kIConsts = mlirutil::kBuiltinIConsts;
         if (id.name == "I64_MIN" || id.name == "I64_MAX")
           return callI64("a_i64n", {c64(id.name == "I64_MIN" ? INT64_MIN : INT64_MAX)});
         if (id.name == "stdout") return c64(kAvalTag | 0x8);
@@ -2668,6 +2671,13 @@ class MlirDialectEmitter {
       fd = fit->second;
     } else {
       return {"", ""};
+    }
+    // Defensive: sema rejects host->offload calls, but never emit a call
+    // into an offload core from host code even if it slips through.
+    if (!curOffloadAttr_.empty() &&
+        fd->offload == FnDecl::OffloadKind::None) {
+      failAt("offload function calls host function '" + fd->name + "'", &c);
+      return {"", "aval"};
     }
     if (typedCoreStatus(fd) != 1) return {"", ""};
     auto cit = fnDeclCnames_.find(fd);
@@ -3108,18 +3118,8 @@ class MlirDialectEmitter {
   }
 
   // ---- auto-parfor (port of LlvmEmitter's emitForParfor/emitParforFn) ----
-  static bool pfDenyName(const std::string& n) {
-    static const char* k[] = {
-        "print","println","eprint","eprintln","printerr","panic","assert",
-        "assert_eq","input","exit","write_file","append_file","write_bytes",
-        "remove_file","remove_dir","create_dir","rename","system","popen",
-        "kill","exec","spawn","join","done","cancel","append","extend",
-        "insert","remove","pop","clear","update","add","discard","push",
-        "send","sendall","sendto","write","writeall","recv","recvfrom",
-        "accept","connect","bind","listen"};
-    for (const char* d : k) if (n == d) return true;
-    return false;
-  }
+  // pfDenyName/parforEnabled live in mlir_util.hpp (shared with the
+  // boxed llvm-dialect emitter).
   // name resolves to a binding that would be shared under capture
   bool pfOuterBinding(const std::string& name) {
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it)
@@ -3232,12 +3232,6 @@ class MlirDialectEmitter {
       }
       default: return false;
     }
-  }
-  static bool parforEnabled() {
-    const char* e = std::getenv("A_PARFOR");
-    if (!e) return true;
-    std::string v = e;
-    return !(v == "0" || v == "off" || v == "no" || v == "false");
   }
   bool parforEligible(const ForStmt& s) {
     if (!parforEnabled() || !inFnBody_ || s.body.empty()) return false;

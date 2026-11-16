@@ -44,6 +44,7 @@ class Parser {
   StmtPtr parseStatement();
   StmtPtr parseFnDecl(bool entryKw = false, bool externFn = false);
   StmtPtr parseExternDecl();
+  StmtPtr parseOffloadDecl();
   StmtPtr parseStructDecl();
   StmtPtr parseEnumDecl();
   StmtPtr parseTraitDecl();

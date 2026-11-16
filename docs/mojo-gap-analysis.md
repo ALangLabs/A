@@ -6,6 +6,11 @@ parity. Sources: `src/astra/frontend/**` (A), `/tmp/mojo-ref/Mojo/**`
 (Mojo stdlib, docs, proposals; the Mojo compiler itself is closed-source —
 only design docs under `Mojo/docs/compiler/` are public).
 
+> Note: this is a historical analysis. References to `llvm/llvm_emit.cpp`
+> below point at the legacy LLVM emitter, which has since been deleted —
+> MLIR lowering (`frontend/mlir/`) is now the only backend. The analysis
+> itself is unchanged.
+
 ## 1. What the Mojo OSS repo actually contains
 
 The compiler is **not** in the repo (MLIR-based, closed). Public surface:

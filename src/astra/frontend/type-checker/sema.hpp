@@ -302,6 +302,7 @@ class Sema {
   TypePtr enumTypeFromInfo(const EnumInfo& info, NamedTypeExpr& named);
   bool enumNamespaceUse(ExprPtr& object, const std::string& enumQ);
   TypePtr checkFunctionCall(const FnSig& sig, CallExpr& call);
+  void checkOffloadCall(const FnDecl& callee, CallExpr& call);
   // Prelude fallback: unqualified calls that match a prelude function resolve
   // to it, giving prelude decls Python-builtin-like visibility.
   const FnDecl* findPreludeFunction(const std::string& name) const;

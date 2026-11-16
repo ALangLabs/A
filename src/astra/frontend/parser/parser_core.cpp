@@ -84,6 +84,14 @@ StmtPtr Parser::parseStatement() {
       peek(1).kind == Tok::Ident && peek(2).kind == Tok::LParen) {
     return parseFnDecl(true);
   }
+  // `kernel fn` / `device fn` — GPU offload modifiers. Contextual keywords
+  // like `entry`: only a modifier when directly followed by `fn`, so
+  // `kernel`/`device` stay usable as ordinary identifiers elsewhere.
+  if (cur().kind == Tok::Ident &&
+      (cur().lexeme == "kernel" || cur().lexeme == "device") &&
+      peek(1).kind == Tok::KwFn) {
+    return parseOffloadDecl();
+  }
   switch (cur().kind) {
     case Tok::KwFn:
       return parseFnDecl();

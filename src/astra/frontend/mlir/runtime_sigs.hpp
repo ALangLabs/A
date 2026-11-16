@@ -54,7 +54,7 @@ inline const std::pair<const char*, const char*> kRuntimeSigs[] = {
     {"a_contains", "(i64, i64) -> i64"},
     {"a_fnon_new", "(i64, i64, !llvm.ptr) -> i64"},
     {"a_closure_env_new", "(i64) -> i64"},
-    {"a_env_new", "(i64) -> i64"}, {"a_env_get", "(i64, i64) -> i64"},
+    {"a_env_get", "(i64, i64) -> i64"},
     {"a_env_set", "(i64, i64, i64) -> i64"},
     {"a_struct_new", "(i64, i64, i64) -> i64"},
     {"a_builtin", "(i64) -> i64"},
@@ -63,7 +63,7 @@ inline const std::pair<const char*, const char*> kRuntimeSigs[] = {
     {"a_method", "(i64, !llvm.ptr, i64, i64, !llvm.ptr) -> i64"},
     {"a_getattr", "(i64, !llvm.ptr) -> i64"},
     {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
-    {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(i64) -> i64"},
+    {"a_promote", "(i64) -> ()"}, {"a_panic_msg", "(!llvm.ptr) -> i64"},
     {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
     {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
     {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
@@ -73,8 +73,6 @@ inline const std::pair<const char*, const char*> kRuntimeSigs[] = {
     {"a_test_main", "(i64, !llvm.ptr, !llvm.ptr) -> i32"},
     {"a_printv", "(i64, !llvm.ptr) -> ()"},
     {"a_eprintv", "(i64, !llvm.ptr) -> ()"},
-    {"a_println", "(i64) -> ()"}, {"a_sleep", "(i64) -> ()"},
-    {"a_now", "() -> i64"}, {"a_gc_collect", "() -> ()"},
     {"a_gc_mark_aval", "(i64) -> ()"}, {"a_gc_add_root_cb", "(!llvm.ptr) -> ()"},
 };
 

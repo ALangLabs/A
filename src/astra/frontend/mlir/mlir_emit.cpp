@@ -23,6 +23,7 @@
 
 #include "ast/ast.hpp"
 #include "codegen/codegen_internal.hpp"
+#include "mlir/mlir_util.hpp"
 #include "mlir/runtime_sigs.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
@@ -31,31 +32,14 @@
 namespace a {
 namespace {
 
-const std::int64_t kAvalTag = -281474976710656LL;  // A_TAG
-constexpr std::int64_t kInlineLim = INT64_C(1) << 46;
-
-std::int64_t avalIntEncode(std::int64_t v) {
-  std::uint64_t p = ((std::uint64_t)v << 1) | 1ULL;
-  p &= 281474976710655ULL;
-  return (std::int64_t)(kAvalTag | (std::int64_t)p);
-}
-
-// filename stem of a module path: "lib/mathx.astra" -> "mathx",
-// "pkg/__init__.astra" -> "pkg" (mirrors LlvmEmitter::stemOf)
-std::string stemOf(const std::string& p) {
-  std::string s = p;
-  auto slash = s.find_last_of('/');
-  if (slash != std::string::npos) s = s.substr(slash + 1);
-  auto dot = s.find_last_of('.');
-  if (dot != std::string::npos) s = s.substr(0, dot);
-  if (s == "__init__") {
-    std::string d = p.substr(0, slash == std::string::npos ? 0 : slash);
-    auto s2 = d.find_last_of('/');
-    d = s2 == std::string::npos ? d : d.substr(s2 + 1);
-    return d;
-  }
-  return s;
-}
+// Shared with mlir_emit_ad.cpp via mlir_util.hpp.
+using mlirutil::avalIntEncode;
+using mlirutil::kAvalTag;
+using mlirutil::kInlineLim;
+using mlirutil::parforEnabled;
+using mlirutil::pfDenyName;
+using mlirutil::runtimeDeclText;
+using mlirutil::stemOf;
 
 struct MlBinding {
   std::string slot;   // alloca SSA name (a !llvm.ptr value)
@@ -64,38 +48,7 @@ struct MlBinding {
 
 // Runtime (`a_*`) function signatures shared by emitDecls (whole-graph
 // mode) and emitModuleDecls (per-module .ambc mode). Sig strings use the
-// compact "(args) -> ret" form parsed by runtimeDeclText.
-
-
-
-// Renders "  llvm.func @<name>(<typed args>) -> <ret>" for a runtime sig.
-std::string runtimeDeclText(const std::string& name, const char* sig) {
-  std::string s = sig;
-  std::string args = s.substr(1, s.find(')') - 1);
-  std::string ret = s.substr(s.find("->") + 3);
-  while (!ret.empty() && ret.front() == ' ') ret.erase(ret.begin());
-  // split arg types on commas not inside <>
-  std::vector<std::string> tys;
-  {
-    std::string cur;
-    int depth = 0;
-    for (char ch : args) {
-      if (ch == '<') ++depth;
-      if (ch == '>') --depth;
-      if (ch == ',' && depth == 0) { tys.push_back(cur); cur.clear(); }
-      else cur += ch;
-    }
-    if (!cur.empty()) tys.push_back(cur);
-  }
-  std::string decl = "  llvm.func @" + name + "(";
-  for (size_t i = 0; i < tys.size(); ++i) {
-    if (i) decl += ", ";
-    decl += "%a" + std::to_string(i) + ": " + tys[i];
-  }
-  decl += ")";
-  if (ret != "()") decl += " -> " + ret;
-  return decl;
-}
+// compact "(args) -> ret" form parsed by mlirutil::runtimeDeclText.
 
 class MlirEmitter {
  public:
@@ -949,6 +902,13 @@ class MlirEmitter {
     for (auto& kv : fnDecls_) {
       if (emitOnlyModule_ >= 0 && kv.second != emitOnlyModule_) continue;
       const FnDecl* fn = kv.first;
+      if (fn->offload != FnDecl::OffloadKind::None) {
+        failAt("'" + fn->name +
+                   "' is a kernel/device function, which requires the "
+                   "typed MLIR backend (unset A_MLIR_TYPED=0).",
+               fn);
+        return;
+      }
       beginFunction(fnDeclCnames_[fn], fn);
       bool sv = inFnBody_; inFnBody_ = true;
       bool suv = inUserFn_; inUserFn_ = true;
@@ -1031,7 +991,7 @@ class MlirEmitter {
         std::string ks = stringLiteralAval(ms.fieldNames[i]);
         callI64("a_dict_set", {obj, ks, fv});
       }
-      callI64("a_promote", {obj});
+      fn_ << "  llvm.call @a_promote(" << obj << ") : (i64) -> ()\n";
       emitReturn(obj);
       fn_ << "}\n\n";
       flushFunction();
@@ -1589,17 +1549,8 @@ class MlirEmitter {
         if (id.name == "True") return c64(kAvalTag | 0x6);
         if (id.name == "False") return c64(kAvalTag | 0x4);
         // builtin constants (mirrors LlvmEmitter::evalIdent kConsts)
-        static const std::unordered_map<std::string, double> kDConsts = {
-            {"PI", 3.14159265358979323846}, {"E", 2.71828182845904523536},
-            {"F32_MIN", -3.4028234663852886e38}, {"F32_MAX", 3.4028234663852886e38},
-            {"F64_MIN", -1.7976931348623157e308}, {"F64_MAX", 1.7976931348623157e308},
-        };
-        static const std::unordered_map<std::string, std::int64_t> kIConsts = {
-            {"I8_MIN", -128}, {"I8_MAX", 127},
-            {"I16_MIN", -32768}, {"I16_MAX", 32767},
-            {"I32_MIN", -2147483648LL}, {"I32_MAX", 2147483647LL},
-            {"U8_MAX", 255}, {"U16_MAX", 65535}, {"U32_MAX", 4294967295LL},
-        };
+        const auto& kDConsts = mlirutil::kBuiltinDConsts;
+        const auto& kIConsts = mlirutil::kBuiltinIConsts;
         if (id.name == "I64_MIN" || id.name == "I64_MAX")
           return callI64("a_i64n", {c64(id.name == "I64_MIN" ? INT64_MIN : INT64_MAX)});
         if (id.name == "stdout") return c64(kAvalTag | 0x8);
@@ -1786,7 +1737,7 @@ class MlirEmitter {
     fn_ << "^" << lprop << ":\n";
     terminated_ = false;
     emitPendingDefers();
-    callI64("a_promote", {t});
+    fn_ << "  llvm.call @a_promote(" << t << ") : (i64) -> ()\n";
     emitReturn(t);
     fn_ << "^" << lok << ":\n";
     terminated_ = false;
@@ -2093,18 +2044,8 @@ class MlirEmitter {
   }
 
   // ---- auto-parfor (port of LlvmEmitter's emitForParfor/emitParforFn) ----
-  static bool pfDenyName(const std::string& n) {
-    static const char* k[] = {
-        "print","println","eprint","eprintln","printerr","panic","assert",
-        "assert_eq","input","exit","write_file","append_file","write_bytes",
-        "remove_file","remove_dir","create_dir","rename","system","popen",
-        "kill","exec","spawn","join","done","cancel","append","extend",
-        "insert","remove","pop","clear","update","add","discard","push",
-        "send","sendall","sendto","write","writeall","recv","recvfrom",
-        "accept","connect","bind","listen"};
-    for (const char* d : k) if (n == d) return true;
-    return false;
-  }
+  // pfDenyName/parforEnabled live in mlir_util.hpp (shared with the
+  // `a`-dialect emitter).
   // name resolves to a binding that would be shared under capture
   bool pfOuterBinding(const std::string& name) {
     for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it)
@@ -2217,12 +2158,6 @@ class MlirEmitter {
       }
       default: return false;
     }
-  }
-  static bool parforEnabled() {
-    const char* e = std::getenv("A_PARFOR");
-    if (!e) return true;
-    std::string v = e;
-    return !(v == "0" || v == "off" || v == "no" || v == "false");
   }
   bool parforEligible(const ForStmt& s) {
     if (!parforEnabled() || !inFnBody_ || s.body.empty()) return false;

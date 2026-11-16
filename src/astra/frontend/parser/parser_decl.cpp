@@ -50,6 +50,22 @@ StmtPtr Parser::parseExternDecl() {
   return decl;
 }
 
+StmtPtr Parser::parseOffloadDecl() {
+  Span start = cur().span;
+  const bool isKernel = cur().lexeme == "kernel";
+  advance();  // consume 'kernel'/'device'
+  expect(Tok::KwFn, "'fn' after 'kernel'/'device'");
+  // Rewind one token so parseFnDecl sees the 'fn' keyword itself.
+  --pos_;
+  StmtPtr decl = parseFnDecl(false, false);
+  if (auto* fn = dynamic_cast<FnDecl*>(decl.get())) {
+    fn->offload = isKernel ? FnDecl::OffloadKind::Kernel
+                           : FnDecl::OffloadKind::Device;
+    fn->span = Span::join(start, fn->span);
+  }
+  return decl;
+}
+
 StmtPtr Parser::parseFnDecl(bool entryKw, bool externFn) {
   Span start = cur().span;
   if (entryKw) {

@@ -129,7 +129,8 @@ package (parse + sema only, like `mojo precompile`).
   `g++ -std=c++20 -fsyntax-only` against MLIR headers
   (`-I/usr/lib/llvm-18/include -I/usr/lib/llvm-18/include/mlir/IR` etc.) or a
   private build dir `build-<name>` if you must configure.
-- Keep `emitMLIR` (text path) and the `llvm_emit.cpp` fallback intact; the
+- Keep `emitMLIR` (llvm-dialect text path) and `emitMLIRDialect` (`a`-dialect
+  path) intact — the legacy `llvm_emit.cpp` fallback has been removed; the
   in-process paths are now the default on non-Windows — `A_MLIR_NATIVE=0`
   or `A_BACKEND=subprocess` and `A_AMBC=0` are the escape hatches.
 - Namespace `a`, C++20, no warnings (CI = Werror).

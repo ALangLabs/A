@@ -176,7 +176,6 @@ flowchart LR
   precompiled package (`a precompile`) is consumed automatically on
   non-Windows, `A_AMBC=0` disables — re-run `a precompile` after
   changing any imported module since packages don't track deps;
-  `emitLLVM` remains as the `A_BACKEND=llvm` debug fallback;
   `cmake/aruntime.cmake` stages `src/astra/runtime/*.c` into
   `build/astralib/libaruntime.a`, which every compiled program links).
 - **`src/astra/mlir/`** *(in progress)* — the Mojo/KGEN-style in-process
@@ -204,9 +203,7 @@ produce and execute binaries for the host architecture and OS
 (`x86_64` or `aarch64`/`arm64`). `a build --target <arch>` parses foreign
 targets but rejects them with a clear error — there is no cross-compile
 path and no per-arch assembler backend. RISC-V32, `i386`, `arm`, `riscv64`
-and the bare-metal `i8086` target are all unsupported; the hand-written
-`src/astra/runtime/i8086_runtime.s` subset remains in the tree for
-reference only.
+and the bare-metal `i8086` target are all unsupported.
 
 Windows is a supported host OS (x86-64 and arm64): the pipeline's
 `_WIN32` ports (`CreateProcess`, `GetTempPath`, `GetModuleFileName` in

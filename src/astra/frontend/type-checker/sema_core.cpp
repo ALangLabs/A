@@ -214,6 +214,9 @@ TypePtr Sema::moduleMemberCall(const ModuleAlias& alias, const std::string& memb
       for (auto& arg : call.args) inferExpr(*arg.value);
       return typeError();
     }
+    call.calleeFunction = fn->second;
+    call.calleeResolved = true;
+    checkOffloadCall(*fn->second, call);
     return checkFunctionCall(sig->second, call);
   }
   if (exports.structs.count(member)) {

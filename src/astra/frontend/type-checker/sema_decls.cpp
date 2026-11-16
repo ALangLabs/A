@@ -422,6 +422,14 @@ TypePtr Sema::makeSignatureTypes(FnDecl& decl, TypePtr selfType, FnSig& sig) {
 }
 
 void Sema::checkFunctionBody(FnDecl& decl, const FnSig& sig) {
+  if (decl.offload != FnDecl::OffloadKind::None &&
+      (decl.isEntry || decl.isExtern || !decl.typeParams.empty() ||
+       !decl.comptimeParams.empty() || !decl.whereClause.empty())) {
+    sink_.error(decl.span,
+                "kernel/device functions cannot be generic, take comptime "
+                "parameters, or combine with 'entry'/'extern'.",
+                "Offload functions must have a plain scalar signature.");
+  }
   auto savedScopes = std::move(scopes_);
   auto savedGenericParams = std::move(genericParams_);
   scopes_.clear();

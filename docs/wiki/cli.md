@@ -28,15 +28,14 @@ faster dev builds).
 - `-O0 -O1 -O2 -O3 -Os -Oz -Ofast`, `--opt-level=N` (0..3; out-of-range
   values like `9` or `-1` are rejected), `--optnone` — optimization.
 - `--no-color` — plain diagnostics.
-- `--native` — execution backend for `run`/`test`/`repl` (the only
-  backend; there is no interpreter). Codegen lowers the checked AST to
-  MLIR's llvm dialect and compiles it **in-process** by default
+- Execution backend — `run`/`test`/`repl` always compile natively (the
+  only backend; there is no interpreter). Codegen lowers the checked AST to
+  MLIR and compiles it **in-process** by default
   (parse -> canonicalize -> LLVM IR -> `llvm::PassBuilder` opt ->
   `TargetMachine` -> `.o` -> clang link with `libaruntime.a`). The
   `mlir-translate`/`opt`/`llc` subprocess chain remains as an escape
   hatch: `A_BACKEND=subprocess` (aliases `mlir-subprocess`,
-  `llvm-subprocess`, `tools`) or `A_MLIR_NATIVE=0`. `A_BACKEND=llvm` is
-  a legacy driver knob, not a CLI flag. Scalar values are emitted unboxed
+  `llvm-subprocess`, `tools`) or `A_MLIR_NATIVE=0`. Scalar values are emitted unboxed
   (`i64`/`f64`/`i1`) wherever Sema proves Int/Float/Bool types; set
   `A_MLIR_TYPED=0` for the boxed-aval emitter. On non-Windows hosts a
   sibling
@@ -77,11 +76,10 @@ faster dev builds).
 
 ### `i8086` bare-metal target
 
-Unsupported. The LLVM backend is host-only and there is no longer a
+Unsupported. The backend is host-only and there is no longer a
 per-arch assembler backend, so `--target i8086` (aliases `i86`, `8086`,
-`8088`) is rejected like every other non-host target. The hand-written
-runtime subset remains in `src/astra/runtime/i8086_runtime.s` for
-reference, and `tests/integration/i8086_image.sh` is inert.
+`8088`) is rejected like every other non-host target;
+`tests/integration/i8086_image.sh` is inert.
 
 Environment: `A_STDLIB`, `A_RUNTIME_C` (path to a_runtime.c overriding the
 staged-runtime lookup),
@@ -93,11 +91,15 @@ stage markers).
 
 ## Cache
 
-Compilation caching was removed — every `a run`/`a build`/`a test`
-compiles fresh and writes nothing beside your sources. `A_SPLIT_UNITS=0`
-still forces the single-unit compile path; `A_DEBUG_UNITS=1` prints
-per-unit emit info. `A_NO_CACHE`, `A_CACHE_DIR`, and the `run-cache`
-CTest entry no longer exist.
+`a run`/`a build`/`a test` use content-addressed run caching, on by
+default: the compiled binary is stored under a central cache root
+(`$A_CACHE_DIR` when set, else the platform user-cache directory) and
+reused when the module contents, compiler version, backend flags, and
+LLVM tool stats are unchanged. `A_NO_CACHE=1` disables caching; it
+applies only to the host target and nothing is written beside your
+sources. The per-module object cache (`A_SPLIT_UNITS`/`A_DEBUG_UNITS`,
+the former `objcache` split-unit path) was removed — those variables
+have no effect.
 
 ## Editor support
 

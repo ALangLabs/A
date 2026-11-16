@@ -50,6 +50,32 @@ TypePtr Sema::checkFunctionValueCall(const std::string& name, TypePtr fnType, Ca
   return resolved->ret;
 }
 
+void Sema::checkOffloadCall(const FnDecl& callee, CallExpr& call) {
+  const FnDecl* caller = currentFunction_;
+  const auto callerKind =
+      caller ? caller->offload : FnDecl::OffloadKind::None;
+  if (callee.offload == callerKind) return;
+  const char* kind =
+      callee.offload == FnDecl::OffloadKind::Kernel ? "kernel" : "device";
+  if (callee.offload == FnDecl::OffloadKind::None) {
+    sink_.error(call.span,
+                "Offload functions cannot call host function '" +
+                    callee.name + "'.",
+                "kernel/device functions compile to GPU code; only other "
+                "kernel/device functions and scalar builtins are available "
+                "on the device.");
+  } else {
+    sink_.error(call.span,
+                "'" + callee.name + "' is a " + kind +
+                    " function and cannot be called directly.",
+                callee.offload == FnDecl::OffloadKind::Kernel
+                    ? "Launch it with gpu.launch(...) from host code."
+                    : "device functions are only callable from other "
+                      "kernel/device functions.");
+  }
+  for (auto& arg : call.args) inferExpr(*arg.value);
+}
+
 TypePtr Sema::checkFunctionCall(const FnSig& sig, CallExpr& call) {
   FnSig effective = sig;
   // Explicit call-site type arguments (`f<i64>(x)`) pin the signature's type

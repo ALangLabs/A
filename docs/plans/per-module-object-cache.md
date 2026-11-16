@@ -1,6 +1,11 @@
 # Plan: per-module compilation units + object cache ("recompile only what changed")
 
-Status: **implemented** (Phases 1–3 landed; see deltas below). Owner: compiler/codegen + pipeline. Reversible at every phase.
+Status: **superseded / removed** — the per-module object cache (`objcache`
+namespace, `A_SPLIT_UNITS`/`A_DEBUG_UNITS`) and the `unitKeyWithCtx` split-unit
+machinery described below were deleted in the dead-code cleanup; only the
+content-addressed run cache (`run_cache` in `pipeline.cpp`, `A_NO_CACHE`,
+`A_CACHE_DIR`) remains. This document is kept for history. Owner:
+compiler/codegen + pipeline. Reversible at every phase.
 
 ## Implementation status (as built)
 

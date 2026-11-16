@@ -174,6 +174,12 @@ struct FnDecl : Stmt {
   // lower to a direct LLVM `call` on `externName` (defaults to `name`).
   bool isExtern = false;
   std::string externName;  // C symbol name; empty means use `name`
+  // `kernel fn` / `device fn` — GPU offload modifiers (Mojo-style
+  // compile_offload). Kernel fns are launchable entry points; device fns
+  // are only callable from other offload fns. Both compile to device code
+  // (LLVM NVPTX/AMDGPU targets) instead of host code.
+  enum class OffloadKind { None, Kernel, Device };
+  OffloadKind offload = OffloadKind::None;
   // Docstring attached from a string-literal statement inside an enclosing
   // type/impl body (methods only). Top-level and body docstrings are recovered
   // from the statement stream instead.

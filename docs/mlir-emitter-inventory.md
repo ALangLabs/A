@@ -83,7 +83,9 @@ hoisted into `fnAllocs_` and spliced by `flushFunction` (:918).
 
 ## 2. Runtime call catalog
 
-Decl block `emitDecls` sigs[] (:697-763) — ~66 decls. Cross-ref `a_runtime.h`:
+Decl block `emitDecls` iterates `runtime_sigs::kRuntimeSigs`
+(`src/astra/frontend/mlir/runtime_sigs.hpp`:13-79) — ~66 decls. Cross-ref
+`a_runtime.h`:
 
 | Declared sig (MLIR) | a_runtime.h symbol | Used by |
 |---|---|---|
@@ -96,7 +98,7 @@ Decl block `emitDecls` sigs[] (:697-763) — ~66 decls. Cross-ref `a_runtime.h`:
 | `()->i64` `a_dict_new`,`a_set_new`,`a_builtin` | constructors | literals, `builtin` fn values |
 | `(i64)->i64` `a_panic_msg`,`a_join_len`,`a_match_fail`,`a_range_bound`? (see note) | misc | errors, match, join |
 | `(i64,i64,i64)->i64` `a_range_new` | range ctor | range expr, `in` lowering helpers |
-| `(i64,i64)->i64` `a_getitem`,`a_setitem`,`a_contains`,`a_iter_new`,`a_closure_env_new`,`a_env_new`,`a_is_option?` no—i32 | seq protocol | index/assign/`in`/for |
+| `(i64,i64)->i64` `a_getitem`,`a_setitem`,`a_contains`,`a_iter_new`,`a_closure_env_new`,`a_is_option?` no—i32 | seq protocol | index/assign/`in`/for |
 | `(i64,i64,i64)->i64` `a_setitem`,`a_dict_set`,`a_env_set` | 3-arg setters | assign-index, dict lit, env capture |
 | `(i64,i64,i64,i64)->i64` `a_slice` | slice | slice expr |
 | `(i64,i64)->i64` `a_dict_get`,`a_dict_has` | dict read | match variant, `in` on dict |
@@ -113,13 +115,16 @@ Decl block `emitDecls` sigs[] (:697-763) — ~66 decls. Cross-ref `a_runtime.h`:
 | `(i64,i64,!llvm.ptr)->i64` `a_call` | dynamic call | fn-value call |
 | `(i64,i64,!llvm.ptr)->i64` `a_bi_call` | builtin dispatch | all builtins (id = `builtinRuntimeId`, `ic`->`ic_impl`) |
 | `(!llvm.ptr,!llvm.ptr,i32)->()` `a_frame_push`; `()->()` `a_frame_pop` | stack frames | every fn prologue/epilogue |
-| `(!llvm.ptr)->()` `a_pin_slot`,`a_gc_add_root_cb`; `(i64)->()` `a_gc_mark_aval`; `()->()` `a_gc_collect`,`a_runtime_init` | GC | pinning, roots, init |
-| `()->i64` `a_now`; `(i64)->()` `a_sleep`; `(i64,!llvm.ptr)->()` `a_printv`,`a_eprintv`; `(i64)->()` `a_println` | IO/time | builtins (mostly via `a_bi_call`, decls kept for direct paths) |
+| `(!llvm.ptr)->()` `a_pin_slot`,`a_gc_add_root_cb`; `(i64)->()` `a_gc_mark_aval`; `()->()` `a_runtime_init` | GC | pinning, roots, init |
+| `(i64,!llvm.ptr)->()` `a_printv`,`a_eprintv` | IO | builtins (mostly via `a_bi_call`, decls kept for direct paths) |
 | `(i64,i64,i64,!llvm.ptr)->i64` `a_fib_main`; `(i64,!llvm.ptr,!llvm.ptr)->i32` `a_test_main` | entry | `main` wrappers |
 
 Notes: `a_runtime.h` provides INLINE fast paths for `a_add`/`a_eq`/etc. plus
 exported `a_*_fast` variants (:568-589); the emitter calls ONLY `_slow`
 variants — boxed-aval fast path is skipped entirely. `a_fnon_new(uint64_t entry, aval env, const char* name)` takes a raw fn pointer as u64 (hence `llvm.ptrtoint`). `a_method(aval obj, const char* name, uint64_t n, uint64_t nkw, aval* argv)`.
+The decls `a_env_new`, `a_println`, `a_sleep`, `a_now`, and `a_gc_collect`
+were dropped from `kRuntimeSigs` — the runtime never exported them (no
+`a_runtime.h` symbol, no callers), so they were dead declarations.
 
 ## 3. Lowering spec for the `a` dialect
 
