@@ -21,6 +21,12 @@ target_include_directories(a_project_options INTERFACE
   $<INSTALL_INTERFACE:include/a/runtime>)
 if(MSVC)
   target_compile_options(a_project_options INTERFACE /W4)
+  # This codebase deliberately uses the classic, portable CRT surface
+  # (getenv, strncpy, fopen, ...). MSVC's C4996 "unsafe function" notes point
+  # at its _s replacements, not at bugs here, so silence them project-wide
+  # instead of rewriting each call site.
+  target_compile_definitions(a_project_options INTERFACE
+    _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
   if(A_WARNINGS_AS_ERRORS)
     target_compile_options(a_project_options INTERFACE /WX)
   endif()
