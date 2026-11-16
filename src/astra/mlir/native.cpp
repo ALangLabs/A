@@ -2,9 +2,11 @@
 
 #include "native.hpp"
 
+#include <fstream>
 #include <memory>
 #include <sstream>
 #include <string>
+#include <cstdlib>
 
 #include "llvm/IR/Module.h"
 #include "llvm/Support/raw_ostream.h"
@@ -119,6 +121,16 @@ int nativeCompileMlirTextToObject(const std::string& mlirText,
   if (failed(pm.run(module->getOperation()))) {
     err << "error: mlir backend: MLIR pass pipeline failed\n";
     return 1;
+  }
+
+  // DIAGNOSTIC (temporary): A_MLIR_DUMP_IR=<path> writes pre-opt LLVM IR.
+  if (const char* dip = std::getenv("A_MLIR_DUMP_IR"); dip && *dip) {
+    std::string ierr;
+    if (std::string is = mlirModuleToLlvmIrText(module.get(), ierr);
+        !is.empty()) {
+      std::ofstream df(dip, std::ios::binary | std::ios::trunc);
+      if (df) df << is;
+    }
   }
 
   return mlirModuleToObject(module.get(), arch, optLevel, objPath, err);

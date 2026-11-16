@@ -49,6 +49,7 @@
 
 #include "ast/ast.hpp"
 #include "codegen/codegen_internal.hpp"
+#include "fastpath_mlir.hpp"
 #include "name-resolution/module_loader.hpp"
 #include "name-resolution/native_modules.hpp"
 #include "type-checker/sema.hpp"
@@ -104,6 +105,46 @@ struct TypedVal {
   double fConst = 0.0;
 };
 
+// ---- inlined a_*_fast runtime fast paths ------------------------------------
+// The a_*_fast exports (src/astra/runtime/fastpath.c) are re-emitted here as
+// llvm.func definitions so the LLVM inliner folds the NaN-box tag checks and
+// the inline-int arithmetic into callers instead of paying a runtime call
+// per operator. Semantics mirror fastpath.c exactly: every case the C fast
+// path defers goes to the same *_slow export. linkonce_odr keeps the defs
+// discardable and conflict-free if libaruntime.a's fastpath.o is ever pulled
+// (its strong symbols simply win; behaviour is identical either way).
+
+namespace {
+// kFastPathMLIR packs all a_*_fast defs into one blob; split it into
+// per-function fragments (lazily, once) so the emitter can append only the
+// defs the module actually calls — the full blob is ~2.3k MLIR ops and
+// parsing/optimizing unused defs dominated compile time.
+struct FastPathFrag {
+  std::string name;
+  std::string text;
+};
+const std::vector<FastPathFrag>& fastPathFrags() {
+  static const std::vector<FastPathFrag> v = [] {
+    std::vector<FastPathFrag> out;
+    const std::string s = fastpathmlir::kFastPathMLIR;
+    std::vector<size_t> starts;
+    for (size_t p = s.find("llvm.func @"); p != std::string::npos;
+         p = s.find("llvm.func @", p + 1))
+      starts.push_back(p);
+    for (size_t i = 0; i < starts.size(); ++i) {
+      const size_t b = starts[i];
+      const size_t e = (i + 1 < starts.size()) ? starts[i + 1] : s.size();
+      const size_t ns = b + 11;  // strlen("llvm.func @")
+      const size_t ne = s.find('(', ns);
+      if (ne == std::string::npos) continue;
+      out.push_back({s.substr(ns, ne - ns), s.substr(b, e - b)});
+    }
+    return out;
+  }();
+  return v;
+}
+}  // namespace
+
 class MlirDialectEmitter {
  public:
   MlirDialectEmitter(const ModuleGraph& graph, const SemaResult& sema,
@@ -132,6 +173,12 @@ class MlirDialectEmitter {
     emitGcRoots();
     emitMain();
     emitLambdas();  // drain last: lambdas may be created anywhere
+    // Inline-able a_*_fast fast-path definitions (fastpath.c semantics as
+    // llvm.func bodies) so the LLVM optimizer folds tag checks into callers.
+    // Emitted only for symbols the module actually calls: the full blob is
+    // ~2.3k MLIR ops and parsing+optimizing unused defs dominated compile
+    // time. Must run after emitLambdas (lambdas can emit _fast calls).
+    emitUsedFastPaths();
     if (failed_) return false;
     out = pre_.str() + body_.str() + "}\n";
     return true;
@@ -293,6 +340,7 @@ class MlirDialectEmitter {
   std::string privPrefix() const { return entryBodyMode_ ? "__a_e" : "__a_"; }
   bool inFnBody_ = false;
   bool inUserFn_ = false;  // inside a user fn/lambda/parfor body (not main_body)
+  bool inEntryBody_ = false;  // inside the entry fn's body in __a_main_body
   // A_MLIR_TYPED=1: emit unboxed i64/f64/i1 scalars for Sema-proven Int/
   // Float/Bool exprs instead of always aval-encoding. Read once here; when
   // off every typed path below is skipped and output is unchanged.
@@ -821,19 +869,29 @@ class MlirDialectEmitter {
 
   void emitDecls() {
     // (sig parsed below into llvm.func declarations)
+    // The a_*_fast exports are DEFINED (not declared) via
+    // fastpathmlir::kFastPathMLIR appended to body_ in run(); only their
+    // *_slow fallbacks and helpers are declared here.
     static const std::pair<const char*, const char*> sigs[] = {
-        {"a_add_fast", "(i64, i64) -> i64"}, {"a_sub_fast", "(i64, i64) -> i64"},
-        {"a_mul_fast", "(i64, i64) -> i64"}, {"a_div_fast", "(i64, i64) -> i64"},
-        {"a_floordiv_fast", "(i64, i64) -> i64"},
-        {"a_mod_fast", "(i64, i64) -> i64"}, {"a_pow_fast", "(i64, i64) -> i64"},
-        {"a_eq_fast", "(i64, i64) -> i64"}, {"a_ne_fast", "(i64, i64) -> i64"},
-        {"a_lt_fast", "(i64, i64) -> i64"}, {"a_le_fast", "(i64, i64) -> i64"},
-        {"a_gt_fast", "(i64, i64) -> i64"}, {"a_ge_fast", "(i64, i64) -> i64"},
-        {"a_band_fast", "(i64, i64) -> i64"}, {"a_bor_fast", "(i64, i64) -> i64"},
-        {"a_bxor_fast", "(i64, i64) -> i64"}, {"a_shl_fast", "(i64, i64) -> i64"},
-        {"a_shr_fast", "(i64, i64) -> i64"}, {"a_neg_fast", "(i64) -> i64"},
-        {"a_bnot_fast", "(i64) -> i64"}, {"a_not_fast", "(i64) -> i64"},
-        {"a_truthy_raw_fast", "(i64) -> i64"},
+        {"a_add_slow", "(i64, i64) -> i64"}, {"a_sub_slow", "(i64, i64) -> i64"},
+        {"a_mul_slow", "(i64, i64) -> i64"}, {"a_div_slow", "(i64, i64) -> i64"},
+        {"a_floordiv_slow", "(i64, i64) -> i64"},
+        {"a_mod_slow", "(i64, i64) -> i64"}, {"a_pow", "(i64, i64) -> i64"},
+        {"a_eq_slow", "(i64, i64) -> i64"}, {"a_ne_slow", "(i64, i64) -> i64"},
+        {"a_lt_slow", "(i64, i64) -> i64"}, {"a_le_slow", "(i64, i64) -> i64"},
+        {"a_gt_slow", "(i64, i64) -> i64"}, {"a_ge_slow", "(i64, i64) -> i64"},
+        {"a_band_slow", "(i64, i64) -> i64"}, {"a_bor_slow", "(i64, i64) -> i64"},
+        {"a_bxor_slow", "(i64, i64) -> i64"}, {"a_shl_slow", "(i64, i64) -> i64"},
+        {"a_shr_slow", "(i64, i64) -> i64"}, {"a_neg_slow", "(i64) -> i64"},
+        {"a_bnot_slow", "(i64) -> i64"}, {"a_not", "(i64) -> i64"},
+        {"a_truthy_raw_slow", "(i64) -> i64"},
+        {"floor", "(f64) -> f64"}, {"fmod", "(f64, f64) -> f64"},
+        {"llvm.sadd.with.overflow.i64",
+         "(i64, i64) -> !llvm.struct<(i64, i1)>"},
+        {"llvm.ssub.with.overflow.i64",
+         "(i64, i64) -> !llvm.struct<(i64, i1)>"},
+        {"llvm.smul.with.overflow.i64",
+         "(i64, i64) -> !llvm.struct<(i64, i1)>"},
         {"a_unwrap", "(i64) -> i64"}, {"a_some_new", "(i64) -> i64"},
         {"a_try_result", "(i64) -> i64"}, {"a_is_option", "(i64) -> i32"},
         {"a_is_propagate", "(i64) -> i32"}, {"a_str", "(i64) -> i64"},
@@ -874,7 +932,7 @@ class MlirDialectEmitter {
         {"a_method", "(i64, !llvm.ptr, i64, i64, !llvm.ptr) -> i64"},
         {"a_getattr", "(i64, !llvm.ptr) -> i64"},
         {"a_setattr", "(i64, !llvm.ptr, i64) -> i64"},
-        {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(i64) -> i64"},
+        {"a_promote", "(i64) -> i64"}, {"a_panic_msg", "(!llvm.ptr) -> i64"},
         {"a_join_len", "(i64) -> i64"}, {"a_match_fail", "(i64) -> i64"},
         {"a_frame_push", "(!llvm.ptr, !llvm.ptr, i32) -> ()"}, {"a_frame_pop", "() -> ()"},
         {"a_pin_slot", "(!llvm.ptr) -> ()"}, {"a_runtime_init", "() -> ()"},
@@ -985,12 +1043,36 @@ class MlirDialectEmitter {
     // nullPtr uses a function-local cache; reset by scoping it per call site
     pushScope();
     fn_ << "llvm.func @" << sym << "(%argv: !llvm.ptr) -> i64 {\n";
+    // Run the assign-kind scan before binding params so canTypeBind sees
+    // reassignments of annotated params (scan is idempotent; emitStatements
+    // re-runs it on the same body).
+    if (typed_ && fn && assignScanPending_) scanAssignKinds(fn->body);
     for (size_t i = 0; i < fn->params.size(); ++i) {
+      const ParamDecl& pr = fn->params[i];
+      std::string aval = load(gepIdx("%argv", c64((std::int64_t)i + 1)));
+      // Explicitly annotated params with no default may bind a typed slot
+      // (unannotated params stay dynamically rebindable aval; defaults need
+      // the A_MISSING sentinel which typed slots cannot represent).
+      std::string pkind;
+      if (typed_ && pr.type && !pr.defaultValue && !pr.variadic && fn) {
+        auto it = sema_.fnParamTypes.find(fn);
+        if (it != sema_.fnParamTypes.end() && i < it->second.size())
+          pkind = scalarKindOfT(it->second[i]);
+      }
+      if (!pkind.empty() && canTypeBind(pr.name, pkind)) {
+        MlBinding b;
+        b.type = pkind;
+        if (pkind == "f64") b.slot = allocaF64();
+        else b.slot = allocaI64();
+        storeTypedVal(b, unboxFromAval(aval, pkind));
+        scopes_.back()[pr.name] = b;
+        continue;
+      }
       std::string slot = allocaI64();
-      store(slot, load(gepIdx("%argv", c64((std::int64_t)i + 1))));
+      store(slot, aval);
       MlBinding b;
       b.slot = slot;
-      scopes_.back()[fn->params[i].name] = b;
+      scopes_.back()[pr.name] = b;
     }
     // defaults: param == A_MISSING -> evaluate default in callee scope
     // (defaults may reference earlier params; processed in order).
@@ -1181,6 +1263,13 @@ class MlirDialectEmitter {
     // order. Uses a dummy FnDecl (main_body takes only the argv pointer).
     FnDecl dummy;
     beginFunction("__a_main_body", &dummy);
+    // __a_main_body spans every module's top-level stmts plus the entry
+    // body; the dummy FnDecl's empty body means beginFunction's assign-kind
+    // scan saw nothing, and a nested emitStatements would otherwise consume
+    // the pending scan on a partial body. Scan everything up front.
+    assignScanPending_ = false;
+    for (const auto& ts : topStmts_) scanStmtAssigns(*ts.stmt);
+    if (entry_) scanAssignKinds(entry_->body);
     // global init stores + top-level stmts interleaved per module order:
     // emit inits first (globals must exist before use), then top stmts.
     for (const auto& gi : globalInits_) {
@@ -1208,9 +1297,10 @@ class MlirDialectEmitter {
     // LlvmEmitter, where emitMainBody is not emitted under a_test_main).
     if (entry_ && !testMode_) {
       bool svf = inFnBody_; inFnBody_ = true;
+      bool sve = inEntryBody_; inEntryBody_ = true;
       int svm = curModuleId_; curModuleId_ = entry_->moduleId;
       emitStatements(entry_->body);
-      curModuleId_ = svm; inFnBody_ = svf;
+      curModuleId_ = svm; inFnBody_ = svf; inEntryBody_ = sve;
     }
     endFunction();
   }
@@ -1239,6 +1329,17 @@ class MlirDialectEmitter {
     body_ << "  %c0 = llvm.mlir.constant(0 : i32) : i32\n";
     body_ << "  llvm.return %c0 : i32\n";
     body_ << "}\n\n";
+  }
+
+  // Append only the a_*_fast fastpath defs this module references. Calls
+  // reach them as a.runtime.call "sym" / llvm.call @sym, so a substring
+  // scan of the emitted text finds every needed def; fragments are
+  // independent (each only calls *_slow/floor/fmod/a_pow, all declared).
+  void emitUsedFastPaths() {
+    const std::string body = body_.str();
+    for (const FastPathFrag& f : fastPathFrags()) {
+      if (body.find(f.name) != std::string::npos) body_ << f.text;
+    }
   }
 
   // Test-mode main: run module inits (via __a_main_body on a fiber, same as
@@ -1479,8 +1580,12 @@ class MlirDialectEmitter {
     TypedVal tv = evalExprT(*as.value);
     if (t.kind == ExprKind::Ident) {
       const std::string& an = static_cast<const IdentExpr&>(t).name;
-      // bare `x = ...` inside a user fn binds a local (not a global)
-      bool firstBind = inUserFn_ && !lookup(an) && globalSymFor(an).empty();
+      // bare `x = ...` inside a user fn or the entry body binds a local
+      // (entry-body names are invisible to other functions — verified by
+      // Sema — so a stack slot is semantics-preserving and lets typed
+      // scalars stay unboxed; conservative-stack-scan GC covers the slots)
+      bool firstBind = (inUserFn_ || inEntryBody_) && !lookup(an) &&
+                       globalSymFor(an).empty();
       if (firstBind) bindLocalT(an, tv);
       MlBinding* old = lookup(an);
       bool hadDrop = old && !old->dropFn.empty();
@@ -1610,8 +1715,159 @@ class MlirDialectEmitter {
     contLabels_.pop_back();
   }
 
+  // `for i in a..b[..s]:` counted loop (port of LlvmEmitter's
+  // emitCountedLoop): bounds evaluated once via a_range_bound (same
+  // expect_int64 checks/panics as a_range_new), step 0 panics up front,
+  // cur advances with overflow saturation to hi. The loop variable binds
+  // as a typed i64 local when the assign-kind scan proves it is never
+  // rebound to a non-i64 scalar, so body arithmetic stays unboxed.
+  void emitCountedLoop(const ForStmt& s, const std::string& lo,
+                       const std::string& hi, const std::string& st) {
+    // step == 0 -> panic before the first iteration (a_range_new parity)
+    std::string zc = nl(), zo = nl();
+    {
+      std::string z = nv();
+      std::string zero = c64(0);  // emits its own line; hoist before use
+      fn_ << "  " << z << " = llvm.icmp \"eq\" " << st << ", " << zero
+          << " : i64\n";
+      fn_ << "  llvm.cond_br " << z << ", ^" << zc << ", ^" << zo << "\n";
+    }
+    fn_ << "^" << zc << ":\n";
+    callI64T("a_panic_msg",
+             {{"!llvm.ptr",
+               cstrPtr("range() step must be positive, found 0.")}});
+    fn_ << "  llvm.unreachable\n";
+    fn_ << "^" << zo << ":\n";
+
+    std::string cur = allocaI64();
+    store(cur, lo);
+    // The assign-kind scan is per-function and may not have covered this
+    // body (top-level stmts bypass it), so scan here: `var` gets a typed
+    // i64 slot only when no AssignStmt in the body rebinds it to another
+    // scalar kind.
+    if (typed_) scanAssignKinds(s.body);
+    const bool typedVar = typed_ && canTypeBind(s.var, "i64");
+    std::string vslot = allocaI64();
+    if (!typedVar) pin(vslot);  // aval fallback may hold heap values
+    std::string sp = nv();
+    {
+      std::string zero = c64(0);
+      fn_ << "  " << sp << " = llvm.icmp \"sgt\" " << st << ", " << zero
+          << " : i64\n";
+    }
+    std::string lhead = nl(), lbody = nl(), lincr = nl(), lend = nl();
+    breakLabels_.push_back(lend);
+    contLabels_.push_back(lincr);  // continue advances cur, like a_iter_next
+    fn_ << "  llvm.br ^" << lhead << "\n";
+    fn_ << "^" << lhead << ":\n";
+    terminated_ = false;
+    std::string c = load(cur);
+    std::string lt = nv(), gt = nv(), more = nv();
+    fn_ << "  " << lt << " = llvm.icmp \"slt\" " << c << ", " << hi
+        << " : i64\n";
+    fn_ << "  " << gt << " = llvm.icmp \"sgt\" " << c << ", " << hi
+        << " : i64\n";
+    fn_ << "  " << more << " = llvm.select " << sp << ", " << lt << ", "
+        << gt << " : i1, i1\n";
+    fn_ << "  llvm.cond_br " << more << ", ^" << lbody << ", ^" << lend
+        << "\n";
+    fn_ << "^" << lbody << ":\n";
+    terminated_ = false;
+    pushScope();
+    {
+      MlBinding mb;
+      mb.slot = vslot;
+      if (typedVar) {
+        mb.type = "i64";
+        storeTy(vslot, c, "i64");
+      } else {
+        store(vslot, boxToAval({c, "i64"}));
+      }
+      scopes_.back()[s.var] = mb;
+    }
+    emitStatements(s.body);
+    popScope();
+    if (!terminated_) fn_ << "  llvm.br ^" << lincr << "\n";
+    fn_ << "^" << lincr << ":\n";
+    // Advance with the same saturation as ITAG_RANGE: on overflow cur is
+    // set to hi so the next check terminates.
+    std::string limP = nv(), ovP = nv(), sum = nv(), nP = nv();
+    std::string imax = c64(INT64_MAX);
+    fn_ << "  " << limP << " = llvm.sub " << imax << ", " << st << " : i64\n";
+    fn_ << "  " << ovP << " = llvm.icmp \"sgt\" " << c << ", " << limP
+        << " : i64\n";
+    fn_ << "  " << sum << " = llvm.add " << c << ", " << st << " : i64\n";
+    fn_ << "  " << nP << " = llvm.select " << ovP << ", " << hi << ", "
+        << sum << " : i1, i64\n";
+    std::string limN = nv(), ovN = nv(), nN = nv(), nxt = nv();
+    // INT64_MIN as -INT64_MAX-1: the bare -9223372036854775808 literal does
+    // not round-trip through MLIR's integer-attr parser.
+    std::string iMin = nv();
+    std::string nmax = c64(-INT64_MAX), one = c64(1);
+    fn_ << "  " << iMin << " = llvm.sub " << nmax << ", " << one << " : i64\n";
+    fn_ << "  " << limN << " = llvm.sub " << iMin << ", " << st << " : i64\n";
+    fn_ << "  " << ovN << " = llvm.icmp \"slt\" " << c << ", " << limN
+        << " : i64\n";
+    fn_ << "  " << nN << " = llvm.select " << ovN << ", " << hi << ", "
+        << sum << " : i1, i64\n";
+    fn_ << "  " << nxt << " = llvm.select " << sp << ", " << nP << ", "
+        << nN << " : i1, i64\n";
+    store(cur, nxt);
+    fn_ << "  llvm.br ^" << lhead << "\n";
+    fn_ << "^" << lend << ":\n";
+    terminated_ = false;
+    breakLabels_.pop_back();
+    contLabels_.pop_back();
+  }
+
+  void emitForRange(const ForStmt& s) {
+    const auto& r = *static_cast<const RangeExpr*>(s.iterable.get());
+    // a_range_bound returns the raw i64 bound (expect_int64 checks, same
+    // panics as a_range_new) — not an aval word.
+    std::string lo = callI64("a_range_bound", {evalExpr(*r.start), c64(0)});
+    std::string hi = callI64("a_range_bound", {evalExpr(*r.end), c64(0)});
+    std::string st = r.step
+                         ? callI64("a_range_bound", {evalExpr(*r.step), c64(1)})
+                         : c64(1);
+    emitCountedLoop(s, lo, hi, st);
+  }
+
+  // True when `range(...)` resolved to the builtin (Sema-set flags, so a
+  // user shadow is already excluded) with 1..3 positional args — the same
+  // shape bi_range accepts. lo/hi/st get the raw i64 bounds in bi_range's
+  // argument order.
+  bool rangeCallBounds(const CallExpr& c, std::string& lo, std::string& hi,
+                       std::string& st) {
+    if (!c.calleeIsBuiltin || c.calleeBuiltin != "range") return false;
+    const std::size_t na = c.args.size();
+    if (na < 1 || na > 3) return false;
+    for (const CallArg& a : c.args)
+      if (!a.name.empty()) return false;
+    // Evaluation order matches bi_range: lo, hi, step (left to right).
+    lo = na >= 2 ? callI64("a_range_bound", {evalExpr(*c.args[0].value), c64(0)})
+                 : c64(0);
+    hi = callI64("a_range_bound",
+                 {evalExpr(*c.args[na >= 2 ? 1 : 0].value), c64(0)});
+    st = na == 3
+             ? callI64("a_range_bound", {evalExpr(*c.args[2].value), c64(1)})
+             : c64(1);
+    return true;
+  }
+
   void emitFor(const ForStmt& fs) {
     if (parforEligible(fs)) { emitForParfor(fs); return; }
+    if (fs.iterable && fs.iterable->kind == ExprKind::Range) {
+      emitForRange(fs);
+      return;
+    }
+    if (fs.iterable && fs.iterable->kind == ExprKind::Call) {
+      const auto& c = *static_cast<const CallExpr*>(fs.iterable.get());
+      std::string lo, hi, st;
+      if (rangeCallBounds(c, lo, hi, st)) {
+        emitCountedLoop(fs, lo, hi, st);
+        return;
+      }
+    }
     std::string coll = evalExpr(*fs.iterable);
     std::string it = callI64("a_iter_new", {coll});
     std::string itemSlot = allocaI64();
@@ -1992,8 +2248,24 @@ class MlirDialectEmitter {
         return {"", "i64", true, -tv.iConst, 0.0};
       }
       // Non-constant i64 negation can hit INT64_MIN, which the runtime
-      // promotes to f64 — llvm.sub cannot express that, stay boxed.
-      return {evalExprImpl(u), "aval"};
+      // promotes to f64 — guard it and fall back to the aval path there.
+      {
+        std::string x = tvalSSA(tv);
+        std::string ls = nl(), lf = nl(), lm = nl(), pv = nv();
+        std::string bad = icmp("eq", x, c64(INT64_MIN), "i64");
+        fn_ << "  llvm.cond_br " << bad << ", ^" << ls << ", ^" << lf << "\n";
+        fn_ << "^" << lf << ":\n";
+        std::string res = llvm2("sub", c64(0), x, "i64");
+        fn_ << "  llvm.br ^" << lm << "(" << res << " : i64)\n";
+        fn_ << "^" << ls << ":\n";
+        // Same fallback as the untyped path: boxed negate, then a_int_full
+        // (panics on the f64 result INT64_MIN produces).
+        std::string av = callI64("a_neg_fast", {boxToAval(tv)});
+        std::string ri = callI64("a_int_full", {av});
+        fn_ << "  llvm.br ^" << lm << "(" << ri << " : i64)\n";
+        fn_ << "^" << lm << "(" << pv << " : i64):\n";
+        return {pv, "i64"};
+      }
     }
     if (u.op == "-" && tv.kind == "f64") {
       if (tv.isConst) return {"", "f64", true, 0, -tv.fConst};
@@ -2014,13 +2286,12 @@ class MlirDialectEmitter {
         b.op == "or" || b.op == "||" || b.binop == BinOp::Or ||
         b.binop == BinOp::Coalesce || b.binop == BinOp::In ||
         b.binop == BinOp::NotIn || b.binop == BinOp::Range ||
-        b.binop == BinOp::Div || b.binop == BinOp::FloorDiv ||
-        b.binop == BinOp::Mod || b.binop == BinOp::Pow)
+        b.binop == BinOp::Div || b.binop == BinOp::Pow)
       return {evalBinary(b), "aval"};
     TypedVal lt = evalExprT(*b.lhs);
     TypedVal rt = evalExprT(*b.rhs);
     if (lt.kind != "aval" && lt.kind == rt.kind) {
-      TypedVal r = typedBinOp(b.binop, lt, rt, lt.kind);
+      TypedVal r = typedBinOp(b.binop, lt, rt, lt.kind, b.opSpan);
       if (!r.kind.empty()) return r;
     }
     // mixed/aval operands: box and use the runtime slow op (identical to
@@ -3152,6 +3423,9 @@ class MlirDialectEmitter {
       fn_ << "  " << tag << " = llvm.mlir.constant(" << kAvalTag << " : i64) : i64\n";
       enc = nv();
       fn_ << "  " << enc << " = llvm.or " << tag << ", " << masked << " : i64\n";
+      // NOTE: keep this straight-line — boxToAval runs in contexts where a
+      // cond_br's successor labels are emitted later, so it must not open
+      // blocks of its own.
       std::string boxed = callI64("a_i64n", {v.name});
       std::string r = nv();
       fn_ << "  " << r << " = llvm.select " << inR << ", " << enc << ", " << boxed << " : i1, i64\n";
@@ -3451,11 +3725,124 @@ class MlirDialectEmitter {
     return res;
   }
 
+  // i64 binop with runtime-exact edge handling: the raw op runs in a fast
+  // block guarded by an i1 `bad` condition; on `bad` (int64 overflow -> the
+  // runtime promotes to f64, div-by-zero / INT64_MIN/-1 / out-of-range shift
+  // -> *_slow panic) control merges through the same aval fallback the
+  // untyped path uses, then a_int_full unboxes (panicking on f64->i64
+  // exactly like storeTypedFromAval does today). Merge is a block arg, so
+  // callers see a plain i64 SSA value.
+  TypedVal checkedI64BinOp(BinOp op, const TypedVal& lt, const TypedVal& rt,
+                           const Span& span) {
+    std::string l = tvalSSA(lt), r = tvalSSA(rt);
+    std::string ls = nl(), lf = nl(), lm = nl(), pv = nv();
+    std::string bad, res;
+    bool preGuard = true;  // raw op may be poison: emit inside ^lf
+    switch (op) {
+      case BinOp::Add:
+      case BinOp::Sub:
+      case BinOp::Mul: {
+        // Canonical with.overflow intrinsics: LLVM lowers these to the
+        // hardware op + overflow-flag branch, cheaper than hand-rolled
+        // sign checks and recognized by IndVarSimplify for elimination.
+        const char* intr = op == BinOp::Add ? "llvm.sadd.with.overflow.i64"
+                            : op == BinOp::Sub ? "llvm.ssub.with.overflow.i64"
+                                               : "llvm.smul.with.overflow.i64";
+        std::string p = nv();
+        fn_ << "  " << p << " = llvm.call @" << intr << "("
+            << l << ", " << r
+            << ") : (i64, i64) -> !llvm.struct<(i64, i1)>\n";
+        res = nv();
+        fn_ << "  " << res << " = llvm.extractvalue " << p
+            << "[0] : !llvm.struct<(i64, i1)>\n";
+        bad = nv();
+        fn_ << "  " << bad << " = llvm.extractvalue " << p
+            << "[1] : !llvm.struct<(i64, i1)>\n";
+        preGuard = false;
+        break;
+      }
+      case BinOp::FloorDiv: {
+        // bad: b==0 (panic) or INT64_MIN/-1 (promotes to f64 -> i64 panic)
+        std::string bz = icmp("eq", r, c64(0), "i64");
+        std::string m1 = icmp("eq", l, c64(INT64_MIN), "i64");
+        std::string m2 = icmp("eq", r, c64(-1), "i64");
+        bad = llvm2("or", bz, llvm2("and", m1, m2, "i1"), "i1");
+        break;
+      }
+      case BinOp::Mod: {
+        std::string bz = icmp("eq", r, c64(0), "i64");
+        std::string m1 = icmp("eq", l, c64(INT64_MIN), "i64");
+        std::string m2 = icmp("eq", r, c64(-1), "i64");
+        bad = llvm2("or", bz, llvm2("and", m1, m2, "i1"), "i1");
+        break;
+      }
+      case BinOp::Shl: case BinOp::Shr: {
+        // bad: shift amount outside [0,63] -> *_slow panics
+        std::string lo = icmp("slt", r, c64(0), "i64");
+        std::string hi = icmp("sgt", r, c64(63), "i64");
+        bad = llvm2("or", lo, hi, "i1");
+        break;
+      }
+      default:
+        return {"", "", false, 0, 0.0};
+    }
+    fn_ << "  llvm.cond_br " << bad << ", ^" << ls << ", ^" << lf << "\n";
+    fn_ << "^" << lf << ":\n";
+    if (preGuard) {
+      // Raw op here is safe: all poison cases were excluded by `bad`.
+      switch (op) {
+        case BinOp::FloorDiv: {
+          std::string q = llvm2("sdiv", l, r, "i64");
+          std::string rem = llvm2("srem", l, r, "i64");
+          // --q iff a%b!=0 && (a<0)!=(b<0)  (value_arith.c a_floordiv_slow)
+          std::string rz = icmp("ne", rem, c64(0), "i64");
+          std::string s1 = icmp("slt", l, c64(0), "i64");
+          std::string s2 = icmp("slt", r, c64(0), "i64");
+          std::string fix = llvm2("and", rz, llvm2("xor", s1, s2, "i1"), "i1");
+          std::string qm1 = llvm2("sub", q, c64(1), "i64");
+          res = nv();
+          fn_ << "  " << res << " = llvm.select " << fix << ", " << qm1
+              << ", " << q << " : i1, i64\n";
+          break;
+        }
+        case BinOp::Mod: {
+          // r += b iff r!=0 && (r<0)!=(b<0)  (value_arith.c '%' case)
+          std::string rem = llvm2("srem", l, r, "i64");
+          std::string rz = icmp("ne", rem, c64(0), "i64");
+          std::string s1 = icmp("slt", rem, c64(0), "i64");
+          std::string s2 = icmp("slt", r, c64(0), "i64");
+          std::string fix = llvm2("and", rz, llvm2("xor", s1, s2, "i1"), "i1");
+          std::string adj = llvm2("add", rem, r, "i64");
+          res = nv();
+          fn_ << "  " << res << " = llvm.select " << fix << ", " << adj
+              << ", " << rem << " : i1, i64\n";
+          break;
+        }
+        case BinOp::Shl:
+          res = llvm2("shl", l, r, "i64");
+          break;
+        case BinOp::Shr:
+          res = llvm2("ashr", l, r, "i64");
+          break;
+        default: break;
+      }
+    }
+    fn_ << "  llvm.br ^" << lm << "(" << res << " : i64)\n";
+    fn_ << "^" << ls << ":\n";
+    // Identical to the untyped fallback: boxed aval op, then a_int_full
+    // (panics on non-int results, matching storeTypedFromAval).
+    std::string av = emitBinOp(op, boxToAval(lt), boxToAval(rt), span);
+    std::string ri = callI64("a_int_full", {av});
+    fn_ << "  llvm.br ^" << lm << "(" << ri << " : i64)\n";
+    fn_ << "^" << lm << "(" << pv << " : i64):\n";
+    return {pv, "i64"};
+  }
+
   // typed binary operator on two same-kind scalar TypedVals; returns "" when
   // the op must stay on the aval runtime path (caller falls back).
   // `lt`/`rt` are the operand TypedVals; `kind` is their shared kind.
   TypedVal typedBinOp(BinOp op, const TypedVal& lt, const TypedVal& rt,
-                      const std::string& kind) {
+                      const std::string& kind, const Span& span = Span()) {
     // constant folding first (overflow/out-of-range -> aval path, which keeps
     // the runtime's promote-to-double / panic semantics for those cases)
     if (lt.isConst && rt.isConst) {
@@ -3499,19 +3886,23 @@ class MlirDialectEmitter {
       return {"", "", false, 0, 0.0};
     }
     switch (op) {
-      // i64 + - * are NOT wrap-around at runtime: value_arith.c promotes
-      // the result to f64 on int64 overflow, which an unboxed llvm.add
-      // cannot express. They stay on the aval path. Same for << / >>:
-      // the runtime panics unless the shift amount is in [0,63], while
-      // llvm.shl/ashr would be poison. Only ops with exact i64 semantics
-      // (bitwise, comparisons) may stay typed.
+      // i64 + - * promote to f64 on int64 overflow and //,%,<<,>> have
+      // div-by-zero / INT64_MIN/-1 / shift-range edge cases — all handled
+      // by checkedI64BinOp's guarded fast block + aval fallback.
+      case BinOp::FloorDiv: case BinOp::Mod:
+      case BinOp::Shl: case BinOp::Shr:
+        if (kind == "i64") return checkedI64BinOp(op, lt, rt, span);
+        break;
       case BinOp::Add:
+        if (kind == "i64") return checkedI64BinOp(op, lt, rt, span);
         if (kind == "f64") return {llvm2("fadd", l, r, "f64"), "f64"};
         break;
       case BinOp::Sub:
+        if (kind == "i64") return checkedI64BinOp(op, lt, rt, span);
         if (kind == "f64") return {llvm2("fsub", l, r, "f64"), "f64"};
         break;
       case BinOp::Mul:
+        if (kind == "i64") return checkedI64BinOp(op, lt, rt, span);
         if (kind == "f64") return {llvm2("fmul", l, r, "f64"), "f64"};
         break;
       case BinOp::BitAnd:
@@ -3929,6 +4320,12 @@ class MlirDialectEmitter {
     const std::string sym =
         "__a_m" + std::to_string(emitOnlyModule_) + "_init";
     beginFunction(sym, &dummy);
+    // Same fix as emitMainBody: the dummy's empty body leaves the assign-kind
+    // scan unarmed for this module's top-level stmts; scan them up front so
+    // a nested emitStatements cannot consume it on a partial body.
+    assignScanPending_ = false;
+    for (const auto& ts : topStmts_)
+      if (ts.moduleId == emitOnlyModule_) scanStmtAssigns(*ts.stmt);
     for (const auto& gi : globalInits_) {
       if (gi.moduleId != emitOnlyModule_) continue;
       curModuleId_ = gi.moduleId;
@@ -3994,6 +4391,7 @@ bool MlirDialectEmitter::runEntryBody(std::string& out, std::string& support,
   assignScanPending_ = true;
   assignKindMask_.clear();
   inFnBody_ = true;
+  inEntryBody_ = true;
   suppressFramePop_ = true;
   emitStatements(entry_->body);
   if (!terminated_) {
@@ -4004,6 +4402,7 @@ bool MlirDialectEmitter::runEntryBody(std::string& out, std::string& support,
   }
   suppressFramePop_ = false;
   inFnBody_ = false;
+  inEntryBody_ = false;
   if (failed_) return false;
   if (terminated_) {
     // The entry body emitted `return` (llvm.return is a terminator). The

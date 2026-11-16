@@ -34,6 +34,7 @@
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
 #include "mlir/mlir_emit.hpp"
+#include "llvm/llvm_emit.hpp"
 #include "mlir/mlir_emit_ad.hpp"
 namespace a {
 namespace {
@@ -1725,6 +1726,17 @@ bool nativeMlirEnabled() {
 #endif
 }
 
+// A_BACKEND=llvm-legacy selects the restored hand-written LLVM IR text
+// emitter (src/astra/frontend/llvm/llvm_emit.cpp, the pre-MLIR backend)
+// instead of the MLIR pipeline. The produced .ll goes through the same
+// opt/llc/clang subprocess chain (llvmBuild).
+bool legacyLlEnabled() {
+  const char* v = std::getenv("A_BACKEND");
+  if (!v || !*v) return false;
+  const std::string s = lowerStr(v);
+  return s == "llvm-legacy" || s == "llvm_ir" || s == "llvm-ir";
+}
+
 // Emits the checked graph to MLIR text. A_MLIR_TYPED=1 routes through the
 // `a`-dialect emitter (emitMLIRDialect); otherwise emitMLIR produces the
 // llvm-dialect text consumed by both backends. Returns false on failure.
@@ -1948,11 +1960,25 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
         << " host=" << hostArch() << "\n";
   {
     std::string llSource;
-    const bool useNative = nativeMlirEnabled();
+    const bool legacyLl = legacyLlEnabled();
+    const bool useNative = nativeMlirEnabled() && !legacyLl;
     {
-      if (!emitMlirText(m, testMode, testFilter, llSource, err)) return kCErr;
       std::string llPath;
       std::string runPath;
+      if (legacyLl) {
+        // Hand-written LLVM IR emitter: .ll text straight to llvmBuild.
+        std::string llError;
+        if (!emitLLVM(*m.graph, *m.sema, llSource, llError, testMode,
+                      testFilter)) {
+          err << "error: llvm backend: LLVM IR emission failed: " << llError
+              << "\n";
+          return kCErr;
+        }
+        llPath = stageSrc(llSource, ".ll", err);
+        llSource.clear();
+        if (llPath.empty()) return kCErr;
+      } else {
+      if (!emitMlirText(m, testMode, testFilter, llSource, err)) return kCErr;
       if (useNative) {
         // In-process path: mlir text -> canonicalize -> LLVM IR -> opt ->
         // .o -> clang link. No intermediate .mlir/.ll files.
@@ -1984,6 +2010,7 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
         if (llPath2.empty()) return kCErr;
         llSource.clear();
         llPath = llPath2;
+      }
       }
       if (std::getenv("A_LLVM_DEBUG"))
         err << "llvm-emit: ok\n";
@@ -2296,7 +2323,7 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
         << " (target '" << td.arch << "' != host '" << hostArch() << "')\n";
     return kCErr;
   }
-  if (nativeMlirEnabled()) {
+  if (nativeMlirEnabled() && !legacyLlEnabled()) {
     // In-process path: mlir text -> LLVM IR -> opt -> .o -> link.
     std::string mlirText;
     if (!emitMlirText(m, false, nullptr, mlirText, err)) return kCErr;
@@ -2339,7 +2366,17 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   }
   std::string llSource;
   std::string directLl;
-  {
+  if (legacyLlEnabled()) {
+    // Hand-written LLVM IR emitter: .ll text straight to llvmBuild.
+    std::string llError;
+    if (!emitLLVM(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
+      err << "error: llvm backend: LLVM IR emission failed: " << llError
+          << "\n";
+      return kCErr;
+    }
+    directLl = stageSrc(llSource, ".ll", err);
+    if (directLl.empty()) return kCErr;
+  } else {
     if (!emitMlirText(m, false, nullptr, llSource, err)) return kCErr;
     std::string mlirPath = stageSrc(llSource, ".mlir", err);
     if (mlirPath.empty()) return kCErr;

@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdio>
 #include <cstdint>
 #include <filesystem>
 #include <memory>
@@ -215,6 +216,29 @@ int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
     err << "error: mlir backend: MLIR -> LLVM IR translation failed\n";
     return 1;
   }
+
+  // The a_*_fast fast-path helpers are emitted as llvm.func definitions
+  // (fastpath_mlir.hpp) precisely so their NaN-box tag checks fold into
+  // callers. Their multi-block bodies exceed the default inline cost model,
+  // so force alwaysinline; linkonce_odr still lets fully-inlined copies be
+  // discarded.
+  for (llvm::Function& fn : llvmMod->functions()) {
+    llvm::StringRef nm = fn.getName();
+    if (nm.starts_with("a_") && nm.ends_with("_fast"))
+      fn.addFnAttr(llvm::Attribute::AlwaysInline);
+  }
+
+  // DIAGNOSTIC (temporary): A_MLIR_DUMP_OPT_IR=<path> writes post-opt LLVM IR.
+  if (const char* dop = std::getenv("A_MLIR_DUMP_OPT_IR"); dop && *dop) {
+    std::error_code oec;
+    llvm::raw_fd_ostream od(dop, oec);
+    if (!oec) {
+      llvmMod->print(od, nullptr);
+      od.flush();
+    }
+  }
+
+  if (const char* e0 = std::getenv("A_MLIR_DUMP_OPT0_IR")) { std::string e; llvm::raw_string_ostream os3(e); llvmMod->print(os3, nullptr); FILE* f = std::fopen(e0, "wb"); if (f) { std::fwrite(e.data(), 1, e.size(), f); std::fclose(f); } }
 
   // Set the triple/datalayout explicitly: emitted modules do not carry
   // llvm.target_triple / llvm.data_layout attributes.
