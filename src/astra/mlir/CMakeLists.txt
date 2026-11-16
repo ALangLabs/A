@@ -12,7 +12,10 @@
 if(NOT MLIR_DIR OR MLIR_DIR STREQUAL "MLIR_DIR-NOTFOUND")
     foreach(_prefix
             /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16 /usr/lib/llvm
-            /usr/local/lib/cmake/mlir /usr/lib/cmake/mlir)
+            /usr/local/lib/cmake/mlir /usr/lib/cmake/mlir
+            /opt/homebrew/opt/llvm/lib/cmake/mlir
+            /opt/homebrew/lib/cmake/mlir
+            /usr/local/opt/llvm/lib/cmake/mlir)
         if(EXISTS "${_prefix}/lib/cmake/mlir/MLIRConfig.cmake")
             set(MLIR_DIR "${_prefix}/lib/cmake/mlir" CACHE PATH FORCE
                 "Directory containing MLIRConfig.cmake")
@@ -27,7 +30,8 @@ endif()
 find_package(MLIR CONFIG QUIET)
 if(NOT LLVM_DIR OR LLVM_DIR STREQUAL "LLVM_DIR-NOTFOUND")
     foreach(_prefix /usr/lib/llvm-18 /usr/lib/llvm-17 /usr/lib/llvm-16
-                   /usr/lib/llvm /usr/local)
+                   /usr/lib/llvm /usr/local /opt/homebrew/opt/llvm
+                   /opt/homebrew /usr/local/opt/llvm)
         if(EXISTS "${_prefix}/lib/cmake/llvm/LLVMConfig.cmake")
             set(LLVM_DIR "${_prefix}/lib/cmake/llvm" CACHE PATH FORCE
                 "Directory containing LLVMConfig.cmake")
@@ -43,6 +47,8 @@ if(MLIR_FOUND)
     # when llvm-18/bin is not on PATH.
     find_program(MLIR_TABLEGEN_EXE_ABS NAMES ${MLIR_TABLEGEN_EXE} mlir-tblgen
         PATHS ${LLVM_TOOLS_BINARY_DIR} /usr/lib/llvm-18/bin /usr/bin
+              /opt/homebrew/opt/llvm/bin /opt/homebrew/bin
+              /usr/local/opt/llvm/bin /usr/local/bin
         NO_DEFAULT_PATH)
     if(MLIR_TABLEGEN_EXE_ABS)
         set(MLIR_TABLEGEN_EXE ${MLIR_TABLEGEN_EXE_ABS})

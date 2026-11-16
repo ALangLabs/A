@@ -25,6 +25,8 @@
 #include <sstream>
 #include <string>
 #include <system_error>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "llvm/ADT/StringMap.h"
@@ -338,17 +340,33 @@ int mlirModuleToObject(mlir::ModuleOp module, const std::string& arch,
 
 namespace {
 
-// Locate the clang/clang++ driver, mirroring findLLVMTool("A_LLVM_CC", ...)
+int runProcess(const std::string& prog,
+               const std::vector<std::string>& args);
+
+// Locate clang/clang++/cc candidates, mirroring findLLVMTool("A_LLVM_CC", ...)
 // in pipeline.cpp: env override, bundled llvm-tools/bin dirs, then PATH.
 // The probe base is derived from `anchor` — the resolved libaruntime.a path —
 // since staged layouts keep clang next to the runtime (bin/../llvm-tools,
-// bin/, astralib/..).
-std::string findClangDriver(const std::string& anchor) {
+// bin/, astralib/..). Returns every viable driver in priority order: a
+// bundled tool that cannot actually run (missing shared libs on the target
+// machine) is skipped at link time in favour of the next candidate.
+std::vector<std::string> findClangDrivers(const std::string& anchor) {
+  // clang first (it is what the opt/llc pipeline was designed against), then
+  // the system C compiler: the final step is a plain .o + libaruntime.a link,
+  // which gcc/cc handle identically, so release installs work on machines
+  // with no LLVM toolchain at all.
   static const char* kNames[] = {
       "clang", "clang-18", "clang-17", "clang-16", "clang-15",
-      "clang++", "clang++-18", "clang++-17"};
-  if (const char* e = std::getenv("A_LLVM_CC"); e && *e) return e;
-  auto tryDir = [&](const std::string& dir) -> std::string {
+      "clang++", "clang++-18", "clang++-17",
+      "cc", "gcc", "c++", "g++"};
+  if (const char* e = std::getenv("A_LLVM_CC"); e && *e) return {e};
+  std::vector<std::string> out;
+  std::unordered_set<std::string> seen;
+  auto add = [&](const std::string& cand) {
+    if (cand.empty() || !seen.insert(cand).second) return;
+    out.push_back(cand);
+  };
+  auto tryDir = [&](const std::string& dir) {
     for (const char* n : kNames) {
       std::string cand = dir + "/" + n;
       std::error_code ec;
@@ -356,9 +374,9 @@ std::string findClangDriver(const std::string& anchor) {
 #ifndef _WIN32
       if (access(cand.c_str(), X_OK) != 0) continue;
 #endif
-      return cand;
+      add(cand);
+      break;  // one driver per directory is enough
     }
-    return "";
   };
   // Bundled toolchain next to the runtime archive: libaruntime.a lives in
   // <root>/astralib[-arch]/ or <root>/bin/../astralib; clang ships under
@@ -376,8 +394,7 @@ std::string findClangDriver(const std::string& anchor) {
     };
     for (const auto& base : bases) {
       if (base.empty() || base == ".") continue;
-      std::string found = tryDir(base);
-      if (!found.empty()) return found;
+      tryDir(base);
     }
   }
   // Fall back to the directory of the running executable (covers layouts
@@ -390,8 +407,7 @@ std::string findClangDriver(const std::string& anchor) {
       std::string dir = self.parent_path().string();
       for (const std::string& base :
            {dir + "/llvm-tools", dir + "/bin", dir}) {
-        std::string found = tryDir(base);
-        if (!found.empty()) return found;
+        tryDir(base);
       }
     }
   }
@@ -405,10 +421,9 @@ std::string findClangDriver(const std::string& anchor) {
 #endif
   while (std::getline(ss, dir, delim)) {
     if (dir.empty()) continue;
-    std::string found = tryDir(dir);
-    if (!found.empty()) return found;
+    tryDir(dir);
   }
-  return "";
+  return out;
 }
 
 // True when `mold` is on PATH and A_NO_MOLD is unset (mirrors llvmBuild).
@@ -458,6 +473,26 @@ int runProcess(const std::string& prog,
 
 }  // namespace
 
+namespace {
+
+// Drivers that actually execute, in probe order. `--version` is used as a
+// viability check because a bundled LLVM tool can be present yet unusable on
+// the target machine (missing libclang-cpp/libLLVM shared libraries); the
+// result is cached per runtime-archive anchor.
+std::vector<std::string> viableLinkDrivers(const std::string& anchor) {
+  static std::unordered_map<std::string, std::vector<std::string>> cache;
+  auto it = cache.find(anchor);
+  if (it != cache.end()) return it->second;
+  std::vector<std::string> viable;
+  for (const auto& c : findClangDrivers(anchor)) {
+    if (runProcess(c, {"--version"}) == 0) viable.push_back(c);
+  }
+  cache.emplace(anchor, viable);
+  return viable;
+}
+
+}  // namespace
+
 int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
                     const std::string& runtimeLib, std::ostream& err) {
 #ifdef _WIN32
@@ -465,8 +500,8 @@ int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
   err << "error: llvm backend is not supported on Windows yet\n";
   return 1;
 #else
-  std::string cc = findClangDriver(runtimeLib);
-  if (cc.empty()) {
+  const auto drivers = viableLinkDrivers(runtimeLib);
+  if (drivers.empty()) {
     err << "error: llvm backend: no clang driver found (set A_LLVM_CC)\n";
     return 1;
   }
@@ -483,15 +518,18 @@ int linkWithRuntime(const std::string& objPath, const std::string& outputPath,
 #endif
   // mold is dramatically faster than ld/lld for the final link; use it when
   // present and retry with the default linker if it fails (mirrors llvmBuild).
-  if (moldAvailable()) {
-    std::vector<std::string> margs = args;
-    margs.insert(margs.begin() + 1, "-fuse-ld=mold");
-    if (runProcess(cc, margs) == 0) return 0;
-    // mold missing/broken: fall through to the default linker.
+  const bool useMold = moldAvailable();
+  for (const auto& cc : drivers) {
+    if (useMold) {
+      std::vector<std::string> margs = args;
+      margs.insert(margs.begin() + 1, "-fuse-ld=mold");
+      if (runProcess(cc, margs) == 0) return 0;
+      // mold missing/broken: fall through to the default linker.
+    }
+    if (runProcess(cc, args) == 0) return 0;
   }
-  int rc = runProcess(cc, args);
-  if (rc != 0) err << "error: llvm backend: clang link failed\n";
-  return rc == 0 ? 0 : 1;
+  err << "error: llvm backend: clang link failed\n";
+  return 1;
 #endif
 }
 

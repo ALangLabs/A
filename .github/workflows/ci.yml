@@ -10,6 +10,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM/MLIR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libmlir-18-dev clang-18
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DA_WARNINGS_AS_ERRORS=ON -DA_ENABLE_LTO=ON
       - name: Build
@@ -32,6 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Install LLVM/MLIR
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y llvm-18-dev libmlir-18-dev clang-18
       - name: Configure
         run: |
           cmake -S . -B build-asan -DCMAKE_BUILD_TYPE=Debug \

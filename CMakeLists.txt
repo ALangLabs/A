@@ -30,4 +30,15 @@ install(DIRECTORY src/astra/frontend/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/
   FILES_MATCHING PATTERN "*.hpp")
 install(DIRECTORY src/astra/runtime/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/a/runtime
   FILES_MATCHING PATTERN "*.hpp")
+# Runtime + stdlib payload: an installed `a` locates both relative to its own
+# executable — <prefix>/astralib (bin/../astralib in findRuntime) and
+# <prefix>/share/a/stdlib (bin/../share/a/stdlib in defaultStdlibRoot). Without
+# these the installed compiler cannot build or run a single program.
+if(EXISTS "${CMAKE_BINARY_DIR}/astralib/libaruntime.a")
+  install(DIRECTORY "${CMAKE_BINARY_DIR}/astralib/"
+          DESTINATION astralib)
+endif()
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/stdlib/"
+        DESTINATION share/a/stdlib
+        PATTERN "_acache_" EXCLUDE)
 add_subdirectory(tests)

@@ -455,7 +455,8 @@ inline void mixLLVMToolStats(std::uint64_t& h) {
   const std::string cc = findLLVMTool(
       "A_LLVM_CC",
       {"clang", "clang-18", "clang-17", "clang-16", "clang-15",
-       "clang++", "clang++-18", "clang++-17"});
+       "clang++", "clang++-18", "clang++-17",
+       "cc", "gcc", "c++", "g++"});
   if (!opt.empty()) h = mixFileStat(h, opt);
   if (!llc.empty()) h = mixFileStat(h, llc);
   if (!cc.empty()) h = mixFileStat(h, cc);
@@ -1607,7 +1608,8 @@ int llvmBuild(const std::string& arch, const std::string& llPath,
   const std::string optFlag = llvmOptFlag(level);
   std::string cc = findLLVMTool("A_LLVM_CC",
       {"clang", "clang-18", "clang-17", "clang-16", "clang-15",
-       "clang++", "clang++-18", "clang++-17"});
+       "clang++", "clang++-18", "clang++-17",
+       "cc", "gcc", "c++", "g++"});
   if (cc.empty()) {
     err << "error: llvm backend: no clang driver found (set A_LLVM_CC)\n";
     return 1;

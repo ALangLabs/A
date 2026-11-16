@@ -27,6 +27,11 @@ if(MSVC)
   # instead of rewriting each call site.
   target_compile_definitions(a_project_options INTERFACE
     _CRT_SECURE_NO_WARNINGS _CRT_NONSTDC_NO_WARNINGS)
+  # MSVC /W4 warns (C4456-C4459) when a declaration hides an outer name —
+  # e.g. a `name` parameter shadowing a struct member. The GCC/Clang side
+  # does not enable -Wshadow, so these are MSVC-only noise here; silence
+  # them project-wide rather than renaming every shadowing identifier.
+  target_compile_options(a_project_options INTERFACE /wd4456 /wd4457 /wd4458 /wd4459)
   if(A_WARNINGS_AS_ERRORS)
     target_compile_options(a_project_options INTERFACE /WX)
   endif()

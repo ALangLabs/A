@@ -44,35 +44,62 @@ for lib in "$BUILD_DIR"/astralib; do
   [ -d "$lib" ] && cp -R "$lib" "$root/"
 done
 
-# LLVM toolchain: the `a` binary discovers opt/llc/clang under
-# <exe>/llvm-tools/ before PATH (see findLLVMTool in pipeline.cpp), so
-# release bundles ship the tools that were used to build — no system LLVM
-# required on the target machine.
+# LLVM toolchain: the `a` binary discovers opt/llc/clang/mlir-translate under
+# <exe>/llvm-tools/ before PATH (see findLLVMTool/findClangDriver), so release
+# bundles ship the tools that were used to build — no system LLVM required on
+# the target machine. A tool is only bundled when it actually executes:
+# distro clangs are often symlinks into versioned installs whose shared libs
+# (libclang-cpp, libLLVM) do not travel with a bare binary copy.
 llvm_dir="$root/bin/llvm-tools"
 mkdir -p "$llvm_dir"
-for tool in opt llc clang; do
-  resolved="$(command -v "$tool" 2>/dev/null || true)"
-  [ -n "$resolved" ] && cp "$resolved" "$llvm_dir/$tool"
+# tool|env override|candidate names (unversioned first, then -18..-15)
+pick_tool() {
+  local resolved=""
+  for cand in "$@"; do
+    resolved="$(command -v "$cand" 2>/dev/null || true)"
+    [ -n "$resolved" ] || continue
+    if "$resolved" --version >/dev/null 2>&1; then
+      printf '%s' "$resolved"
+      return 0
+    fi
+  done
+  return 1
+}
+# A bare binary copy is not always relocatable (distro clangs need
+# libclang-cpp/libLLVM .so's, Homebrew clangs need ../lib dylibs). The driver
+# probes llvm-tools/ before PATH, so a bundled tool that cannot execute would
+# shadow a working system compiler — verify the copy and drop it if broken.
+bundle_tool() {
+  local tool="$1" src="$2" dest="$llvm_dir/$1"
+  case "$src" in *.exe) dest="$dest.exe" ;; esac
+  cp "$src" "$dest"
+  if ! "$dest" --version >/dev/null 2>&1; then
+    rm -f "$dest"
+    echo "package: warning: bundled '$tool' does not run standalone; dropped" >&2
+    return 1
+  fi
+}
+for spec in \
+    "opt|A_LLVM_OPT|opt opt-18 opt-17 opt-16 opt-15" \
+    "llc|A_LLVM_LLC|llc llc-18 llc-17 llc-16 llc-15" \
+    "clang|A_LLVM_CC|clang clang-18 clang-17 clang-16 clang-15 clang++ clang++-18 clang++-17" \
+    "mlir-translate|A_MLIR_TRANSLATE|mlir-translate mlir-translate-18 mlir-translate-17"; do
+  tool="${spec%%|*}"
+  rest="${spec#*|}"
+  env_name="${rest%%|*}"
+  names="${rest#*|}"
+  # Honour the same env overrides the driver does (A_LLVM_OPT etc.).
+  override="$(printenv "$env_name" 2>/dev/null || true)"
+  if [ -n "$override" ] && "$override" --version >/dev/null 2>&1; then
+    bundle_tool "$tool" "$override" && continue
+  fi
+  resolved="$(pick_tool $names || true)"
+  if [ -n "$resolved" ]; then
+    bundle_tool "$tool" "$resolved" || true
+  else
+    echo "package: warning: no working '$tool' found (PATH fallback at runtime)" >&2
+  fi
 done
-# Versioned fallbacks when only suffixed binaries exist (opt-18 etc.).
-if [ ! -f "$llvm_dir/opt" ]; then
-  for v in 18 17 16 15; do
-    resolved="$(command -v "opt-$v" 2>/dev/null || true)"
-    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/opt"; break; }
-  done
-fi
-if [ ! -f "$llvm_dir/llc" ]; then
-  for v in 18 17 16 15; do
-    resolved="$(command -v "llc-$v" 2>/dev/null || true)"
-    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/llc"; break; }
-  done
-fi
-if [ ! -f "$llvm_dir/clang" ]; then
-  for v in 18 17 16 15; do
-    resolved="$(command -v "clang-$v" 2>/dev/null || true)"
-    [ -n "$resolved" ] && { cp "$resolved" "$llvm_dir/clang"; break; }
-  done
-fi
 
 # Standard library (drop _acache_ build artifacts and stray objects).
 cp -R "$ROOT_DIR/stdlib" "$root/stdlib"
