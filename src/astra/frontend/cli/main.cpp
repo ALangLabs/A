@@ -80,7 +80,6 @@ void printUsage(std::ostream& os) {
      << "                    (optional -linux/-windows/-macos suffix; must\n"
      << "                    match the host OS — the LLVM backend cannot\n"
      << "                    cross OSes or arches; host target only)\n"
-     << "  --native         force the native codegen backend (default)\n"
      << "  --no-color       disable colored diagnostics\n"
      << "  --filter <s>     test name substring filter (test only)\n"
      << "  -h, --help       show this message\n"
@@ -106,11 +105,6 @@ bool isTerminal() {
 #endif
 }
 
-std::string lowerAscii(std::string s) {
-  for (char& c : s) c = (char)::tolower((unsigned char)c);
-  return s;
-}
-
 struct Options {
   std::string command;
   std::string path;
@@ -125,7 +119,6 @@ struct Options {
   bool writeInPlace = false;
   bool jsonOutput = false;
   bool optnone = false;
-  bool native = false;
   int optimizationLevel = 3;  // 0..3 (Os/Oz map to 1, Ofast to 3)
   int indentWidth = 4;
   int jobs = 1;
@@ -175,7 +168,6 @@ bool parseOptions(int argc, char** argv, Options& options, std::ostream& err) {
                     arg == "-Os" || arg == "-Oz" || arg == "-Ofast" ||
                     arg.rfind("--opt-level=", 0) == 0 || arg == "--opt-level");
   if (arg == "--optnone") options.optnone = true;
-  else if (arg == "--native") { options.native = true; }
   else if (isOptFlag) {
     bool ok = false;
     if (!parseOptFlag(arg, ok)) { err << "error: invalid optimization level '" << arg << "'\n"; return false; }
@@ -340,11 +332,6 @@ int main(int argc, char** argv) {
   config.checkOnly = options.command == "check";
   config.useColor = options.useColor;
   config.jsonDiagnostics = options.jsonOutput && options.command == "check";
-  config.backend = "mlir-direct";
-  if (const char* be = std::getenv("A_BACKEND"); be && *be) {
-    // Escape hatch for the direct LLVM-IR emitter; not exposed as a flag.
-    if (lowerAscii(be) == "llvm") config.backend = "llvm";
-  }
   config.jobs = options.jobs == 0 ? 0 : options.jobs;  // 0 -> analyzeParallel resolves core count
   config.optimizationLevel = options.optimizationLevel;
   if (const char* env = std::getenv("A_JOBS")) {

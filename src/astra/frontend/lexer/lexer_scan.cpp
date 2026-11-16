@@ -188,14 +188,12 @@ void Lexer::scanString() {
       advance();
     }
     std::size_t contentStart = pos_;
-    bool terminated = false;
     while (!atEnd()) {
       if (peek() == '"' && peek(1) == '"' && peek(2) == '"') {
         std::size_t contentEnd = pos_;
         advance();
         advance();
         advance();
-        terminated = true;
         Token token;
         token.kind = Tok::String;
         token.rawString = true;
@@ -289,14 +287,12 @@ void Lexer::scanChar() {
       advance();
     }
     std::size_t contentStart = pos_;
-    bool terminated = false;
     while (!atEnd()) {
       if (peek() == '\'' && peek(1) == '\'' && peek(2) == '\'') {
         std::size_t contentEnd = pos_;
         advance();
         advance();
         advance();
-        terminated = true;
         Token token;
         token.kind = Tok::String;
         token.rawString = true;
@@ -367,11 +363,9 @@ void Lexer::scanChar() {
   }
 
   char32_t value = 0;
-  bool ok = true;
   if (peek() == '\\') {
     advance();
     if (atEnd()) {
-      ok = false;
     } else {
       char esc = advance();
       switch (esc) {
@@ -397,7 +391,6 @@ void Lexer::scanChar() {
             ++digits;
           }
           if (digits == 0) {
-            ok = false;
             error(makeSpan(start, startLine, startCol),
                   "Escape '\\x' needs two hexadecimal digits.", "Write '\\x41' for 'A'.");
           }
@@ -406,7 +399,6 @@ void Lexer::scanChar() {
         }
         case 'u': {
           if (!matchChar('{')) {
-            ok = false;
             error(makeSpan(start, startLine, startCol),
                   "Unicode escapes use the form '\\u{1F600}'.");
             break;
@@ -421,7 +413,6 @@ void Lexer::scanChar() {
             ++digits;
           }
           if (digits == 0 || !matchChar('}') || parsed > 0x10FFFF) {
-            ok = false;
             error(makeSpan(start, startLine, startCol),
                   "Invalid Unicode escape in character literal.",
                   "Write at most six hex digits, e.g. '\\u{1F600}'.");
@@ -430,7 +421,6 @@ void Lexer::scanChar() {
           break;
         }
         default:
-          ok = false;
           error(makeSpan(start, startLine, startCol), "Unknown escape sequence in character literal.",
                 "Supported escapes: \\n \\t \\r \\a \\b \\f \\v \\0 \\xNN \\u{...} \\\\ \\' \\\".");
           value = static_cast<unsigned char>(esc);
@@ -442,7 +432,6 @@ void Lexer::scanChar() {
     if (byte < 0x80) {
       value = byte;
     } else {
-      ok = false;
       error(makeSpan(start, startLine, startCol),
             "Non-ASCII character literal is not supported yet.",
             "Use a string literal for Unicode text.");

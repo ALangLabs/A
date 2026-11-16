@@ -29,7 +29,7 @@
 #endif
 namespace a {
 namespace {
-PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; p.backend=c.backend; return p; }
+PipelineConfig toP(const DriverConfig& c){ PipelineConfig p; p.checkOnly=c.checkOnly; p.jsonDiagnostics=c.jsonDiagnostics; p.useColor=c.useColor; p.jobs=c.jobs; p.optimizationLevel=c.optimizationLevel; p.modulePaths=c.modulePaths; p.stdlibRoot=c.stdlibRoot; p.target=c.target; p.testFilter=c.testFilter; return p; }
 bool readAll(const std::string& path,std::string& t,std::ostream& e){
   std::error_code ec;
   if(std::filesystem::is_directory(path,ec)){ e<<"error: '"<<path<<"' is a directory, not a source file\n"; return false; }
@@ -38,7 +38,6 @@ bool readAll(const std::string& path,std::string& t,std::ostream& e){
 }
 int runSource(const std::string& n,std::string s,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return executePipeline(n,std::move(s),toP(c),i,o,e); }
 int runFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ std::string s; if(!readAll(p,s,e)) return 66; return executePipeline(p,std::move(s),toP(c),i,o,e); }
-int testFile(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return testPipeline(p,toP(c),i,o,e); }
 int testPath(const std::string& p,const DriverConfig& c,std::istream& i,std::ostream& o,std::ostream& e){ return a::testPath(p,toP(c),i,o,e); }
 namespace {
 // Heuristic for Python-style continuation: unclosed brackets or a trailing
@@ -117,7 +116,6 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
   // Line-based REPL: each complete input is compiled and run by the LLVM
   // toolchain as a fresh process (top-level bindings do not persist).
   o<<"A REPL "<<kVersion<<" — 'exit'/'quit' or Ctrl-D to leave\n";
-  ReplSession session;
   PipelineConfig pc=toP(c); pc.checkOnly=false;
   std::string sessionSource, pending;
   std::string line;
@@ -128,7 +126,7 @@ int repl(const DriverConfig& c,std::istream& in,std::ostream& o,std::ostream& e)
     pending+=line; pending+='\n';
     if(!replInputComplete(pending)) continue;
     std::string attempt=sessionSource+pending;
-    int rc=replEval(session,attempt,pc,in,o,e);
+    int rc=replEval(attempt,pc,in,o,e);
     if(rc==1){ pending.clear(); continue; } // compile error: discard, don't poison session
     sessionSource=std::move(attempt);
     pending.clear();

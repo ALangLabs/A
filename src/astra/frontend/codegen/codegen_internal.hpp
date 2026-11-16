@@ -1,7 +1,7 @@
 #pragma once
-// Internal shared types/helpers for the codegen backends (C emitter in
-// codegen.cpp, asm emitter in codegen_emitter.hpp + codegen_*.cpp). Not part of the public
-// codegen.hpp interface.
+// Internal shared types/helpers for the MLIR emitters
+// (frontend/mlir/mlir_emit*.cpp). Not part of the public codegen.hpp
+// interface.
 #include <cstdint>
 #include <cstdio>
 #include <string>
@@ -161,92 +161,6 @@ inline int builtinIdForBuiltin(BuiltinId id) {
     case BuiltinId::DebugRepr: return 53;  // __repr__/__debug_repr__ -> a_repr
     default: return -1;
   }
-}
-
-inline std::string cEscape(const std::string& s) {
-  std::string out;
-  for (unsigned char c : s) {
-    switch (c) {
-      case '"': out += "\\\""; break;
-      case '\\': out += "\\\\"; break;
-      case '\n': out += "\\n"; break;
-      case '\t': out += "\\t"; break;
-      case '\r': out += "\\r"; break;
-      default:
-        if (c < 0x20) {
-          char buf[8];
-          std::snprintf(buf, sizeof buf, "\\%03o", c);
-          out += buf;
-        } else {
-          out.push_back(static_cast<char>(c));
-        }
-    }
-  }
-  return out;
-}
-
-struct FnInfo {
-  const FnDecl* decl = nullptr;
-  std::string cname;
-  std::string globalVar;  // aval global holding the FNON value
-  std::vector<std::string> paramNames;
-  bool isMethod = false;
-  std::string structName;
-  int moduleId = -1;
-  std::string name;
-  bool variadic = false;  // last param collects extra args into a list
-  bool isEntry = false;   // `entry name():` program entry point
-};
-
-struct StructInfo {
-  const StructDecl* decl = nullptr;
-  std::string ctorCname;
-  std::string globalVar;
-  std::vector<std::string> fieldNames;
-  std::unordered_map<std::string, FnInfo*> methods;
-  int moduleId = -1;
-  std::string name;
-};
-
-struct EnumVariantInfo {
-  std::string globalVar;
-  std::int64_t value = 0;
-  bool algebraic = false;
-  int tag = 0;
-  std::vector<std::string> payloadFields;
-  int moduleId = -1;
-  std::string enumName;
-  std::string variantName;
-};
-
-enum class BKind { Local, Global, Param, Capture, FnValue, Builtin, StructCtor, EnumValue, Module, PyModule, PyFunc, NativeConst };
-
-// ---- Stable symbol hashing (per-module object cache, Phase 1) -------------
-// Names are derived from (module, declaration) content, never from program
-// order, so a cached object from an earlier build still links. FNV-1a 64-bit.
-inline std::uint64_t stableHash64(const std::string& s) {
-  std::uint64_t h = 1469598103934665603ULL;
-  for (unsigned char c : s) {
-    h ^= c;
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-inline std::uint64_t stableHash64Init(std::uint64_t h, const std::string& s) {
-  for (unsigned char c : s) {
-    h ^= c;
-    h *= 1099511628211ULL;
-  }
-  return h;
-}
-inline std::string stableHex64(std::uint64_t h) {
-  char b[17];
-  std::snprintf(b, sizeof b, "%016llx",
-                static_cast<unsigned long long>(h));
-  return std::string(b);
-}
-inline std::string stableTag(const std::string& s) {
-  return stableHex64(stableHash64(s));
 }
 
 // Follow `from "x.astra" import name` re-exports (package __init__ modules) to

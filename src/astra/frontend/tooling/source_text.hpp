@@ -16,7 +16,6 @@ class SourceText {
   explicit SourceText(std::string text);
 
   const std::string& text() const { return text_; }
-  std::size_t lineCount() const { return lineStarts_.size(); }
 
   // Byte offset of a 1-based line/column pair. Out-of-range values clamp to the
   // end of the buffer.

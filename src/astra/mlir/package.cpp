@@ -107,6 +107,19 @@ bool resolvePackageEntry(const std::string& dirOrFile, std::string& entry,
 
 } // namespace
 
+std::string ambcSiblingPath(const std::string& sourcePath) {
+  fs::path p(sourcePath);
+  p.replace_extension(".ambc");
+  return p.string();
+}
+
+std::string defaultAmbcOutputPath(const std::string& packageDirOrFile) {
+  std::string entry;
+  std::ostringstream devnull;
+  if (!resolvePackageEntry(packageDirOrFile, entry, devnull)) return {};
+  return ambcSiblingPath(entry);
+}
+
 // ---------------------------------------------------------------------------
 // precompilePackageModules - per-module .ambc package (.mojoc model)
 // ---------------------------------------------------------------------------

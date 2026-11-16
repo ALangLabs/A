@@ -25,9 +25,6 @@ struct PipelineConfig {
   // `a test --filter <substr>`: only run test_* functions whose name
   // contains this substring. Empty means run every test.
   std::string testFilter;
-  // Native codegen backend: "llvm" is the only native backend
-  // (AST -> LLVM IR -> opt/llc/clang).
-  std::string backend = "llvm";
   // Internal: scan mode (`a test` over a directory/codebase) treats a
   // per-file filter that matches no tests as "skip this file" instead of an
   // error, so `--filter` can select matching tests across files.
@@ -55,13 +52,7 @@ int buildPipeline(const std::string& path, const std::string& outputPath, const 
 // Interactive REPL session. The driver feeds the full accumulated source on
 // every call; each eval is compiled and run by the LLVM toolchain as a
 // fresh process, so top-level bindings do not persist between inputs.
-struct ReplSession {
-  ~ReplSession();
-  ReplSession() = default;
-  ReplSession(const ReplSession&) = delete;
-  ReplSession& operator=(const ReplSession&) = delete;
-};
 // Returns 0 on success, 1 on compile failure, 2 on runtime error.
-int replEval(ReplSession& session, const std::string& source, const PipelineConfig& config,
+int replEval(const std::string& source, const PipelineConfig& config,
              std::istream& in, std::ostream& out, std::ostream& err);
 }

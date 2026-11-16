@@ -42,7 +42,6 @@
 #include "ownership/ownership.hpp"
 #include "type-checker/sema.hpp"
 #include "mlir/mlir_emit.hpp"
-#include "llvm/llvm_emit.hpp"
 #include "mlir/mlir_emit_ad.hpp"
 namespace a {
 namespace {
@@ -943,453 +942,6 @@ std::string codegenFingerprintImpl() {
   return fp;
 }
 
-namespace objcache {
-
-inline bool envFlagOff(const char* name) {
-  const char* v = std::getenv(name);
-  if (!v || !*v) return false;
-  std::string s = lowerStr(v);
-  return s == "0" || s == "off" || s == "no" || s == "none" || s == "false";
-}
-[[maybe_unused]] inline bool splitUnitsEnabled() {
-  // Kept for the object-cache key helpers; the per-module split build that
-  // consumed this was removed with the assembly backend.
-  return !envFlagOff("A_SPLIT_UNITS");
-}
-[[maybe_unused]] inline bool objCacheEnabled() {
-  return !run_cache::disabled();
-}
-[[maybe_unused]] inline bool debugUnits() {
-  const char* v = std::getenv("A_DEBUG_UNITS");
-  return v && *v && lowerStr(v) != "0";
-}
-// Cached objects live in <cache root>/obj (see defaultCacheRoot). Unit
-// keys are content+path hashed, so a single shared dir is collision-safe
-// and source trees stay free of `_acache_/` folders.
-inline std::string objCacheDir() {
-  return (std::filesystem::path(defaultCacheRoot()) / "obj").string();
-}
-inline std::string hex64(std::uint64_t h) {
-  char b[17];
-  std::snprintf(b, sizeof b, "%016llx",
-                static_cast<unsigned long long>(h));
-  return std::string(b);
-}
-
-inline std::string typeSig(const TypeExprPtr& t) {
-  if (!t) return "_";
-  if (const auto* n = dynamic_cast<const NamedTypeExpr*>(t.get())) {
-    std::string s = "N:";
-    for (const auto& q : n->qualifiers) { s += q; s += "::"; }
-    s += n->name;
-    if (!n->typeArgs.empty()) {
-      s += "<";
-      for (std::size_t i = 0; i < n->typeArgs.size(); ++i) {
-        if (i) s += ",";
-        s += typeSig(n->typeArgs[i]);
-      }
-      s += ">";
-    }
-    return s;
-  }
-  if (const auto* a = dynamic_cast<const ArrayTypeExpr*>(t.get())) {
-    return "A[" + std::to_string(a->length) + "]:" + typeSig(a->element);
-  }
-  if (const auto* o = dynamic_cast<const OptionalTypeExpr*>(t.get())) {
-    return "O:" + typeSig(o->element);
-  }
-  if (const auto* tp = dynamic_cast<const TupleTypeExpr*>(t.get())) {
-    std::string s = "T(";
-    for (std::size_t i = 0; i < tp->elements.size(); ++i) {
-      if (i) s += ",";
-      s += typeSig(tp->elements[i]);
-    }
-    return s + ")";
-  }
-  if (const auto* m = dynamic_cast<const MapTypeExpr*>(t.get())) {
-    return "D:" + typeSig(m->key) + ":" + typeSig(m->value);
-  }
-  if (const auto* s = dynamic_cast<const SetTypeExpr*>(t.get())) {
-    return "S:" + typeSig(s->element);
-  }
-  if (const auto* f = dynamic_cast<const FunctionTypeExpr*>(t.get())) {
-    std::string s = "F(";
-    for (std::size_t i = 0; i < f->params.size(); ++i) {
-      if (i) s += ",";
-      s += typeSig(f->params[i]);
-    }
-    return s + ")->" + typeSig(f->returnType);
-  }
-  return "?";
-}
-inline std::string exprSig(const Expr* e) {
-  if (!e) return "_";
-  switch (e->kind) {
-    case ExprKind::IntLit: {
-      return "I" + std::to_string(static_cast<const IntLitExpr*>(e)->value);
-    }
-    case ExprKind::FloatLit: {
-      std::uint64_t bits = 0;
-      double d = static_cast<const FloatLitExpr*>(e)->value;
-      std::memcpy(&bits, &d, 8);
-      return "F" + hex64(bits);
-    }
-    case ExprKind::Ident: {
-      return "V" + static_cast<const IdentExpr*>(e)->name;
-    }
-    case ExprKind::Unary: {
-      const UnaryExpr* u = static_cast<const UnaryExpr*>(e);
-      return "U" + u->op + exprSig(u->operand.get());
-    }
-    case ExprKind::Binary: {
-      const BinaryExpr* b = static_cast<const BinaryExpr*>(e);
-      return "B" + b->op + "(" + exprSig(b->lhs.get()) + "," +
-             exprSig(b->rhs.get()) + ")";
-    }
-    default:
-      return "E" + std::to_string(static_cast<int>(e->kind));
-  }
-}
-inline void mixFnSig(std::uint64_t& h, const FnDecl* fn) {
-  if (!fn) return;
-  h = run_cache::mixBytes(h, "F:" + fn->name);
-  std::size_t arity = fn->comptimeParams.size() + fn->params.size();
-  h = run_cache::mixInt(h, static_cast<std::uint64_t>(arity));
-  for (const ComptimeParam& p : fn->comptimeParams) {
-    h = run_cache::mixBytes(h, "C:" + p.name + ":" + typeSig(p.type));
-  }
-  for (const ParamDecl& p : fn->params) {
-    h = run_cache::mixBytes(h, "P:" + p.name + ":" + typeSig(p.type) +
-                                   (p.variadic ? ":v" : ""));
-  }
-  h = run_cache::mixBytes(h, "R:" + typeSig(fn->returnType));
-  for (const auto& tp : fn->typeParams) h = run_cache::mixBytes(h, "T:" + tp);
-  for (const auto& w : fn->whereClause) h = run_cache::mixBytes(h, "W:" + w);
-}
-inline std::uint64_t sighash(const Module& mod) {
-  std::uint64_t h = 1469598103934665603ULL;
-  h = run_cache::mixBytes(h, "sig1");
-  if (!mod.program) return h;
-  for (const StmtPtr& s : mod.program->statements) {
-    switch (s->kind) {
-      case StmtKind::FnDecl: {
-        mixFnSig(h, static_cast<const FnDecl*>(s.get()));
-        break;
-      }
-      case StmtKind::StructDecl: {
-        const StructDecl* st = static_cast<const StructDecl*>(s.get());
-        h = run_cache::mixBytes(h, "S:" + st->name + ":" + st->baseClass);
-        for (const auto& tp : st->typeParams)
-          h = run_cache::mixBytes(h, "T:" + tp);
-        for (const FieldDecl& f : st->fields)
-          h = run_cache::mixBytes(h, "f:" + f.name + ":" + typeSig(f.type));
-        for (const auto& m : st->methods) mixFnSig(h, m.get());
-        break;
-      }
-      case StmtKind::EnumDecl: {
-        const EnumDecl* e = static_cast<const EnumDecl*>(s.get());
-        h = run_cache::mixBytes(h, "E:" + e->name);
-        for (const auto& tp : e->typeParams)
-          h = run_cache::mixBytes(h, "T:" + tp);
-        for (const EnumVariant& v : e->variants) {
-          h = run_cache::mixBytes(h, "v:" + v.name + "=" + exprSig(v.value.get()));
-          for (const FieldDecl& f : v.fields)
-            h = run_cache::mixBytes(h, "p:" + f.name + ":" + typeSig(f.type));
-        }
-        break;
-      }
-      case StmtKind::Let: {
-        const LetStmt* let = static_cast<const LetStmt*>(s.get());
-        h = run_cache::mixBytes(h, "L:" + let->name + ":" + typeSig(let->type));
-        break;
-      }
-      case StmtKind::Assign: {
-        // Top-level `x = ...` creates an implicit global (__a_top_*) just
-        // like `let`; it must be part of the interface hash or dependent
-        // units keep stale objects when the global appears/disappears.
-        const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
-        if (as->target && as->target->kind == ExprKind::Ident) {
-          const std::string& nm =
-              static_cast<const IdentExpr*>(as->target.get())->name;
-          h = run_cache::mixBytes(h, "AS:" + nm + ":" + exprSig(as->value.get()));
-        }
-        break;
-      }
-      case StmtKind::TypeAlias: {
-        const TypeAliasDecl* ta = static_cast<const TypeAliasDecl*>(s.get());
-        h = run_cache::mixBytes(h, "A:" + ta->name + ":" + typeSig(ta->type));
-        break;
-      }
-      case StmtKind::TraitDecl: {
-        const TraitDecl* tr = static_cast<const TraitDecl*>(s.get());
-        h = run_cache::mixBytes(h, "R:" + tr->name);
-        for (const TraitSig& m : tr->methods)
-          h = run_cache::mixBytes(h, "m:" + m.name + ":" +
-              std::to_string(m.params.size()) + ":" + typeSig(m.returnType));
-        for (const auto& tp : tr->typeParams)
-          h = run_cache::mixBytes(h, "T:" + tp);
-        break;
-      }
-      case StmtKind::ImplDecl: {
-        const ImplDecl* im = static_cast<const ImplDecl*>(s.get());
-        h = run_cache::mixBytes(
-            h, "I:" + im->traitName + ":" + im->targetName);
-        for (const auto& m : im->methods) mixFnSig(h, m.get());
-        break;
-      }
-      case StmtKind::Import: {
-        const ImportStmt* im = static_cast<const ImportStmt*>(s.get());
-        std::string tag = "IP:";
-        if (im->pythonModuleImport) tag += "py:" + im->pythonModule;
-        else if (im->nativeModule) tag += "nat:" + im->bareName;
-        else if (im->stdModuleImport) tag += "std:" + im->stdModule;
-        else tag += im->path + ":" + im->bareName;
-        h = run_cache::mixBytes(h, tag);
-        break;
-      }
-      case StmtKind::FromImport: {
-        const FromImportStmt* im = static_cast<const FromImportStmt*>(s.get());
-        std::string tag = "FP:";
-        if (im->pythonModuleImport) tag += "py:" + im->pythonModule;
-        else if (im->nativeModule) tag += "nat:" + im->bareName;
-        else if (im->stdModuleImport) tag += "std:" + im->stdModule;
-        else tag += im->path + ":" + im->bareName;
-        h = run_cache::mixBytes(h, tag);
-        for (const auto& item : im->items)
-          h = run_cache::mixBytes(h, "item:" + item.name + ":" + item.alias);
-        break;
-      }
-      default:
-        break;
-    }
-  }
-  return h;
-}
-// Names a module contributes to the emitter's flat global scope
-// (buildGlobalScope binds top-level lets/assigns, functions, structs, enum
-// variants and module names across ALL modules, first/last-wins in module
-// order). A unit's object can therefore reference `__a_top_*`/`__a_f_*`
-// symbols owned by modules outside its import closure, so the unit key must
-// capture the whole graph's *name namespace* — but not signatures or bodies:
-// callers reach cross-module functions through adaptive/runtime dispatch, so
-// an interface-only edit (e.g. an extra parameter) does not change the
-// symbols a dependent unit references.
-inline std::uint64_t scopeNamesHash(const Module& mod) {
-  std::uint64_t h = 1469598103934665603ULL;
-  h = run_cache::mixBytes(h, "scope1");
-  h = run_cache::mixBytes(h, mod.name);
-  h = run_cache::mixBytes(h, stemOf(mod.path));
-  if (mod.program) {
-    for (const StmtPtr& s : mod.program->statements) {
-      switch (s->kind) {
-        case StmtKind::Let: {
-          h = run_cache::mixBytes(h, "L:" + static_cast<const LetStmt*>(s.get())->name);
-          break;
-        }
-        case StmtKind::Assign: {
-          const AssignStmt* as = static_cast<const AssignStmt*>(s.get());
-          if (as->target && as->target->kind == ExprKind::Ident)
-            h = run_cache::mixBytes(
-                h, "A:" + static_cast<const IdentExpr*>(as->target.get())->name);
-          break;
-        }
-        case StmtKind::FnDecl:
-          h = run_cache::mixBytes(h, "F:" + static_cast<const FnDecl*>(s.get())->name);
-          break;
-        case StmtKind::StructDecl:
-          h = run_cache::mixBytes(h, "S:" + static_cast<const StructDecl*>(s.get())->name);
-          break;
-        case StmtKind::EnumDecl: {
-          const EnumDecl* e = static_cast<const EnumDecl*>(s.get());
-          h = run_cache::mixBytes(h, "E:" + e->name);
-          for (const EnumVariant& v : e->variants)
-            h = run_cache::mixBytes(h, "V:" + v.name + "=" + exprSig(v.value.get()));
-          break;
-        }
-        default:
-          break;
-      }
-    }
-  }
-  return h;
-}
-inline std::set<int> directImports(const ModuleGraph& g, int moduleId) {
-  std::set<int> out;
-  if (moduleId < 0 || moduleId >= (int)g.modules.size()) return out;
-  const Module& mod = g.at(moduleId);
-  if (mod.program) {
-    for (const StmtPtr& s : mod.program->statements) {
-      if (s->kind == StmtKind::Import) {
-        int id = static_cast<const ImportStmt*>(s.get())->moduleId;
-        if (id >= 0) out.insert(id);
-      } else if (s->kind == StmtKind::FromImport) {
-        int id = static_cast<const FromImportStmt*>(s.get())->moduleId;
-        if (id >= 0) out.insert(id);
-      }
-    }
-  }
-  // The prelude is implicitly loaded before every program.
-  if (g.preludeId >= 0 && g.preludeId != moduleId && moduleId >= 0)
-    out.insert(g.preludeId);
-  return out;
-}
-[[maybe_unused]] inline std::set<int> transitiveImports(const ModuleGraph& g, int moduleId) {
-  std::set<int> seen;
-  std::vector<int> stack;
-  for (int d : directImports(g, moduleId)) stack.push_back(d);
-  while (!stack.empty()) {
-    int cur = stack.back();
-    stack.pop_back();
-    if (!seen.insert(cur).second) continue;
-    for (int d : directImports(g, cur)) {
-      if (!seen.count(d)) stack.push_back(d);
-    }
-  }
-  return seen;
-}
-// Unit key (Phase 3): content of M plus the interface closure it was built
-// against. The entry unit additionally keys on every module's interface
-// (its fnon setup table covers all modules) and on the test filter.
-[[maybe_unused]] inline std::string unitKey(CompiledModule& m, const TargetDesc& td,
-                           int optimizationLevel, bool testMode,
-                           const std::string* testFilter,
-                           const std::string* entrySource, int moduleId,
-                           std::uint64_t sigh, const std::set<int>& deps) {
-  std::string runtimeC, runtimeDir;
-  std::uint64_t h = 1469598103934665603ULL;
-  h = run_cache::mixBytes(h, "unit1");
-  h = run_cache::mixBytes(h, kVersion);
-  h = run_cache::mixBytes(h, "split1");
-  h = run_cache::mixBytes(h, td.arch);
-  h = run_cache::mixBytes(h, td.os);
-  h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
-  const char* codegen = std::getenv("A_CODEGEN");
-  h = run_cache::mixBytes(h, codegen ? codegen : "");
-  if (findRuntime(td.arch, runtimeC, runtimeDir)) {
-    h = run_cache::mixBytes(h, runtimeDir);
-    run_cache::mixRuntimeSources(h, runtimeC);
-    h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
-  }
-  {
-    const std::string self = run_cache::selfExePath();
-    if (!self.empty()) h = run_cache::mixFileStat(h, self);
-  }
-  const ModuleGraph& g = *m.graph;
-  const Module& mod = g.at(moduleId);
-  h = run_cache::mixBytes(h, "M:" + absCachePath(mod.path));
-  std::string text;
-  if (!run_cache::readFileText(mod.path, text)) {
-    if (mod.id == g.entry && entrySource) text = *entrySource;
-    else { h = run_cache::mixBytes(h, "<missing>"); }
-  }
-  h = run_cache::mixBytes(h, text);
-  h = run_cache::mixInt(h, sigh);
-  // Dependencies in sorted order for determinism.
-  std::vector<int> sorted(deps.begin(), deps.end());
-  for (int d : sorted) {
-    h = run_cache::mixBytes(h, "D:" + absCachePath(g.at(d).path));
-    h = run_cache::mixInt(h, sighash(g.at(d)));
-  }
-  if (moduleId == g.entry) {
-    h = run_cache::mixInt(h, testMode ? 1 : 0);
-    if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
-  }
-  return hex64(h);
-}
-// Shared per-build key inputs (Phase 3 perf): runtime/compiler
-// identity and per-module sighashes/sources are computed once, not per unit.
-struct KeyContext {
-  std::uint64_t runtimeBase = 0;
-  // Hash of the flat global scope every unit is emitted against: each
-  // module's path, module name/stem and top-level exported names, in
-  // g.modules order (the order buildGlobalScope resolves collisions).
-  // Signature/body edits leave this unchanged, so unaffected units keep
-  // their cached objects; adding/removing/reordering a module or renaming
-  // a top-level symbol changes it and rebuilds everything.
-  std::uint64_t graphKey = 0;
-  std::unordered_map<int, std::uint64_t> sighById;
-  std::unordered_map<int, std::string> sourceById;
-};
-[[maybe_unused]] inline KeyContext makeKeyContext(CompiledModule& m, const TargetDesc& td,
-                                 int optimizationLevel,
-                                 const std::string* entrySource) {
-  KeyContext ctx;
-  std::uint64_t h = 1469598103934665603ULL;
-  h = run_cache::mixBytes(h, "unit1");
-  h = run_cache::mixBytes(h, kVersion);
-  h = run_cache::mixBytes(h, "split1");
-  h = run_cache::mixBytes(h, td.arch);
-  h = run_cache::mixBytes(h, td.os);
-  h = run_cache::mixInt(h, static_cast<std::uint64_t>(optimizationLevel));
-  const char* codegen = std::getenv("A_CODEGEN");
-  h = run_cache::mixBytes(h, codegen ? codegen : "");
-  std::string runtimeC, runtimeDir;
-  if (findRuntime(td.arch, runtimeC, runtimeDir)) {
-    h = run_cache::mixBytes(h, runtimeDir);
-    run_cache::mixRuntimeSources(h, runtimeC);
-    h = run_cache::mixFileBytes(h, runtimeDir + "/libaruntime.a");
-  }
-  {
-    const std::string self = run_cache::selfExePath();
-    if (!self.empty()) h = run_cache::mixFileStat(h, self);
-  }
-  ctx.runtimeBase = h;
-  const ModuleGraph& g = *m.graph;
-  for (const Module& mod : g.modules) {
-    ctx.sighById[mod.id] = sighash(mod);
-    std::string text;
-    if (!run_cache::readFileText(mod.path, text)) {
-      if (mod.id == g.entry && entrySource) text = *entrySource;
-      else text = "<missing>";
-    }
-    ctx.sourceById[mod.id] = std::move(text);
-  }
-  {
-    std::uint64_t gh = 1469598103934665603ULL;
-    gh = run_cache::mixBytes(gh, "graph1");
-    gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.entry));
-    gh = run_cache::mixInt(gh, static_cast<std::uint64_t>(g.preludeId));
-    for (const Module& mod : g.modules) {
-      gh = run_cache::mixBytes(gh, "G:" + absCachePath(mod.path));
-      gh = run_cache::mixInt(gh, scopeNamesHash(mod));
-    }
-    ctx.graphKey = gh;
-  }
-  return ctx;
-}
-[[maybe_unused]] inline std::string unitKeyWithCtx(CompiledModule& m, const KeyContext& ctx,
-                                  bool testMode,
-                                  const std::string* testFilter, int moduleId,
-                                  const std::set<int>& deps) {
-  std::uint64_t h = ctx.runtimeBase;
-  h = run_cache::mixInt(h, ctx.graphKey);
-  const ModuleGraph& g = *m.graph;
-  const Module& mod = g.at(moduleId);
-  h = run_cache::mixBytes(h, "M:" + absCachePath(mod.path));
-  auto sit = ctx.sourceById.find(moduleId);
-  h = run_cache::mixBytes(h, sit == ctx.sourceById.end() ? "<missing>" : sit->second);
-  auto sighIt = ctx.sighById.find(moduleId);
-  h = run_cache::mixInt(h, sighIt == ctx.sighById.end() ? 0 : sighIt->second);
-  std::vector<int> sorted(deps.begin(), deps.end());
-  for (int d : sorted) {
-    h = run_cache::mixBytes(h, "D:" + absCachePath(g.at(d).path));
-    auto dit = ctx.sighById.find(d);
-    h = run_cache::mixInt(h, dit == ctx.sighById.end() ? 0 : dit->second);
-  }
-  if (moduleId == g.entry) {
-    // g.order is the module init-call order emitted into the entry unit;
-    // it is not implied by module-id order, so hash it explicitly.
-    for (int id : g.order) h = run_cache::mixInt(h, static_cast<std::uint64_t>(id));
-    h = run_cache::mixInt(h, testMode ? 1 : 0);
-    if (testMode) h = run_cache::mixBytes(h, testFilter ? *testFilter : "");
-  }
-  return hex64(h);
-}
-[[maybe_unused]] inline std::string unitCachePath(const std::string& key) {
-  return objCacheDir() + "/" + key + ".o";
-}
-
-}  // namespace objcache
 
 
 // Locates the staged A runtime directory containing a_runtime.c and
@@ -1772,17 +1324,6 @@ bool nativeMlirEnabled() {
 #endif
 }
 
-// A_BACKEND=llvm-legacy selects the restored hand-written LLVM IR text
-// emitter (src/astra/frontend/llvm/llvm_emit.cpp, the pre-MLIR backend)
-// instead of the MLIR pipeline. The produced .ll goes through the same
-// opt/llc/clang subprocess chain (llvmBuild).
-bool legacyLlEnabled() {
-  const char* v = std::getenv("A_BACKEND");
-  if (!v || !*v) return false;
-  const std::string s = lowerStr(v);
-  return s == "llvm-legacy" || s == "llvm_ir" || s == "llvm-ir";
-}
-
 // Emits the checked graph to MLIR text. A_MLIR_TYPED=1 routes through the
 // `a`-dialect emitter (emitMLIRDialect); otherwise emitMLIR produces the
 // llvm-dialect text consumed by both backends. Returns false on failure.
@@ -1986,11 +1527,8 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
                   const std::string* keepBin = nullptr,
                   const TargetDesc* td = nullptr,
                   const std::string* entrySource = nullptr,
-                  const std::string* testFilter = nullptr, int jobs = 0,
-                  const std::string& backend = "llvm") {
-  (void)in; (void)out; (void)jobs;  // jobs: per-module split assemble removed with the asm backend
-  if (std::getenv("A_LLVM_DEBUG"))
-    err << "compileAndRun backend='" << backend << "'\n";
+                  const std::string* testFilter = nullptr) {
+  (void)in; (void)out;
   TargetDesc localTd;
   if (!td) {
     if (!resolveTarget("", localTd, err)) return kCErr;
@@ -2026,24 +1564,10 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
         << " host=" << hostArch() << "\n";
   {
     std::string llSource;
-    const bool legacyLl = legacyLlEnabled();
-    const bool useNative = nativeMlirEnabled() && !legacyLl;
+    const bool useNative = nativeMlirEnabled();
     {
       std::string llPath;
       std::string runPath;
-      if (legacyLl) {
-        // Hand-written LLVM IR emitter: .ll text straight to llvmBuild.
-        std::string llError;
-        if (!emitLLVM(*m.graph, *m.sema, llSource, llError, testMode,
-                      testFilter)) {
-          err << "error: llvm backend: LLVM IR emission failed: " << llError
-              << "\n";
-          return kCErr;
-        }
-        llPath = stageSrc(llSource, ".ll", err);
-        llSource.clear();
-        if (llPath.empty()) return kCErr;
-      } else {
       if (!emitMlirText(m, testMode, testFilter, llSource, err)) return kCErr;
       if (useNative) {
         // In-process path: mlir text -> canonicalize -> LLVM IR -> opt ->
@@ -2076,7 +1600,6 @@ int compileAndRun(CompiledModule& m, std::istream& in, std::ostream& out, std::o
         if (llPath2.empty()) return kCErr;
         llSource.clear();
         llPath = llPath2;
-      }
       }
       if (std::getenv("A_LLVM_DEBUG"))
         err << "llvm-emit: ok\n";
@@ -2213,8 +1736,7 @@ int executePipeline(const std::string& path,std::string source,const PipelineCon
       if(sidecar) sidecar << diagCapture;
     }
     return compileAndRun(m,in,out,err,false,config.optimizationLevel,
-                       preBin.empty() ? nullptr : &preBin, &td, &source, nullptr,
-                       config.jobs, config.backend);
+                       preBin.empty() ? nullptr : &preBin, &td, &source, nullptr);
   }
 }
 int testPipeline(const std::string& path,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
@@ -2319,8 +1841,7 @@ int testPipeline(const std::string& path,const PipelineConfig& config,std::istre
     }
   }
   return compileAndRun(m,in,out,err,true,config.optimizationLevel,nullptr,&td,&srcCopy,
-                       config.testFilter.empty()?nullptr:&config.testFilter, config.jobs,
-                       config.backend);
+                       config.testFilter.empty()?nullptr:&config.testFilter);
 }
 int buildPipeline(const std::string& path,const std::string& outputPath,const PipelineConfig& config,std::ostream& err){
   // Guard `a build x.astra -o x.astra`: the linker would overwrite the source file with
@@ -2393,7 +1914,7 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
         << " (target '" << td.arch << "' != host '" << hostArch() << "')\n";
     return kCErr;
   }
-  if (nativeMlirEnabled() && !legacyLlEnabled()) {
+  if (nativeMlirEnabled()) {
     // In-process path: mlir text -> LLVM IR -> opt -> .o -> link.
     std::string mlirText;
     if (!emitMlirText(m, false, nullptr, mlirText, err)) return kCErr;
@@ -2435,26 +1956,11 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
     return 0;
   }
   std::string llSource;
-  std::string directLl;
-  if (legacyLlEnabled()) {
-    // Hand-written LLVM IR emitter: .ll text straight to llvmBuild.
-    std::string llError;
-    if (!emitLLVM(*m.graph, *m.sema, llSource, llError, false, nullptr)) {
-      err << "error: llvm backend: LLVM IR emission failed: " << llError
-          << "\n";
-      return kCErr;
-    }
-    directLl = stageSrc(llSource, ".ll", err);
-    if (directLl.empty()) return kCErr;
-  } else {
-    if (!emitMlirText(m, false, nullptr, llSource, err)) return kCErr;
-    std::string mlirPath = stageSrc(llSource, ".mlir", err);
-    if (mlirPath.empty()) return kCErr;
-    directLl = mlirToLl(mlirPath, err);
-    std::error_code ec2; std::filesystem::remove(mlirPath, ec2);
-    if (directLl.empty()) return kCErr;
-  }
-  std::string llPath = !directLl.empty() ? directLl : stageSrc(llSource, ".ll", err);
+  if (!emitMlirText(m, false, nullptr, llSource, err)) return kCErr;
+  std::string mlirPath = stageSrc(llSource, ".mlir", err);
+  if (mlirPath.empty()) return kCErr;
+  const std::string llPath = mlirToLl(mlirPath, err);
+  std::error_code ec2; std::filesystem::remove(mlirPath, ec2);
   if (llPath.empty()) return kCErr;
   int rc = llvmBuild(td.arch, llPath, outputPath,
                      config.optimizationLevel, err);
@@ -2466,14 +1972,12 @@ int buildPipeline(const std::string& path,const std::string& outputPath,const Pi
   }
   return 0;
 }
-ReplSession::~ReplSession() = default;
-int replEval(ReplSession& session,const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
-  (void)session;
+int replEval(const std::string& source,const PipelineConfig& config,std::istream& in,std::ostream& out,std::ostream& err){
   DiagnosticSink sink; auto m=runFrontendPipeline("<repl>",source,config,sink,out,err); if(!m.ok) return 1;
   TargetDesc td;
   if(!resolveTarget(config.target,td,err)) return 1;
   if(!td.native){ err<<"error: repl requires the host target\n"; return 1; }
-  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source,nullptr,config.jobs,config.backend);
+  return compileAndRun(m,in,out,err,false,config.optimizationLevel,nullptr,&td,&source);
 }
 
 namespace {
