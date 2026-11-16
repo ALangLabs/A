@@ -124,7 +124,7 @@ static void stack_overflow_error(uintptr_t sp) {
     exit(2);
 }
 
-static __attribute__((noinline)) void stack_guard_init(uintptr_t sp) {
+static A_RT_NOINLINE void stack_guard_init(uintptr_t sp) {
     g_stack_guard_init = 1;
     g_stack_probe = (char *)sp;
 #if defined(__linux__) && !defined(__TINYC__)
@@ -298,9 +298,10 @@ char *xarena(size_t n) {
        chunk is mapped; stale cursors are refreshed by callers via
        a_gc_arena_stale afterwards. */
     a_gc_maybe_collect();
+    void *p = NULL;
 #if defined(__linux__) && defined(MAP_ANONYMOUS)
-    void *p = mmap(NULL, n, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    p = mmap(NULL, n, PROT_READ | PROT_WRITE,
+             MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (p != MAP_FAILED) {
 #ifdef MADV_HUGEPAGE
         (void)madvise(p, n, MADV_HUGEPAGE);
@@ -309,7 +310,7 @@ char *xarena(size_t n) {
         return (char *)p;
     }
 #endif
-    /* Linux branch left `p` in scope above; assign rather than redeclare. */
+    /* Non-Linux (or mmap unavailable): plain heap fallback. */
     p = xmalloc(n);
     a_gc_note_arena(p, n, 0);  /* heap fallback bump chunk */
     return (char *)p;
@@ -459,14 +460,12 @@ aval mkdouble(double d) {
 
 aval bool_aval(int b) { return b ? A_TRUE : A_FALSE; }
 
-#if defined(_WIN32)
-/* ------------------------------------------------------------------ */
-/* Windows compat: snprintf shim + Win32 timing helpers               */
-/* ------------------------------------------------------------------ */
-
+#if defined(_WIN32) && !defined(_MSC_VER) && !defined(_UCRT)
 /* msvcrt.dll has no snprintf export (it lives in libmingwex, which is not
    shipped); wrap the exported vsnprintf. Note the legacy vsnprintf
-   returns -1 on truncation instead of the would-be length. */
+   returns -1 on truncation instead of the would-be length. MSVC (UCRT)
+   and UCRT-targeted MinGW already ship snprintf, so the shim is skipped
+   there to avoid a redefinition. */
 int snprintf(char *s, size_t n, const char *format, ...) {
     va_list ap;
     va_start(ap, format);
@@ -474,7 +473,9 @@ int snprintf(char *s, size_t n, const char *format, ...) {
     va_end(ap);
     return r;
 }
+#endif
 
+#if defined(_WIN32)
 /* FILETIME counts 100 ns intervals since 1601-01-01 UTC; the Unix epoch
    offset is 11644473600 s. */
 int64_t a_win_time_ms(void) {

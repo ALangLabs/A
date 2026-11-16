@@ -64,6 +64,12 @@
 #else
 #define A_RT_TLS
 #endif
+/* noinline: MSVC spells it __declspec, GCC/clang use __attribute__. */
+#if defined(_MSC_VER)
+#define A_RT_NOINLINE __declspec(noinline)
+#else
+#define A_RT_NOINLINE __attribute__((noinline))
+#endif
 #if defined(_WIN32) && !defined(_WIN64)
 /* 32-bit Windows CRT malloc only guarantees 8-byte alignment, but heap
    objects must be 16-byte aligned for NaN-boxing (mkobj panics otherwise).
